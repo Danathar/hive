@@ -8,28 +8,80 @@ import (
 	"testing"
 )
 
-func TestCatalogValidAndLargeEnough(t *testing.T) {
-	if len(Catalog()) < 8 {
-		t.Fatalf("catalog has %d themes, want at least 8", len(Catalog()))
+func TestLegacyThemeAliasesRemainValid(t *testing.T) {
+	want := map[string]string{
+		"openclaw":       "hive-dark",
+		"openclaw-light": "hive-light",
+		"honeycomb":      "hive",
+		"graphite":       "hive-dark",
+		"dracula":        "cyberpunk",
+		"github-light":   "hive-light",
+		"high-contrast":  "terminal",
 	}
-	if err := ValidateCatalog(); err != nil {
-		t.Fatalf("catalog validation failed: %v", err)
-	}
-	for _, id := range []string{"openclaw", "openclaw-light", "honeycomb", "nord", "dracula", "solarized-dark", "github-light", "high-contrast"} {
-		if _, ok := Builtin(id); !ok {
-			t.Fatalf("missing built-in theme %q", id)
+	for oldID, newID := range want {
+		th, ok := Builtin(oldID)
+		if !ok || th.ID != newID {
+			t.Fatalf("Builtin(%q) = %q, %v; want %q, true", oldID, th.ID, ok, newID)
+		}
+		if err := ValidateSelection(oldID, Overrides{}); err != nil {
+			t.Fatalf("legacy theme %q did not validate: %v", oldID, err)
 		}
 	}
 }
 
-func TestTokenAllowListMatchesDashboardRoot(t *testing.T) {
-	b, err := os.ReadFile("../static/index.html")
-	if err != nil {
-		t.Fatalf("read dashboard index: %v", err)
+func TestCatalogValidAndLargeEnough(t *testing.T) {
+	if len(Catalog()) < 17 {
+		t.Fatalf("catalog has %d themes, want at least 17", len(Catalog()))
 	}
-	root := regexp.MustCompile(`(?s):root\s*\{(.*?)\n\s*\}`).FindSubmatch(b)
+	if err := ValidateCatalog(); err != nil {
+		t.Fatalf("catalog validation failed: %v", err)
+	}
+	for _, id := range []string{"hive", "hive-dark", "hive-light", "star-wars", "dungeons-and-dragons", "star-trek", "cyberpunk", "terminal", "solarized-dark", "nord", "contributor-rank-metal", "contributor-verdant", "contributor-amber-rank", "contributor-violet-advisor", "contributor-minimal", "contributor-rose", "contributor-roomy-ranked"} {
+		th, ok := Builtin(id)
+		if !ok {
+			t.Fatalf("missing built-in theme %q", id)
+		}
+		if len(th.Scopes) == 0 {
+			t.Fatalf("theme %q has no scopes", id)
+		}
+	}
+}
+
+func TestEveryThemeFileParsesWithUniqueID(t *testing.T) {
+	entries, err := os.ReadDir("themes")
+	if err != nil {
+		t.Fatalf("read themes dir: %v", err)
+	}
+	files := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".yaml") {
+			files++
+		}
+	}
+	catalog, err := LoadCatalog()
+	if err != nil {
+		t.Fatalf("load embedded theme catalog: %v", err)
+	}
+	if len(catalog) != files {
+		t.Fatalf("catalog loaded %d themes, want %d yaml files", len(catalog), files)
+	}
+	seen := map[string]bool{}
+	for _, th := range catalog {
+		if seen[th.ID] {
+			t.Fatalf("duplicate theme id %q", th.ID)
+		}
+		seen[th.ID] = true
+	}
+}
+
+func TestTokenAllowListMatchesDashboardRoot(t *testing.T) {
+	b, err := os.ReadFile("../static/tokens.css")
+	if err != nil {
+		t.Fatalf("read dashboard tokens: %v", err)
+	}
+	root := regexp.MustCompile(`(?s):root\s*\{(.*?)\n\}`).FindSubmatch(b)
 	if root == nil {
-		t.Fatal("dashboard index has no :root token block")
+		t.Fatal("dashboard tokens.css has no :root token block")
 	}
 	re := regexp.MustCompile(`--[a-zA-Z0-9-]+\s*:`)
 	got := map[string]struct{}{}
@@ -37,9 +89,143 @@ func TestTokenAllowListMatchesDashboardRoot(t *testing.T) {
 		got[strings.TrimSuffix(strings.TrimSpace(m), ":")] = struct{}{}
 	}
 	want := TokenAllowList()
-	if diff := tokenDiff(got, want); diff != "" {
-		t.Fatalf("theme token allow-list drifted from static/index.html :root:\n%s", diff)
+	var missing []string
+	for token := range got {
+		if _, ok := want[token]; !ok {
+			missing = append(missing, token)
+		}
 	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("theme token allow-list missing tokens.css :root tokens:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
+func TestCSSCompilesLegacyTokensToCanonicalAliases(t *testing.T) {
+	th := Theme{ID: "legacy", Tokens: map[string]string{
+		"--bg":     "#010203",
+		"--panel":  "#111213",
+		"--line":   "#212223",
+		"--amber":  "#313233",
+		"--blue":   "#414243",
+		"--accent": "#515253",
+	}}
+	css, err := CSS(th)
+	if err != nil {
+		t.Fatalf("CSS legacy: %v", err)
+	}
+	for _, want := range []string{
+		"--surface-0: #010203;",
+		"--surface-2: #111213;",
+		"--line-subtle: #212223;",
+		"--brand: #313233;",
+		"--status-info: #414243;",
+		"--bg: var(--surface-0);",
+		"--panel: var(--surface-2);",
+		"--line: var(--line-subtle);",
+		"--amber: var(--brand);",
+		"--blue: var(--status-info);",
+		"--accent: #515253;",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("legacy CSS missing %q:\n%s", want, css)
+		}
+	}
+}
+
+func TestCSSCanonicalTokenWinsOverLegacyToken(t *testing.T) {
+	th := Theme{ID: "mixed", Tokens: map[string]string{
+		"--bg":        "#010203",
+		"--surface-0": "#aabbcc",
+	}, LightTokens: map[string]string{
+		"--bg":        "#111111",
+		"--surface-0": "#eeeeee",
+	}}
+	css, err := CSS(th)
+	if err != nil {
+		t.Fatalf("CSS mixed: %v", err)
+	}
+	if !strings.Contains(css, "--surface-0: #aabbcc;") || strings.Contains(css, "--surface-0: #010203;") {
+		t.Fatalf("root canonical token did not win:\n%s", css)
+	}
+	if !strings.Contains(css, "body.light-mode{\n  --surface-0: #eeeeee;") || strings.Contains(css, "--surface-0: #111111;") {
+		t.Fatalf("light canonical token did not win:\n%s", css)
+	}
+	if got := strings.Count(css, "--bg: var(--surface-0);"); got != 2 {
+		t.Fatalf("legacy alias count = %d, want 2:\n%s", got, css)
+	}
+}
+
+func TestDarkThemesKeepOwnPaletteInLightMode(t *testing.T) {
+	for _, th := range Catalog() {
+		if !th.Dark || len(th.LightTokens) > 0 {
+			continue
+		}
+		css, err := CSS(th)
+		if err != nil {
+			t.Fatalf("CSS(%s): %v", th.ID, err)
+		}
+		lightBlock := cssBlock(t, css, "body.light-mode")
+		for _, token := range []string{"--surface-0", "--surface-2", "--text"} {
+			want := compileTokens(th.Tokens)[token]
+			if want == "" {
+				t.Fatalf("%s missing token %s", th.ID, token)
+			}
+			if !strings.Contains(lightBlock, token+": "+want+";") {
+				t.Fatalf("%s light-mode block did not keep %s=%s:\n%s", th.ID, token, want, lightBlock)
+			}
+		}
+	}
+}
+
+func TestBuiltinThemesDifferFromDefaultCoreTokens(t *testing.T) {
+	defaultTheme, ok := Builtin(DefaultDarkID)
+	if !ok {
+		t.Fatalf("missing default theme %q", DefaultDarkID)
+	}
+	defaultTokens := compileTokens(defaultTheme.Tokens)
+	core := []string{"--surface-0", "--surface-2", "--text", "--accent"}
+	for _, th := range Catalog() {
+		if th.ID == DefaultDarkID {
+			continue
+		}
+		tokens := compileTokens(th.Tokens)
+		different := false
+		for _, token := range core {
+			if tokens[token] == "" {
+				t.Fatalf("%s missing core token %s", th.ID, token)
+			}
+			if tokens[token] != defaultTokens[token] {
+				different = true
+			}
+		}
+		if !different {
+			t.Fatalf("%s core tokens match default %s", th.ID, DefaultDarkID)
+		}
+		css, err := CSS(th)
+		if err != nil {
+			t.Fatalf("CSS(%s): %v", th.ID, err)
+		}
+		for _, token := range core {
+			if !strings.Contains(css, token+": "+tokens[token]+";") {
+				t.Fatalf("%s compiled CSS missing %s=%s", th.ID, token, tokens[token])
+			}
+		}
+	}
+}
+
+func cssBlock(t *testing.T, css, selector string) string {
+	t.Helper()
+	start := strings.Index(css, selector+"{")
+	if start < 0 {
+		t.Fatalf("CSS missing selector %s", selector)
+	}
+	start += len(selector) + 1
+	end := strings.Index(css[start:], "}")
+	if end < 0 {
+		t.Fatalf("CSS selector %s has no closing brace", selector)
+	}
+	return css[start : start+end]
 }
 
 func TestSanitizeCSSGuardrails(t *testing.T) {
@@ -62,9 +248,9 @@ func TestSanitizeCSSGuardrails(t *testing.T) {
 }
 
 func TestEffectiveCSSIncludesBackgroundAndETag(t *testing.T) {
-	th, err := Effective("honeycomb", Overrides{Tokens: map[string]string{"--accent": "#e0a33a"}})
+	th, err := Effective("hive", Overrides{Tokens: map[string]string{"--accent": "#e0a33a"}})
 	if err != nil {
-		t.Fatalf("effective honeycomb: %v", err)
+		t.Fatalf("effective hive: %v", err)
 	}
 	css, err := CSS(th)
 	if err != nil {
@@ -77,22 +263,6 @@ func TestEffectiveCSSIncludesBackgroundAndETag(t *testing.T) {
 	if err != nil || !strings.HasPrefix(etag, "\"") || !strings.HasSuffix(etag, "\"") {
 		t.Fatalf("etag = %q, %v", etag, err)
 	}
-}
-
-func tokenDiff(got, want map[string]struct{}) string {
-	var lines []string
-	for k := range got {
-		if _, ok := want[k]; !ok {
-			lines = append(lines, "+ "+k)
-		}
-	}
-	for k := range want {
-		if _, ok := got[k]; !ok {
-			lines = append(lines, "- "+k)
-		}
-	}
-	sort.Strings(lines)
-	return strings.Join(lines, "\n")
 }
 
 func TestValidationErrorBranches(t *testing.T) {
@@ -143,15 +313,15 @@ func TestEffectiveBranches(t *testing.T) {
 			t.Fatalf("custom css missing %q: %s", want, css)
 		}
 	}
-	light, err := Effective("github-light", Overrides{})
+	light, err := Effective("hive-light", Overrides{})
 	if err != nil {
-		t.Fatalf("github-light effective: %v", err)
+		t.Fatalf("hive-light effective: %v", err)
 	}
 	css, err = CSS(light)
 	if err != nil {
 		t.Fatalf("light css: %v", err)
 	}
-	if !strings.Contains(css, "body.light-mode") || !strings.Contains(css, "--bg: #ffffff") {
+	if !strings.Contains(css, "body.light-mode") || !strings.Contains(css, "--surface-0: #f7f8fa") || !strings.Contains(css, "--bg: var(--surface-0)") {
 		t.Fatalf("light css missing body remap: %s", css)
 	}
 }

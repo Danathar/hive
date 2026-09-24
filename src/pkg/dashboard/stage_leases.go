@@ -55,11 +55,14 @@ const (
 	runFanoutTaskPrefix    = "run-fanout-"
 )
 
+// Audit and timeline keys for checkpoint decisions. `auto` is the actor
+// recorded when a disabled checkpoint approves a plan without a human.
 const (
 	runCheckpointAutoActor       = "auto"
 	runCheckpointConfigSourceKey = "config_source"
 	runCheckpointReasonKey       = "checkpoint_reason"
 	runCheckpointActorKey        = "approval_actor"
+	runCheckpointEpicKey         = "plan_epic_id"
 	runCheckpointDisabledReason  = "checkpoint_disabled"
 )
 
@@ -323,6 +326,10 @@ func (s *Server) AdvanceStageLease(identity, taskID, to string, now time.Time, r
 			Attrs:    eventAttrs,
 		})
 	}
+	// The plan checkpoint (hivecommons/hive#8550): a run may not reach
+	// implement while its plan is still a draft. Holding is not an error - the
+	// stage did its work and the receipt stands - so the lease is extended and
+	// the runner is told nothing went wrong.
 	if stage == StagePlan && to == StageImplement && s.planCheckpointHolds(runKey) {
 		if err := s.extendHeldPlanLease(identity, taskID, now); err != nil {
 			return err
@@ -338,7 +345,7 @@ func (s *Server) AdvanceStageLease(identity, taskID, to string, now time.Time, r
 	recordReceipt(advanced.identity)
 	if stage == StageSpec {
 		if decision := s.runCheckpointPolicy(StageSpec); !decision.blocks {
-			s.recordRunCheckpointAutoApproval(runKey, "", StageSpec, decision)
+			s.recordRunCheckpointAutoApproval(runKey, "", StageSpec, advanced.gen, now, decision)
 		}
 	}
 	return nil
@@ -493,6 +500,8 @@ func (s *Server) ImportRunPlan(runKey, repo, taskList string) error {
 	if updated, err := store.Get(epic.ID); err == nil {
 		epic = updated
 	}
+	// A disabled plan checkpoint approves the freshly imported plan here, with
+	// `auto` recorded as the approving actor (hivecommons/hive#8550).
 	if decision := s.runCheckpointPolicy(StagePlan); !decision.blocks {
 		if err := s.autoApproveRunCheckpoint(store, epic, runKey, StagePlan, decision); err != nil {
 			return err
@@ -576,11 +585,15 @@ func (s *Server) runPlanApproved(runKey string) bool {
 	return epic != nil && epic.Meta(planning.MetaPlanStatus) == planning.PlanStatusApproved
 }
 
+// planCheckpointHolds reports whether the plan->implement advance must wait.
 func (s *Server) planCheckpointHolds(runKey string) bool {
 	decision := s.runCheckpointPolicy(StagePlan)
 	return decision.blocks && !s.runPlanApproved(runKey)
 }
 
+// extendHeldPlanLease pushes a held plan lease's expiry out to the checkpoint
+// wait budget so the hold survives until an owner can act on it. A lease that
+// has already left the plan stage is left alone.
 func (s *Server) extendHeldPlanLease(identity, taskID string, now time.Time) error {
 	if s == nil || s.contributeHub == nil {
 		return errors.New("run lease registry unavailable")
@@ -610,6 +623,9 @@ func (s *Server) extendHeldPlanLease(identity, taskID string, now time.Time) err
 	return nil
 }
 
+// runCheckpointHoldDuration is the checkpoint wait budget, floored at leaseTTL
+// so a short configured timeout can never shorten a lease below its normal
+// life.
 func (s *Server) runCheckpointHoldDuration() time.Duration {
 	seconds := config.DefaultRunsWaitTimeoutSeconds
 	if s != nil && s.deps != nil && s.deps.Config != nil {
@@ -622,47 +638,9 @@ func (s *Server) runCheckpointHoldDuration() time.Duration {
 	return d
 }
 
-func (s *Server) runKeyForEpic(repo, number, runKey string) string {
-	if ref, ok := worksource.ParseKey(runKey); ok && ref.Number > 0 {
-		return worksource.Ref{Repo: s.qualifyRunRepo(ref.Repo), Number: ref.Number}.Key()
-	}
-	if repo != "" && number != "" {
-		return s.canonicalRunKey(repo, atoiOrZero(number), "", "")
-	}
-	return strings.TrimSpace(runKey)
-}
-
-func (s *Server) advanceApprovedPlanLease(runKey string, now time.Time) error {
-	if s == nil || s.contributeHub == nil || runKey == "" {
-		return nil
-	}
-	var identity, taskID string
-	found := false
-	err := s.VisitActiveStageLeases(func(rk, _, stage, id, task, repo string, _ uint64, expiresAt time.Time) {
-		if found || !s.sameRunKey(runKey, rk, repo) || stage != StagePlan || now.After(expiresAt) {
-			return
-		}
-		identity, taskID, found = id, task, true
-	})
-	if err != nil || !found {
-		return err
-	}
-	_, err = s.contributeHub.advanceLeaseStage(identity, taskID, StageImplement, now)
-	return err
-}
-
-func (s *Server) sameRunKey(target, candidate, repo string) bool {
-	target = strings.TrimSpace(target)
-	candidate = strings.TrimSpace(candidate)
-	if target == "" || candidate == "" {
-		return false
-	}
-	if target == candidate {
-		return true
-	}
-	return s.canonicalRunKey(repo, 0, target, "") == s.canonicalRunKey(repo, 0, candidate, "")
-}
-
+// ensureRunPlanApproved reports whether implement may be offered: either the
+// plan is already approved, or the implement checkpoint is disabled and the
+// plan is auto-approved here with `auto` recorded as the actor.
 func (s *Server) ensureRunPlanApproved(runKey string) bool {
 	store, epic := s.findRunEpic(runKey)
 	if epic == nil {
@@ -692,11 +670,14 @@ func (s *Server) autoApproveRunCheckpoint(store *beads.Store, epic *beads.Bead, 
 	if err := planning.ApprovePlan(store, epic.ID); err != nil {
 		return fmt.Errorf("auto-approving %s checkpoint for %s: %w", stage, runKey, err)
 	}
-	s.recordRunCheckpointAutoApproval(runKey, epic.ID, stage, decision)
+	gen := s.activeRunStageGen(runKey, stage, time.Now())
+	s.recordRunCheckpointAutoApproval(runKey, epic.ID, stage, gen, time.Now(), decision)
 	return nil
 }
 
-func (s *Server) recordRunCheckpointAutoApproval(runKey, epicID, stage string, decision runCheckpointPolicy) {
+// recordRunCheckpointAutoApproval leaves the paper trail for an approval no
+// human made: who (auto), which config said the checkpoint was off, and why.
+func (s *Server) recordRunCheckpointAutoApproval(runKey, epicID, stage string, gen uint64, at time.Time, decision runCheckpointPolicy) {
 	if s == nil {
 		return
 	}
@@ -705,18 +686,108 @@ func (s *Server) recordRunCheckpointAutoApproval(runKey, epicID, stage string, d
 	}
 	detail := auditDetail("epic", epicID, "run", runKey, "surface", "plan", "stage", stage, runCheckpointConfigSourceKey, decision.source, runCheckpointReasonKey, decision.reason)
 	s.audit.Log(runCheckpointAutoActor, "plan_approve", detail, planning.ArchitectAgentName)
+	s.recordRunCheckpointApproval(runKey, epicID, stage, runCheckpointAutoActor, gen, at, map[string]string{
+		runCheckpointConfigSourceKey: decision.source,
+		runCheckpointReasonKey:       decision.reason,
+	})
+}
+
+func (s *Server) recordRunCheckpointApproval(runKey, epicID, stage, actor string, gen uint64, at time.Time, extra map[string]string) {
+	if s == nil || strings.TrimSpace(runKey) == "" {
+		return
+	}
+	if actor == "" {
+		actor = "unknown"
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	attrs := map[string]string{
+		stageAttrRunKey:       runKey,
+		stageAttrStage:        stage,
+		runCheckpointActorKey: actor,
+	}
+	if gen > 0 {
+		attrs[stageAttrGen] = strconv.FormatUint(gen, 10)
+	}
+	if epicID != "" {
+		attrs[runCheckpointEpicKey] = epicID
+	}
+	for k, v := range extra {
+		if strings.TrimSpace(v) != "" {
+			attrs[k] = v
+		}
+	}
 	s.LifecycleTimeline().Record(timeline.Event{
 		IssueRef: runKey,
-		Kind:     timeline.KindStageCompleted,
-		Agent:    runCheckpointAutoActor,
-		At:       time.Now().UnixMilli(),
-		Attrs: map[string]string{
-			stageAttrStage:               stage,
-			runCheckpointActorKey:        runCheckpointAutoActor,
-			runCheckpointConfigSourceKey: decision.source,
-			runCheckpointReasonKey:       decision.reason,
-		},
+		Kind:     timeline.KindStageApproval,
+		Agent:    actor,
+		At:       at.UnixMilli(),
+		Attrs:    attrs,
 	})
+}
+
+func (s *Server) activeRunStageGen(runKey, stage string, now time.Time) uint64 {
+	var gen uint64
+	_ = s.VisitActiveStageLeases(func(rk, _, st, _, _, repo string, g uint64, expiresAt time.Time) {
+		if gen != 0 || !s.sameRunKey(runKey, rk, repo) || st != stage || now.After(expiresAt) {
+			return
+		}
+		gen = g
+	})
+	return gen
+}
+
+// runKeyForEpic resolves the canonical run key an epic belongs to, preferring
+// an explicit MetaRunKey over the issue repo/number pair.
+func (s *Server) runKeyForEpic(repo, number, runKey string) string {
+	if ref, ok := worksource.ParseKey(runKey); ok && ref.Number > 0 {
+		return worksource.Ref{Repo: s.qualifyRunRepo(ref.Repo), Number: ref.Number}.Key()
+	}
+	if repo != "" && number != "" {
+		return s.canonicalRunKey(repo, atoiOrZero(number), "", "")
+	}
+	return strings.TrimSpace(runKey)
+}
+
+// advanceApprovedPlanLease releases the lease AdvanceStageLease parked at the
+// plan checkpoint, once the plan has actually been approved. A run with no
+// live held plan lease is a no-op, not an error.
+func (s *Server) advanceApprovedPlanLease(runKey, epicID, actor string, now time.Time) error {
+	if s == nil || s.contributeHub == nil || runKey == "" {
+		return nil
+	}
+	var identity, taskID string
+	var gen uint64
+	found := false
+	err := s.VisitActiveStageLeases(func(rk, _, stage, id, task, repo string, g uint64, expiresAt time.Time) {
+		if found || !s.sameRunKey(runKey, rk, repo) || stage != StagePlan || now.After(expiresAt) {
+			return
+		}
+		identity, taskID, gen, found = id, task, g, true
+	})
+	if err != nil || !found {
+		return err
+	}
+	_, err = s.contributeHub.advanceLeaseStageAt(identity, taskID, StageImplement, now, now.Add(time.Millisecond))
+	if err == nil {
+		s.recordRunCheckpointApproval(runKey, epicID, StagePlan, actor, gen, now, nil)
+	}
+	return err
+}
+
+// sameRunKey compares two run keys through their canonical form, so an
+// unqualified `repo#7` matches the stored `org/repo#7`.
+func (s *Server) sameRunKey(target, candidate, repo string) bool {
+	target = strings.TrimSpace(target)
+	candidate = strings.TrimSpace(candidate)
+	if target == "" || candidate == "" {
+		return false
+	}
+	if target == candidate {
+		return true
+	}
+	return s.canonicalRunKey(repo, 0, target, "") == s.canonicalRunKey(repo, 0, candidate, "")
 }
 
 func (s *Server) runPlanHasWaves(runKey string) bool {
@@ -738,21 +809,32 @@ func (s *Server) RunStageAccessor() worksource.RunStageLeaseAccessor {
 
 func (a *runStageAccessor) PendingRunStages(_ context.Context) ([]worksource.RunStage, error) {
 	s := a.s
-	out := []worksource.RunStage{}
+	type pendingLease struct {
+		runKey, stage, identity, repo string
+	}
+	// Snapshot under leaseMu, decide afterwards: ensureRunPlanApproved may
+	// auto-approve a plan and re-enter VisitActiveStageLeases for the lease
+	// generation, which would deadlock inside the visit callback.
+	var pending []pendingLease
+	now := time.Now()
 	err := s.VisitActiveStageLeases(func(runKey, _, stage, identity, _, repo string, _ uint64, expiresAt time.Time) {
-		if time.Now().After(expiresAt) {
+		if now.After(expiresAt) {
 			return
 		}
-		if stage == StageImplement && !s.ensureRunPlanApproved(runKey) {
-			return
-		}
-		if stage == StageImplement && identity != runFanoutIdentity && s.runPlanHasWaves(runKey) {
-			return
-		}
-		out = append(out, worksource.RunStage{RunKey: runKey, Stage: stage, Repo: repo, Title: runKey})
+		pending = append(pending, pendingLease{runKey: runKey, stage: stage, identity: identity, repo: repo})
 	})
 	if err != nil {
 		return nil, err
+	}
+	out := []worksource.RunStage{}
+	for _, l := range pending {
+		if l.stage == StageImplement && !s.ensureRunPlanApproved(l.runKey) {
+			continue
+		}
+		if l.stage == StageImplement && l.identity != runFanoutIdentity && s.runPlanHasWaves(l.runKey) {
+			continue
+		}
+		out = append(out, worksource.RunStage{RunKey: l.runKey, Stage: l.stage, Repo: l.repo, Title: l.runKey})
 	}
 	return out, nil
 }

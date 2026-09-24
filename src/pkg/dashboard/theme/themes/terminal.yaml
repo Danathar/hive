@@ -1,0 +1,35 @@
+id: terminal
+name: Terminal
+description: Green-on-black mono theme for operators who live in shells.
+author: Hive contributors
+scopes:
+- dashboard
+- contributor
+dark: true
+tokens:
+  --font-ui: '''SF Mono'', ''Cascadia Code'', monospace'
+  --font-mono: '''SF Mono'', ''Cascadia Code'', monospace'
+  --surface-0: '#000000'
+  --surface-1: '#020602'
+  --surface-2: '#031003'
+  --surface-3: '#062006'
+  --surface-terminal: '#000000'
+  --line-subtle: '#145214'
+  --line-strong: '#25d825'
+  --text: '#c8ffc8'
+  --text-muted: '#7bd87b'
+  --brand: '#afff5a'
+  --accent: '#00ff66'
+  --status-ok: '#00ff66'
+  --status-warn: '#afff5a'
+  --status-attention: '#d0ff66'
+  --status-error: '#ff6666'
+  --status-info: '#66ffcc'
+  --acmm-level-2: '#66ffcc'
+  --acmm-level-5: '#99ff99'
+  --terminal-fg: '#00ff66'
+  --terminal-line: '#145214'
+  --terminal-muted: '#7bd87b'
+fonts:
+  ui: '''SF Mono'', ''Cascadia Code'', monospace'
+  mono: '''SF Mono'', ''Cascadia Code'', monospace'

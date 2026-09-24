@@ -12,22 +12,12 @@
   <link rel="canonical" href="https://hive.hivecommons.dev/api/docs">
   <meta name="description" content="Hive API reference — hub registry, leaderboard, hosted hive provisioning, and spoke integration, with the full OpenAPI schema.">
   <title>API Reference — Hive</title>
+  <link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/components.css">
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #080b0f;
-      --bg-soft: #0d1218;
-      --panel: #121922;
-      --panel-strong: #17212d;
-      --text: #f6f8fb;
-      --muted: #a8b3c2;
-      --line: #263545;
-      --amber: #f4c75f;
-      --green: #74df9a;
-      --blue: #80bfff;
-      --red: #ff7e7e;
-      --shadow: 0 24px 80px #0006;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --hub-marketing-shadow: 0 24px 80px #0006;
+      font-family: var(--font-ui);
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -38,7 +28,7 @@
         linear-gradient(180deg, #090d12 0%, var(--bg) 48%, #0a0e13 100%);
       min-width: 320px;
       color: var(--text);
-      margin: 0;
+      margin: var(--sp-0);
     }
     a { color: inherit; text-decoration: none; }
 
@@ -52,31 +42,31 @@
       display: grid;
       grid-template-columns: 1fr auto 1fr;
       align-items: center;
-      gap: 1.5rem;
-      padding: 1rem clamp(1rem, 4vw, 4.5rem);
+      gap: var(--sp-8);
+      padding: var(--sp-6) clamp(1rem, 4vw, 4.5rem);
       position: sticky;
       top: 0;
     }
     .brand, .header-link, nav { align-items: center; display: flex; }
-    .brand { letter-spacing: 0; gap: .75rem; font-weight: 800; }
+    .brand { letter-spacing: 0; gap: var(--sp-5); font-weight: 800; }
     .brand-mark {
       width: 2.5rem; height: 2.5rem;
       color: var(--amber);
       background: linear-gradient(145deg, #f4c75f2e, #80bfff1a);
       border: 1px solid #f4c75f6b;
-      border-radius: .65rem;
+      border-radius: var(--r-lg);
       place-items: center;
       font-size: 1.2rem;
       display: grid;
     }
-    nav { color: var(--muted); gap: 1.35rem; font-size: .94rem; }
+    nav { color: var(--muted); gap: 1.35rem; font-size: var(--fs-md); }
     nav a:hover, .header-link:hover { color: var(--text); }
     nav a.active { color: var(--amber); }
     .header-link {
       border: 1px solid var(--line);
       width: fit-content;
       color: var(--text);
-      border-radius: .55rem;
+      border-radius: var(--r);
       justify-self: end;
       padding: .72rem 1rem;
       font-weight: 700;
@@ -88,11 +78,11 @@
       color: var(--amber);
       letter-spacing: .12em;
       text-transform: uppercase;
-      margin: 0 0 1rem;
-      font-size: .82rem;
+      margin: var(--sp-0) var(--sp-0) var(--sp-6);
+      font-size: var(--fs-base);
       font-weight: 900;
     }
-    h1, h2, h3, p { margin-top: 0; }
+    h1, h2, h3, p { margin-top: var(--sp-0); }
     h1 {
       letter-spacing: 0;
       max-width: 20ch;
@@ -100,34 +90,34 @@
       font-size: clamp(2.6rem, 6vw, 5rem);
       line-height: .95;
     }
-    h2 { font-size: 1.25rem; font-weight: 800; margin: 2rem 0 .8rem; color: var(--text); }
+    h2 { font-size: var(--fs-xl); font-weight: 800; margin: 2rem 0 .8rem; color: var(--text); }
     p { color: var(--muted); font-size: 1.02rem; line-height: 1.7; }
     .lede { color: #d7deea; max-width: 44rem; font-size: clamp(1.05rem, 1.3vw, 1.22rem); }
-    code { background: #17212d; border: 1px solid var(--line); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--amber); }
+    code { background: #17212d; border: 1px solid var(--line); padding: var(--sp-1) var(--sp-3); border-radius: var(--r-sm); font-size: 0.85rem; color: var(--amber); }
     pre {
       background: #080b0f85;
       border: 1px solid var(--line);
       border-radius: .7rem;
-      padding: 1rem 1.2rem;
+      padding: var(--sp-6) 1.2rem;
       margin: .8rem 0 0;
       overflow-x: auto;
-      font-size: 0.82rem;
+      font-size: var(--fs-base);
       color: #d7deea;
       line-height: 1.6;
     }
-    pre code { background: none; border: none; padding: 0; color: inherit; }
+    pre code { background: none; border: none; padding: var(--sp-0); color: inherit; }
 
     /* ── Cards ── */
     .card {
-      box-shadow: var(--shadow);
+      box-shadow: var(--hub-marketing-shadow);
       background: linear-gradient(#17212deb, #0c1219eb);
       border: 1px solid #ffffff1a;
-      border-radius: .85rem;
+      border-radius: var(--r-lg);
       padding: 1.3rem;
-      margin-bottom: 1rem;
+      margin-bottom: var(--sp-6);
     }
     .card strong { color: var(--text); }
-    .card p { font-size: .9rem; margin: .35rem 0 0; }
+    .card p { font-size: var(--fs-md); margin: .35rem 0 0; }
     .card a { color: var(--blue); }
     .card a:hover { text-decoration: underline; }
 
@@ -135,33 +125,33 @@
     .surface-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1rem;
-      margin-bottom: 2rem;
+      gap: var(--sp-6);
+      margin-bottom: var(--sp-9);
     }
     .surface-card {
-      box-shadow: var(--shadow);
+      box-shadow: var(--hub-marketing-shadow);
       background: linear-gradient(#17212deb, #0c1219eb);
       border: 1px solid #ffffff1a;
-      border-radius: .85rem;
+      border-radius: var(--r-lg);
       padding: 1.3rem;
     }
     .surface-card .tag {
       text-transform: uppercase;
       font-weight: 900;
       font-size: .78rem;
-      margin-bottom: .5rem;
+      margin-bottom: var(--sp-4);
     }
     .surface-card.hub .tag { color: var(--amber); }
     .surface-card.spoke .tag { color: var(--blue); }
-    .surface-card p { font-size: .9rem; margin: .4rem 0 0; }
+    .surface-card p { font-size: var(--fs-md); margin: .4rem 0 0; }
 
     /* ── Tabs ── */
-    .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin-top: .5rem; }
+    .tabs { display: flex; gap: var(--sp-0); border-bottom: 1px solid var(--line); margin-top: var(--sp-4); }
     .tab {
       padding: .7rem 1.4rem;
       cursor: pointer;
       color: var(--muted);
-      font-size: .9rem;
+      font-size: var(--fs-md);
       font-weight: 700;
       border-bottom: 2px solid transparent;
     }
@@ -171,11 +161,11 @@
     .tab-content.active { display: block; }
 
     /* ── Redoc wrap ── */
-    .redoc-wrap { border: 1px solid var(--line); border-radius: .85rem; overflow: hidden; margin-top: 1.2rem; background: var(--bg-soft); }
+    .redoc-wrap { border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; margin-top: 1.2rem; background: var(--bg-soft); }
 
     /* ── Footer ── */
-    .footer { border-top: 1px solid var(--line); padding: 2rem clamp(1rem, 4vw, 4.5rem); text-align: center; font-size: .82rem; color: var(--muted); }
-    .footer-links { display: flex; justify-content: center; gap: 1.5rem; margin-bottom: .8rem; }
+    .footer { border-top: 1px solid var(--line); padding: 2rem clamp(1rem, 4vw, 4.5rem); text-align: center; font-size: var(--fs-base); color: var(--muted); }
+    .footer-links { display: flex; justify-content: center; gap: var(--sp-8); margin-bottom: .8rem; }
     .footer-links a { color: var(--muted); }
     .footer-links a:hover { color: var(--text); }
 
@@ -217,15 +207,15 @@
       <h1>API Reference</h1>
       <p class="lede">There are two API surfaces in the Hive ecosystem — the hub, which manages the fleet, and each hive's own spoke API.</p>
 
-      <div class="surface-grid" style="margin-top:2rem">
+      <div class="surface-grid" style="margin-top:var(--sp-9)">
         <div class="surface-card hub">
           <div class="tag">Hub API</div>
-          <strong style="color:var(--text)"><code>hive.hivecommons.dev</code></strong>
+          <strong class="text-default"><code>hive.hivecommons.dev</code></strong>
           <p>Manages hive registry, users, access control, hosted hive provisioning, leaderboard. Documented below.</p>
         </div>
         <div class="surface-card spoke">
           <div class="tag">Spoke API</div>
-          <strong style="color:var(--text)">each hive instance</strong>
+          <strong class="text-default">each hive instance</strong>
           <p>The actual hive dashboard &mdash; agents, governor, config, contributors, beads, tokens. Available at each hive's URL (e.g. <code>192.168.4.85:3001</code> or <code>hosted-*.hive.hivecommons.dev</code>).</p>
         </div>
       </div>
@@ -304,7 +294,7 @@ curl -b "hive_hub_user=YOUR_USERNAME" \
   dashboard_url: http://YOUR_IP:3001
   snapshot_url: https://your-snapshot-url</code></pre>
           <p>Or set the environment variable: <code>HIVE_HUB_URL=https://hive.hivecommons.dev</code></p>
-          <p style="margin-bottom:0"><strong>Authentication is required.</strong> <code>POST /api/heartbeat</code> rejects any beat without a valid <code>Authorization: Bearer &lt;HIVE_HUB_SECRET&gt;</code> header when the hub has a secret configured, so the settings above only take effect once the hub operator has issued your spoke a <code>HIVE_HUB_SECRET</code>. A spoke configured without one logs <code>hub heartbeat rejected status=401</code> every beat and never appears in the registry.</p>
+          <p style="margin-bottom:var(--sp-0)"><strong>Authentication is required.</strong> <code>POST /api/heartbeat</code> rejects any beat without a valid <code>Authorization: Bearer &lt;HIVE_HUB_SECRET&gt;</code> header when the hub has a secret configured, so the settings above only take effect once the hub operator has issued your spoke a <code>HIVE_HUB_SECRET</code>. A spoke configured without one logs <code>hub heartbeat rejected status=401</code> every beat and never appears in the registry.</p>
         </div>
 
         <h2>Rate Limits</h2>

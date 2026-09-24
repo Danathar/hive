@@ -110,3 +110,13 @@ the fleet is reachable, turning that into a legible red X. That is not done
 here: it needs a decision about whether every workflow pays for such a job, and
 guessing at the shape is worse than raising it.
 
+
+## Finding flaky tests in recent CI
+
+Use `src/scripts/ci-flake-tally.sh` when the v5 test workflow is red and you need to separate repeat Go test failures from build or infrastructure noise. The script unsets `GITHUB_TOKEN`, scans recent `v2-tests.yml` runs, fetches failed job logs, strips the GitHub log timestamp prefix, and ranks failing `--- FAIL:` tests and `FAIL github.com/...` packages by distinct workflow run count; failed runs with no test failure marker are listed separately as build/infra failures.
+
+```sh
+bash src/scripts/ci-flake-tally.sh -n 40
+```
+
+Flake policy: the Go test shards rerun failing tests automatically with gotestsum (2 retries, up to 5 failing tests per shard). Any rerun is surfaced in the job summary, emitted as a warning annotation, uploaded as a `flaky-tests-*` artifact, and tracked from v5/v6 push runs with a deduplicated `ci-flake` issue. A rerun is not a pass: fix the flaky test rather than treating the green shard as resolved.

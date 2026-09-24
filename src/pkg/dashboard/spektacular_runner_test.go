@@ -83,6 +83,12 @@ func (e *spekExec) exec(_ context.Context, args []string) ([]byte, error) {
 
 func spekHub(t *testing.T) (*ContributeWSHub, *Server, *beads.Store, *hookCapture) {
 	t.Helper()
+	// The lifecycle timeline is a process-wide singleton and every test here
+	// drives the SAME lease key (spekRepo!spekRunKey:<stage>), so its
+	// per-(ref,kind) Stage.Count accumulates across tests and receipt
+	// assertions read other tests' receipts under -shuffle. Reset it per test,
+	// the package idiom from api_lifecycle_timeline_test.go.
+	resetLifecycleStore()
 	hub, s := covK2Hub(t)
 	s.contributeHub = hub
 	old := runReceiptsDir
@@ -229,8 +235,8 @@ func TestSpektacularRunner_LeaseWorksourceHookIntegration(t *testing.T) {
 		t.Fatalf("same-instant tick = %+v", res)
 	}
 
-	// Plan final: imported as a DRAFT plan, lease stays parked at plan until
-	// the checkpoint is approved.
+	// Plan final: imported as a DRAFT plan, and the lease stays parked at plan
+	// until the checkpoint is approved (hivecommons/hive#8550).
 	now = now.Add(spekPoll)
 	if res := r.Tick(context.Background(), now); res.Advanced != 1 || res.Errors != 0 {
 		t.Fatalf("plan final tick = %+v", res)
@@ -250,19 +256,13 @@ func TestSpektacularRunner_LeaseWorksourceHookIntegration(t *testing.T) {
 		t.Fatalf("plan tree = %+v err=%v", children, err)
 	}
 	if listed := spekListed(t, s); len(listed) != 1 || listed[0].Stage != StagePlan {
-		t.Fatalf("listed before ApprovePlan = %+v, want held plan", listed)
-	}
-	plans := s.runPlanSnapshots()
-	plan := plans[spekRepo+"!"+spekRunKey]
-	run := runFromLease(runLeaseSnapshot{key: spekRepo + "!" + spekRunKey, leaseKey: spekRepo + "!" + spekRunKey + ":" + StagePlan, repo: spekRepo, stage: StagePlan, gen: gen, identity: spekIdentity}, plan, runHumanReviewHold{}, s.deps.Config)
-	if run.PlanEpicID != epic.ID || run.WaitingOn != RunWaitingOnHuman {
-		t.Fatalf("run projection = %+v, plan snapshot = %+v", run, plan)
+		t.Fatalf("listed before ApprovePlan = %+v, want the held plan stage", listed)
 	}
 	approvalAt := now.Add(leaseTTL + time.Second)
 	if err := planning.ApprovePlan(store, epic.ID); err != nil {
 		t.Fatalf("ApprovePlan: %v", err)
 	}
-	if err := s.advanceApprovedPlanLease(spekRunKey, approvalAt); err != nil {
+	if err := s.advanceApprovedPlanLease(spekRunKey, epic.ID, "test-operator", approvalAt); err != nil {
 		t.Fatalf("advance approved plan lease: %v", err)
 	}
 	if listed := spekListed(t, s); len(listed) != 1 || listed[0].Stage != StageImplement {
@@ -740,7 +740,7 @@ func TestAdvanceApprovedPlanLeaseMatchesCanonicalIssueKey(t *testing.T) {
 	if err := hub.recordLeaseForKeyStage(spekIdentity, spekTaskID, repo, 0, leaseKey, "contributor", StagePlan, spekGen, now); err != nil {
 		t.Fatalf("record stage lease: %v", err)
 	}
-	if err := s.advanceApprovedPlanLease("clubanderson/hive-runs-e2e#7", now.Add(time.Second)); err != nil {
+	if err := s.advanceApprovedPlanLease("clubanderson/hive-runs-e2e#7", "", "test-operator", now.Add(time.Second)); err != nil {
 		t.Fatalf("advance approved plan lease: %v", err)
 	}
 	if stage, _ := spekLeaseState(hub); stage != StageImplement {
@@ -815,5 +815,195 @@ func TestCovGov_FeaturesSpektacularRoundTrip(t *testing.T) {
 	}
 	if rec := doPut(s, "/api/config/governor/features", map[string]any{"spektacularEnabled": false}); rec.Code != 200 || s.deps.Config.Runs.Spektacular.Enabled {
 		t.Fatal("could not switch the runner back off")
+	}
+}
+
+// spekPlanLeaseExpiry reads the held lease's expiry so a hold can be told from
+// a plain no-op.
+func spekPlanLeaseExpiry(hub *ContributeWSHub) time.Time {
+	hub.leaseMu.Lock()
+	defer hub.leaseMu.Unlock()
+	l := hub.leaseForLocked(spekIdentity, spekTaskID)
+	if l == nil {
+		return time.Time{}
+	}
+	return l.expiresAt
+}
+
+// spekDraftEpic binds a draft-plan epic to the run so the checkpoint has
+// something unapproved to hold on.
+func spekDraftEpic(t *testing.T, store *beads.Store) *beads.Bead {
+	t.Helper()
+	epic, err := store.Create("bound", beads.TypeEpic, beads.PriorityMedium, "architect", spekRunKey)
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	if err := store.Update(epic.ID, func(b *beads.Bead) {
+		b.Metadata[planning.MetaRunKey] = spekRunKey
+		b.Metadata[planning.MetaIssueRepo] = spekRepo
+		b.Metadata[planning.MetaPlanStatus] = planning.PlanStatusDraft
+	}); err != nil {
+		t.Fatalf("update epic: %v", err)
+	}
+	got, err := store.Get(epic.ID)
+	if err != nil {
+		t.Fatalf("reload epic: %v", err)
+	}
+	return got
+}
+
+// spekReceipts counts the stage receipts recorded for the run's plan stage.
+// The timeline folds repeats of one IssueRef+Kind into a single stage and
+// carries the cardinality in Count, so the number of recordings is that
+// Count - ByIssue would synthesize one event no matter how many were written.
+func spekReceipts(s *Server) int {
+	j, ok := s.LifecycleTimeline().Journey(spekRepo + "!" + spekRunKey + ":" + StagePlan)
+	if !ok {
+		return 0
+	}
+	st, ok := j.Stages[timeline.KindStageReceipt]
+	if !ok || st == nil {
+		return 0
+	}
+	return st.Count
+}
+
+// TestPlanCheckpointHoldsUnapprovedPlan is the core of hivecommons/hive#8550
+// on v5: an enabled plan checkpoint with a draft plan neither advances the
+// lease nor errors, it extends the hold and still writes the receipt.
+func TestPlanCheckpointHoldsUnapprovedPlan(t *testing.T) {
+	hub, s, store, _ := spekHub(t)
+	now := time.Now()
+	spekLease(t, hub, StagePlan, now)
+	spekDraftEpic(t, store)
+	before := spekPlanLeaseExpiry(hub)
+
+	if err := s.AdvanceStageLease(spekIdentity, spekTaskID, StageImplement, now, []byte(`{}`), map[string]string{stageAttrRunKey: spekRunKey}); err != nil {
+		t.Fatalf("AdvanceStageLease on held plan returned an error: %v", err)
+	}
+	if stage, _ := spekLeaseState(hub); stage != StagePlan {
+		t.Fatalf("stage after held advance = %s, want plan", stage)
+	}
+	if after := spekPlanLeaseExpiry(hub); !after.After(before) {
+		t.Fatalf("held plan lease not extended: before=%s after=%s", before, after)
+	}
+	if got := spekReceipts(s); got != 1 {
+		t.Fatalf("stage receipts on hold = %d, want 1", got)
+	}
+}
+
+// TestPlanCheckpointAdvancesAfterApprovePlan pins the release half: once the
+// plan is approved, the very next advance reaches implement and records its
+// own receipt.
+func TestPlanCheckpointAdvancesAfterApprovePlan(t *testing.T) {
+	hub, s, store, _ := spekHub(t)
+	now := time.Now()
+	spekLease(t, hub, StagePlan, now)
+	epic := spekDraftEpic(t, store)
+
+	if err := s.AdvanceStageLease(spekIdentity, spekTaskID, StageImplement, now, []byte(`{}`), map[string]string{stageAttrRunKey: spekRunKey}); err != nil {
+		t.Fatalf("held advance: %v", err)
+	}
+	if stage, _ := spekLeaseState(hub); stage != StagePlan {
+		t.Fatalf("stage before approval = %s, want plan", stage)
+	}
+	if err := planning.ApprovePlan(store, epic.ID); err != nil {
+		t.Fatalf("ApprovePlan: %v", err)
+	}
+	if err := s.AdvanceStageLease(spekIdentity, spekTaskID, StageImplement, now.Add(time.Second), []byte(`{}`), map[string]string{stageAttrRunKey: spekRunKey}); err != nil {
+		t.Fatalf("advance after approval: %v", err)
+	}
+	if stage, _ := spekLeaseState(hub); stage != StageImplement {
+		t.Fatalf("stage after approval = %s, want implement", stage)
+	}
+	if got := spekReceipts(s); got != 2 {
+		t.Fatalf("stage receipts across hold and advance = %d, want 2", got)
+	}
+}
+
+// TestPlanCheckpointDisabledAutoApprovesAndAdvances covers the opposite
+// rollout position: with runs.checkpoints.plan false the plan is approved by
+// `auto` and the lease advances without a human.
+func TestPlanCheckpointDisabledAutoApprovesAndAdvances(t *testing.T) {
+	hub, s, store, _ := spekHub(t)
+	off := false
+	s.deps.Config.SourcePath = "hive.yaml"
+	s.deps.Config.Runs.Checkpoints.Plan = &off
+	now := time.Now()
+	spekLease(t, hub, StagePlan, now)
+	if err := s.ImportRunPlan(spekRunKey, spekRepo, "1. [T1] x [agent_suitable]"); err != nil {
+		t.Fatalf("ImportRunPlan: %v", err)
+	}
+	_, epic := s.findRunEpic(spekRunKey)
+	if epic == nil {
+		t.Fatal("plan import did not create the epic")
+	}
+	if got, _ := store.Get(epic.ID); got.Meta(planning.MetaPlanStatus) != planning.PlanStatusApproved {
+		t.Fatalf("plan_status = %q, want approved", got.Meta(planning.MetaPlanStatus))
+	}
+	if err := s.AdvanceStageLease(spekIdentity, spekTaskID, StageImplement, now, []byte(`{}`), map[string]string{stageAttrRunKey: spekRunKey}); err != nil {
+		t.Fatalf("AdvanceStageLease: %v", err)
+	}
+	if stage, _ := spekLeaseState(hub); stage != StageImplement {
+		t.Fatalf("stage with checkpoint disabled = %s, want implement", stage)
+	}
+	found := false
+	for _, e := range s.audit.Recent(10) {
+		if e.User == runCheckpointAutoActor && e.Action == "plan_approve" && strings.Contains(e.Detail, "stage=plan") && strings.Contains(e.Detail, "config_source=hive.yaml") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("auto plan approval audit not recorded: %+v", s.audit.Recent(10))
+	}
+}
+
+// TestImplementCheckpointRespectsACMMFloor pins the floor: below
+// RunImplementCheckpointMinACMM an explicit `implement: false` is ignored and
+// the checkpoint keeps blocking.
+func TestImplementCheckpointRespectsACMMFloor(t *testing.T) {
+	_, s, _, _ := spekHub(t)
+	off := false
+	s.deps.Config.Runs.Checkpoints.Implement = &off
+
+	below := config.RunImplementCheckpointMinACMM - 1
+	s.deps.Config.ACMMLevel = &below
+	if decision := s.runCheckpointPolicy(StageImplement); !decision.blocks {
+		t.Fatalf("implement checkpoint opened below the ACMM floor: %+v", decision)
+	}
+
+	atFloor := config.RunImplementCheckpointMinACMM
+	s.deps.Config.ACMMLevel = &atFloor
+	if decision := s.runCheckpointPolicy(StageImplement); decision.blocks {
+		t.Fatalf("implement checkpoint still blocks at the ACMM floor: %+v", decision)
+	} else if decision.reason != runCheckpointDisabledReason {
+		t.Fatalf("reason = %q, want %q", decision.reason, runCheckpointDisabledReason)
+	}
+}
+
+// TestIssue8550RunCannotReachImplementWithDraftPlan is the regression guard
+// for hivecommons/hive#8550: no sequence of advances may leave a run at
+// stage=implement while its plan is still draft.
+func TestIssue8550RunCannotReachImplementWithDraftPlan(t *testing.T) {
+	hub, s, store, _ := spekHub(t)
+	now := time.Now()
+	spekLease(t, hub, StagePlan, now)
+	epic := spekDraftEpic(t, store)
+
+	for i := 0; i < 3; i++ {
+		if err := s.AdvanceStageLease(spekIdentity, spekTaskID, StageImplement, now.Add(time.Duration(i)*time.Second), []byte(`{}`), map[string]string{stageAttrRunKey: spekRunKey}); err != nil {
+			t.Fatalf("advance %d: %v", i, err)
+		}
+		stage, _ := spekLeaseState(hub)
+		got, err := store.Get(epic.ID)
+		if err != nil {
+			t.Fatalf("reload epic: %v", err)
+		}
+		if stage == StageImplement && got.Meta(planning.MetaPlanStatus) == planning.PlanStatusDraft {
+			t.Fatalf("#8550 regression: run reached stage=implement with a draft plan after advance %d", i)
+		}
+	}
+	if listed := spekListed(t, s); len(listed) != 1 || listed[0].Stage != StagePlan {
+		t.Fatalf("listed with a draft plan = %+v, want the held plan stage only", listed)
 	}
 }
