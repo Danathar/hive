@@ -1,1 +1,0 @@
-- Added dashboard repository-card hold toggles for issue #8620.

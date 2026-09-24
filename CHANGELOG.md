@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.37.0)
+
+### Added
+
+- Add the compact run checkpoint payload and generation-fenced mobile decision endpoint.
+- Added dashboard repository-card hold toggles for issue #8620.
+- Publish two adopter reference-architecture pages on the hub, at `/cncf-reference-architecture/console` for KubeStellar Console and `/cncf-reference-architecture/bluefin` for Project Bluefin, alongside the existing Hive platform page, so operators evaluating Hive can read how each adopter's surrounding architecture actually works ([#8631](https://github.com/hivecommons/hive/issues/8631)).
+
+### Changed
+
+- Regrouped the operator dashboard sidebar, unified sidebar count badges, and documented the Agent/Contributor/Governor/Fleet glossary pending maintainer review.
+
+### Fixed
+
+- runs: fix a deadlock in `PendingRunStages` when a disabled implement checkpoint auto-approves a plan — the approval re-entered the lease registry while the visit callback still held `leaseMu`, hanging the run work source (introduced by #8570).
+
 ## 2026-09-24 (v5.36.1)
 
 ### Fixed
