@@ -834,20 +834,32 @@ func (s *Server) RunStageAccessor() worksource.RunStageLeaseAccessor {
 func (a *runStageAccessor) PendingRunStages(_ context.Context) ([]worksource.RunStage, error) {
 	s := a.s
 	out := []worksource.RunStage{}
+	type pendingLease struct {
+		runKey, stage, identity, repo string
+		gen                           uint64
+	}
+	// Snapshot under leaseMu, decide afterwards: ensureRunPlanApproved may
+	// auto-approve a plan and must not re-enter the lease lock from inside
+	// the visit callback.
+	var pending []pendingLease
+	now := time.Now()
 	err := s.VisitActiveStageLeases(func(runKey, _, stage, identity, _, repo string, gen uint64, expiresAt time.Time) {
-		if time.Now().After(expiresAt) {
+		if now.After(expiresAt) {
 			return
 		}
-		if stage == StageImplement && !s.ensureRunPlanApproved(runKey, gen) {
-			return
-		}
-		if stage == StageImplement && identity != runFanoutIdentity && s.runPlanHasWaves(runKey) {
-			return
-		}
-		out = append(out, worksource.RunStage{RunKey: runKey, Stage: stage, Repo: repo, Title: runKey})
+		pending = append(pending, pendingLease{runKey: runKey, stage: stage, identity: identity, repo: repo, gen: gen})
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, l := range pending {
+		if l.stage == StageImplement && !s.ensureRunPlanApproved(l.runKey, l.gen) {
+			continue
+		}
+		if l.stage == StageImplement && l.identity != runFanoutIdentity && s.runPlanHasWaves(l.runKey) {
+			continue
+		}
+		out = append(out, worksource.RunStage{RunKey: l.runKey, Stage: l.stage, Repo: l.repo, Title: l.runKey})
 	}
 	return out, nil
 }

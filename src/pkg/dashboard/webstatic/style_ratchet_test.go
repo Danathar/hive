@@ -24,12 +24,14 @@ type styleRatchetCounts struct {
 // counts may go DOWN freely — lower the matching constant in the same PR that
 // removes raw styling — but they must not go UP.
 var styleRatchetBaselines = map[string]styleRatchetCounts{
+	// v6 carries surfaces v5 does not have (runs section, standby, wavefront
+	// fan-out UI); these baselines are v6's own counts, not v5's.
 	"operator static/index.html": {
-		inlineStyles:   1701,
+		inlineStyles:   1700,
 		rawColors:      152,
-		rawFontSizes:   696,
-		rawPadding:     264,
-		rawBorderRadii: 191,
+		rawFontSizes:   694,
+		rawPadding:     252,
+		rawBorderRadii: 189,
 	},
 	"contributor landing": {
 		inlineStyles:   95,

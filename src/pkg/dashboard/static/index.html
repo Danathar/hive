@@ -3435,8 +3435,8 @@
     </div>
   </div>
 
-  <div id="advisory-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
-    <h2 style="margin-bottom: 8px;" class="section-label section-group-header section-header-toggle" data-action="toggleSection" data-arg0="advisory-section"><span class="section-chevron">▼</span> 🧭 Hive Advisory</h2>
+  <div id="advisory-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
+    <h2 class="section-label section-group-header section-header-toggle mb-4" data-action="toggleSection" data-arg0="advisory-section"><span class="section-chevron">▼</span> 🧭 Hive Advisory</h2>
     <div class="section-body section-group-body">
     <div class="mb-7" id="advisory-digest-section">
       <h2 class="section-label advisory-collapse-header section-header-toggle" style="margin-bottom: var(--sp-4); cursor: pointer; user-select: none;" data-action="toggleAdvisorySection" data-arg0="advisory-digest-main">
@@ -7183,10 +7183,10 @@
             return `<div class="agent-error" title="${esc(a.lastError)}">⚠ ${esc(prefix)}${esc(a.lastError)}</div>`;
           })()}
           <div class="agent-card-details">
-          <div class="agent-field"><span class="label" title="${isInferenceBackendName(a.cli) ? 'Inference backend (self-hosted model server)' : 'The CLI backend running this agent (e.g. claude, copilot). Pin to prevent governor from switching it.'}">${isInferenceBackendName(a.cli) ? 'method' : 'cli'}</span><span class="value">${cliChip(a.cli, a.pinnedBoth || a.pinnedCli, a.name)}${(a.pinnedBoth || a.pinnedCli) ? '' : ` <button class="pin-toggle" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="cli" data-unpin="false" title="Pin CLI — lock current backend" style="opacity:0.4;cursor:pointer;border:none;background:none">📌</button>`}</span></div>
-          <div class="agent-field"><span class="label" title="The LLM model powering this agent. Governor may change it based on budget or mode. Pin to lock.">model</span><span class="value">${modelChip(a.model, a.govReason, a.pinnedBoth || a.pinnedModel, a.name)}${(a.pinnedBoth || a.pinnedModel) ? '' : ` <button class="pin-toggle" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="model" data-unpin="false" title="Pin model — lock current model" style="opacity:0.4;cursor:pointer;border:none;background:none">📌</button>`}</span></div>
+          <div class="agent-field"><span class="label" title="${isInferenceBackendName(a.cli) ? 'Inference backend (self-hosted model server)' : 'The CLI backend running this agent (e.g. claude, copilot). Pin to prevent governor from switching it.'}">${isInferenceBackendName(a.cli) ? 'method' : 'cli'}</span><span class="value">${cliChip(a.cli, a.pinnedBoth || a.pinnedCli, a.name)}${(a.pinnedBoth || a.pinnedCli) ? '' : ` <button class="hv-btn pin-toggle btn-icon btn-sm" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="cli" data-unpin="false" title="Pin CLI — lock current backend">📌</button>`}</span></div>
+          <div class="agent-field"><span class="label" title="The LLM model powering this agent. Governor may change it based on budget or mode. Pin to lock.">model</span><span class="value">${modelChip(a.model, a.govReason, a.pinnedBoth || a.pinnedModel, a.name)}${(a.pinnedBoth || a.pinnedModel) ? '' : ` <button class="hv-btn pin-toggle btn-icon btn-sm" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="model" data-unpin="false" title="Pin model — lock current model">📌</button>`}</span></div>
           ${agentCurrentRunRow(a)}
-          <div class="agent-field"><span class="label" title="Agent operating mode — controls what GitHub actions this agent can take (advisory, issues, PRs, merge).">mode</span><span class="value">${modeLabel(a)}${a.needsRestart ? ' <span class="status-badge needs-context" title="CLI flags are stale — restart agent to apply new mode">⚠ restart needed</span>' : ''}</span></div>
+          <div class="agent-field"><span class="label" title="Agent operating mode — controls what GitHub actions this agent can take (advisory, issues, PRs, merge).">mode</span><span class="value">${modeLabel(a)}${a.needsRestart ? ' ' + statusBadgeHTML('needs_context', '⚠ restart needed', 'CLI flags are stale — restart agent to apply new mode', 'needs-context') : ''}</span></div>
           <div class="agent-field"><span class="label" title="Number of HTTP requests blocked by the ACMM proxy for this agent. Non-zero means the agent attempted actions above its mode.">proxy</span><span class="value">${a.proxyViolations > 0 ? '<span style="color:var(--danger)">⛔ ' + a.proxyViolations + ' blocked</span>' : '✓ clean'}</span></div>
           <div class="agent-field"><span class="label" title="Time between governor kicks for this agent in the current mode. Configured per governor mode (idle/quiet/busy/surge).">interval</span><span class="value">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? esc(agentCadenceOffLabel()) : a.cadence}</span></div>
           <div class="agent-field"><span class="label" title="When the governor last kicked (sent a work prompt to) this agent. A kicked work pass often keeps running long after this time — terminal activity between kicks is normally the previous pass still working, not an off-schedule run.">last kick</span><span class="value">${a.lastKick || '—'}</span></div>
@@ -15070,25 +15070,25 @@ function burnAreaChart() {
           ? linkedAvatar(e.github_username, CONTRIBUTOR_AVATAR_PX, `@${e.github_username}`, e.avatar_url)
           : `<span style="display:inline-block;width:${CONTRIBUTOR_AVATAR_PX}px;height:${CONTRIBUTOR_AVATAR_PX}px;border-radius:50%;background:var(--border)"></span>`;
         return `<tr style="border-bottom:1px solid var(--border)">
-          <td style="padding:8px 12px;font-weight:600;color:var(--muted)">${e.rank}</td>
-          <td style="padding:8px 12px">${avatarHtml}</td>
-          <td style="padding:8px 12px">@${esc(e.github_username)}</td>
-          <td style="padding:8px 12px">${trustTierBadge(e.trust_tier)}</td>
-          <td style="padding:8px 12px;text-align:right">${e.tasks_completed || 0}</td>
-          <td style="padding:8px 12px;text-align:right" title="Run stage completions credited to this contributor (#8349)">${leaderboardStagesText(e)}</td>
-          <td style="padding:8px 12px;text-align:right;color:${(e.tasks_failed || 0) > 0 ? 'var(--red)' : 'var(--muted)'}">${e.tasks_failed || 0}</td>
+          <td style="padding:var(--sp-4) var(--sp-5);font-weight:600;color:var(--muted)">${e.rank}</td>
+          <td style="padding:var(--sp-4) var(--sp-5)">${avatarHtml}</td>
+          <td style="padding:var(--sp-4) var(--sp-5)">@${esc(e.github_username)}</td>
+          <td style="padding:var(--sp-4) var(--sp-5)">${trustTierBadge(e.trust_tier)}</td>
+          <td style="padding:var(--sp-4) var(--sp-5);text-align:right">${e.tasks_completed || 0}</td>
+          <td style="padding:var(--sp-4) var(--sp-5);text-align:right" title="Run stage completions credited to this contributor (#8349)">${leaderboardStagesText(e)}</td>
+          <td style="padding:var(--sp-4) var(--sp-5);text-align:right;color:${(e.tasks_failed || 0) > 0 ? 'var(--red)' : 'var(--muted)'}">${e.tasks_failed || 0}</td>
         </tr>`;
       }).join('');
       setIfChanged(panel, `<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;overflow:hidden">
         <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
           <thead><tr style="background:var(--bg);border-bottom:1px solid var(--border)">
-            <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:600">#</th>
-            <th style="padding:8px 12px"></th>
-            <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:600">User</th>
-            <th style="padding:8px 12px;text-align:left;color:var(--muted);font-weight:600">Tier</th>
-            <th style="padding:8px 12px;text-align:right;color:var(--muted);font-weight:600">Completed</th>
-            <th style="padding:8px 12px;text-align:right;color:var(--muted);font-weight:600">Stages</th>
-            <th style="padding:8px 12px;text-align:right;color:var(--muted);font-weight:600">Failed</th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:left;color:var(--muted);font-weight:600">#</th>
+            <th style="padding:var(--sp-4) var(--sp-5)"></th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:left;color:var(--muted);font-weight:600">User</th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:left;color:var(--muted);font-weight:600">Tier</th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:right;color:var(--muted);font-weight:600">Completed</th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:right;color:var(--muted);font-weight:600">Stages</th>
+            <th style="padding:var(--sp-4) var(--sp-5);text-align:right;color:var(--muted);font-weight:600">Failed</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -16012,9 +16012,9 @@ function burnAreaChart() {
           <button id="inception-follow-btn" class="oc-summary-follow-btn" data-action="inceptionResumeTail" title="Follow new output">⬇</button>
           </div>
           ${renderInceptionProposedFacts()}
-          <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-            <button data-action="stopInception" style="padding:8px 16px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;font-size:0.82rem">Stop</button>
-            <button data-action="clearInception" style="padding:8px 16px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--red);cursor:pointer;font-size:0.82rem">Clear</button>
+          <div style="margin-top:var(--sp-5);display:flex;gap:var(--sp-4);justify-content:flex-end">
+            <button class="hv-btn btn-danger" data-action="stopInception">Stop</button>
+            <button class="hv-btn btn-danger" data-action="clearInception">Clear</button>
           </div>
         </div>`;
     }
