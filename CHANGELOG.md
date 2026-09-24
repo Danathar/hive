@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.1)
+
+### Changed
+
+- Collapse dashboard, contributor, and hub card/panel surfaces onto shared design-token surface levels.
+
 ## 2026-09-24 (v5.35.0)
 
 ### Added
