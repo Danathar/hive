@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.36.1)
+
+### Fixed
+
+- Treat Spektacular artifact_id as the run artifact join key and hold stale strict-mode plans for human re-plan/re-approval.
+
 ## 2026-09-24 (v5.36.0)
 
 ### Added
