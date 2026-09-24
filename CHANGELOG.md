@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.36.0)
+
+### Added
+
+- Add the owner-only runs audit index query over retained run artifacts.
+
+### Changed
+
+- Align the contributor portal and hub pages with the shared dashboard design tokens, reducing local palette aliases and tightening the style ratchet baselines.
+- Rewrite the Hive introduction as a reader-focused overview and move the full topic catalog to a documentation map.
+
+### Fixed
+
+- Fix dashboard Appearance theme previews, swatches, and light/dark toggles so selected themes stay visible without rewriting hive-wide config (#8611, #8613).
+
 ## 2026-09-24 (v5.35.7)
 
 ### Fixed
