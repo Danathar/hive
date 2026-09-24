@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.2)
+
+### Changed
+
+- Migrate dashboard, contributor, and hub button families to the shared design-system button variants.
+
 ## 2026-09-24 (v5.35.1)
 
 ### Changed
