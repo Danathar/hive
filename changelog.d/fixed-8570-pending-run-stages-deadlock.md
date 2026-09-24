@@ -1,1 +1,0 @@
-- runs: fix a deadlock in `PendingRunStages` when a disabled implement checkpoint auto-approves a plan — the approval re-entered the lease registry while the visit callback still held `leaseMu`, hanging the run work source (introduced by #8570).
