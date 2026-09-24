@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.38.0)
+
+### Added
+
+- ✨ Add hub and hive notification settings for Discord factory feed event/repo selection, Slack visibility, and hot-reloaded GitHub activity filters (#8629).
+
+### Fixed
+
+- Fix bob-backed agents with bobshell 2.x by launching through `bob chat --auto-approve`, writing the v2 harness provider setting, and keeping the 1.x `--auth-method api-key` path for older images (#8640).
+
 ## 2026-09-24 (v5.37.1)
 
 ### Fixed
