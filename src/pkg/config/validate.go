@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	dashboardtheme "github.com/hivecommons/hive/pkg/dashboard/theme"
 )
 
 func (c *Config) Validate() error {
@@ -59,6 +61,9 @@ func (c *Config) Validate() error {
 		return err
 	} else {
 		c.Dashboard.PublicURL = normalized
+	}
+	if err := dashboardtheme.ValidateSelection(c.Dashboard.Theme, c.Dashboard.ThemeOverrides); err != nil {
+		return err
 	}
 	if normalized, err := NormalizeContributeHelpLinks(c.Contribute.HelpLinks); err != nil {
 		return err
