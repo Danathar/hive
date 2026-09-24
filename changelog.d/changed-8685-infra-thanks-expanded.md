@@ -1,1 +1,0 @@
-- The public Hive landing page now expands its infrastructure thanks to include Cloudflare, GitHub Copilot, and Bluehost alongside Akamai (Linode), Oracle Cloud OKE, and the CNCF.
