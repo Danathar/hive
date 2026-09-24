@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.39.2)
+
+### Fixed
+
+- Fixed #8666 by proxying contributor deep-link pages through Go so their stylesheet links resolve with CSS content types.
+- Fresh installs no longer enable `caveman_mode: full` on Scanner from the shipped example config ([#8668](https://github.com/hivecommons/hive/issues/8668)); existing operators who want uncompressed output should remove or downgrade that line in their own `hive.yaml`.
+- Default server-managed agy agents to a headless `agy -p` launch shim, with `HIVE_AGY_LAUNCH_MODE=interactive` as the opt-in TUI escape hatch, so affected Antigravity CLI versions avoid the upstream interactive CPU wake loop ([#8656](https://github.com/hivecommons/hive/issues/8656)).
+
 ## 2026-09-24 (v5.39.1)
 
 ### Fixed
