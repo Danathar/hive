@@ -1976,10 +1976,6 @@ type FleetConfig struct {
 
 func (f FleetReportConfig) DryRun() bool { return !f.FileUpstream }
 
-func boolDefaultTrue(v *bool) bool {
-	return v == nil || *v
-}
-
 // ProviderBudgetConfig tunes how long the hive keeps agent kicks suspended
 // after the inference provider refuses on a spending limit (#4294).
 //
