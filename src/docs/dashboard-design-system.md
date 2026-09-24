@@ -403,28 +403,34 @@ headers, visit the same route/viewport/theme, and pixel-diff the resulting PNGs.
 Record the viewport, theme, route, and intentional differences in the PR. Do
 not paste secrets or cluster-specific hostnames into docs, logs, or screenshots.
 
-## IA and naming glossary — proposed, needs maintainer review
+## IA and naming glossary — implemented
 
-Sidebar groups:
+Implemented in [PR #8602](https://github.com/hivecommons/hive/pull/8602) for A10 `ui-ia-naming`. The source-of-truth details live in [dashboard glossary and sidebar IA](dashboard-glossary.md).
 
-- **Overview**: Governor, dashboard summary, health.
-- **Agents**: Agent list, agent detail, runs/inception.
-- **Resources**: Repositories, beads, contributors, claims.
-- **Intelligence**: Advisory, planning intelligence, knowledge, strategy lab.
-- **Admin**: Settings, audit logs, tokens, budgets, upgrade controls.
-- **Help**: FAQ, getting started, docs, external support links.
+Sidebar groups now map the existing destinations without changing IDs, `data-action` handlers, or route hashes:
+
+| Group | Items |
+| --- | --- |
+| Overview | Governor |
+| Agents | Dynamic agent tree, `+ agent`, `+ group` |
+| Resources | Repos, Beads, Contributors |
+| Intelligence | Advisory, ACMM Eval, Inception, Knowledge, Strategy Lab |
+| Admin | Tokens, Cost, Audit Log |
+| Help | FAQ, Getting Started, API Spec (Redoc), Getting Started Guide, Report an Issue |
 
 Terms:
 
-| Term | Proposed meaning |
+| Term | Meaning |
 | --- | --- |
 | Agent | Runnable automation process or configured role. |
 | Contributor | Human/account participating through the contributor portal or relay. |
+| Contributor agent (ClankeR) | A contributor's relay-backed worker; use the full form on first or prominent mention, then Contributor agent for repeated inline mentions. |
 | Governor | Policy engine that decides autonomy and merge/apply gates. |
-| Fleet | The set of agents and hives under observation. |
+| Fleet | The set of agents or contributor agents under observation. |
 
-Avoid `clanker` in operator-facing copy; keep it only in historical/internal
-references until maintainers choose a replacement path.
+Avoid lowercase `clanker` in operator-facing copy. Keep **ClankeR** where it names the contributor relay product/brand, including the full-form term Contributor agent (ClankeR). Internal `clanker-*` identifiers are stable and intentionally unchanged.
+
+Count badges use `.badge-count`; zero counts render as dimmed `0` badges with `data-zero`.
 
 
 ### A5 surface migration notes

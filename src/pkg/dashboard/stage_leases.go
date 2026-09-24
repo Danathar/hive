@@ -40,6 +40,8 @@ const (
 	stageAttrStage           = "stage"
 	stageAttrGen             = "gen"
 	stageAttrReceipt         = "receipt"
+	stageAttrArtifact        = "artifact"
+	stageAttrDocumentStatus  = "document_status"
 	stageAttrReason          = "reason"
 	stageAttrSeverity        = "severity"
 	stageAttrAttempts        = "attempts"
@@ -373,6 +375,24 @@ func (s *Server) RefuseStageLease(taskID string, attrs map[string]string) {
 		fields = append(fields, k, v)
 	}
 	s.AgentAuditSink().Record("system", agent.AuditLeaseStageRefused, taskID, agent.Fields(fields...))
+	if attrs[stageAttrReason] == planning.WaitingReasonStalePlan {
+		eventAttrs := make(map[string]string, len(attrs)+1)
+		for k, v := range attrs {
+			eventAttrs[k] = v
+		}
+		eventAttrs[planning.MetaRunWaitingOn] = worksource.RunWaitingOnHuman
+		runKey := attrs[stageAttrRunKey]
+		if store, epic := s.findRunEpic(runKey); store != nil && epic != nil {
+			_ = store.SetMetadata(epic.ID, planning.MetaRunWaitingOn, worksource.RunWaitingOnHuman)
+			_ = store.SetMetadata(epic.ID, planning.MetaRunWaitingReason, planning.WaitingReasonStalePlan)
+		}
+		s.LifecycleTimeline().Record(timeline.Event{
+			IssueRef: runKey,
+			Kind:     timeline.KindBlocked,
+			At:       time.Now().UnixMilli(),
+			Attrs:    eventAttrs,
+		})
+	}
 	s.logger.Warn("[spektacular] refusing to advance stage", "task", taskID,
 		"run", attrs[stageAttrRunKey], "stage", attrs[stageAttrStage], "gen", attrs[stageAttrGen], "reason", attrs[stageAttrReason])
 }
@@ -641,7 +661,7 @@ func (s *Server) runCheckpointHoldDuration() time.Duration {
 // ensureRunPlanApproved reports whether implement may be offered: either the
 // plan is already approved, or the implement checkpoint is disabled and the
 // plan is auto-approved here with `auto` recorded as the actor.
-func (s *Server) ensureRunPlanApproved(runKey string) bool {
+func (s *Server) ensureRunPlanApproved(runKey string, gen uint64) bool {
 	store, epic := s.findRunEpic(runKey)
 	if epic == nil {
 		return false
@@ -653,7 +673,7 @@ func (s *Server) ensureRunPlanApproved(runKey string) bool {
 	if decision.blocks {
 		return false
 	}
-	if err := s.autoApproveRunCheckpoint(store, epic, runKey, StageImplement, decision); err != nil {
+	if err := s.autoApproveRunCheckpointWithGen(store, epic, runKey, StageImplement, gen, decision); err != nil {
 		s.logger.Warn("[runs] auto-approve checkpoint failed", "run", runKey, "stage", StageImplement, "error", err)
 		return false
 	}
@@ -661,6 +681,11 @@ func (s *Server) ensureRunPlanApproved(runKey string) bool {
 }
 
 func (s *Server) autoApproveRunCheckpoint(store *beads.Store, epic *beads.Bead, runKey, stage string, decision runCheckpointPolicy) error {
+	gen := s.activeRunStageGen(runKey, stage, time.Now())
+	return s.autoApproveRunCheckpointWithGen(store, epic, runKey, stage, gen, decision)
+}
+
+func (s *Server) autoApproveRunCheckpointWithGen(store *beads.Store, epic *beads.Bead, runKey, stage string, gen uint64, decision runCheckpointPolicy) error {
 	if store == nil || epic == nil {
 		return errors.New("run plan unavailable for checkpoint auto-approval")
 	}
@@ -670,7 +695,6 @@ func (s *Server) autoApproveRunCheckpoint(store *beads.Store, epic *beads.Bead, 
 	if err := planning.ApprovePlan(store, epic.ID); err != nil {
 		return fmt.Errorf("auto-approving %s checkpoint for %s: %w", stage, runKey, err)
 	}
-	gen := s.activeRunStageGen(runKey, stage, time.Now())
 	s.recordRunCheckpointAutoApproval(runKey, epic.ID, stage, gen, time.Now(), decision)
 	return nil
 }
@@ -809,26 +833,27 @@ func (s *Server) RunStageAccessor() worksource.RunStageLeaseAccessor {
 
 func (a *runStageAccessor) PendingRunStages(_ context.Context) ([]worksource.RunStage, error) {
 	s := a.s
+	out := []worksource.RunStage{}
 	type pendingLease struct {
 		runKey, stage, identity, repo string
+		gen                           uint64
 	}
 	// Snapshot under leaseMu, decide afterwards: ensureRunPlanApproved may
-	// auto-approve a plan and re-enter VisitActiveStageLeases for the lease
-	// generation, which would deadlock inside the visit callback.
+	// auto-approve a plan and must not re-enter the lease lock from inside
+	// the visit callback.
 	var pending []pendingLease
 	now := time.Now()
-	err := s.VisitActiveStageLeases(func(runKey, _, stage, identity, _, repo string, _ uint64, expiresAt time.Time) {
+	err := s.VisitActiveStageLeases(func(runKey, _, stage, identity, _, repo string, gen uint64, expiresAt time.Time) {
 		if now.After(expiresAt) {
 			return
 		}
-		pending = append(pending, pendingLease{runKey: runKey, stage: stage, identity: identity, repo: repo})
+		pending = append(pending, pendingLease{runKey: runKey, stage: stage, identity: identity, repo: repo, gen: gen})
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := []worksource.RunStage{}
 	for _, l := range pending {
-		if l.stage == StageImplement && !s.ensureRunPlanApproved(l.runKey) {
+		if l.stage == StageImplement && !s.ensureRunPlanApproved(l.runKey, l.gen) {
 			continue
 		}
 		if l.stage == StageImplement && l.identity != runFanoutIdentity && s.runPlanHasWaves(l.runKey) {
