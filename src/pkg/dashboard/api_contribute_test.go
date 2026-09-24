@@ -294,12 +294,12 @@ func TestContributeLandingHasOpsTab(t *testing.T) {
 	}
 
 	// The split must place the admin CONTROLS block under Management and the
-	// monitoring panels (clankers list / my work / pipeline) under Operations.
+	// monitoring panels (contributor agents list / my work / pipeline) under Operations.
 	// Verify ordering: ops-admin appears inside tab-manage, before tab-ops opens.
 	iManage := strings.Index(body, `id="tab-manage"`)
 	iAdmin := strings.Index(body, `id="ops-admin"`)
 	iOps := strings.Index(body, `id="tab-ops"`)
-	iClankers := strings.Index(body, `<h3>Connected clankers</h3>`)
+	iClankers := strings.Index(body, `<h3>Connected contributor agents (ClankeR)</h3>`)
 	if iManage < 0 || iAdmin < 0 || iOps < 0 || iClankers < 0 {
 		t.Fatalf("missing anchors: manage=%d admin=%d ops=%d clankers=%d", iManage, iAdmin, iOps, iClankers)
 	}
@@ -307,7 +307,7 @@ func TestContributeLandingHasOpsTab(t *testing.T) {
 		t.Errorf("admin controls must render under Management (before Operations): manage=%d admin=%d ops=%d", iManage, iAdmin, iOps)
 	}
 	if iOps >= iClankers {
-		t.Errorf("Connected clankers must render under Operations (after tab-ops opens): ops=%d clankers=%d", iOps, iClankers)
+		t.Errorf("Connected contributor agents (ClankeR) must render under Operations (after tab-ops opens): ops=%d clankers=%d", iOps, iClankers)
 	}
 
 	// Existing onboarding content must still be present and unchanged.
@@ -318,7 +318,7 @@ func TestContributeLandingHasOpsTab(t *testing.T) {
 		`How it works`,
 		// #4549 tokenized the neutral inline literals so the light ramp reaches
 		// them; this assertion guards the SENTENCE, not the hex it was written in.
-		`Powered by <strong style="color:var(--cc-text)">ClankeR</strong>`,
+		`Powered by <strong style="color:var(--text)">ClankeR</strong>`,
 		`Trust tiers`,
 	} {
 		if !strings.Contains(body, want) {

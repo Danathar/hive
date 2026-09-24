@@ -125,8 +125,8 @@ func TestOpsAccentStatsAndTierBadges(t *testing.T) {
 		`class="ops-card-count count-strong" id="clanker-count"`,
 		// Gradient header band applied to the fleet + ready-work queue cards.
 		`<div class="ops-card card-accent">
-<div class="ops-card-head"><span class="feed-dot"></span><h3>Connected clankers</h3>`,
-		`<div class="ops-card card-accent" style="margin-top:20px">
+<div class="ops-card-head"><span class="feed-dot"></span><h3>Connected contributor agents (ClankeR)</h3>`,
+		`<div class="ops-card card-accent mt-7">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Ready-work queue</h3>`,
 	} {
 		if !strings.Contains(body, want) {

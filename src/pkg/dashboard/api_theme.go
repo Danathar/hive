@@ -12,6 +12,16 @@ type dashboardThemeRequest struct {
 	ThemeOverrides config.DashboardThemeOverrides `json:"theme_overrides"`
 }
 
+type dashboardThemeListItem struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Author      string   `json:"author,omitempty"`
+	Dark        bool     `json:"dark"`
+	Swatches    []string `json:"swatches"`
+	Scopes      []string `json:"scopes,omitempty"`
+}
+
 func (s *Server) currentDashboardTheme() (config.DashboardTheme, error) {
 	if s.deps == nil || s.deps.Config == nil {
 		return config.DashboardThemeEffective(config.DashboardConfig{})
@@ -21,9 +31,9 @@ func (s *Server) currentDashboardTheme() (config.DashboardTheme, error) {
 }
 
 func (s *Server) handleThemeCSS(w http.ResponseWriter, r *http.Request) {
-	th, err := s.currentDashboardTheme()
+	th, err := s.themeForCSSRequest(r)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	css, err := config.DashboardThemeCSS(th)
@@ -44,6 +54,58 @@ func (s *Server) handleThemeCSS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte(css))
+}
+
+func (s *Server) themeForCSSRequest(r *http.Request) (config.DashboardTheme, error) {
+	id := strings.TrimSpace(r.URL.Query().Get("theme"))
+	if id == "" {
+		return s.currentDashboardTheme()
+	}
+	if _, ok := config.DashboardThemeBuiltin(id); !ok {
+		return config.DashboardTheme{}, errUnknownDashboardTheme(id)
+	}
+	if strings.TrimSpace(r.URL.Query().Get("scope")) == "contributor" && s.deps != nil && s.deps.Config != nil {
+		return config.DashboardThemeEffective(config.DashboardConfig{
+			Theme: id,
+			ThemeOverrides: config.DashboardThemeOverrides{
+				CustomCSS: s.deps.Config.Dashboard.ThemeOverrides.CustomCSS,
+			},
+		})
+	}
+	th, _ := config.DashboardThemeBuiltin(id)
+	return th, nil
+}
+
+func errUnknownDashboardTheme(id string) error {
+	return &unknownDashboardThemeError{id: id}
+}
+
+type unknownDashboardThemeError struct {
+	id string
+}
+
+func (e *unknownDashboardThemeError) Error() string {
+	return "unknown dashboard theme " + e.id
+}
+
+func (s *Server) handleThemesList(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	items := make([]dashboardThemeListItem, 0, len(config.DashboardThemeCatalog()))
+	for _, th := range config.DashboardThemeCatalog() {
+		if scope != "" && !themeHasScope(th, scope) {
+			continue
+		}
+		items = append(items, dashboardThemeListItem{
+			ID:          th.ID,
+			Name:        th.Name,
+			Description: th.Description,
+			Author:      th.Author,
+			Dark:        th.Dark,
+			Swatches:    themeSwatches(th),
+			Scopes:      th.Scopes,
+		})
+	}
+	jsonResponse(w, map[string]any{"themes": items})
 }
 
 func (s *Server) handleDashboardThemeGet(w http.ResponseWriter, r *http.Request) {
@@ -111,5 +173,67 @@ func defaultDashboardThemeID(id string) string {
 	if id == "" {
 		return config.DefaultDashboardThemeID()
 	}
-	return id
+	return config.CanonicalDashboardThemeID(id)
+}
+
+func themeHasScope(th config.DashboardTheme, scope string) bool {
+	if scope == "" {
+		return true
+	}
+	if len(th.Scopes) == 0 {
+		return scope == "dashboard"
+	}
+	for _, candidate := range th.Scopes {
+		if candidate == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func themeSwatches(th config.DashboardTheme) []string {
+	keyGroups := [][]string{
+		{"--surface-0", "--bg"},
+		{"--surface-2", "--surface", "--panel", "--card-bg"},
+		{"--accent", "--text-muted", "--brand", "--status-info"},
+		{"--text", "--fg"},
+	}
+	out := make([]string, 0, len(keyGroups))
+	for _, keys := range keyGroups {
+		if v := themeFirstSwatchToken(th, keys...); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func themeFirstSwatchToken(th config.DashboardTheme, keys ...string) string {
+	for _, key := range keys {
+		if v := usableSwatchColor(th.Tokens[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func usableSwatchColor(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "var(") {
+		return value
+	}
+	comma := strings.LastIndex(value, ",")
+	if comma < 0 {
+		return ""
+	}
+	fallback := strings.TrimSpace(strings.TrimSuffix(value[comma+1:], ")"))
+	if fallback == "" {
+		return ""
+	}
+	if strings.HasPrefix(fallback, "var(") {
+		return usableSwatchColor(fallback)
+	}
+	return value
 }

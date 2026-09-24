@@ -263,7 +263,7 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit @openai/codex@${CODEX_V
     echo "WARN: OpenAI Codex CLI install failed — skipping"
 
 # --- Layer 7: Claude Code (most frequent updates) ---
-ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_VERSION=2.1.281
 # --ignore-scripts (kept, deliberately: no arbitrary postinstall runs during the
 # build) skips claude-code's install.cjs, which is what LINKS the platform
 # native binary into the package's bin/. The binary itself ships in the
@@ -284,9 +284,9 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit @anthropic-ai/claude-co
 # Installs from the OFFICIAL block/goose repo, pinned to a fixed release and
 # SHA-256-verified before extraction. Download failures are tolerated because
 # Goose is an optional backend; checksum mismatches must hard-fail the build.
-ARG GOOSE_VERSION=1.51.0
-ARG GOOSE_SHA256_AMD64=fc53761f5b907499d5fe21ef940c2bc57b2d93b4c8b858be24261cc136c6108e
-ARG GOOSE_SHA256_ARM64=e47da01a5378383b050bd736be3989d94ba8160d0a7e7df8280ddb2aec6fd306
+ARG GOOSE_VERSION=1.52.0
+ARG GOOSE_SHA256_AMD64=4aee1f770b405c44194c0e9407df1fb06bda4c50eee935f0d8fd10731821cc5e
+ARG GOOSE_SHA256_ARM64=ae602c4f6e9a785bf087da52c89908d4dc6aa605dcc17bf83293873f626d9c85
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64) GOOSE_ARCH=x86_64; GOOSE_SHA256="$GOOSE_SHA256_AMD64" ;; \
@@ -311,10 +311,10 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # complete the interactive OAuth flow itself). This enables a self-hosted Hive
 # controller to use its configured agy fallback rung without pretending that
 # generic contributor containers can bootstrap Google login.
-ARG AGY_VERSION=1.2.9
-ARG AGY_BUILD=5905287731871744
-ARG AGY_SHA512_AMD64=75e83d46cb1632da4aca29b785017753c8c2dfb0320166da6b2c8007678982943515e64c8824ff2d8510d9b52eb2b3c27f306aeec58c4a4f4f8aa5550cb0cb12
-ARG AGY_SHA512_ARM64=524daf6ce6138d58455f3b82eba4923b3da2d4f874eda31a7699fb0275d18de3d4ae6d2c3acc4b43fdb063f6c51adaab42785054cd1852b8455892fa2404d019
+ARG AGY_VERSION=1.2.10
+ARG AGY_BUILD=4751581200121856
+ARG AGY_SHA512_AMD64=e19aef599aaf47a9225e72f2cd420d5f97d6dd974e698685950557ca23a8bda63effe666773178c82912b98e9c197da29829b92e771eb6f66c82236f17864fee
+ARG AGY_SHA512_ARM64=105fee8989456e4cccd444bd34a7294c3315fc8e3bd3d94022e90053532be02a84375546da78758d6dcf2f4955c7d333ccbd4cd6f8b86c18e47667493d35179f
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64|x86_64) AGY_URL_ARCH=x64; AGY_FILE_ARCH=x64; AGY_SHA512="$AGY_SHA512_AMD64" ;; \
@@ -332,9 +332,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # --- Layer 8.27: OMP CLI (Oh My Pi — backend: omp) ---
 # Mirrored from Dockerfile.contributor so hub agents can launch backend: omp.
 # Downloads are optional like Goose/agy, but checksum mismatches are fatal.
-ARG OMP_VERSION=18.2.11
-ARG OMP_SHA256_AMD64=97cf39557bf3d98327dd4c9814380b7e6bcb76e41169edd9b0ff30424c733a2a
-ARG OMP_SHA256_ARM64=c115f95a0a0081d3724a3c878231fb8c3b2fdb25ad5ad6c3b30d152a82b3939e
+ARG OMP_VERSION=18.3.0
+ARG OMP_SHA256_AMD64=d2fdaa29affe96e596eb9c78d42f548f1f291df28608631bcc00750a84b94bc3
+ARG OMP_SHA256_ARM64=bdfb9c494e17a2fee1956dae16a010a1953574ce4172c4db8efe06fbe477c637
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
   && case "$ARCH" in \
        amd64|x86_64) OMP_ASSET=omp-linux-x64; OMP_SHA256="$OMP_SHA256_AMD64" ;; \

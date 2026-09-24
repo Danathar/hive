@@ -24,9 +24,19 @@ const (
 	// status verb for each active stage lease.
 	DefaultSpektacularPollS = 30
 
+	// DefaultRunsWaitTimeoutSeconds is how long a run checkpoint may wait for
+	// owner approval before escalation. It also floors how far a held plan
+	// lease is extended so the hold does not expire out from under the owner.
 	DefaultRunsWaitTimeoutSeconds = 3600
-	DefaultRunsWaitSeverity       = "decision"
+	// DefaultRunsWaitSeverity is the escalation severity for a checkpoint that
+	// waited past DefaultRunsWaitTimeoutSeconds.
+	DefaultRunsWaitSeverity = "decision"
+	// RunImplementCheckpointMinACMM is the ACMM level a hive must reach before
+	// runs.checkpoints.implement: false is honoured. Below it the implement
+	// checkpoint keeps blocking regardless of config, so a young hive cannot
+	// disable the last gate in front of code changes.
 	RunImplementCheckpointMinACMM = 5
+
 	// DefaultTriageMinBodyChars is the minimum useful issue body size before
 	// the run triage pass asks the reporter for more detail.
 	DefaultTriageMinBodyChars = 80
@@ -39,8 +49,10 @@ type RunsConfig struct {
 	// Checkpoints controls which run boundaries wait for owner approval.
 	Checkpoints RunCheckpointConfig `yaml:"checkpoints,omitempty" json:"checkpoints,omitempty"`
 	// WaitTimeoutSeconds is how long a checkpoint may wait before escalation.
+	// Zero or negative means DefaultRunsWaitTimeoutSeconds.
 	WaitTimeoutSeconds int `yaml:"wait_timeout_seconds,omitempty" json:"wait_timeout_seconds,omitempty"`
 	// WaitSeverity is the escalation severity for timed-out checkpoints.
+	// Empty means DefaultRunsWaitSeverity.
 	WaitSeverity string `yaml:"wait_severity,omitempty" json:"wait_severity,omitempty"`
 	// MaxStageRetries bounds the generations one stage may burn before the
 	// runner escalates. Zero or negative means DefaultMaxStageRetries.
@@ -67,19 +79,29 @@ type RunCheckpointConfig struct {
 	Implement *bool `yaml:"implement,omitempty" json:"implement,omitempty"`
 }
 
+// CheckpointBlocks reports whether the named stage boundary waits for owner
+// approval. An unknown stage blocks: the safe answer for a name this build
+// does not recognise is to keep the gate.
 func (r RunsConfig) CheckpointBlocks(stage string) bool {
 	switch strings.TrimSpace(strings.ToLower(stage)) {
 	case "spec":
-		return boolDefaultTrue(r.Checkpoints.Spec)
+		return runCheckpointBoolDefaultTrue(r.Checkpoints.Spec)
 	case "plan":
-		return boolDefaultTrue(r.Checkpoints.Plan)
+		return runCheckpointBoolDefaultTrue(r.Checkpoints.Plan)
 	case "implement":
-		return boolDefaultTrue(r.Checkpoints.Implement)
+		return runCheckpointBoolDefaultTrue(r.Checkpoints.Implement)
 	default:
 		return true
 	}
 }
 
+// runCheckpointBoolDefaultTrue treats an unset checkpoint key as enabled.
+func runCheckpointBoolDefaultTrue(v *bool) bool {
+	return v == nil || *v
+}
+
+// EffectiveWaitTimeoutSeconds returns the configured checkpoint wait budget or
+// the default.
 func (r RunsConfig) EffectiveWaitTimeoutSeconds() int {
 	if r.WaitTimeoutSeconds > 0 {
 		return r.WaitTimeoutSeconds
@@ -87,6 +109,8 @@ func (r RunsConfig) EffectiveWaitTimeoutSeconds() int {
 	return DefaultRunsWaitTimeoutSeconds
 }
 
+// EffectiveWaitSeverity returns the configured escalation severity or the
+// default.
 func (r RunsConfig) EffectiveWaitSeverity() string {
 	if s := strings.TrimSpace(strings.ToLower(r.WaitSeverity)); s != "" {
 		return s

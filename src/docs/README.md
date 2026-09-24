@@ -1,10 +1,10 @@
-# Hive documentation
+# Hive introduction
 
-Documentation for the current Hive line (branch `v5`; the code and docs live under the `src/` directory). The `v2` branch was retired in August 2026 — operators upgrading a v2 deployment should start with the [v2 → v4 migration guide](migration-v2-v4.md), and v4 operators should use the [v4 → v5 migration guide](migration-v4-v5.md).
+Hive is a governed fleet of AI coding agents for maintaining real GitHub and forge repositories. A hive helps with triage, fixes, reviews, release operations, and operational follow-up by watching the work a project already has — issues, pull requests, review queues, and health signals — then routing appropriate tasks to agents while deterministic guardrails handle filtering, permissions, merge eligibility, audit trails, and policy. Maintainers set the autonomy boundary through the Governor and ACMM levels, so Hive can range from advisory triage to carefully gated fixes and reviews without turning repository control over to an unconstrained model.
 
-Start with [Architecture](architecture.md) for the system overview, then use the topic guides below. New users should start with the [getting-started guide](getting-started.md) — it covers setting up the Forge App (the app for your source control system, e.g., GitHub, GitHub Enterprise, GitLab, or Gitea) and what to do if an inactive hosted hive is reaped. If you want the no-cluster hosted path, use the [hosted Hive Hub onboarding guide](hosted-hub.md).
+Hive is for maintainers of busy open source projects who need help keeping queues moving, and for platform teams that want a repeatable operations plane for agent work across many repositories. It is especially useful when the hard part is not invoking one agent, but coordinating many agents with clear ownership, safety checks, and a path for human oversight.
 
-## Operations
+## Core concepts
 
 - [Manual provisioning](manual-provisioning.md) — heartbeat-only cluster provisioning, hub access roles, and common gotchas.
 - [Hosted Hive Hub onboarding](hosted-hub.md) — signing in at `https://hive.hivecommons.dev`, requesting a hosted hive, installing the GitHub App, configuring model gateways and Copilot login, reading `/fleet`, and fixing common setup problems.
@@ -80,111 +80,35 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [ioscan status](ioscan.md) — the untrusted-input scanner/canary feature (live and default-on in v4).
 - [Deployment scripts](../deploy/README.md) — inventory of deployment helpers, including dashboard TTY panes and `hive-panes`.
 
-## Contributors and access
+- **[Hive and spoke](architecture.md#8-hub--spoke):** a spoke is the running hive that serves repositories; a hub can register, provision, and observe multiple spokes.
+- **[Agents](agent-configuration.md):** configured AI workers with scopes, models, cadences, and permissions for specific lanes of work.
+- **[Governor](architecture.md#3-the-governor-loop--from-queue-depth-to-a-kick):** the scheduler and policy loop that decides what work is actionable and when agents should be kicked.
+- **[ACMM levels](acmm-policy-matrix.md):** the autonomy model that maps project maturity to what agents may observe, propose, open, review, or merge.
+- **[Hub](hosted-hub.md):** the hosted or self-hosted control plane for onboarding hives, heartbeats, fleet views, and hosted-spoke lifecycle.
+- **[Contributors and ClankeR relay](contributor-relay.md):** a way for trusted contributors to donate compute and run delegated work through hub-mediated roles.
 
-- [Getting started as a first-time contributor](../../docs/getting-started-contributing.md) — the end-to-end path for a first code or documentation contribution, tying the reference docs together and answering the Hive-specific questions they don't.
-- [Local development](../../docs/development.md) — the local workflow for contributing to the Go codebase on `v4`: prerequisites, build, and test loop.
-- [ClankeR contributor relay](contributor-relay.md) — local contributor setup, multi-hub subscriptions, moving a relay to another machine, and role requests.
-- [Backend smoke](backend-smoke.md) — the live canary for the contributor CLI integration: who runs it (the project's CI, centrally — not hive operators), the latest/pinned lanes and what a red in each means, how failures become deduplicated issues with evidence attached, the API-key vs subscription-login credential options, and the per-hive run telemetry behind `/api/contribute/run-stats` with its scenario ratchet.
-- [CLI pins and the automated pin bump](cli-pins.md) — where each agent CLI's version and per-arch digest are pinned in the two Dockerfiles, why they are pinned rather than self-updating, and how `cli-pin-bump.yml` resolves the latest release, recomputes the digests, smokes the image, and opens one labelled PR per CLI.
-- [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md) — newcomer/contributor/trusted/merger/advisor semantics, **Acting as**, grants, and delegatable roles.
-- [Credly badges](credly-badges.md) — planned integration design; currently a placeholder mapping only.
+## How it works
 
-## Configuration and agents
+1. Connect a repository through the Forge App and configure the project, agents, model backends, and desired ACMM level.
+2. The Governor enumerates actionable work and applies deterministic filters before any agent sees a task.
+3. Agents receive bounded kicks, work in their configured lanes, and use Hive relays for audited writes such as issues, pull requests, reviews, or merges.
+4. Dashboards, logs, fleet health, and hub heartbeats show what happened and what still needs human attention.
 
-- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, ACMM packs, and live-linked `definition_source` (with its seed-only trust model).
-- [Formal verification](formal-verification.md) — the optional L5/L6 `quality.formal` capability for agent-authored Spin/Promela models, reporting-only CI, and deduplicated counterexample issues.
-- [Advisory digest](advisory.md) — what the digest shows (`max_findings`, `show_all`), how stale findings are marked unverified, and which positive signals retire findings.
-- [Advisory digest staleness](advisory-staleness.md) — when the hub raises the stale-advisory pill and alert, the gates that deliberately suppress it (undelivered App, App cannot write, all agents quiet), and the admin diagnostics that measure hidden staleness.
-- [Governor mode thresholds](governor-thresholds.md) — how idle/quiet/busy/surge thresholds scale with repo count, the `threshold_scaling` curves, and when explicit thresholds win.
-- [Large-spoke scale envelope](scale-envelope.md) — the backlog size one spoke is known to work at, why kick-prompt caps are render-side while enumeration is uncapped, and an inventory of every cap that changes behaviour at scale (default, overflow behaviour, and whether it is operator-tunable).
-- [Supervisor agent](supervisor.md) — supervisor policy modes, bead roles, and when to enable the orchestration lane.
-- [Telemetry agent](telemetry.md) — the L5/L6-only opt-in observability agent, ACMM level gating, and the `project_observability` opt-in flow.
-- [Operations agent](operations.md) — the L5/L6-only opt-in operational-readiness agent (health checks, SLOs, runbooks), ACMM level gating, and the `project_observability` opt-in flow.
-- [Custom dashboard stylesheets](custom-stylesheets.md) — operator-supplied CSS for the dashboard and public snapshot.
-- [Branding a hive](branding.md) — persistent per-deployment name, mark, and colours via `<data>/branding/branding.json` and `custom.css` (`HIVE_BRANDING_JSON`/`HIVE_BRANDING_CSS`); distinct from the per-request `?style=` stylesheets above.
-- [Portable AgentDefinition format](../AGENT-DEFINITION.md) — standalone YAML schema for importing/exporting agent definitions.
-- [Knowledge curator](knowledge-curator.md) — automatic fact extraction and promotion knobs, plus the other `knowledge:` sub-sections: `git_sources` (indexing a remote repo, layer semantics, private-repo auth (unsupported), diagnosing a failed source), `vaults` (local Obsidian vaults, git-sync), `documents` (PDF/URL import), and `bead_synthesizer` (on-by-default bead→wiki synthesis and retention policy, and how to turn it off).
-- [Skill registry](skills.md) — the `/data/skills/` file format and front-matter fields. **Delivered to agents today**: skills are opt-in per agent via `skills: [name, ...]`, resolved registry-first with an `AGENTS.md` repo-local fallback, and the rendered block is prepended to the kick's `${KNOWLEDGE}`. Both sources reload on every kick. An 8 KiB whole-skill cap applies; a skill that would exceed it is dropped whole, never truncated.
-- [AGENTS.md repo instructions](agents-md.md) — the per-repo `AGENTS.md` file format Hive's parser (`pkg/agentsmd`) understands, including front-matter `skills:` and inline `## Skill:` sections. **Wired into kicks, but needs a checkout**: Hive agents keep no clones, so set `project.checkouts_dir` to a directory holding one checkout per repo. Without it there is no root to read and injection stays a no-op, which is the default.
-- [Agent peer-awareness logging (pluk)](agent-logging.md) — pluk log format, `hive-panes`, availability, and retention.
-- [Strategy Lab (Nous)](strategy-lab.md) — experiment lifecycle, dashboard/API configuration, fast-fail bounds, and the gate-decision flow. No `nous:` block in `hive.yaml`.
-- [GitHub App setup](github-app-setup.md) — the Forge App on GitHub and GitHub Enterprise: app creation, permissions, Setup URL, and `/gh-setup`.
-- [Forge setup: GitLab, Gitea, and Forgejo](forge-app-setup.md) — the non-GitHub forges. **Adapters exist and are tested, but are not wired into any running code path**: a hive cannot run against GitLab, Gitea, or Forgejo today, and `project.forge` only changes what the dashboard displays. Covers the `gitlab:`/`gitea:` config surface that does parse, why the `gh`-CLI agent path is GitHub-only, and how `project.forge` differs from `github.forge`.
-- [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
-- [ACMM level-up advisor](acmm-advisor.md) — the advisory-only `pkg/acmmadvisor` computation behind `GET /api/acmm-recommendation`: the signals it measures, per-level thresholds, and why it never changes the applied level.
-- [ACMM waivers](acmm-waivers.md) — how a repo declares in `.acmm.yml` that a criterion is satisfied off-repo, why the file-existence check needs it, and the properties that keep a waiver from becoming a way around the model — chiefly that a waiver can restore full green but can never advance a level.
-- [Inception](inception.md) — operator guide to the L1 brainstorm/inception workflow: phases, API, and template variables.
-- [Planning intelligence](planning-intelligence.md) — how a large GitHub issue becomes an epic the architect lane decomposes into child beads, the human plan-review gate that withholds those children until approved, and stall-replan.
-- [Review swarm](review-swarm.md) — the five review perspectives, the verdict collector and its report contract, and the opt-in merge-gate integration and bounded auto-fix cycle for review findings.
-- [Duplicate PR sweep](duplicate-sweep.md) — the opt-in (`duplicate_sweep.enabled`) cross-PR pass that clusters open PRs by changed-file set and suggests which one to keep: the two confidence tiers, how a survivor is chosen, why a bot regeneration series gets one summary instead of a comment per PR, and why the output is always a suggestion a human acts on and never an automated close.
-- [Hold-gated review queue triage](review-queue-triage.md) — the triage-class policy for the human review queue (T0 fixes, T1 behavior-adjacent, T2 additive), the shipped `review_class` presentational sort in `last-actionable.json` and the dashboard PR list, and the open mechanism options awaiting maintainer decisions (#6183).
-- [Retro lane](retro-lane.md) — the opt-in (`retro.enabled`) post-completion pass that reconstructs a record for each closed bead and flags patterns such as excessive fix attempts or kicks; deterministic by default, with LLM analysis separately opt-in.
-- [Work sources](work-sources.md) — `governor.work_source`: the four `type` options (`github` default, `github_projects`, `linear`, `jira`), config fields, required credentials, and priority/hold-label mapping per source.
-- [Linear agent integration](linear-agent.md) — joining a Linear workspace as a first-class agent member: webhook verification, the 10-second session acknowledgement, which hive agent takes sessions, and narrating completion back as agent activities.
-- [Lite enrollment](lite-enrollment.md) — the zero-repo-secret on-ramp: `hivectl enroll OWNER/REPO` adds a repo to a spoke's `project.repos`, with prerequisites and the hosted lite-spoke path.
-- [ACMM policy fragments](../../examples/acmm/README.md) — per-level ACMM policy references.
-- [Sandbox isolation and agent guardrails](sandbox-isolation.md) — isolation layers and operator guardrail notes.
-- [Per-agent gh restrictions](../../config/restrictions/README.md) — file-based wrapper denials in `/etc/hive/restrictions/`.
-- [Podman rootless CI](podman-rootless-ci.md) — rootless Podman contract for `contribute-hive`.
-- [Podman Quadlet `.kube` compatibility spike](podman-quadlet-kube-spike.md) — why the standalone Kubernetes overlay is not a safe direct source for Podman units.
-- [Podman ownership and cleanup contract](podman-ownership-cleanup.md) — the labels that mark a resource Hive-owned and the guard that keeps Podman/Buildah cleanup from reaching the operator's other containers, Distroboxes, and images.
-- [Podman preflight: SELinux, mounts, secrets, and ports](podman-preflight-host.md) — read-only diagnostics for SELinux state and mount labeling, configuration/secrets readability, and published host-port availability, with remediation that never disables SELinux or widens a secret.
-- [Podman preflight: subordinate IDs, graphroot, and networking](podman-preflight-ids.md) — read-only diagnostics for rootless subordinate UID/GID delegation, unsupported (NFS and other distributed) container storage, and the rootless network backend/helper, with remediation that never edits `/etc/subuid` or `/etc/subgid`.
-- [CLI backend setup](../../docs/backend-setup.md) — setup notes for Claude, Copilot, Goose, Bob, Pi, Codex, and Aider.
-- [Backend support tiers and acceptance bar](backend-support-tiers.md) — the policy for adding a CLI backend: the three tiers (core/headless-pod, supported/confined, experimental/unconfined), the criteria each requires with the exact file or test a PR must touch (list parity, declared posture, flag-honoring proof, credential detection, pinned install, refusal gate, confinement floor, headless entry point, unattended-credential verification, allowlist touchpoints), and how a backend moves between tiers.
-- [Inference backends](../../docs/inference-backends.md) — vLLM, llm-d, LiteLLM, and Model Gateway troubleshooting.
-- [apiproxy](apiproxy.md) — Anthropic-compatible proxy logging and deployment notes.
-- [Outreach anti-spam ruleset](../../docs/outreach-antispam.md) — the deduplication and anti-spam rules the outreach agent operates under across awesome lists, project issues, directories, and community threads.
-- [v1 to v2 migration](../../docs/migration-v1-v2.md) — **historical.** Both ends of this migration are retired; v2 was retired in August 2026. Kept for operators still on v1, who should read it alongside [v2 → v4 migration](migration-v2-v4.md) above. New deployments do not need it.
+## Ways to run Hive
 
-## Architecture and design
+- **Hosted Hive Hub:** start at [`https://hive.hivecommons.dev`](https://hive.hivecommons.dev) and follow the [hosted onboarding guide](hosted-hub.md) for the no-cluster path.
+- **Self-hosted:** run your own spoke on [Kubernetes](../../README.md#kubernetes-deployment) or [Podman](../../README.md#quick-start-podman), or operate a [self-hosted hub](hub-deployment.md) for a fleet.
 
-- [Architecture](architecture.md) — process model, governor loop, guardrails, hub/spoke, and walkthrough.
-- [Automatic repo ACMM onboarding reconciler](design/repo-acmm-onboarding.md) — proposed design for per-repo ACMM targets, gap-to-work reconciliation, human hand-off, waivers, and anti-gaming controls (RFC #6235).
-- [Hive federation design](../../docs/federation-design.md) — the multi-hive registry: live `/api/hives` endpoints, project onboarding, contributor flow across hubs, and what remains future design work.
-- [Public roadmap](roadmap.md) — the v4 direction as Now / Next / Later, with the tracking issue behind each item. Directional rather than a promise, maintained by pull request; check the date in its header before relying on the ordering.
-- [Landscape and positioning](landscape.md) — how Hive's operations-plane design compares to nearby agentic orchestration tools, with public references per project. Explicitly time-sensitive; check the conducted date in its header before quoting product details.
-- [CNCF reference architecture](cncf-reference-architecture.md) — CNCF submission/reference template.
-- [Podman CI runner map](podman-ci-runner-map.md) — measured hosted-runner capabilities and which Podman lane goes where; SELinux is the only lane needing non-hosted infrastructure.
-- [CI runner labels](ci-runner-labels.md) — how `runs-on:` picks the self-hosted fleet, why a fork must degrade to a GitHub-hosted runner, and the one variable `hivecommons` sets.
-- [Gate-integrity invariants for agent lanes](design/gate-integrity-invariants.md) — proposed write-gate rules for agent lanes: no history rewrites on branches a lane did not create, no sign-off on other authors' commits, and hold-gated demotion for gate manipulation.
-- [Design documents](design/README.md) — longer-form design records with the full reasoning behind a decision, indexed with a status each (shipped / partly shipped / design only / historical) so a proposal is not mistaken for current behaviour: master secret rotation, wrapped master delivery to pull-only spokes, PR reach telemetry, and the knowledge system.
-- [Discord reaction-consensus issue promotion](design/discord-issue-promotion.md) — proposed design for turning Discord reaction consensus into an audited Hive label write that composes with `project.issue_filter.require_labels` (RFC #6239).
-- [GitHub @-mention triggers](design/github-mention-triggers.md) — v6 design, now shipped on the `v6` branch in all three phases (#7582, #7597, #7623), for the first inbound GitHub trigger: a human summons an agent by mentioning the App on an issue or PR, mirroring the Linear agent-session path, replying through `Converse` on the existing write path, with poll-first transport and guards mapped to mechanisms that already exist (RFC #7483). Not present on `v4` or `v5`.
-- [Podman Compose-provider selection spike](podman-compose-provider-spike.md) — why `podman compose` must name its provider explicitly, and which provider needs no Docker tooling.
-- [Sourcing token metering from ccusage behind a tokens.Source seam](design/token-metering-ccusage.md) — proposed design for ccusage-backed token metering with attribution preservation, Bob fallback, and cutover diagnostics (RFC #6234).
-- [Trajectory review](trajectory-review.md) — trajectory safety lane and review signals.
-- [Podman Quadlet `.container`/`.pod` spike](podman-quadlet-container-pod-spike.md) — feasibility result for explicit Quadlet units: readiness via `Notify=healthy`, the startup-timeout trap, and what the generator does not validate.
+## Get started
 
-## Historical/design notes
+Start with [Zero to Automation: Getting Started with Hive](getting-started.md). If you want the hosted path, read [Hosted Hive Hub onboarding](hosted-hub.md) next.
 
-Some documents describe planned or design-only work rather than live features. Those pages are marked at the top, for example [Credly badges](credly-badges.md). The longer-form design records under [`design/`](design/README.md) are a whole directory of these: each entry in that index carries a status, because those pages are the reference record of a decision and are deliberately not rewritten as later stages ship.
+## Where to go next
 
-## Security (v4)
+- [Architecture](architecture.md)
+- [Getting started](getting-started.md)
+- [Operator reference](operator-reference.md)
+- [Security model](security-model.md)
+- [Documentation map](documentation-map.md)
 
-- [Security model — operator guide](security-model.md) — Ed25519-only sessions/SSO, per-hive keys, master key rotation, forced proxy egress and `CAP_NET_ADMIN`, privilege model, and supply-chain posture.
-- [Security threat model](security-threat-model.md) — actors, boundaries, layered defenses, known gaps, and reporting.
-- [Security response process](security-response.md) — who responds to a vulnerability report (the Maintainer Committee, rostered in `OWNERS`), the end-to-end handling flow and the 60-day fix commitment, how membership is added and rotated, the escalation path if a reporter gets no response, and the project's known limits stated plainly.
-- [CNCF TAG-Security self-assessment](security-self-assessment.md) — the CNCF Incubation self-assessment artifact: metadata, actors/actions/goals, critical security components with file/line citations, project compliance, secure development practices, vulnerability response process, and the three most significant known weaknesses stated plainly.
-- [ioscan red-team evaluation](ioscan-red-team.md) — measured, not asserted: a 43-payload adversarial corpus run through the production input path. 42% of attacks withheld from the agent, 58% reached it verbatim, with the per-family breakdown, the two Unicode table gaps a single character exploited (both now closed), the benign-text false positives, and the proxy deny rules that contain what gets through — verified across all four ACMM modes on every test run.
-- [CNCF General Technical Review](general-technical-review.md) — the full Day 0/1/2 GTR questionnaire answered against this repository, cited file-by-file, with every currently-unanswerable question marked `[NEEDS OPERATOR INPUT]` rather than guessed at.
-- [Heartbeat bearer cutover](heartbeat-bearer-cutover.md) — retiring the fleet-wide heartbeat bearer, whose possession proves only "some provisioned spoke" and lets any spoke heartbeat as any hive, in favour of the per-hive key — without re-provisioning the fleet, and the precondition that gates the removal.
-- [Rootless Podman startup and exit-77 behavior](podman-rootless-startup-spike.md) — measured rootless matrix: fail-closed exit 77, gate installation under `--cap-add NET_ADMIN`, proven interception, and what is still unproven.
-- [IPv6 egress-gate bypass](podman-ipv6-egress-bypass.md) — measured: the forced-proxy redirect is IPv4-only, so agent traffic to `:443` over IPv6 never meets it (5 IPv6 connections, 0 redirects; 5 IPv4 connections, 5 redirects, same run). Names the fix slice.
-- [Rootful Podman egress-gate baseline](podman-rootful-egress-baseline.md) — the rootful baseline the rootless result is measured against: fail-closed exit 77, redirect and ambient-capability evidence, and `SO_MARK` isolated from the owner-UID exemption.
-- [Podman support matrix: rootful/rootless × enforcing/advisory](podman-support-matrix.md) — the support statement for standalone Hive under Podman: which of the four combinations is supported, experimental, or a deliberate unenforced choice, what evidence settles each, and the gaps carried forward.
-- [Release qualification: SELinux-enforcing Podman](podman-selinux-release-qualification.md) — the one Podman lane hosted CI cannot run, and why: a per-release, reproducible procedure on an enforcing Fedora/CentOS Stream-class host covering `:z`/`:Z` mounts, MCS label behaviour, and secret access, with a results ledger and a stop condition that records UNEXECUTED rather than passing from a permissive host.
-- [`hive-data` under SELinux enforcing](podman-volume-persistence.md) — what the named volume actually guarantees: podman labels it `container_file_t:s0` with **no** MCS category at create time, which is what lets a recreated container (a fresh category every start, `--rm` deleting the old one) still read the data. Ownership after the copy-up, what survives unit deletion and reinstall, what does destroy it, why `:Z` on the volume line is a silent footgun where `:Z` on the config and secret bind mounts is correct, and why `EnvironmentFile=` needs no flag at all.
-- [SELinux AVC evidence, and the hive-launch group secret](podman-selinux-avc-evidence.md) — the audit-log evidence behind the qualification above: the actual AVC records per case rather than pass/fail inferred from an exit status, plus the `0440` hive-launch (GID 1002) secret read through a supplementary group. Records three defects in shipped advice, including a label check that reads garbage where uutils coreutils shadows GNU, and an MCS denial that produces no audit record at all.
-- [Standalone Hive under Podman: the Quadlet units](podman-standalone-quadlet.md) — the `.container`, `.volume`, and `.network` units that start Hive and its authenticating gateway on Podman in both root modes, the published-port boundary they encode (3001 published, the raw ttyd terminal on 7681 never) and how it was measured, the install and boot-persistence steps, and why `systemctl start` returning means the healthcheck passed rather than merely that a process was spawned. Also records the **Docker-free run** (#4448): the quick start executed verbatim with `docker` removed from `PATH` and `DOCKER_HOST` pointed at a nonexistent socket, reaching `{"status":"ok"}` on 3001 with no Docker socket mounted anywhere — and states plainly which #4188 criterion that closes and which stays open.
-- [Quadlet lifecycle: stop, start, restart, recreate, and boot persistence](podman-quadlet-lifecycle.md) — what those units actually report as an operator drives them, in both root modes, including the first live rootful start. Records that a clean `systemctl stop` left the unit `failed`, that `systemctl enable` fails outright on a generated unit, and that `is-enabled` cannot tell you whether Hive will come back after a reboot; ships `bin/hive-podman-lifecycle-probe.sh` as the repeatable check and records the reboot row as NOT EXECUTED rather than inferring it.
-
-- [Host-execution capability matrix](podman-host-execution-gap.md) — what one real execution environment can actually do, measured rather than asserted, before any new execution runtime is proposed on the strength of what it supposedly cannot. Command, exit status and verbatim output per capability for `/dev/kvm`, systemd, reboot, lingering, SELinux, rootful Podman, `modprobe` and `NET_ADMIN`. The result was not the expected one: most are present, and the reason the reboot rows in the lifecycle page stay unexecuted is topology — the session runs on the host that would restart — not permission. Scoped hard to one path on one host, and says so.
-- [Quadlet update and rollback: moving the image, and getting back](podman-quadlet-update-rollback.md) — the deliberate manual path from one Hive image to another and back, pinned by digest in a Quadlet drop-in because the shipped unit names a floating tag that cannot be rolled back to. Executed in both root modes between two real `v4` builds: an 11-second healthy update, a failed update that held the unit in `activating` for the full 301-second `TimeoutStartSec` and then looped without ever reading `failed`, and an 11-second rollback out of it with `hive-data` intact throughout. Ships `bin/hive-podman-update.sh`.
-
-- [Health-aware auto-update: whether it works on this unit, and what it costs](podman-auto-update.md) — the #4411 decision, measured rather than assumed. `podman auto-update --rollback` DOES fire on this unit despite it never reading `failed`, because podman reads the D-Bus start-job result (`timeout`) and not `ActiveState`; `Restart=always` is kept untouched and never even fires. Driven against a bad-but-startable image. Also what it costs: one full `TimeoutStartSec` of downtime per bad update, repeated on every timer firing because podman does not remember a rollback, and a digest pin that silently wins. Opt-in only, via `bin/hive-podman-update.sh autoupdate on`. Executed in **both root modes** — rootless (#4411) and rootful under the system manager (#4447), which is the enforcing mode.
-- [Architecture Decision Records](adr/README.md) — lightweight ADR process and records 0001-0017.
-- [Intent verification](intent-verification.md) — tier-based change authorization for merge eligibility.
-- [Rootless Podman CI seam](podman-rootless-ci.md) — documented test intent and static contract for contributor-container runtime handling.
-- [Release-line carry-forward guard](release-line-guard.md) — the nine workflows pinned to hardcoded version-branch names, the single source of truth they are asserted against, and what to edit when a new release line is cut.
+Current docs target branch `v5`; use the [documentation map](documentation-map.md) for v2 → v4 and v4 → v5 migration pointers.

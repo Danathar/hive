@@ -11,6 +11,124 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.36.1)
+
+### Fixed
+
+- Treat Spektacular artifact_id as the run artifact join key and hold stale strict-mode plans for human re-plan/re-approval.
+
+## 2026-09-24 (v5.36.0)
+
+### Added
+
+- Add the owner-only runs audit index query over retained run artifacts.
+
+### Changed
+
+- Align the contributor portal and hub pages with the shared dashboard design tokens, reducing local palette aliases and tightening the style ratchet baselines.
+- Rewrite the Hive introduction as a reader-focused overview and move the full topic catalog to a documentation map.
+
+### Fixed
+
+- Fix dashboard Appearance theme previews, swatches, and light/dark toggles so selected themes stay visible without rewriting hive-wide config (#8611, #8613).
+
+## 2026-09-24 (v5.35.7)
+
+### Fixed
+
+- Pinned Flue, OMP, and Wavefront smoke lanes now mark the bind-mounted checkout as a safe Git directory inside the contributor container, and the pinned Flue/OMP builds avoid writing into the read-only checkout, so Go VCS stamping no longer aborts the scheduled canaries ([#8599](https://github.com/hivecommons/hive/issues/8599), [#8600](https://github.com/hivecommons/hive/issues/8600)).
+
+## 2026-09-24 (v5.35.6)
+
+### Changed
+
+- Reconcile dashboard themes with ADR-0018 design tokens by targeting canonical tokens while aliasing deprecated legacy variables for existing themes.
+
+## 2026-09-24 (v5.35.5)
+
+### Changed
+
+- Dedicated dashboard light-mode surface, text, shadow, brand, status, and ACMM tokens now replace inverted dark alpha tints and are covered by WCAG contrast tests.
+
+## 2026-09-24 (v5.35.4)
+
+### Changed
+
+- Migrate dashboard, contributor, and hub type, spacing, and radius styling to shared design tokens and utilities.
+
+## 2026-09-24 (v5.35.3)
+
+### Changed
+
+- Split dashboard chip/pill/badge/status-dot styling into entity, status, action, and count recipes backed by status, ACMM, and vendor design tokens.
+
+## 2026-09-24 (v5.35.2)
+
+### Changed
+
+- Migrate dashboard, contributor, and hub button families to the shared design-system button variants.
+
+## 2026-09-24 (v5.35.1)
+
+### Changed
+
+- Collapse dashboard, contributor, and hub card/panel surfaces onto shared design-token surface levels.
+
+## 2026-09-24 (v5.35.0)
+
+### Added
+
+- Record human plan checkpoint approvals as distinct run timeline events surfaced in run detail responses (#8582).
+- Add shared dashboard component CSS recipes and an unlinked design-system preview page for future migrations.
+
+## 2026-09-24 (v5.34.0)
+
+### Added
+
+- Unify contributor profile styles with the shared dashboard theme catalog and scoped theme CSS (#8536).
+
+## 2026-09-24 (v5.33.0)
+
+### Added
+
+- Add dashboard style ratchet tests for inline styles and raw CSS values so design-system debt can only decrease.
+
+## 2026-09-24 (v5.32.0)
+
+### Added
+
+- Add file-based dashboard theme presets, `/api/themes`, and theme preview CSS for Settings → Appearance (#8536).
+- Add the shared dashboard design-token stylesheet layer with compatibility aliases for zero visual change.
+
+## 2026-09-24 (v5.31.0)
+
+### Added
+
+- Added the opt-in Discord factory feed for org-wide GitHub issue/PR activity (#8569).
+
+### Changed
+
+- Rerun failed Go tests in CI with gotestsum, surface rerun flakes, and file deduplicated ci-flake issues.
+
+### Fixed
+
+- Hold v5 run plan leases at the plan checkpoint until the imported plan is approved, so a run can no longer reach `stage=implement` with a draft plan. Adds the `runs.checkpoints.{spec,plan,implement}` config, `runs.wait_timeout_seconds`, and the ACMM floor that keeps the implement checkpoint closed below ACMM L5.
+- Fix dashboard navbar clock drift by ticking locally and flagging stale hub status payloads (#8556).
+
+## 2026-09-24 (v5.30.0)
+
+### Added
+
+- Add dashboard theme configuration, built-in presets, `/api/theme.css`, and a Settings → Appearance preset/background/custom-CSS UI for hive-wide dashboard customization (#8536).
+- Added `src/scripts/ci-flake-tally.sh` so maintainers can rank flaky Go tests and packages from recent GitHub Actions runs with one command.
+- Added ADR-0018 and the dashboard design-system reference so the spoke, contributor portal, and hub can converge on shared tokens and theme overrides for #8536.
+
+### Fixed
+
+- Improved the contributor Management tab layout so admin controls read as grouped settings sections on desktop and mobile.
+- Dashboard startup now answers readiness before building the heavy static UI gzip cache, preventing saturated CI runners from flaking `TestStart_ServesEndpoints` while preserving compressed dashboard responses.
+- tui: make stream integration tests deterministic (sync hook instead of wall-clock polling), fixing recurring CI flake.
+
 ## 2026-09-24 (v5.29.0)
 
 ### Added

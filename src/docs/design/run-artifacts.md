@@ -45,16 +45,53 @@ participates in the identity path.
 
 ## Provenance guard
 
-Stage receipts carry `input_revision` and `contract_revision`. Until the
-Spektacular status verb exposes a stable current-spec join key, Hive uses the
-receipt chain as the provenance source: when a plan stage finalizes, the plan's
-metadata records the spec `input_revision` as `spec_revision`. Before an
-implementation stage starts, Hive compares that recorded revision with the
-current spec artifact revision. A mismatch refuses the kick, sets
-`waiting_on=human` with reason `stale_plan`, and leaves the existing plan gate
-as the recovery path: re-run or re-approve a fresh plan so the stored revision
-matches the current spec. This is intentionally metadata-only and adds no
+Stage receipts carry `input_revision` and `contract_revision`. Hive consumes
+Spektacular's status `artifact_id` as the durable join key for Spektacular
+artifacts whenever the field is present, and falls back to the historical bare
+`name` only for older CLIs. Counter-shaped names remain readable display
+aliases, not globally unique identities.
+
+When Spektacular strict mode reports a plan with `document_status: stale`, Hive
+treats the plan as invalidated rather than as an expired lease. The stage runner
+refuses the plan-to-implement advance, records `waiting_on=human` with reason
+`stale_plan`, and writes a blocked timeline event. The recovery path is the
+existing plan gate: re-run or re-approve a fresh plan so the implement stage is
+released from a current plan. This is intentionally metadata-only and adds no
 store, CRD, DSL, or credential path.
+
+For older Spektacular versions that do not emit `stale`, Hive keeps the receipt
+chain as a provenance backstop: when a plan stage finalizes, the plan's metadata
+records the spec `input_revision` as `spec_revision`; before implementation,
+Hive can compare that recorded revision with the current spec artifact revision
+and hold the run with the same `stale_plan` reason on mismatch.
+
+## Cross-repo audit query and retention
+
+Hive exposes the run audit index as a read-only projection over artifacts it
+already writes; it is not a new store, CRD, DSL, or credential path. `GET
+/api/runs/audit` is owner-gated and accepts `repo`, canonical `run`
+(`owner/repo#number`), `since`, `until`, `kind`, `limit`, and `page_token`. The
+handler scans the retained dashboard audit log, lifecycle timeline, lease stage
+receipts, and plan epics from all configured bead stores, normalizes each row to
+`source`, `kind`, canonical run key, repo, timestamp, actor, artifact id, and
+attributes, then returns a deterministic paginated list. `stage_approval`
+timeline events and `stage_receipt` lease receipts are first-class rows so
+reviewers can trace owner approvals and runner receipts without reading chat
+history.
+
+The retention contract reuses current behavior. Audit entries are retained by
+the dashboard audit log rotation (`MaxAge=90d`, `MaxSize=5MiB`,
+`MaxBackups=3`), with an in-memory fallback ring of 500 entries for deployments
+without `/data`. Timeline events are retained as lifecycle journeys with the
+existing `timeline.MaxJourneys` capacity (500 journeys) and optional timeline
+persistence. Plan epics and lease receipt metadata live in their existing bead
+stores and lease/timeline artifacts. There is deliberately no
+`runs.audit.retention` setting unless a future change replaces these underlying
+retention knobs. When a query reaches before retained coverage or asks for a run
+whose artifacts may have aged out, the response includes a row with
+`kind=expired`, `status=expired`, and `state=Unknown`; callers must render that
+as unknown/expired evidence rather than treating the missing source rows as an
+empty audit history.
 
 ## Commit artifact linkage
 

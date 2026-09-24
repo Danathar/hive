@@ -17,10 +17,22 @@ sync with the Go config schema. `pkg/dashboard` has a guard test that extracts
 those keys from the FAQ panel and asserts each path exists in `config.Config`
 via YAML tags.
 
-
 ## Design system
 
-Dashboard UI changes should follow the shared [dashboard design system](dashboard-design-system.md) and [ADR-0018](adr/0018-dashboard-design-tokens.md). The token layer is the theme contract for future user theme/background work and the migration path away from static inline styles.
+Dashboard UI changes should follow the shared [dashboard design system](dashboard-design-system.md), [dashboard glossary and sidebar IA](dashboard-glossary.md), and [ADR-0018](adr/0018-dashboard-design-tokens.md). The token layer is the theme contract for future user theme/background work and the migration path away from static inline styles; `go test ./pkg/dashboard/... -run StyleRatchet -v` ratchets inline styles and raw CSS values so the debt only goes down.
+
+## Governor card
+
+The dashboard **Governor** card summarizes queue depth, operating mode, budget
+posture, and cadence controls for the hive. Its **PRs by model** section reads
+`GET /api/governor/pr-models` with the selected `7d`, `30d`, or `all` window.
+Rows keep the merged/open/closed PR-volume bar, then add compact effectiveness
+columns from the same aggregation used by the contributor Operations **Most
+effective models** panel: merged PRs, first-pass merge rate, verified-PR run
+rate, failure rate, and completed-without-PR ("nothing to ship") rate. Models
+that meet `HIVE_CONTRIBUTE_EFFECTIVE_MODELS_MIN_PRS` (default `5`) merged PRs
+get rank badges. The default row order is effectiveness rank; operators can
+toggle back to raw PR count without changing the selected window.
 
 ## Appearance themes
 
@@ -30,7 +42,7 @@ config surface is:
 
 ```yaml
 dashboard:
-  theme: honeycomb      # built-in id, or custom
+  theme: hive           # built-in id from /api/themes, or custom
   theme_overrides:
     tokens:
       "--accent": "#e0a33a"
@@ -42,10 +54,41 @@ dashboard:
       .panel { border-radius: 2px; }
 ```
 
-Built-ins include `openclaw`, `openclaw-light`, `honeycomb`, `graphite`, `nord`,
-`dracula`, `solarized-dark`, `github-light`, and `high-contrast`. Tokens are
+Built-ins are loaded from one YAML file per theme under `src/pkg/dashboard/theme/themes/`. Initial themes include `hive`, `hive-dark`, `hive-light`, `star-wars`, `dungeons-and-dragons`, `star-trek`, `cyberpunk`, `terminal`, `solarized-dark`, `nord`, and migrated contributor profile skins such as `contributor-violet-advisor`. Theme files can set `scopes: [dashboard, contributor]` so the same catalog drives dashboard Appearance and contributor profile styling. Tokens are
 validated against the dashboard's `:root` CSS custom properties so typos fail
 fast. Custom CSS is capped at 32 KiB, strips HTML/style-breakout characters, and
 only permits `https:` or bounded `data:` URLs; inlined backgrounds are capped at
 256 KiB. `/api/theme.css` serves the effective theme with an ETag and is linked
 from the document head so the themed stylesheet is available before first paint.
+
+### Settings → Appearance
+
+The **Appearance** tab in Settings renders the built-in preset gallery with
+swatches for background, panel, accent, and text colors. Hovering a card previews
+it, **Apply** persists the preset, **Reset to preset** removes overrides, and
+**Apply background/CSS** saves the background URL, opacity, honeycomb watermark,
+and custom CSS textarea (with byte counter). The existing dark/light button asks
+the theme API for the closest light or dark built-in variant and refreshes
+`/api/theme.css` without reloading the dashboard.
+
+Preset screenshots are committed in `src/docs/images/themes/` for the shipped catalog.
+
+The contributor profile page uses the same theme catalog. Its former local profile
+style numbers map to `contributor-*` theme ids, so existing browser-local choices
+continue to work while new themes appear in the profile picker. Contributor CSS is
+layered after shared theme variables and hive-wide custom CSS: theme vars → admin
+Appearance custom CSS → contributor `?style=owner/repo/path.css@ref` stylesheet.
+
+
+### How to add a dashboard theme
+
+Create one YAML file in `src/pkg/dashboard/theme/themes/` and give it a unique
+`id`, display `name`, original `description`, `author`, `dark` flag, `tokens`,
+optional `background`, optional `custom_css`, and `fonts` stacks. The directory
+README documents the full schema and guardrails. The theme loader embeds every
+`*.yaml` file with `embed.FS`; adding a file automatically makes it appear in
+`GET /api/themes`, `GET /api/theme.css?theme=<id>`, and Settings → Appearance.
+CI runs `pkg/dashboard/theme` tests that parse every file, enforce unique IDs,
+and reject unsupported dashboard CSS variables, so theme-only changes are a good
+first issue when the palette is original and avoids logos, copyrighted imagery,
+quotes, or bundled proprietary fonts.

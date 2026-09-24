@@ -115,8 +115,8 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
 		{"Newcomer", "var(--cc-amber)", tierCounts["newcomer"]},
 		{"Contributor", "var(--cc-accent)", tierCounts["contributor"]},
 		{"Trusted", "var(--cc-green)", tierCounts["trusted"]},
-		{"Merger", "var(--cc-pink)", tierCounts["merger"]},
-		{"Advisor", "var(--cc-purple)", tierCounts["advisor"]},
+		{"Merger", "var(--acmm-level-5)", tierCounts["merger"]},
+		{"Advisor", "var(--acmm-level-5)", tierCounts["advisor"]},
 		{"Revoked", "var(--cc-red)", tierCounts["revoked"]},
 	}
 	var tierBoxes strings.Builder
@@ -167,6 +167,7 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
 		contributorAutoPromoteAt, contributorTrustedAt,
 	)
 
+	themeHeadHTML := `<link id="contributor-theme-css" rel="stylesheet" href="/api/theme.css?scope=contributor">`
 	customStyleHeadHTML := ""
 	customStyleNoticeHTML := ""
 	if rawStyle := strings.TrimSpace(r.URL.Query().Get("style")); rawStyle != "" {
@@ -187,7 +188,7 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
 				customStyleNoticeHTML = fmt.Sprintf(`<div class="lb-custom-style-note" id="leaderboard-custom-style-note" role="status">Custom style active: <code>%s</code></div>`, escapedSrc)
 			}
 		} else {
-			customStyleNoticeHTML = `<div class="lb-custom-style-note lb-custom-style-note--warn" id="leaderboard-custom-style-note" role="status">Custom style could not be loaded — using default <button type="button" data-action="dismiss-parent">Dismiss</button></div>`
+			customStyleNoticeHTML = `<div class="lb-custom-style-note lb-custom-style-note--warn" id="leaderboard-custom-style-note" role="status">Custom style could not be loaded — using default <button class="hv-btn btn-secondary" type="button" data-action="dismiss-parent">Dismiss</button></div>`
 		}
 	}
 
@@ -238,6 +239,8 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
      sha256 for every inline script in the finished document (pkg/dashboard/webstatic);
      it is inline on*= ATTRIBUTES that are forbidden (ADR-0016), which is why the
      button dispatches through data-action instead of onclick. -->
+<link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/components.css">
 <script>
 (function(){try{var t=localStorage.getItem('hive.contribute.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
 </script>
@@ -245,163 +248,108 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
 /* Michroma display face, base64-embedded (no network fonts). Used ONLY by the
    dossier hero name + rank designation (.dz-heroname / .dz-rankpill .rank-name). */
 %s
-/* ── Theme tokens (#2612 part d) ─────────────────────────────────────────────
-   The /contribute page shipped with a hardcoded GitHub-dark palette and zero
-   light-mode infrastructure. These custom properties name the palette once so
-   the whole sheet can flip to a light appearance without touching any rule. The
-   :root defaults below are the ORIGINAL dark hex values byte-for-byte, so the
-   dark appearance is unchanged; only the neutral surface/border/text ramp is
-   tokenized (accents like blue/green/amber/red read fine on both themes and are
-   pinned by exact-match tests, so they stay literal and are exposed here only as
-   named tokens for the light-mode fixups below).
-   Light mode activates on BOTH signals — the OS preference AND an explicit
-   :root[data-theme="light"] hook — so a future in-page toggle can force it
-   (the toggle itself is out of scope). data-theme="dark" always wins back to
-   dark even under a light OS preference. Values are Primer-light neutrals so the
-   surface blends with the surrounding Docusaurus docs chrome.
-   #4549: each block also declares color-scheme, which is what tells the browser
-   how to paint the chrome CSS cannot reach — the <select> popups on the
-   onboarding tab, scrollbars, and the focus ring. Without it a forced-light page
-   still drops a black dropdown over a white form. */
+/* Contributor-only aliases kept after the ADR-0018 migration. The GitHub-blue
+   action color and merger pink are deliberate portal identity accents; neutral
+   surfaces/text/lines come entirely from tokens.css and its [data-theme] light
+   block. */
 :root{
   color-scheme:dark;
-  --cc-bg:#0d1117;
-  --cc-bg-deep:#010409;
-  --cc-surface:#161b22;
-  --cc-border:#30363d;
-  --cc-border-2:#21262d;
-  --cc-text:#e6edf3;
-  --cc-text-2:#c9d1d9;
-  --cc-muted:#8b949e;
-  --cc-muted-2:#6e7681;
-  --cc-code-bg:#0d1117;
   --cc-accent:#58a6ff;
-  --cc-accent-2:#79c0ff;
-  --cc-accent-fg:#1f6feb;
   --cc-green:#3fb950;
   --cc-amber:#d29922;
   --cc-red:#f85149;
-  --cc-pink:#f778ba;
-  --cc-purple:#bc8cff;
+  --cc-accent-fg:#1f6feb;
 }
 @media(prefers-color-scheme:light){:root:not([data-theme="dark"]){
-  color-scheme:light;
-  --cc-bg:#ffffff;
-  --cc-bg-deep:#f6f8fa;
-  --cc-surface:#f6f8fa;
-  --cc-border:#d0d7de;
-  --cc-border-2:#eaeef2;
-  --cc-text:#1f2328;
-  --cc-text-2:#32383f;
-  --cc-muted:#636c76;
-  --cc-muted-2:#7d858e;
-  --cc-code-bg:#eff1f3;
   --cc-accent:#0969da;
-  --cc-accent-2:#0550ae;
-  --cc-accent-fg:#0969da;
   --cc-green:#1a7f37;
   --cc-amber:#9a6700;
   --cc-red:#cf222e;
-  --cc-pink:#bf3989;
-  --cc-purple:#8250df;
+  --cc-accent-fg:#0969da;
 }}
 :root[data-theme="light"]{
-  color-scheme:light;
-  --cc-bg:#ffffff;
-  --cc-bg-deep:#f6f8fa;
-  --cc-surface:#f6f8fa;
-  --cc-border:#d0d7de;
-  --cc-border-2:#eaeef2;
-  --cc-text:#1f2328;
-  --cc-text-2:#32383f;
-  --cc-muted:#636c76;
-  --cc-muted-2:#7d858e;
-  --cc-code-bg:#eff1f3;
   --cc-accent:#0969da;
-  --cc-accent-2:#0550ae;
-  --cc-accent-fg:#0969da;
   --cc-green:#1a7f37;
   --cc-amber:#9a6700;
   --cc-red:#cf222e;
-  --cc-pink:#bf3989;
-  --cc-purple:#8250df;
+  --cc-accent-fg:#0969da;
 }
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--cc-bg);color:var(--cc-text);margin:0;min-height:100vh}
+*{margin:var(--sp-0);padding:var(--sp-0);box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--surface-0);color:var(--text);margin:var(--sp-0);min-height:100vh}
 .page{display:flex;min-height:100vh;width:100%%}
 .main{flex:3;padding:40px 48px;overflow-y:auto}
-.sidebar{flex:1;background:var(--cc-surface);border-left:1px solid var(--cc-border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
-h1{font-size:2rem;margin-bottom:8px}
-.subtitle{color:var(--cc-muted);font-size:1.1rem;margin-bottom:32px}
-.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:10px;margin-bottom:24px}
-.stat{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:10px;padding:14px 8px;text-align:center}
-.stat-num{font-size:1.5rem;font-weight:700;color:var(--cc-accent)}
-.stat-label{font-size:.7rem;color:var(--cc-muted);margin-top:4px}
-.steps{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;padding:24px;margin-top:24px}
-.steps h3{margin-top:0;color:var(--cc-accent)}
-.steps ol{padding-left:20px;line-height:2}
-code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
-.how{margin-top:32px}
-.how h3{color:var(--cc-text)}
-.how p{color:var(--cc-muted);line-height:1.6}
-.tier-table{width:100%%;border-collapse:collapse;margin-top:16px}
-.tier-table th,.tier-table td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--cc-border);font-size:.85rem}
-.tier-table th{color:var(--cc-muted);font-weight:600}
-.feed-header{padding:20px 20px 12px;border-bottom:1px solid var(--cc-border);display:flex;align-items:center;gap:8px}
-.feed-header h3{font-size:.95rem;color:var(--cc-text)}
+.sidebar{flex:1;background:var(--surface-2);border-left:1px solid var(--line-strong);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+h1{font-size:var(--fs-3xl);margin-bottom:var(--sp-4)}
+.subtitle{color:var(--text-muted);font-size:1.1rem;margin-bottom:var(--sp-9)}
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:10px;margin-bottom:var(--sp-8)}
+.stat{background:var(--surface-2);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-4);text-align:center;box-shadow:var(--shadow-card)}
+.stat-num{font-size:var(--fs-2xl);font-weight:700;color:var(--cc-accent)}
+.stat-label{font-size:.7rem;color:var(--text-muted);margin-top:var(--sp-2)}
+.steps{background:var(--surface-1);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-8);margin-top:var(--sp-8);box-shadow:var(--shadow-card)}
+.steps h3{margin-top:var(--sp-0);color:var(--cc-accent)}
+.steps ol{padding-left:var(--sp-7);line-height:2}
+code{background:var(--surface-0);padding:var(--sp-1) var(--sp-4);border-radius:var(--r-sm);font-size:.9rem}
+.how{margin-top:var(--sp-9)}
+.how h3{color:var(--text)}
+.how p{color:var(--text-muted);line-height:1.6}
+.tier-table{width:100%%;border-collapse:collapse;margin-top:var(--sp-6)}
+.tier-table th,.tier-table td{padding:var(--sp-4) var(--sp-5);text-align:left;border-bottom:1px solid var(--line-strong);font-size:.85rem}
+.tier-table th{color:var(--text-muted);font-weight:600}
+.feed-header{padding:var(--sp-7) var(--sp-7) var(--sp-5);border-bottom:1px solid var(--line-strong);display:flex;align-items:center;gap:var(--sp-4)}
+.feed-header h3{font-size:.95rem;color:var(--text)}
 .feed-dot{width:8px;height:8px;border-radius:50%%;background:var(--cc-green);animation:pulse 2s infinite}
 @keyframes pulse{0%%,100%%{opacity:1}50%%{opacity:.4}}
-.feed-count{font-size:.75rem;color:var(--cc-muted);margin-left:auto}
-.feed-scroll{flex:1;overflow-y:auto;padding:0}
-.feed-entry{padding:10px 20px;border-bottom:1px solid var(--cc-border-2);font-size:.85rem;animation:fadeIn .3s ease;display:flex;align-items:flex-start;gap:12px}
+.feed-count{font-size:var(--fs-sm);color:var(--text-muted);margin-left:auto}
+.feed-scroll{flex:1;overflow-y:auto;padding:var(--sp-0)}
+.feed-entry{padding:10px 20px;border-bottom:1px solid var(--line-subtle);font-size:.85rem;animation:fadeIn .3s ease;display:flex;align-items:flex-start;gap:var(--sp-5)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-.feed-entry:hover{background:rgba(88,166,255,.04)}
+.feed-entry:hover{background:color-mix(in srgb,var(--cc-accent) 4%%,transparent)}
 .feed-text{flex:1;min-width:0}
-.feed-time{color:var(--cc-muted);font-size:.75rem;white-space:nowrap;flex-shrink:0}
+.feed-time{color:var(--text-muted);font-size:var(--fs-sm);white-space:nowrap;flex-shrink:0}
 .feed-role{color:var(--cc-accent);font-weight:500}
-.feed-cli{color:var(--cc-muted);font-size:.8rem}
-.feed-empty{padding:40px 20px;text-align:center;color:var(--cc-muted);font-size:.85rem}
-@media(max-width:768px){.page{flex-direction:column}.sidebar{border-left:none;border-top:1px solid var(--cc-border);max-width:none;max-height:300px}}
+.feed-cli{color:var(--text-muted);font-size:.8rem}
+.feed-empty{padding:40px 20px;text-align:center;color:var(--text-muted);font-size:.85rem}
+@media(max-width:768px){.page{flex-direction:column}.sidebar{border-left:none;border-top:1px solid var(--line-strong);max-width:none;max-height:300px}}
 /* Management & Operations tab chrome — additive, does not touch onboarding content */
 /* #4537 follow-up: five tabs at 14px 20px plus 96px of gutters are ~700px, so
    between 600px (where the phone breakpoint's wrap kicks in) and ~700px the bar
    still overflowed the document and the trailing tabs were unreachable. Wrap in
    the base rule — a no-op at any width where the tabs fit on one line. */
-.page-tabs{display:flex;flex-wrap:wrap;gap:2px;background:var(--cc-surface);border-bottom:1px solid var(--cc-border);padding:0 48px}
-.page-tab{background:none;border:none;color:var(--cc-muted);font-size:.95rem;font-weight:500;padding:14px 20px;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit}
-.page-tab:hover{color:var(--cc-text)}
-.page-tab.active{color:var(--cc-text);border-bottom-color:var(--cc-accent)}
+.page-tabs{display:flex;flex-wrap:wrap;gap:var(--sp-1);background:var(--surface-2);border-bottom:1px solid var(--line-strong);padding:0 48px}
+.page-tab{background:none;border:none;color:var(--text-muted);font-size:.95rem;font-weight:500;padding:14px 20px;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit}
+.page-tab:hover{color:var(--text)}
+.page-tab.active{color:var(--text);border-bottom-color:var(--cc-accent)}
 .tab-panel{display:none}
 .tab-panel.active{display:block}
 .ops{padding:40px 48px;overflow-y:auto}
-.ops h1{font-size:1.7rem;margin-bottom:6px}
+.ops h1{font-size:1.7rem;margin-bottom:var(--sp-3)}
 /* #4537: minmax(0,1fr), not 1fr. A 1fr track's automatic minimum is min-content,
    and the cards it holds contain white-space:nowrap text (.cc-q-title, .cc-army,
    the clanker sub-lines), so the track resolved to the widest unbreakable line
    and the whole panel outgrew .ops. The explicit 0 minimum lets the track shrink
    to the viewport and hands the overflow back to the ellipsis/wrapping the cards
    already declare. */
-.ops-grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:20px;margin-top:24px}
+.ops-grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:var(--sp-7);margin-top:var(--sp-8)}
 @media(max-width:900px){.ops-grid{grid-template-columns:minmax(0,1fr)}}
-.ops-card{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;padding:0;overflow:hidden}
-.ops-card-head{padding:16px 20px;border-bottom:1px solid var(--cc-border);display:flex;align-items:center;gap:10px}
-.ops-card-head h3{font-size:.95rem;color:var(--cc-text);margin:0}
-.ops-card-count{font-size:.75rem;color:var(--cc-muted);margin-left:auto}
-.ops-filters{display:flex;gap:4px;padding:12px 20px;border-bottom:1px solid var(--cc-border-2);flex-wrap:wrap}
+.ops-card{background:var(--surface-1);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-0);overflow:hidden;box-shadow:var(--shadow-card)}
+.ops-card-head{padding:var(--sp-6) var(--sp-7);border-bottom:1px solid var(--line-strong);display:flex;align-items:center;gap:10px}
+.ops-card-head h3{font-size:.95rem;color:var(--text);margin:var(--sp-0)}
+.ops-card-count{font-size:var(--fs-sm);color:var(--text-muted);margin-left:auto}
+.ops-filters{display:flex;gap:var(--sp-2);padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-subtle);flex-wrap:wrap}
 /* .ops-scope (the Fleet work All/Mine chips, #6945) shares the chip LOOK with the
    status filters and nothing else — the two are deliberately separate classes so
    the status click handler cannot deactivate a scope chip, and vice versa. */
-.ops-filter,.ops-scope{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-muted);font-size:.78rem;padding:4px 12px;border-radius:999px;cursor:pointer;font-family:inherit}
-.ops-filter.active,.ops-scope.active{background:#1f6feb;border-color:var(--cc-accent-fg);color:#fff}
+.ops-filter,.ops-scope{background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text-muted);font-size:.78rem;padding:var(--sp-2) var(--sp-5);border-radius:var(--r-pill);cursor:pointer;font-family:inherit}
+.ops-filter.active,.ops-scope.active{background:var(--cc-accent-fg);border-color:var(--cc-accent-fg);color:var(--surface-2)}
 /* A hairline between the status chips and the scope chips: they are two
    independent axes, and side by side with no divider they read as one row of
    mutually exclusive choices. */
-.ops-filters__sep{width:1px;align-self:stretch;background:var(--cc-border-2);margin:0 6px}
+.ops-filters__sep{width:1px;align-self:stretch;background:var(--line-subtle);margin:var(--sp-0) var(--sp-3)}
 .work-list{max-height:520px;overflow-y:auto}
-.work-item{padding:14px 20px;border-bottom:1px solid var(--cc-border-2);cursor:pointer}
-.work-item:hover{background:rgba(88,166,255,.04)}
-.work-item.selected{background:rgba(88,166,255,.08)}
-.work-repo{font-size:.75rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.work-item{padding:14px 20px;border-bottom:1px solid var(--line-subtle);cursor:pointer}
+.work-item:hover{background:color-mix(in srgb,var(--cc-accent) 4%%,transparent)}
+.work-item.selected{background:color-mix(in srgb,var(--cc-accent) 8%%,transparent)}
+.work-repo{font-size:var(--fs-sm);color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 /* ── Clickable GitHub issue/PR references (#2616) ────────────────────────────────
    Shared affordance for every repo#number reference on the Operations tab (ready
    queue, my-work, opportunistic-work, dev-log). Deliberately more visible than
@@ -409,19 +357,19 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
    a small external-link glyph — so it reads as an obvious "open on GitHub"
    action, not decoration. Inherits the host element's font (monospace repo#num,
    or inline log text) so it drops into any of those contexts unchanged. */
-.cc-issue-link{display:inline-flex;align-items:center;gap:3px;color:var(--cc-accent);text-decoration:none;font:inherit;border-radius:4px;transition:color .15s}
-.cc-issue-link:hover,.cc-issue-link:focus-visible{color:var(--cc-accent-2);text-decoration:underline}
+.cc-issue-link{display:inline-flex;align-items:center;gap:3px;color:var(--cc-accent);text-decoration:none;font:inherit;border-radius:var(--r-sm);transition:color .15s}
+.cc-issue-link:hover,.cc-issue-link:focus-visible{color:var(--cc-accent);text-decoration:underline}
 .cc-issue-link:focus-visible{outline:2px solid var(--cc-accent);outline-offset:2px}
 .cc-issue-link-ic{flex-shrink:0;opacity:.85}
 .cc-issue-link:hover .cc-issue-link-ic{opacity:1}
-.work-title{font-size:.9rem;color:var(--cc-text);margin:2px 0 6px}
-.work-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.75rem;color:var(--cc-muted)}
-.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent}
-.pill-progress{background:rgba(88,166,255,.12);color:var(--cc-accent);border-color:rgba(88,166,255,.3)}
-.pill-review{background:rgba(210,153,34,.12);color:var(--cc-amber);border-color:rgba(210,153,34,.3)}
-.pill-passed{background:rgba(63,185,80,.12);color:var(--cc-green);border-color:rgba(63,185,80,.3)}
-.pill-blocked{background:rgba(248,81,73,.12);color:var(--cc-red);border-color:rgba(248,81,73,.3)}
-.pill-idle{background:rgba(139,148,158,.12);color:var(--cc-muted);border-color:rgba(139,148,158,.3)}
+.work-title{font-size:.9rem;color:var(--text);margin:var(--sp-1) var(--sp-0) var(--sp-3)}
+.work-meta{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;font-size:var(--fs-sm);color:var(--text-muted)}
+.pill{--component-status:var(--status-neutral);display:inline-block;padding:var(--badge-pad-y) var(--badge-pad-x);border-radius:var(--r-pill);font-size:var(--fs-xs);font-weight:600;border:var(--line-width) solid color-mix(in srgb,var(--component-status) var(--component-border),transparent);background:color-mix(in srgb,var(--component-status) var(--component-tint),transparent);color:var(--component-status)}
+.pill-progress{--component-status:var(--status-info)}
+.pill-review{--component-status:var(--status-attention)}
+.pill-passed{--component-status:var(--cc-green)}
+.pill-blocked{--component-status:var(--cc-red)}
+.pill-idle{--component-status:var(--status-neutral)}
 /* #2574 (follow-up): the Connected-clankers card is a NARROW column. The old
    layout put the multi-line identity text (.clanker-main) and the inline
    controls (.admin-actions: tier dropdown + Revoke + Remove) in the SAME
@@ -441,110 +389,110 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
    than its card. The dot and the avatar are 8px and 28px at every width, so
    naming those widths is what auto already resolved to when nothing spanned;
    it just leaves nothing for the spanning row to inflate. */
-.clanker-row{display:grid;grid-template-columns:8px 28px minmax(0,1fr);align-items:start;column-gap:10px;row-gap:8px;padding:12px 20px;border-bottom:1px solid var(--cc-border-2)}
+.clanker-row{display:grid;grid-template-columns:8px 28px minmax(0,1fr);align-items:start;column-gap:10px;row-gap:var(--sp-4);padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-subtle)}
 /* The trailing controls / timestamp: full-width line beneath the identity. It is
    always the LAST grid child, so grid-column:1/-1 drops it below regardless of
    whether it's .admin-actions or the .feed-time fallback. */
 .clanker-row>.admin-actions,.clanker-row>.feed-time{grid-column:1/-1}
-.clanker-av{width:28px;height:28px;border-radius:50%%;flex-shrink:0;background:var(--cc-border)}
+.clanker-av{width:28px;height:28px;border-radius:50%%;flex-shrink:0;background:var(--line-strong)}
 .clanker-main{min-width:0}
-.clanker-user{font-size:.88rem;color:var(--cc-text);font-weight:500}
-.clanker-sub{font-size:.74rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;word-break:break-word}
+.clanker-user{font-size:.88rem;color:var(--text);font-weight:500}
+.clanker-sub{font-size:.74rem;color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;word-break:break-word}
 /* #7317 item 3: per-clanker diagnostics. The last failure reads in the same
    mono sub-line voice as the rest of the row, tinted so a run of them stands
    out; the pane is a collapsed <details> so a healthy fleet costs no height.
    The pane <pre> scrolls inside its own box — the row must never widen the
    page (see the .ops-shell overflow rule). */
 .clanker-fail{color:var(--cc-amber)}
-.clanker-fail b{color:var(--cc-text-2);font-weight:600}
-.clanker-pane{margin-top:6px;font-size:.72rem}
-.clanker-pane>summary{cursor:pointer;color:var(--cc-muted-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;user-select:none;list-style:none}
-.clanker-pane>summary::before{content:"\25B8";display:inline-block;width:1em;color:var(--cc-muted)}
+.clanker-fail b{color:var(--text);font-weight:600}
+.clanker-pane{margin-top:var(--sp-3);font-size:.72rem}
+.clanker-pane>summary{cursor:pointer;color:var(--text-faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;user-select:none;list-style:none}
+.clanker-pane>summary::before{content:"\25B8";display:inline-block;width:1em;color:var(--text-muted)}
 .clanker-pane[open]>summary::before{content:"\25BE"}
 .clanker-pane>summary::-webkit-details-marker{display:none}
-.clanker-pane pre{margin:6px 0 0;padding:8px 10px;background:var(--cc-bg);border:1px solid var(--cc-border-2);border-radius:6px;max-height:220px;overflow:auto;font-size:.7rem;line-height:1.45;color:var(--cc-text-2);white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.clanker-link{background:none;border:0;padding:0;color:var(--cc-accent);font:inherit;font-size:.72rem;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.clanker-link:hover{color:var(--cc-text)}
+.clanker-pane pre{margin:var(--sp-3) var(--sp-0) var(--sp-0);padding:var(--sp-4) 10px;background:var(--surface-0);border:1px solid var(--line-subtle);border-radius:var(--r);max-height:220px;overflow:auto;font-size:.7rem;line-height:1.45;color:var(--text);white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.clanker-link{background:none;border:0;padding:var(--sp-0);color:var(--cc-accent);font:inherit;font-size:.72rem;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.clanker-link:hover{color:var(--text)}
 /* Contributor run history card (#7317 items 1+3 rendered). A lookup by login
    so it answers for a contributor that has already disconnected — the fleet
    row is gone by then, but the run log is not. */
-.runs-lookup{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid var(--cc-border-2);flex-wrap:wrap;align-items:center}
-.runs-lookup input{flex:1 1 180px;min-width:0;background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text);border-radius:6px;padding:6px 10px;font-size:.8rem;font-family:inherit}
+.runs-lookup{display:flex;gap:var(--sp-4);padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-subtle);flex-wrap:wrap;align-items:center}
+.runs-lookup input{flex:1 1 180px;min-width:0;background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text);border-radius:var(--r);padding:6px 10px;font-size:.8rem;font-family:inherit}
 .runs-lookup input:focus{outline:none;border-color:var(--cc-accent)}
 .runs-list{max-height:520px;overflow-y:auto}
-.run-item{padding:12px 20px;border-bottom:1px solid var(--cc-border-2)}
-.run-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:.8rem}
-.run-outcome{font-size:.68rem;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--cc-border);color:var(--cc-muted);text-transform:uppercase;letter-spacing:.03em}
+.run-item{padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-subtle)}
+.run-head{display:flex;gap:var(--sp-4);align-items:baseline;flex-wrap:wrap;font-size:.8rem}
+.run-outcome{font-size:var(--fs-xs);font-weight:600;padding:1px 7px;border-radius:var(--r-pill);border:1px solid var(--line-strong);color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em}
 .run-outcome.completed{color:var(--cc-green);border-color:var(--cc-green)}
 .run-outcome.failed{color:var(--cc-red);border-color:var(--cc-red)}
 .run-outcome.abandoned{color:var(--cc-amber);border-color:var(--cc-amber)}
-.run-task{color:var(--cc-text);font-weight:600;overflow-wrap:anywhere}
+.run-task{color:var(--text);font-weight:600;overflow-wrap:anywhere}
 .run-task a{color:inherit;text-decoration:none}
 .run-task a:hover{text-decoration:underline}
-.run-meta{margin-left:auto;color:var(--cc-muted);font-size:.72rem;white-space:nowrap}
-.run-reason{margin-top:4px;font-size:.74rem;color:var(--cc-text-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
-.run-pane-note{padding:10px 20px;font-size:.74rem;color:var(--cc-muted-2);border-bottom:1px solid var(--cc-border-2)}
+.run-meta{margin-left:auto;color:var(--text-muted);font-size:.72rem;white-space:nowrap}
+.run-reason{margin-top:var(--sp-2);font-size:.74rem;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.run-pane-note{padding:10px 20px;font-size:.74rem;color:var(--text-faint);border-bottom:1px solid var(--line-subtle)}
 /* Hub decisions card (#7330 — item 4 of #7317 rendered). Shares the run
    history's login lookup, because the two are the two halves of one
    conversation: what the relay reported, and what the hub did about it. The
    palette is deliberately the run-outcome palette — a fence and a failure are
    equally bad news and should not read differently. */
 .dec-list{max-height:420px;overflow-y:auto}
-.dec-item{padding:10px 20px;border-bottom:1px solid var(--cc-border-2)}
-.dec-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:.8rem}
-.dec-event{font-size:.68rem;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--cc-border);color:var(--cc-muted);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+.dec-item{padding:10px 20px;border-bottom:1px solid var(--line-subtle)}
+.dec-head{display:flex;gap:var(--sp-4);align-items:baseline;flex-wrap:wrap;font-size:.8rem}
+.dec-event{font-size:var(--fs-xs);font-weight:600;padding:1px 7px;border-radius:var(--r-pill);border:1px solid var(--line-strong);color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
 .dec-event.stale_gen_rejected,.dec-event.unassigned_ignored{color:var(--cc-red);border-color:var(--cc-red)}
 .dec-event.abandoned,.dec-event.lease_expired,.dec-event.resume_rejected{color:var(--cc-amber);border-color:var(--cc-amber)}
-.dec-task{color:var(--cc-text);font-weight:600;overflow-wrap:anywhere}
+.dec-task{color:var(--text);font-weight:600;overflow-wrap:anywhere}
 .dec-task a{color:inherit;text-decoration:none}
 .dec-task a:hover{text-decoration:underline}
-.dec-meta{margin-left:auto;color:var(--cc-muted);font-size:.72rem;white-space:nowrap}
-.dec-detail{margin-top:4px;font-size:.74rem;color:var(--cc-text-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
-.dec-note{padding:10px 20px;font-size:.72rem;color:var(--cc-muted-2);border-bottom:1px solid var(--cc-border-2)}
+.dec-meta{margin-left:auto;color:var(--text-muted);font-size:.72rem;white-space:nowrap}
+.dec-detail{margin-top:var(--sp-2);font-size:.74rem;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.dec-note{padding:10px 20px;font-size:.72rem;color:var(--text-faint);border-bottom:1px solid var(--line-subtle)}
 /* Row is align-items:start (grid), so nudge the small dot down to sit level with
    the username's first line instead of the very top of the row. */
 .clanker-dot{width:8px;height:8px;border-radius:50%%;background:var(--cc-green);flex-shrink:0;margin-top:7px}
-.clanker-dot.stale{background:var(--cc-muted)}
-.pipeline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:14px 0}
-.pipe-node{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;padding:8px 14px;font-size:.82rem;color:var(--cc-text)}
+.clanker-dot.stale{background:var(--text-muted)}
+.pipeline{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin:14px 0}
+.pipe-node{background:var(--surface-0);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-4) 14px;font-size:var(--fs-base);color:var(--text)}
 .pipe-node .lgtm{color:var(--cc-green);font-size:.72rem}
-.pipe-arrow{color:var(--cc-muted)}
-.policy-row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--cc-border-2);font-size:.85rem}
+.pipe-arrow{color:var(--text-muted)}
+.policy-row{display:flex;justify-content:space-between;gap:var(--sp-5);padding:var(--sp-4) var(--sp-0);border-bottom:1px solid var(--line-subtle);font-size:.85rem}
 .policy-row:last-child{border-bottom:none}
-.policy-key{color:var(--cc-muted)}
-.policy-val{color:var(--cc-text);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
-.ops-empty{padding:32px 20px;text-align:center;color:var(--cc-muted);font-size:.85rem}
-.effective-controls{display:flex;gap:6px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--cc-border-2)}
-.effective-chip{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-muted);font-size:.72rem;padding:4px 10px;border-radius:999px;cursor:pointer;font-family:inherit}
-.effective-chip.active{background:#1f6feb;border-color:var(--cc-accent-fg);color:#fff}
+.policy-key{color:var(--text-muted)}
+.policy-val{color:var(--text);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
+.ops-empty{padding:var(--sp-9) var(--sp-7);text-align:center;color:var(--text-muted);font-size:.85rem}
+.effective-controls{display:flex;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-subtle)}
+.effective-chip{background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text-muted);font-size:.72rem;padding:4px 10px;border-radius:var(--r-pill);cursor:pointer;font-family:inherit}
+.effective-chip.active{background:var(--cc-accent-fg);border-color:var(--cc-accent-fg);color:var(--surface-0)}
 .effective-table{width:100%%;border-collapse:collapse;font-size:.76rem}
-.effective-table th,.effective-table td{padding:8px 10px;border-bottom:1px solid var(--cc-border-2);text-align:right;font-variant-numeric:tabular-nums;vertical-align:top}
+.effective-table th,.effective-table td{padding:var(--sp-4) 10px;border-bottom:1px solid var(--line-subtle);text-align:right;font-variant-numeric:tabular-nums;vertical-align:top}
 .effective-table th:first-child,.effective-table td:first-child{text-align:left}
-.effective-table th{color:var(--cc-muted);font-size:.64rem;text-transform:uppercase;letter-spacing:.05em;background:var(--cc-bg)}
-.effective-model{color:var(--cc-text);font-weight:600;overflow-wrap:anywhere}
-.effective-sub{color:var(--cc-muted);font-size:.68rem;margin-top:2px}
-.effective-muted{color:var(--cc-muted)}
+.effective-table th{color:var(--text-muted);font-size:.64rem;text-transform:uppercase;letter-spacing:.05em;background:var(--surface-0)}
+.effective-model{color:var(--text);font-weight:600;overflow-wrap:anywhere}
+.effective-sub{color:var(--text-muted);font-size:var(--fs-xs);margin-top:var(--sp-1)}
+.effective-muted{color:var(--text-muted)}
 .effective-link{color:var(--cc-accent);text-decoration:none}
 .effective-link:hover{text-decoration:underline}
-.effective-section-title{padding:12px 20px 6px;color:var(--cc-muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
-.lb-row{display:grid;grid-template-columns:56px 1fr 120px 70px 70px 80px 72px;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--cc-border-2);font-size:.85rem}
+.effective-section-title{padding:var(--sp-5) var(--sp-7) var(--sp-3);color:var(--text-muted);font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+.lb-row{display:grid;grid-template-columns:56px 1fr 120px 70px 70px 80px 72px;align-items:center;gap:var(--sp-4);padding:10px 20px;border-bottom:1px solid var(--line-subtle);font-size:.85rem}
 .lb-row:last-child{border-bottom:none}
 /* Subtle self-highlight for the logged-in viewer's own row: a faint tint + a left
    accent border, professional not loud. Readability preserved. */
 .lb-row--me{background:rgba(31,111,235,.09);box-shadow:inset 3px 0 0 0 #1f6feb}
-.lb-you{display:inline-block;margin-left:8px;font-size:.62rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent);background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.3);border-radius:999px;padding:1px 7px;vertical-align:middle}
-.lb-head{color:var(--cc-muted);font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;background:var(--cc-bg)}
-.lb-rank{color:var(--cc-muted);font-variant-numeric:tabular-nums}
-.lb-name{color:var(--cc-text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-you{display:inline-block;margin-left:var(--sp-4);font-size:var(--fs-2xs);font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent);background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.3);border-radius:var(--r-pill);padding:1px 7px;vertical-align:middle}
+.lb-head{color:var(--text-muted);font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;background:var(--surface-0)}
+.lb-rank{color:var(--text-muted);font-variant-numeric:tabular-nums}
+.lb-name{color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lb-name__link{color:inherit;text-decoration:none}
 .lb-name__link:hover{color:var(--cc-accent);text-decoration:underline}
-.lb-tier{color:var(--cc-muted)}
-.lb-stat{text-align:right;color:var(--cc-text-2);font-variant-numeric:tabular-nums}
-.lb-head .lb-stat,.lb-head .lb-rank{text-align:right;color:var(--cc-muted)}
+.lb-tier{color:var(--text-muted)}
+.lb-stat{text-align:right;color:var(--text);font-variant-numeric:tabular-nums}
+.lb-head .lb-stat,.lb-head .lb-rank{text-align:right;color:var(--text-muted)}
 .lb-head .lb-rank{text-align:left}
 /* ── Subtle "ranked/alive" accent pass on Operations + Leaderboard (SUBTLE +
    PROFESSIONAL — light watermarking only). Theme-aware: built entirely from the
-   existing dark palette (var(--cc-surface) card / var(--cc-border) border / var(--cc-bg) deep). Every
+   existing dark palette (var(--surface-2) card / var(--line-strong) border / var(--surface-0) deep). Every
    accent is driven by REAL data (trust tier + real task counts); nothing is
    fabricated. Readability first — text keeps full contrast; the tints are muted,
    never neon. All motion respects the prefers-reduced-motion block below. ───── */
@@ -555,46 +503,45 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
    tier-badge family; the Me-card below reuses it rather than hand-rolling its own
    tier-color helper, so leaderboard rows, ops cards, and the Me-card read as one
    ranked family. */
-.tier-badge{display:inline-flex;align-items:center;gap:5px;font-size:.68rem;font-weight:600;line-height:1;padding:3px 8px 3px 6px;border-radius:999px;border:1px solid var(--cc-border);background:var(--cc-bg);color:var(--cc-muted);text-transform:capitalize;white-space:nowrap}
+.tier-badge{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);font-weight:600;line-height:1;padding:3px 8px 3px 6px;border-radius:var(--r-pill);border:1px solid var(--line-strong);background:var(--surface-0);color:var(--text-muted);text-transform:capitalize;white-space:nowrap}
 .tier-badge::before{content:"";width:8px;height:8px;border-radius:50%%;background:currentColor;box-shadow:inset 0 0 0 1px rgba(1,4,9,.35);flex:none}
 .tier-badge.tier-advisor{border-color:rgba(210,169,85,.45);background:rgba(210,169,85,.10);color:#d0a955}
-.tier-badge.tier-merger{border-color:rgba(247,120,186,.42);background:rgba(247,120,186,.10);color:var(--cc-pink)}
+.tier-badge.tier-merger{border-color:color-mix(in srgb,var(--acmm-level-5) 42%%,transparent);background:color-mix(in srgb,var(--acmm-level-5) 10%%,transparent);color:var(--acmm-level-5)}
 .tier-badge.tier-trusted{border-color:rgba(201,162,39,.40);background:rgba(201,162,39,.08);color:#c9a94a}
 .tier-badge.tier-contributor{border-color:rgba(110,163,201,.38);background:rgba(110,163,201,.08);color:#6ea3c9}
-.tier-badge.tier-newcomer{border-color:var(--cc-border);background:var(--cc-bg);color:var(--cc-muted)}
+.tier-badge.tier-newcomer{border-color:var(--line-strong);background:var(--surface-0);color:var(--text-muted)}
 /* Restrained gradient header band on the accented cards. Very low-contrast wash
    from the deep bg into the card colour — reads as a faint banner, not a loud
    gradient; the bottom border keeps the head crisp. */
-.ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,#12161d 0%%,var(--cc-surface) 100%%)}
+.ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,#12161d 0%%,var(--surface-2) 100%%)}
 .ops-card.card-accent>.ops-card-head h3{letter-spacing:.01em}
 /* Bold-numeral stat emphasis: the primary "Done" numeral on the leaderboard and
    the key ops counts get heavier weight + slightly larger tabular figures so the
    number reads as the hero of the row without adding chrome. The Me-card's own
    stat numerals reuse this same bold/tabular treatment via .lb-stat.lb-primary. */
-.lb-row .lb-stat.lb-primary{color:var(--cc-text);font-weight:700;font-size:.95rem}
-.lb-head .lb-stat.lb-primary{font-weight:600;font-size:.72rem;color:var(--cc-muted)}
+.lb-row .lb-stat.lb-primary{color:var(--text);font-weight:700;font-size:.95rem}
+.lb-head .lb-stat.lb-primary{font-weight:600;font-size:.72rem;color:var(--text-muted)}
 .tier-badge.tier-lb{padding:2px 8px 2px 5px;font-size:.66rem}
 /* Ops "your army" counts + card counts as bold numerals (tabular, no layout shift). */
 .cc-army b{font-weight:700;font-variant-numeric:tabular-nums}
-.ops-card-count.count-strong{color:var(--cc-text);font-weight:700;font-variant-numeric:tabular-nums}
+.ops-card-count.count-strong{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
 /* Small circled-i info affordance next to a header (cooldown explainer, #2649
    companion). A borderless button carrying the ⓘ glyph; hover/focus brightens it.
    The popover is an absolutely-positioned card toggled open by JS (aria-expanded),
    anchored to the wrapper so it sits just under the glyph. */
 .info-affordance{position:relative;display:inline-flex;align-items:center}
-.info-btn{background:none;border:0;padding:0 2px;margin-left:4px;color:var(--cc-muted-2);cursor:pointer;font-size:.85rem;line-height:1;vertical-align:middle}
-.info-btn:hover,.info-btn:focus{color:var(--cc-accent);outline:none}
-.info-pop{position:absolute;top:130%%;left:0;z-index:40;width:300px;max-width:78vw;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;padding:10px 12px;box-shadow:0 8px 24px rgba(1,4,9,.7);color:var(--cc-text-2);font-size:.74rem;line-height:1.5;font-weight:400;text-align:left;white-space:normal}
+.info-btn{vertical-align:middle}
+.info-pop{position:absolute;top:130%%;left:0;z-index:40;width:300px;max-width:78vw;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;padding:10px 12px;box-shadow:0 8px 24px rgba(1,4,9,.7);color:var(--text);font-size:.74rem;line-height:1.5;font-weight:400;text-align:left;white-space:normal}
 .info-pop[hidden]{display:none}
-.info-pop h4{margin:0 0 4px;font-size:.76rem;color:var(--cc-text);font-weight:600}
-.info-pop ul{margin:4px 0 0;padding-left:16px}
-.info-pop li{margin:2px 0}
-.info-pop code{background:var(--cc-surface);border:1px solid var(--cc-border-2);border-radius:4px;padding:0 3px;font-size:.7rem}
-.custom-css-help .info-btn{font-size:.72rem;font-weight:600;color:var(--cc-accent)}
+.info-pop h4{margin:var(--sp-0) var(--sp-0) var(--sp-2);font-size:.76rem;color:var(--text);font-weight:600}
+.info-pop ul{margin:var(--sp-2) var(--sp-0) var(--sp-0);padding-left:var(--sp-6)}
+.info-pop li{margin:var(--sp-1) var(--sp-0)}
+.info-pop code{background:var(--surface-2);border:1px solid var(--line-subtle);border-radius:var(--r-sm);padding:0 3px;font-size:.7rem}
+.custom-css-help .info-btn{font-weight:var(--fw-semibold)}
 .custom-css-pop{width:min(320px,calc(100vw - 32px));z-index:10002}
-.custom-css-example{box-sizing:border-box;width:100%%;margin:6px 0 4px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text-2);font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:6px}
+.custom-css-example{box-sizing:border-box;width:100%%;margin:var(--sp-3) var(--sp-0) var(--sp-2);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r);color:var(--text);font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:var(--sp-3)}
 /* Compact tier badge inline next to a connected clanker's identity. */
-.tier-badge.tier-inline{padding:1px 6px 1px 4px;font-size:.62rem;margin-left:6px;vertical-align:middle}
+.tier-badge.tier-inline{padding:1px 6px 1px 4px;font-size:var(--fs-2xs);margin-left:var(--sp-3);vertical-align:middle}
 .tier-badge.tier-inline::before{width:6px;height:6px}
 /* Larger tier-badge variant used as the hero medallion on the personal Me-card
    (see below) — same canonical tier colors/dot, just sized up for a hero slot. */
@@ -608,146 +555,128 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
    Theaters of Operation, and a record footer. --me-accent is the viewer's
    ceremony rank metal by default; the 7 style skins only re-tint it. Reduced-
    motion safe. No decay, no streaks, no nags. */
-.me-card{position:relative;margin-bottom:20px;--me-accent:#58a6ff;--me-accent-soft:rgba(88,166,255,.14)}
+.me-card{position:relative;margin-bottom:var(--sp-7);--me-accent:#58a6ff;--me-accent-soft:rgba(88,166,255,.14)}
 /* Masthead: "{project} · contributor record" (accent) + "DOSSIER {user}" (mono). */
-.dz-masthead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
-.dz-masthead .brand{font-size:.82rem;font-weight:700;letter-spacing:.04em;color:var(--cc-accent)}
-.dz-masthead .id{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem;color:var(--cc-muted-2);text-transform:uppercase}
-.dz-epigraph{font-size:.82rem;color:var(--cc-muted);margin:0 0 20px}
-.dz-epigraph em{font-style:italic;color:var(--cc-text-2)}
+.dz-masthead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:var(--sp-2)}
+.dz-masthead .brand{font-size:var(--fs-base);font-weight:700;letter-spacing:.04em;color:var(--cc-accent)}
+.dz-masthead .id{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem;color:var(--text-faint);text-transform:uppercase}
+.dz-epigraph{font-size:var(--fs-base);color:var(--text-muted);margin:var(--sp-0) var(--sp-0) var(--sp-7)}
+.dz-epigraph em{font-style:italic;color:var(--text)}
 /* Zone-card primitives (mockup .card/.zone/.zone-head with the metal dot). */
-.dz-zcard{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;padding:20px 22px 22px}
-.dz-zone-head{display:flex;align-items:center;gap:8px;font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--cc-muted);padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--cc-border-2)}
+.dz-zcard{background:var(--surface-2);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-7) var(--sp-7) var(--sp-7);box-shadow:var(--shadow-card)}
+.dz-zone-head{display:flex;align-items:center;gap:var(--sp-4);font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--line-subtle)}
 .dz-zone-head::before{content:"";width:8px;height:8px;border-radius:50%%;background:var(--me-accent)}
 /* The sheet grid: 5fr/7fr two-column rhythm, stacking on small screens. */
-.dz-grid{display:grid;grid-template-columns:5fr 7fr;gap:16px;margin-bottom:16px}
+.dz-grid{display:grid;grid-template-columns:5fr 7fr;gap:var(--sp-6);margin-bottom:var(--sp-6)}
 @media(max-width:860px){.dz-grid{grid-template-columns:1fr}}
 /* ZONE A — identity plate: full-width, bottom-anchored content over the
    generative EMBLEM FIELD (layered conic/radial/repeating-linear gradients,
    deterministically seeded from emblem_seed/username via the --a1/--a2/--p1/
    --p2 custom props the client sets inline). color-mix keeps the darkening
-   tied to --cc-bg so the plate degrades gracefully in light mode. */
-.dz-identity{position:relative;overflow:hidden;margin-bottom:16px;border:1px solid var(--cc-border);border-radius:14px;min-height:300px;display:flex;flex-direction:column;justify-content:flex-end;background:var(--cc-surface)}
+   tied to --surface-0 so the plate degrades gracefully in light mode. */
+.dz-identity{position:relative;overflow:hidden;margin-bottom:var(--sp-6);border:1px solid var(--line-strong);border-radius:14px;min-height:300px;display:flex;flex-direction:column;justify-content:flex-end;background:var(--surface-2)}
 @media(max-width:860px){.dz-identity{min-height:220px}}
-.me-emblem{position:absolute;inset:0;pointer-events:none;--a1:210deg;--a2:160deg;--p1:30%%;--p2:62%%;background:repeating-linear-gradient(var(--a2),transparent 0 22px,rgba(255,255,255,.02) 22px 23px),conic-gradient(from var(--a1) at var(--p1) 20%%,transparent 0deg,var(--me-accent-soft) 40deg,transparent 90deg,var(--me-accent-soft) 165deg,transparent 210deg,var(--me-accent-soft) 300deg,transparent 360deg),radial-gradient(700px 340px at var(--p2) 0%%,var(--me-accent-soft),transparent 70%%),linear-gradient(180deg,color-mix(in srgb,var(--cc-bg) 10%%,transparent),color-mix(in srgb,var(--cc-bg) 92%%,transparent) 85%%),var(--cc-bg-deep)}
-.dz-identity-inner{position:relative;padding:28px 26px 22px;display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.me-emblem{position:absolute;inset:0;pointer-events:none;--a1:210deg;--a2:160deg;--p1:30%%;--p2:62%%;background:repeating-linear-gradient(var(--a2),transparent 0 22px,rgba(255,255,255,.02) 22px 23px),conic-gradient(from var(--a1) at var(--p1) 20%%,transparent 0deg,var(--me-accent-soft) 40deg,transparent 90deg,var(--me-accent-soft) 165deg,transparent 210deg,var(--me-accent-soft) 300deg,transparent 360deg),radial-gradient(700px 340px at var(--p2) 0%%,var(--me-accent-soft),transparent 70%%),linear-gradient(180deg,color-mix(in srgb,var(--surface-0) 10%%,transparent),color-mix(in srgb,var(--surface-0) 92%%,transparent) 85%%),var(--surface-1)}
+.dz-identity-inner{position:relative;padding:28px 26px 22px;display:flex;gap:var(--sp-7);align-items:center;flex-wrap:wrap}
 /* Circular medallion with the rank-metal ring. */
-.dz-medallion{width:84px;height:84px;flex:none;border-radius:50%%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50%% 35%%,var(--me-accent-soft),var(--cc-bg) 78%%);border:2px solid var(--me-accent);box-shadow:0 0 0 4px rgba(1,4,9,.35)}
-.dz-medallion img{width:70px;height:70px;border-radius:50%%;object-fit:cover;background:var(--cc-border)}
+.dz-medallion{width:84px;height:84px;flex:none;border-radius:50%%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50%% 35%%,var(--me-accent-soft),var(--surface-0) 78%%);border:2px solid var(--me-accent);box-shadow:0 0 0 4px rgba(1,4,9,.35)}
+.dz-medallion img{width:70px;height:70px;border-radius:50%%;object-fit:cover;background:var(--line-strong)}
 .dz-namebloc{flex:1;min-width:240px}
 /* Hero name: the Michroma display treatment (embedded above — no network). */
-.dz-heroname{font-family:'Michroma','Arial Narrow',sans-serif;font-size:clamp(1.6rem,3.6vw,2.6rem);font-weight:400;letter-spacing:.1em;line-height:1.1;text-transform:uppercase;color:var(--cc-text);margin:0}
+.dz-heroname{font-family:'Michroma','Arial Narrow',sans-serif;font-size:clamp(1.6rem,3.6vw,2.6rem);font-weight:400;letter-spacing:.1em;line-height:1.1;text-transform:uppercase;color:var(--text);margin:var(--sp-0)}
 /* Rank pill: the ceremony DESIGNATION (rank metal) big, "trust · tier" small. */
-.dz-rankpill{flex:none;text-align:center;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:12px;padding:10px 16px}
-.dz-rankpill .rank-name{font-family:'Michroma','Arial Narrow',sans-serif;font-size:.92rem;letter-spacing:.14em;color:var(--me-accent);text-transform:uppercase}
-.dz-rankpill .rank-sub{font-size:.64rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--cc-muted);margin-top:4px}
+.dz-rankpill{flex:none;text-align:center;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:var(--r-lg);padding:10px 16px}
+.dz-rankpill .rank-name{font-family:'Michroma','Arial Narrow',sans-serif;font-size:var(--fs-md);letter-spacing:.14em;color:var(--me-accent);text-transform:uppercase}
+.dz-rankpill .rank-sub{font-size:.64rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-top:var(--sp-2)}
 /* Livebar strip along the bottom of the plate — only when a task is live. */
-.dz-livebar{position:relative;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 26px 12px;border-top:1px solid var(--cc-border-2);background:color-mix(in srgb,var(--cc-bg-deep) 40%%,transparent);font-size:.74rem;color:var(--cc-text-2)}
+.dz-livebar{position:relative;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 26px 12px;border-top:1px solid var(--line-subtle);background:color-mix(in srgb,var(--surface-1) 40%%,transparent);font-size:.74rem;color:var(--text)}
 .dz-livebar .dot{width:8px;height:8px;border-radius:50%%;background:var(--cc-green);flex:none}
 @media(prefers-reduced-motion:no-preference){.dz-livebar .dot{animation:dzpulse 2s infinite}@keyframes dzpulse{50%%{opacity:.35}}}
-.dz-livebar .live-tag{font-weight:700;font-size:.68rem;letter-spacing:.06em;color:var(--cc-green)}
-.dz-livebar .live-dim{color:var(--cc-muted);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem}
+.dz-livebar .live-tag{font-weight:700;font-size:var(--fs-xs);letter-spacing:.06em;color:var(--cc-green)}
+.dz-livebar .live-dim{color:var(--text-muted);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem}
 /* Founding mark: real registration order only (first twenty), never faked. */
-.me-founding{display:inline-block;margin-top:8px;padding:2px 9px;border-radius:999px;font-size:.64rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--me-accent);border:1px solid var(--me-accent);background:var(--me-accent-soft)}
+.me-founding{display:inline-block;margin-top:var(--sp-4);padding:2px 9px;border-radius:var(--r-pill);font-size:.64rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--me-accent);border:1px solid var(--me-accent);background:var(--me-accent-soft)}
 /* ZONE B — Deeds of Record: 2-col grid of stat blocks. The numeral keeps the
    canonical bold .lb-stat.lb-primary treatment, tinted only for standing. */
 .dz-deeds{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.dz-deed{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:10px;padding:12px 10px;text-align:center}
-.dz-deed .num{font-size:1.4rem;font-weight:700;color:var(--cc-text);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace}
-.dz-deed .num small{font-size:.85rem;color:var(--cc-muted);font-weight:400}
-.dz-deed .cap{font-size:.66rem;color:var(--cc-muted);margin-top:4px}
+.dz-deed{background:var(--surface-3);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-5);text-align:center}
+.dz-deed .num{font-size:var(--fs-2xl);font-weight:700;color:var(--text);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace}
+.dz-deed .num small{font-size:.85rem;color:var(--text-muted);font-weight:400}
+.dz-deed .cap{font-size:.66rem;color:var(--text-muted);margin-top:var(--sp-2)}
 .dz-deed--standing .num{color:var(--me-accent)}
 /* Full-width Golden Path card: zone-head left, "next designation" right. */
-.dz-path-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px}
-.dz-path-head .dz-zone-head{margin:0;border:none;padding:0}
-.dz-path-next{font-size:.82rem;color:var(--cc-muted)}
-.dz-path-next b{font-family:'Michroma','Arial Narrow',sans-serif;font-size:.88rem;letter-spacing:.1em;color:var(--cc-text);font-weight:400}
+.dz-path-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:var(--sp-4)}
+.dz-path-head .dz-zone-head{margin:var(--sp-0);border:none;padding:var(--sp-0)}
+.dz-path-next{font-size:var(--fs-base);color:var(--text-muted)}
+.dz-path-next b{font-family:'Michroma','Arial Narrow',sans-serif;font-size:.88rem;letter-spacing:.1em;color:var(--text);font-weight:400}
 /* ZONE D — Triumphs: milestone SEALS (mockup .seal blocks; attained ones are
    solid, the next one to chase renders with a dashed border, never a nag). */
 .dz-seals{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
-.dz-seal{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:10px;padding:12px 14px}
-.dz-seal .glyph{width:8px;height:8px;border-radius:50%%;background:var(--me-accent);margin-bottom:8px}
-.dz-seal .t-name{font-size:.78rem;font-weight:700;letter-spacing:.04em;color:var(--cc-text)}
-.dz-seal .t-sub{font-size:.7rem;color:var(--cc-muted);margin-top:5px;line-height:1.5}
+.dz-seal{background:var(--surface-3);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-5)}
+.dz-seal .glyph{width:8px;height:8px;border-radius:50%%;background:var(--me-accent);margin-bottom:var(--sp-4)}
+.dz-seal .t-name{font-size:.78rem;font-weight:700;letter-spacing:.04em;color:var(--text)}
+.dz-seal .t-sub{font-size:.7rem;color:var(--text-muted);margin-top:5px;line-height:1.5}
 .dz-seal--next{border-style:dashed}
-.dz-seal--next .glyph{background:var(--cc-border)}
-.dz-seal--next .t-name{color:var(--cc-text-2)}
+.dz-seal--next .glyph{background:var(--line-strong)}
+.dz-seal--next .t-name{color:var(--text)}
 /* Heraldry divider inside the Triumphs card. */
-.dz-heraldry-head{margin-top:18px;padding-top:14px;border-top:1px dashed var(--cc-border);display:flex;justify-content:space-between;align-items:baseline;font-size:.7rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--cc-muted);margin-bottom:14px}
+.dz-heraldry-head{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line-strong);display:flex;justify-content:space-between;align-items:baseline;font-size:.7rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin-bottom:14px}
 /* ZONE E — Collaborators: the empty state shown until the first real joint
    operation is recorded. An invitation to go and meet someone, not a placeholder. */
-.dz-collab-empty{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.78rem;color:var(--cc-muted);line-height:1.8}
+.dz-collab-empty{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.78rem;color:var(--text-muted);line-height:1.8}
 /* Collaborators — the people you have worked alongside. Each row links to that
    contributor's own dossier, so the collection is navigable. */
-.dz-collabs{display:grid;gap:8px}
+.dz-collabs{display:grid;gap:var(--sp-4)}
 .dz-collab{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:9px;
-  border:1px solid var(--cc-border);background:var(--cc-bg);text-decoration:none;color:inherit}
+  border:1px solid var(--line-strong);background:var(--surface-0);text-decoration:none;color:inherit}
 .dz-collab:hover{border-color:var(--me-accent)}
-.dz-collab__av{width:28px;height:28px;border-radius:50%%;flex:none;background:var(--cc-surface)}
+.dz-collab__av{width:28px;height:28px;border-radius:50%%;flex:none;background:var(--surface-2)}
 .dz-collab__body{display:flex;flex-direction:column;min-width:0}
-.dz-collab__name{font-size:.84rem;font-weight:600;color:var(--cc-text)}
-.dz-collab__how{font-size:.7rem;color:var(--cc-muted-2);text-transform:uppercase;letter-spacing:.04em}
+.dz-collab__name{font-size:.84rem;font-weight:600;color:var(--text)}
+.dz-collab__how{font-size:.7rem;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em}
 /* ZONE F — Field Log rows: mono time-ago + entry. */
 .dz-flog{display:grid;gap:10px}
-.dz-frow{display:grid;grid-template-columns:5.5rem 1fr;gap:12px;align-items:baseline}
-.dz-frow .f-when{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem;color:var(--cc-muted-2)}
-.dz-frow .f-what{font-size:.8rem;color:var(--cc-text-2);line-height:1.55}
+.dz-frow{display:grid;grid-template-columns:5.5rem 1fr;gap:var(--sp-5);align-items:baseline}
+.dz-frow .f-when{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem;color:var(--text-faint)}
+.dz-frow .f-what{font-size:.8rem;color:var(--text);line-height:1.55}
 .dz-frow .f-what b{font-weight:600;color:var(--cc-accent)}
-.dz-frow .f-what span{color:var(--cc-muted)}
+.dz-frow .f-what span{color:var(--text-muted)}
 /* Record footer: HIVE // id + the per-hive closing quote. */
-.dz-footer{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-top:8px;padding:14px 4px 0;border-top:1px solid var(--cc-border-2);font-size:.72rem;color:var(--cc-muted-2);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;text-transform:uppercase}
-.dz-footer .quote{color:var(--cc-muted);text-transform:none}
+.dz-footer{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:var(--sp-4);margin-top:var(--sp-4);padding:14px 4px 0;border-top:1px solid var(--line-subtle);font-size:.72rem;color:var(--text-faint);font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;text-transform:uppercase}
+.dz-footer .quote{color:var(--text-muted);text-transform:none}
 /* Theaters of Operation: hives render as rows — name + relationship pill. */
-.me-hives{display:grid;gap:8px}
-.me-hive{display:flex;align-items:center;gap:10px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:10px;padding:10px 14px;font-size:.82rem;color:var(--cc-text-2)}
-.me-hive__name{font-size:.82rem;font-weight:700;letter-spacing:.03em;color:var(--cc-text);flex:1;text-transform:uppercase}
-.me-hive__rel{font-size:.66rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:6px;background:var(--me-accent-soft);color:var(--me-accent)}
+.me-hives{display:grid;gap:var(--sp-4)}
+.me-hive{display:flex;align-items:center;gap:var(--sp-5);background:var(--surface-3);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-5);font-size:var(--fs-base);color:var(--text)}
+.me-hive__name{font-size:var(--fs-base);font-weight:700;letter-spacing:.03em;color:var(--text);flex:1;text-transform:uppercase}
+.me-hive__rel{font-size:.66rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:var(--r);background:var(--me-accent-soft);color:var(--me-accent)}
 .me-hive__rel--owner{background:rgba(210,153,34,.16);color:var(--cc-amber)}
 .me-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;align-items:center}
-.me-share{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:10px;font-size:.85rem;font-weight:600;text-decoration:none;background:var(--me-accent);color:var(--cc-bg);border:1px solid var(--me-accent);cursor:pointer;font-family:inherit}
+.me-share{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:10px;font-size:.85rem;font-weight:600;text-decoration:none;background:var(--me-accent);color:var(--surface-0);border:1px solid var(--me-accent);cursor:pointer;font-family:inherit}
 .me-share:hover{filter:brightness(1.08)}
 .me-share--ghost{background:transparent;color:var(--me-accent)}
-.me-stylepick{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:.72rem;color:var(--cc-muted)}
-.me-stylepick select{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text-2);border-radius:8px;padding:5px 8px;font-size:.78rem;font-family:inherit;cursor:pointer}
-.me-signin{background:var(--cc-surface);border:1px dashed var(--cc-border);border-radius:14px;padding:22px;text-align:center;color:var(--cc-muted);font-size:.9rem;margin-bottom:20px}
-.me-signin b{color:var(--cc-text)}
+.me-stylepick{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:.72rem;color:var(--text-muted)}
+.me-stylepick select{background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text);border-radius:8px;padding:5px 8px;font-size:.78rem;font-family:inherit;cursor:pointer}
+.me-signin{background:var(--surface-2);border:var(--line-width) dashed var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-7);text-align:center;color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-7)}
+.me-signin b{color:var(--text)}
 /* The signed-out call to action. It was <b> text, which told a visitor to sign
    in while giving them nothing to click (#7195). Styled as an explicit control
    rather than an inline link so it reads as the action it is, and underlined on
    hover/focus so it is not identified by colour alone. */
-.cc-signin-cta{display:inline-block;color:var(--cc-text);font-weight:600;
+.cc-signin-cta{display:inline-block;color:var(--text);font-weight:600;
   text-decoration:underline;text-underline-offset:2px;cursor:pointer}
 .cc-signin-cta:hover,.cc-signin-cta:focus-visible{color:var(--cc-accent,#2ea043)}
 .cc-signin-cta:focus-visible{outline:2px solid var(--cc-accent,#2ea043);outline-offset:2px}
 /* Leaderboard standing strip — the one-line remnant of the dossier on the
    standings tab. Deliberately unobtrusive: the Rankings are the content here. */
-.me-standing{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
-  background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;
-  padding:10px 16px;margin-bottom:16px;font-size:.86rem;color:var(--cc-muted)}
-.me-standing b{color:var(--cc-text)}
+.me-standing{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-5);flex-wrap:wrap;
+  background:var(--surface-1);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);
+  padding:var(--sp-5) var(--sp-6);margin-bottom:var(--sp-6);font-size:var(--fs-base);color:var(--text-muted);box-shadow:var(--shadow-card)}
+.me-standing b{color:var(--text)}
 .me-standing__link{color:var(--cc-accent);text-decoration:none;font-weight:600;white-space:nowrap}
 .me-standing__link:hover{text-decoration:underline}
-/* ── The 7 profile-style skins (palette / framing / density variations) ────────
-   Each is a tasteful, readable, professional variant of the SAME card. They only
-   change accent palette, header treatment, medallion framing, and density —
-   never the data or the affordances. Default (style1) needs no override. */
-/* style1 "Rank metal" is the DEFAULT: it takes its accent from the viewer's
-   ceremony rank metal (--me-metal/--me-metal-soft, set inline by the client
-   from the trust tier). Styles 2..7 override --me-accent directly, so picking
-   any other skin beats the rank metal — exactly like the old Signal blue. */
-.me-card--style1{--me-accent:var(--me-metal,#58a6ff);--me-accent-soft:var(--me-metal-soft,rgba(88,166,255,.14))}
-.me-card--style2{--me-accent:#3fb950;--me-accent-soft:rgba(63,185,80,.14)}
-.me-card--style3{--me-accent:#d29922;--me-accent-soft:rgba(210,153,34,.15)}
-.me-card--style4{--me-accent:#a371f7;--me-accent-soft:rgba(163,113,247,.15)}
-.me-card--style5{--me-accent:var(--cc-muted);--me-accent-soft:rgba(139,148,158,.12)}     /* minimal / restrained */
-.me-card--style5 .dz-identity{min-height:0}
-.me-card--style5 .me-emblem{display:none}
-.me-card--style5 .dz-medallion{background:var(--cc-bg)}
-.me-card--style6{--me-accent:#f778ba;--me-accent-soft:rgba(247,120,186,.14)}
-.me-card--style6 .me-emblem{opacity:.75}
-.me-card--style7{--me-accent:#58a6ff;--me-accent-soft:rgba(88,166,255,.18)}     /* roomy "ranked" */
-.me-card--style7 .dz-identity{min-height:340px}
-.me-card--style7 .dz-identity-inner{padding:34px 30px 26px}
+/* Contributor profile skins now live in pkg/dashboard/theme/themes/*.yaml and
+   are loaded through the same /api/themes catalog as dashboard Appearance. The
+   legacy localStorage key is still honored, but numeric skin ids map to theme ids. */
 /* ── Contributor dossier additions (me-card v2) ───────────────────────────────
    Identity band gains an equipped-title callsign + designation line; the body
    gains the operator-profile rows (archetype / specializations / loadout /
@@ -755,188 +684,185 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
    HERALDRY hall (the viewer's own public Credly badges, floating free — no
    boxes). Everything is tinted by the SAME --me-accent the 7 style skins drive,
    so every skin themes the dossier for free. No decay, no streaks, no nags. */
-.me-callsign{font-size:.74rem;font-weight:600;letter-spacing:.18em;color:var(--me-accent);text-transform:uppercase;margin-bottom:4px}
-.me-desig{font-size:.82rem;color:var(--cc-muted);margin-top:8px}
-.me-desig b{font-weight:600;color:var(--cc-text-2)}
+.me-callsign{font-size:.74rem;font-weight:600;letter-spacing:.18em;color:var(--me-accent);text-transform:uppercase;margin-bottom:var(--sp-2)}
+.me-desig{font-size:var(--fs-base);color:var(--text-muted);margin-top:var(--sp-4)}
+.me-desig b{font-weight:600;color:var(--text)}
 .me-prows{display:grid;gap:9px}
-.me-prow{display:grid;grid-template-columns:128px 1fr;gap:12px;align-items:baseline}
-.me-prow .k{font-size:.68rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--cc-muted)}
-.me-prow .v{font-size:.86rem;color:var(--cc-text)}
+.me-prow{display:grid;grid-template-columns:128px 1fr;gap:var(--sp-5);align-items:baseline}
+.me-prow .k{font-size:var(--fs-xs);font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted)}
+.me-prow .v{font-size:.86rem;color:var(--text)}
 .me-prow .v.mono{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.78rem}
-.me-prow .v .unset{color:var(--cc-muted-2)}
-.me-specs{display:flex;flex-wrap:wrap;gap:6px}
-.me-spec{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid var(--me-accent);background:var(--me-accent-soft);color:var(--me-accent)}
-.me-testimony{margin-top:14px;padding:12px 14px;background:var(--cc-bg);border-left:3px solid var(--me-accent);border-radius:6px;font-size:.9rem;color:var(--cc-text-2)}
-.me-testimony .attr{display:block;font-size:.64rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--cc-muted);margin-top:6px}
+.me-prow .v .unset{color:var(--text-faint)}
+.me-specs{display:flex;flex-wrap:wrap;gap:var(--sp-3)}
+.me-spec{display:inline-block;padding:var(--sp-1) var(--sp-4);border-radius:var(--r-pill);font-size:.7rem;font-weight:600;border:1px solid var(--me-accent);background:var(--me-accent-soft);color:var(--me-accent)}
+.me-testimony{margin-top:14px;padding:var(--sp-5) 14px;background:var(--surface-0);border-left:3px solid var(--me-accent);border-radius:var(--r);font-size:.9rem;color:var(--text)}
+.me-testimony .attr{display:block;font-size:.64rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-top:var(--sp-3)}
 .me-dossier-invite{margin-top:14px;font-size:.8rem}.me-dossier-invite a{color:var(--me-accent);text-decoration:none;cursor:pointer}
 .me-dossier-invite a:hover{text-decoration:underline}
-.me-dossier-form{display:none;margin-top:12px;padding:14px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:10px}
+.me-dossier-form{display:none;margin-top:var(--sp-5);padding:14px;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:10px}
 .me-dossier-form.open{display:grid;gap:10px}
-.me-dossier-form label{display:grid;gap:4px;font-size:.66rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--cc-muted)}
-.me-dossier-form input,.me-dossier-form textarea{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);font-family:inherit;font-size:.85rem;padding:8px 10px;outline:none;resize:vertical}
+.me-dossier-form label{display:grid;gap:var(--sp-2);font-size:var(--fs-xs);font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted)}
+.me-dossier-form input,.me-dossier-form textarea{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;color:var(--text);font-family:inherit;font-size:.85rem;padding:var(--sp-4) 10px;outline:none;resize:vertical}
 .me-dossier-form input:focus,.me-dossier-form textarea:focus{border-color:var(--me-accent)}
-.me-dossier-form .hint{font-size:.68rem;font-weight:400;letter-spacing:0;text-transform:none;color:var(--cc-muted-2)}
+.me-dossier-form .hint{font-size:var(--fs-xs);font-weight:400;letter-spacing:0;text-transform:none;color:var(--text-faint)}
 .me-dossier-form .actions{display:flex;gap:10px;align-items:center}
-.me-dossier-save{padding:8px 16px;border-radius:10px;font-size:.82rem;font-weight:600;background:var(--me-accent);color:var(--cc-bg);border:1px solid var(--me-accent);cursor:pointer;font-family:inherit}
-.me-dossier-cancel{background:transparent;border:none;color:var(--cc-muted);font-size:.78rem;cursor:pointer;font-family:inherit}
-.me-path-reqs{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px 22px;margin-top:12px}
-.me-path-req{margin-top:4px}
+.me-dossier-save{padding:var(--sp-4) var(--sp-6);border-radius:10px;font-size:var(--fs-base);font-weight:600;background:var(--me-accent);color:var(--surface-0);border:1px solid var(--me-accent);cursor:pointer;font-family:inherit}
+.me-dossier-cancel{background:transparent;border:none;color:var(--text-muted);font-size:.78rem;cursor:pointer;font-family:inherit}
+.me-path-reqs{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px 22px;margin-top:var(--sp-5)}
+.me-path-req{margin-top:var(--sp-2)}
 .me-path-req .req-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
-.me-path-req .req-name{font-size:.68rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-muted)}
-.me-path-req .req-num{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem;color:var(--cc-text-2)}
-.me-path-req .bar{height:6px;border-radius:999px;background:var(--cc-border-2);position:relative;overflow:hidden}
-.me-path-req .bar i{position:absolute;inset:0 auto 0 0;border-radius:999px;background:var(--me-accent);display:block}
+.me-path-req .req-name{font-size:var(--fs-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.me-path-req .req-num{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem;color:var(--text)}
+.me-path-req .bar{height:6px;border-radius:var(--r-pill);background:var(--line-subtle);position:relative;overflow:hidden}
+.me-path-req .bar i{position:absolute;inset:0 auto 0 0;border-radius:var(--r-pill);background:var(--me-accent);display:block}
 /* Ceremony ladder: RECRUIT · OPERATOR · SPECIALIST · WARDEN · VANGUARD · PARAGON */
-.me-ladder{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:14px;font-size:.68rem;font-weight:600;color:var(--cc-muted-2)}
-.me-ladder .rung{display:flex;align-items:center;gap:6px}
-.me-ladder .rung::after{content:"\00B7";color:var(--cc-border);margin-left:6px}
+.me-ladder{display:flex;flex-wrap:wrap;gap:var(--sp-3);align-items:center;margin-top:14px;font-size:var(--fs-xs);font-weight:600;color:var(--text-faint)}
+.me-ladder .rung{display:flex;align-items:center;gap:var(--sp-3)}
+.me-ladder .rung::after{content:"\00B7";color:var(--line-strong);margin-left:var(--sp-3)}
 .me-ladder .rung:last-child::after{content:none}
 .me-ladder .rung.attained{color:var(--me-accent)}
 /* A rung no trust tier can grant yet — visibly out of reach, never implied next. */
 .me-ladder .rung.aspirational{opacity:.45;font-style:italic}
-.me-ladder .rung.current{color:var(--cc-text)}
-.me-path-note{margin-top:10px;font-size:.72rem;color:var(--cc-muted)}
-.me-heraldry{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:20px 12px}
-.me-arms{position:relative;text-align:center;text-decoration:none;padding:4px 4px 2px;transition:transform .18s ease;display:block}
+.me-ladder .rung.current{color:var(--text)}
+.me-path-note{margin-top:10px;font-size:.72rem;color:var(--text-muted)}
+.me-heraldry{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:var(--sp-7) var(--sp-5)}
+.me-arms{position:relative;text-align:center;text-decoration:none;padding:var(--sp-2) var(--sp-2) var(--sp-1);transition:transform .18s ease;display:block}
 .me-arms:hover{transform:translateY(-3px)}
 .me-arms .shield{width:96px;height:96px;margin:0 auto;display:block;position:relative;z-index:1;filter:drop-shadow(0 10px 14px rgba(1,4,9,.65))}
 .me-arms .shield::before{content:"";position:absolute;inset:-14px;z-index:-1;border-radius:50%%;background:radial-gradient(closest-side,var(--me-accent-soft),transparent 72%%)}
 .me-arms .shield img{width:100%%;height:100%%;object-fit:contain}
 .me-arms .plinth{display:block;width:64px;height:8px;margin:2px auto 0;border-radius:50%%;background:radial-gradient(closest-side,rgba(1,4,9,.85),transparent)}
-.me-arms .ribbon{display:inline-block;margin-top:8px;max-width:100%%;font-size:.66rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--cc-text);line-height:1.35}
-.me-arms .a-sub{display:block;font-size:.62rem;color:var(--cc-muted);margin-top:3px;line-height:1.45}
-.me-heraldry-note{font-size:.78rem;color:var(--cc-muted)}
+.me-arms .ribbon{display:inline-block;margin-top:var(--sp-4);max-width:100%%;font-size:.66rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text);line-height:1.35}
+.me-arms .a-sub{display:block;font-size:var(--fs-2xs);color:var(--text-muted);margin-top:3px;line-height:1.45}
+.me-heraldry-note{font-size:.78rem;color:var(--text-muted)}
 .me-heraldry-note a{color:var(--me-accent);text-decoration:none;cursor:pointer}
-.lb-title{font-size:.68rem;font-weight:600;letter-spacing:.06em;color:var(--cc-accent);margin-left:7px}
-@media(max-width:560px){.me-prow{grid-template-columns:1fr;gap:2px}}
+.lb-title{font-size:var(--fs-xs);font-weight:600;letter-spacing:.06em;color:var(--cc-accent);margin-left:7px}
+@media(max-width:560px){.me-prow{grid-template-columns:1fr;gap:var(--sp-1)}}
 @media(max-width:520px){.dz-identity-inner{flex-wrap:wrap}.dz-deeds{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.me-card *{transition:none!important;animation:none!important}}
-.ops-note{color:var(--cc-muted-2);font-size:.78rem;margin-top:12px;line-height:1.5}
-.ops-note code{background:var(--cc-bg);padding:1px 6px;border-radius:4px}
-.prompt-preview{margin-top:10px;border-top:1px solid var(--cc-border-2);padding-top:8px}
+.ops-note{color:var(--text-faint);font-size:.78rem;margin-top:var(--sp-5);line-height:1.5}
+.ops-note code{background:var(--surface-0);padding:1px 6px;border-radius:var(--r-sm)}
+.prompt-preview{margin-top:10px;border-top:1px solid var(--line-subtle);padding-top:var(--sp-4)}
 .prompt-preview summary{cursor:pointer;color:var(--cc-accent);font-size:.78rem;list-style:none}
 .prompt-preview summary::-webkit-details-marker{display:none}
-.prompt-preview summary::before{content:'\25B8 ';color:var(--cc-muted)}
+.prompt-preview summary::before{content:'\25B8 ';color:var(--text-muted)}
 .prompt-preview[open] summary::before{content:'\25BE '}
-.prompt-labels{margin:8px 0 4px;display:flex;flex-wrap:wrap;gap:4px}
-.prompt-text{margin-top:8px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.75rem;color:var(--cc-text-2);white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto}
-.prompt-preview .ops-note{margin-top:8px}
+.prompt-labels{margin:var(--sp-4) var(--sp-0) var(--sp-2);display:flex;flex-wrap:wrap;gap:var(--sp-2)}
+.prompt-text{margin-top:var(--sp-4);background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;padding:var(--sp-5);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:var(--fs-sm);color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto}
+.prompt-preview .ops-note{margin-top:var(--sp-4)}
 /* #2534 Operator admin controls — mirror the Governor Hub config controls into the
    Management & Operations tab. Owner/read-write only; a read viewer never sees them. */
 .ops-admin{display:none}
 .ops-admin.enabled{display:block}
-.admin-badge{font-size:.68rem;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(210,153,34,.12);color:var(--cc-amber);border:1px solid rgba(210,153,34,.3);margin-left:auto}
+.admin-badge{font-size:var(--fs-xs);font-weight:600;padding:var(--badge-pad-y) var(--badge-pad-x);border-radius:var(--r-pill);background:color-mix(in srgb,var(--status-attention) var(--component-tint),transparent);color:var(--status-attention);border:var(--line-width) solid color-mix(in srgb,var(--status-attention) var(--component-border),transparent);margin-left:auto}
 .admin-badge:empty{display:none}
-.admin-body{padding:18px 20px 22px;display:grid;gap:16px}
-.admin-section{border:1px solid var(--cc-border-2);border-radius:12px;background:rgba(139,148,158,.04);padding:16px;display:grid;gap:14px}
+.admin-body{padding:18px 20px 22px;display:grid;gap:var(--sp-6)}
+.admin-section{border:1px solid var(--line-subtle);border-radius:var(--r-lg);background:rgba(139,148,158,.04);padding:var(--sp-6);display:grid;gap:14px}
 .admin-section-head{display:grid;gap:3px;max-width:760px}
-.admin-section-head h3{font-size:.92rem;color:var(--cc-text);margin:0}
-.admin-section-head p{font-size:.76rem;color:var(--cc-muted);line-height:1.5;margin:0}
+.admin-section-head h3{font-size:var(--fs-md);color:var(--text);margin:var(--sp-0)}
+.admin-section-head p{font-size:.76rem;color:var(--text-muted);line-height:1.5;margin:var(--sp-0)}
 .admin-form-stack{display:grid;gap:10px;max-width:720px;width:100%%}
-.admin-form-stack label,.admin-field>label{display:block;font-size:.78rem;font-weight:600;color:var(--cc-text);margin-bottom:6px}
-.admin-field{margin:0;max-width:760px}
-.admin-control-note,.admin-toggle-sub{font-size:.74rem;color:var(--cc-muted);line-height:1.45}
+.admin-form-stack label,.admin-field>label{display:block;font-size:.78rem;font-weight:600;color:var(--text);margin-bottom:var(--sp-3)}
+.admin-field{margin:var(--sp-0);max-width:760px}
+.admin-control-note,.admin-toggle-sub{font-size:.74rem;color:var(--text-muted);line-height:1.45}
 .admin-control-note code,.admin-toggle-sub code{word-break:break-word}
-.admin-input,.admin-field input[type="text"],.admin-field input[type="number"],.admin-addrow input{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);font-size:.8rem;padding:7px 9px;font-family:inherit;min-width:0}
+.admin-input,.admin-field input[type="text"],.admin-field input[type="number"],.admin-addrow input{background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;color:var(--text);font-size:.8rem;padding:7px 9px;font-family:inherit;min-width:0}
 .admin-input:focus,.admin-field input:focus,.admin-field textarea:focus,.admin-addrow input:focus{outline:none;border-color:var(--cc-accent)}
-.admin-textarea{width:100%%;box-sizing:border-box;max-width:720px;resize:vertical;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:10px;color:var(--cc-text);font-family:inherit;font-size:.82rem;line-height:1.5;padding:10px 12px;min-width:0}
+.admin-textarea{width:100%%;box-sizing:border-box;max-width:720px;resize:vertical;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:10px;color:var(--text);font-family:inherit;font-size:var(--fs-base);line-height:1.5;padding:10px 12px;min-width:0}
 .admin-textarea--announcement{min-height:96px}
 .admin-textarea--links{min-height:140px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem}
-.admin-action-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;max-width:720px}
-.admin-action-row select,.admin-action-row input{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);padding:7px 9px;font-family:inherit;font-size:.8rem;min-height:34px}
-.admin-toggle{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:10px;padding:8px 0}
-.admin-switch{width:38px;height:20px;border-radius:999px;background:var(--cc-border);position:relative;cursor:pointer;flex-shrink:0;transition:background .15s;margin-top:1px}
-.admin-switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%%;background:var(--cc-text);transition:left .15s}
-.admin-switch.on{background:#1f6feb}
+.admin-action-row{display:flex;flex-wrap:wrap;gap:var(--sp-4);align-items:center;max-width:720px}
+.admin-action-row select,.admin-action-row input{background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;color:var(--text);padding:7px 9px;font-family:inherit;font-size:.8rem;min-height:34px}
+.admin-toggle{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:10px;padding:var(--sp-4) var(--sp-0)}
+.admin-switch{width:38px;height:20px;border-radius:var(--r-pill);background:var(--line-strong);position:relative;cursor:pointer;flex-shrink:0;transition:background .15s;margin-top:1px}
+.admin-switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%%;background:var(--text);transition:left .15s}
+.admin-switch.on{background:var(--cc-accent-fg)}
 .admin-switch.on.danger{background:var(--cc-red)}
 .admin-switch.on::after{left:20px}
-.admin-toggle-label{font-size:.85rem;font-weight:600;color:var(--cc-text);margin-bottom:2px}
-.admin-toggle-grid{display:grid;gap:2px;max-width:760px}
+.admin-toggle-label{font-size:.85rem;font-weight:600;color:var(--text);margin-bottom:var(--sp-1)}
+.admin-toggle-grid{display:grid;gap:var(--sp-1);max-width:760px}
 .admin-nested-field{margin-left:48px;max-width:420px}
-.admin-inline-input{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.admin-inline-input{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap}
 .admin-inline-input input[type="number"]{width:88px;text-align:right}
-.admin-unit{font-size:.78rem;color:var(--cc-muted)}
-.admin-modeseg{display:inline-flex;border:1px solid var(--cc-border);border-radius:8px;overflow:hidden;margin-bottom:8px}
-.admin-modeseg button{background:var(--cc-bg);border:none;color:var(--cc-muted);font-size:.72rem;padding:5px 12px;cursor:pointer;font-family:inherit}
-.admin-modeseg button.on{background:#1f6feb;color:#fff}
-.admin-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:4px}
-.admin-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:.72rem;background:rgba(139,148,158,.12);color:var(--cc-text-2);border:1px solid var(--cc-border)}
+.admin-unit{font-size:.78rem;color:var(--text-muted)}
+.admin-modeseg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;margin-bottom:var(--sp-4)}
+.admin-modeseg button{background:var(--surface-0);border:none;color:var(--text-muted);font-size:.72rem;padding:5px 12px;cursor:pointer;font-family:inherit}
+.admin-modeseg button.on{background:var(--cc-accent);color:var(--surface-0)}
+.admin-chips{display:flex;flex-wrap:wrap;gap:var(--sp-3);margin-bottom:var(--sp-4);min-height:4px}
+.admin-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:var(--r-pill);font-size:.72rem;background:rgba(139,148,158,.12);color:var(--text);border:1px solid var(--line-strong)}
 .admin-chip .x{cursor:pointer;opacity:.7}
 .admin-chip .x:hover{opacity:1;color:var(--cc-red)}
-.admin-addrow{display:flex;gap:6px;max-width:520px}
+.admin-addrow{display:flex;gap:var(--sp-3);max-width:520px}
 .admin-addrow input{flex:1}
-.admin-addrow button,.admin-save{background:#238636;border:1px solid #2ea043;color:#fff;font-size:.75rem;padding:7px 12px;border-radius:8px;cursor:pointer;font-family:inherit;min-height:34px}
-.admin-addrow button{background:var(--cc-border-2);border-color:var(--cc-border);color:var(--cc-text-2)}
-.admin-save{margin-top:0}
+.admin-addrow button,.admin-save{min-height:var(--control-min-h)}
+.admin-save{margin-top:var(--sp-0)}
 .admin-save:disabled{opacity:.5;cursor:default}
-.admin-hr{border:none;border-top:1px solid var(--cc-border-2);margin:2px 0}
-.admin-filter-grid{display:grid;gap:12px;max-width:760px}
-@media(max-width:720px){.admin-body{padding:14px}.admin-section{padding:14px}.admin-action-row,.admin-addrow{align-items:stretch}.admin-action-row>*,.admin-addrow input,.admin-addrow button,.admin-save{width:100%%}.admin-nested-field{margin-left:0}.admin-inline-input input[type="number"]{width:100%%}}
+.admin-hr{border:none;border-top:1px solid var(--line-subtle);margin:var(--sp-1) var(--sp-0)}
+.admin-filter-grid{display:grid;gap:var(--sp-5);max-width:760px}
+@media(max-width:720px){.admin-body{padding:14px}.admin-section{padding:14px}.admin-action-row,.admin-addrow{align-items:stretch}.admin-action-row>*,.admin-addrow input,.admin-addrow button,.admin-save{width:100%%}.admin-nested-field{margin-left:var(--sp-0)}.admin-inline-input input[type="number"]{width:100%%}}
 /* Repos-for-Contribute enable toggles + Tier rate-limit rows (Management mirror of
    the Governor Hub sections). Subtle, matching the rest of the admin controls. */
-.admin-repos{display:flex;flex-wrap:wrap;gap:8px}
-.admin-repo{display:inline-flex;align-items:flex-start;gap:8px;padding:6px 10px;border:1px solid var(--cc-border);border-radius:8px;background:var(--cc-bg);flex-wrap:wrap}
+.admin-repos{display:flex;flex-wrap:wrap;gap:var(--sp-4)}
+.admin-repo{display:inline-flex;align-items:flex-start;gap:var(--sp-4);padding:6px 10px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-0);flex-wrap:wrap}
 .admin-repo .admin-switch{width:32px;height:18px}
 .admin-repo .admin-switch::after{width:14px;height:14px}
 .admin-repo .admin-switch.on::after{left:16px}
-.admin-repo__name{font-size:.76rem;color:var(--cc-text-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.admin-repo-filter{flex-basis:100%%;font-size:.76rem;color:var(--cc-text-2)}
+.admin-repo__name{font-size:.76rem;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.admin-repo-filter{flex-basis:100%%;font-size:.76rem;color:var(--text)}
 .admin-repo-filter summary{cursor:pointer}
-.admin-repo-filter-field{margin-top:8px}
-.admin-tier{display:grid;grid-template-columns:1fr repeat(3,64px);align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--cc-border-2)}
+.admin-repo-filter-field{margin-top:var(--sp-4)}
+.admin-tier{display:grid;grid-template-columns:1fr repeat(3,64px);align-items:center;gap:var(--sp-4);padding:var(--sp-4) var(--sp-0);border-bottom:1px solid var(--line-subtle)}
 .admin-tier:last-child{border-bottom:none}
-.admin-tier__head{display:flex;align-items:center;gap:8px;min-width:0}
-.admin-tier__name{font-size:.8rem;color:var(--cc-text);text-transform:capitalize}
-.admin-tier input{width:100%%;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text);font:inherit;font-size:.78rem;padding:4px 6px;outline:none;text-align:right}
-.admin-tier input:focus{border-color:var(--cc-accent-fg)}
+.admin-tier__head{display:flex;align-items:center;gap:var(--sp-4);min-width:0}
+.admin-tier__name{font-size:.8rem;color:var(--text);text-transform:capitalize}
+.admin-tier input{width:100%%;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:var(--r);color:var(--text);font:inherit;font-size:.78rem;padding:var(--sp-2) var(--sp-3);outline:none;text-align:right}
+.admin-tier input:focus{border-color:var(--cc-accent)}
 .admin-tier input:disabled{opacity:.45}
-.admin-tier__col{font-size:.62rem;color:var(--cc-muted-2);text-align:right;text-transform:uppercase;letter-spacing:.03em}
-.admin-tier--head{border-bottom:1px solid var(--cc-border);padding-bottom:4px}
+.admin-tier__col{font-size:var(--fs-2xs);color:var(--text-faint);text-align:right;text-transform:uppercase;letter-spacing:.03em}
+.admin-tier--head{border-bottom:1px solid var(--line-strong);padding-bottom:var(--sp-2)}
 /* No margin-left:auto — .admin-actions is now a full-width grid row beneath the
    identity (see .clanker-row grid), left-aligned and wrapping if the buttons
    don't fit the narrow column. */
-.admin-actions{display:flex;gap:6px;flex-wrap:wrap}
-.admin-act{background:var(--cc-border-2);border:1px solid var(--cc-border);color:var(--cc-text-2);font-size:.7rem;padding:3px 9px;border-radius:6px;cursor:pointer;font-family:inherit}
-.admin-act:hover{border-color:var(--cc-muted)}
-.admin-act.danger:hover{border-color:var(--cc-red);color:var(--cc-red)}
-.op-msg-banner{border:1px solid var(--cc-amber);background:rgba(210,153,34,.10);border-radius:12px;padding:12px 14px;margin:0 0 16px;color:var(--cc-text-2);display:grid;gap:8px}
-.op-msg-banner b{color:var(--cc-text)}
-.op-msg-banner pre{white-space:pre-wrap;margin:0;font:inherit;color:var(--cc-text)}
-.op-msg-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.op-msg-reply{flex:1;min-width:220px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);padding:7px 9px;font-family:inherit}
-.op-msg-state{font-size:.7rem;color:var(--cc-muted);margin-left:4px}
-.op-msg-form{display:flex;gap:6px;flex-wrap:wrap;align-items:center;width:100%%}
-.op-msg-form textarea{flex:1;min-width:220px;min-height:44px;resize:vertical;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);padding:7px 9px;font-family:inherit;font-size:.78rem}
-.admin-act select{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text-2);font-size:.7rem;border-radius:6px;padding:2px 4px;font-family:inherit}
-.agent-role-grants{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:100%%;font-size:.7rem;color:var(--cc-muted)}
-.agent-role-grants__label{font-weight:600;color:var(--cc-text-2)}
+.admin-actions{display:flex;gap:var(--sp-3);flex-wrap:wrap}
+.admin-act{white-space:nowrap}
+.op-msg-banner{border:1px solid var(--cc-amber);background:rgba(210,153,34,.10);border-radius:var(--r-lg);padding:var(--sp-5) 14px;margin:var(--sp-0) var(--sp-0) var(--sp-6);color:var(--text);display:grid;gap:var(--sp-4)}
+.op-msg-banner b{color:var(--text)}
+.op-msg-banner pre{white-space:pre-wrap;margin:var(--sp-0);font:inherit;color:var(--text)}
+.op-msg-actions{display:flex;gap:var(--sp-4);flex-wrap:wrap;align-items:center}
+.op-msg-reply{flex:1;min-width:220px;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;color:var(--text);padding:7px 9px;font-family:inherit}
+.op-msg-state{font-size:.7rem;color:var(--text-muted);margin-left:var(--sp-2)}
+.op-msg-form{display:flex;gap:var(--sp-3);flex-wrap:wrap;align-items:center;width:100%%}
+.op-msg-form textarea{flex:1;min-width:220px;min-height:44px;resize:vertical;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;color:var(--text);padding:7px 9px;font-family:inherit;font-size:.78rem}
+.admin-act select{background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text);font-size:.7rem;border-radius:var(--r);padding:var(--sp-1) var(--sp-2);font-family:inherit}
+.agent-role-grants{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;width:100%%;font-size:.7rem;color:var(--text-muted)}
+.agent-role-grants__label{font-weight:600;color:var(--text)}
 /* #4537: a flex item defaults to min-width:auto, so this one held the literal
    "Acting as" plus a <select> whose intrinsic width is its widest option
    ("none (general work)") and refused to shrink — .admin-actions' flex-wrap had
    nothing it was allowed to break, so the whole line ran off the card. */
-.clanker-act-as{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px;min-width:0;max-width:100%%;color:var(--cc-muted);font-size:.72rem}
+.clanker-act-as{display:inline-flex;align-items:center;flex-wrap:wrap;gap:var(--sp-2);min-width:0;max-width:100%%;color:var(--text-muted);font-size:.72rem}
 /* The tier and acting-as controls ARE the <select> (class on the element), which
    is why the .admin-act select descendant rule above never matched them. */
 select.admin-act{min-width:0;max-width:100%%}
-.agent-role-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;border:1px solid rgba(88,166,255,.28);background:rgba(88,166,255,.08);color:var(--cc-accent-2)}
-.agent-role-chip button{border:none;background:transparent;color:inherit;cursor:pointer;padding:0;line-height:1;opacity:.75;font:inherit}
+.agent-role-chip{display:inline-flex;align-items:center;gap:var(--sp-2);padding:var(--badge-pad-y) var(--badge-pad-x);border-radius:var(--r-pill);border:var(--line-width) solid color-mix(in srgb,var(--status-info) var(--component-border),transparent);background:color-mix(in srgb,var(--status-info) var(--component-tint-soft),transparent);color:var(--status-info)}
+.agent-role-chip button{border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--sp-0);line-height:1;opacity:.75;font:inherit}
 .agent-role-chip button:hover{opacity:1;color:var(--cc-red)}
-.agent-role-add{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text-2);font-size:.7rem;border-radius:6px;padding:2px 4px;font-family:inherit}
+.agent-role-add{background:var(--surface-0);border:1px solid var(--line-strong);color:var(--text);font-size:.7rem;border-radius:var(--r);padding:var(--sp-1) var(--sp-2);font-family:inherit}
 .admin-modal-back{display:none;position:fixed;inset:0;background:rgba(1,4,9,.7);z-index:1000;align-items:center;justify-content:center}
 .admin-modal-back.show{display:flex}
-.admin-modal{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;max-width:420px;width:90%%;padding:22px}
-.admin-modal h4{margin:0 0 8px;font-size:1rem;color:var(--cc-text)}
-.admin-modal p{font-size:.85rem;color:var(--cc-muted);line-height:1.5;margin:0 0 18px}
-.admin-modal-btns{display:flex;gap:8px;justify-content:flex-end}
-.admin-modal-btns button{font-size:.8rem;padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit;border:1px solid var(--cc-border);background:var(--cc-border-2);color:var(--cc-text-2)}
-.admin-modal-btns button.confirm{background:#da3633;border-color:var(--cc-red);color:#fff}
-.admin-note{color:var(--cc-muted-2);font-size:.76rem;margin-top:10px;line-height:1.5}
+.admin-modal{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r-lg);max-width:420px;width:90%%;padding:22px}
+.admin-modal h4{margin:var(--sp-0) var(--sp-0) var(--sp-4);font-size:1rem;color:var(--text)}
+.admin-modal p{font-size:.85rem;color:var(--text-muted);line-height:1.5;margin:0 0 18px}
+.admin-modal-btns{display:flex;gap:var(--sp-4);justify-content:flex-end}
+.admin-modal-btns button{font-size:.8rem;padding:6px 14px;border-radius:var(--r);cursor:pointer;font-family:inherit;border:1px solid var(--line-strong);background:var(--line-subtle);color:var(--text)}
+.admin-modal-btns button.confirm{background:#da3633;border-color:var(--cc-red);color:var(--surface-0)}
+.admin-note{color:var(--text-faint);font-size:.76rem;margin-top:10px;line-height:1.5}
 /* ── Operations command center — live SSE-driven queue / travel / dev-log /
    achievements / army framing. Subtle-professional motion only; degrades to the
    existing poll when SSE is unavailable. Additive, read-only. ─────────────── */
-.cc-live{display:inline-flex;align-items:center;gap:6px;font-size:.68rem;font-weight:600;padding:2px 8px;border-radius:999px;margin-left:auto;border:1px solid rgba(63,185,80,.3);background:rgba(63,185,80,.1);color:var(--cc-green)}
+.cc-live{display:inline-flex;align-items:center;gap:var(--sp-3);font-size:var(--fs-xs);font-weight:600;padding:var(--badge-pad-y) var(--badge-pad-x);border-radius:var(--r-pill);margin-left:auto;border:var(--line-width) solid color-mix(in srgb,var(--cc-green) var(--component-border),transparent);background:color-mix(in srgb,var(--cc-green) var(--component-tint-soft),transparent);color:var(--cc-green)}
 .cc-live .cc-live-dot{width:7px;height:7px;border-radius:50%%;background:var(--cc-green);animation:pulse 2s infinite}
-.cc-live.stale{border-color:rgba(210,153,34,.3);background:rgba(210,153,34,.1);color:var(--cc-amber)}
+.cc-live.stale{border-color:color-mix(in srgb,var(--cc-amber) var(--component-border),transparent);background:color-mix(in srgb,var(--cc-amber) var(--component-tint-soft),transparent);color:var(--cc-amber)}
 /* Polling (stale) dot: a very slow, gentle breathe rather than the brisk live
    pulse — signals "still watching, just on the calmer poll cadence". */
 .cc-live.stale .cc-live-dot{background:var(--cc-amber);animation:cc-slowpulse 2.8s ease-in-out infinite}
@@ -948,25 +874,22 @@ select.admin-act{min-width:0;max-width:100%%}
    paused, matching .admin-switch.on.danger's accent so the two placements read
    as one state. Left of #cc-live so status (queue live/stale) and posture
    (active/paused) sit as a pair. */
-#queue-suspend-wrap{display:inline-flex;align-items:center;gap:6px;margin-left:auto}
-.queue-suspend-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border-radius:999px;border:1px solid var(--cc-border);background:transparent;color:var(--cc-muted);cursor:pointer;line-height:0;transition:background .15s,color .15s,border-color .15s}
+#queue-suspend-wrap{display:inline-flex;align-items:center;gap:var(--sp-3);margin-left:auto}
+.queue-suspend-btn{line-height:0}
 /* SVG glyph is centered by the flex-box; currentColor tracks the button state.
    Using an SVG (not a &#10074; bar glyph) so the pause bars sit dead-center —
    the light-vertical-bar character carries font side-bearing that pushed the
    pair off-center inside the circle. */
 .queue-suspend-btn svg{display:block;width:12px;height:12px;fill:currentColor}
-.queue-suspend-btn:hover{background:rgba(139,148,158,.12);color:var(--cc-text-2)}
-.queue-suspend-btn.paused{border-color:rgba(248,81,73,.35);color:var(--cc-red);background:rgba(248,81,73,.08)}
-.queue-suspend-btn.paused:hover{background:rgba(248,81,73,.16)}
-.queue-suspend-btn:disabled{opacity:.5;cursor:not-allowed}
+.queue-suspend-btn.paused{border-color:var(--cc-red);color:var(--cc-red)}
 /* Army roster header line under the clanker card */
-.cc-army{display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid var(--cc-border-2);font-size:.78rem;color:var(--cc-muted)}
-.cc-army b{color:var(--cc-text);font-weight:600}
+.cc-army{display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid var(--line-subtle);font-size:.78rem;color:var(--text-muted)}
+.cc-army b{color:var(--text);font-weight:600}
 .cc-army-stat{display:inline-flex;align-items:center;gap:5px}
 .cc-army-stat .dot{width:7px;height:7px;border-radius:50%%}
 .cc-army-stat.working .dot{background:var(--cc-accent)}
 .cc-army-stat.reviewing .dot{background:var(--cc-amber)}
-.cc-army-stat.idle .dot{background:var(--cc-muted)}
+.cc-army-stat.idle .dot{background:var(--text-muted)}
 /* Clanker rows: enter pop-in / leave fade so the roster feels alive */
 @keyframes cc-popin{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
 @keyframes cc-fadeout{from{opacity:1}to{opacity:0;transform:translateX(8px)}}
@@ -975,10 +898,10 @@ select.admin-act{min-width:0;max-width:100%%}
 /* A clanker actively receiving a travelling task pulses its border briefly */
 @keyframes cc-landing{0%%{box-shadow:0 0 0 0 rgba(88,166,255,.5)}100%%{box-shadow:0 0 0 6px rgba(88,166,255,0)}}
 .clanker-row.cc-landing{animation:cc-landing .8s ease}
-.clanker-status{font-size:.68rem;font-weight:600;padding:1px 7px;border-radius:999px;margin-left:6px;border:1px solid transparent}
-.clanker-status.working{background:rgba(88,166,255,.12);color:var(--cc-accent);border-color:rgba(88,166,255,.3)}
-.clanker-status.reviewing{background:rgba(210,153,34,.12);color:var(--cc-amber);border-color:rgba(210,153,34,.3)}
-.clanker-status.idle{background:rgba(139,148,158,.12);color:var(--cc-muted);border-color:rgba(139,148,158,.3)}
+.clanker-status{font-size:var(--fs-xs);font-weight:600;padding:1px 7px;border-radius:var(--r-pill);margin-left:var(--sp-3);border:1px solid transparent}
+.clanker-status.working{background:color-mix(in srgb,var(--status-info) var(--component-tint),transparent);color:var(--status-info);border-color:color-mix(in srgb,var(--status-info) var(--component-border),transparent)}
+.clanker-status.reviewing{background:color-mix(in srgb,var(--status-attention) var(--component-tint),transparent);color:var(--status-attention);border-color:color-mix(in srgb,var(--status-attention) var(--component-border),transparent)}
+.clanker-status.idle{background:rgba(139,148,158,.12);color:var(--text-muted);border-color:rgba(139,148,158,.3)}
 /* Ready-work QUEUE — the stack of issues waiting to be picked off. A generous
    max-height keeps a long backlog (up to ~150 items) scrolling inside the card
    instead of stretching the page; the panel scrolls, the page does not. */
@@ -986,37 +909,37 @@ select.admin-act{min-width:0;max-width:100%%}
 /* The enter animation is OPT-IN via .cc-q-enter (added only to genuinely-new rows),
    NOT baked into .cc-q-item — otherwise every poll re-render replayed cc-popin on
    every row and the whole queue "blinked". Mirrors .clanker-row.cc-enter above. */
-.cc-q-item{display:flex;align-items:flex-start;gap:10px;padding:11px 20px;border-bottom:1px solid var(--cc-border-2);position:relative}
+.cc-q-item{display:flex;align-items:flex-start;gap:10px;padding:11px 20px;border-bottom:1px solid var(--line-subtle);position:relative}
 .cc-q-item.cc-q-enter{animation:cc-popin .35s ease}
 /* Withheld section (#6902). Deliberately quieter than the ready rows: this is a
    diagnostic drawer an operator opens to answer "why isn't this queued?", not a
    second queue competing for attention. No grip, no menu, no drag affordance. */
-.cc-withheld-toggle{display:block;width:100%%;text-align:left;padding:10px 20px;background:none;border:0;color:var(--cc-muted-2);font:inherit;font-size:.85rem;cursor:pointer}
-.cc-withheld-toggle:hover{color:var(--cc-fg)}
+.cc-withheld-toggle{display:block;width:100%%;text-align:left;padding:10px 20px;background:none;border:0;color:var(--text-faint);font:inherit;font-size:.85rem;cursor:pointer}
+.cc-withheld-toggle:hover{color:var(--text)}
 .cc-withheld-toggle[aria-expanded="true"] .cc-withheld-caret{display:inline-block;transform:rotate(90deg)}
 .cc-withheld-caret{display:inline-block;transition:transform .15s ease}
 @media (prefers-reduced-motion:reduce){.cc-withheld-caret{transition:none}}
 .cc-withheld{max-height:420px;overflow-y:auto}
-.cc-w-item{padding:9px 20px 9px 38px;border-bottom:1px solid var(--cc-border-2);opacity:.72}
+.cc-w-item{padding:9px 20px 9px 38px;border-bottom:1px solid var(--line-subtle);opacity:.72}
 .cc-w-item:last-child{border-bottom:0}
 .cc-w-title{font-size:.9rem}
-.cc-w-reason{display:block;margin-top:2px;font-size:.8rem;color:var(--cc-muted-2)}
+.cc-w-reason{display:block;margin-top:var(--sp-1);font-size:.8rem;color:var(--text-faint)}
 .cc-q-item:first-child{background:rgba(88,166,255,.05)}
 /* Drag handle (grab bar) — owner/read-write only. Hidden unless the queue root
    carries .cc-q-draggable (set by initAdmin after /api/role). Reduced-motion and
    pointer friendly. */
-.cc-q-grip{display:none;flex-shrink:0;width:16px;align-self:stretch;cursor:grab;color:var(--cc-muted-2);font-size:.9rem;line-height:1;align-items:center;justify-content:center;user-select:none;touch-action:none}
-.cc-q-grip:hover{color:var(--cc-text-2)}
+.cc-q-grip{display:none;flex-shrink:0;width:16px;align-self:stretch;cursor:grab;color:var(--text-faint);font-size:.9rem;line-height:1;align-items:center;justify-content:center;user-select:none;touch-action:none}
+.cc-q-grip:hover{color:var(--text)}
 .cc-queue.cc-q-draggable .cc-q-grip{display:flex}
 .cc-queue.cc-q-draggable .cc-q-item{cursor:default}
 .cc-q-item.cc-q-dragging{opacity:.5;cursor:grabbing}
 .cc-q-item.cc-q-over{box-shadow:inset 0 2px 0 0 #58a6ff}
-.cc-q-idx{font-size:.7rem;color:var(--cc-muted-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;flex-shrink:0;width:22px;text-align:right;padding-top:2px}
+.cc-q-idx{font-size:.7rem;color:var(--text-faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;flex-shrink:0;width:22px;text-align:right;padding-top:var(--sp-1)}
 .cc-q-body{flex:1;min-width:0}
-.cc-q-repo{font-size:.72rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.cc-q-title{font-size:.86rem;color:var(--cc-text);margin:2px 0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cc-q-labels{display:flex;flex-wrap:wrap;gap:4px}
-.cc-q-next{font-size:.62rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent);flex-shrink:0;padding-top:2px}
+.cc-q-repo{font-size:.72rem;color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cc-q-title{font-size:.86rem;color:var(--text);margin:var(--sp-1) var(--sp-0) var(--sp-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cc-q-labels{display:flex;flex-wrap:wrap;gap:var(--sp-2)}
+.cc-q-next{font-size:var(--fs-2xs);font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent);flex-shrink:0;padding-top:var(--sp-1)}
 .cc-q-item.cc-leaving{animation:cc-fadeout .45s ease forwards}
 /* FLIP glide for operator drag-reorder: items that changed slot are given an
    inverse transform (see ccFlipQueue) then eased back to translateY(0). Subtle —
@@ -1028,15 +951,15 @@ select.admin-act{min-width:0;max-width:100%%}
    muted greys, the page's blue accent only on focus/hover, no game-y flourish.
    The search bar is read-only filtering so it shows for everyone; the per-row
    ACTIONS live inside the row menu, which is only rendered for owner/read-write. */
-.cc-q-search{display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--cc-border-2)}
-.cc-q-search-ic{color:var(--cc-muted-2);font-size:.85rem;flex-shrink:0;line-height:1}
-.cc-q-search input{flex:1;min-width:0;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:7px;color:var(--cc-text);font:inherit;font-size:.82rem;padding:6px 10px;outline:none;transition:border-color .15s,box-shadow .15s}
-.cc-q-search input::placeholder{color:var(--cc-muted-2)}
-.cc-q-search input:focus{border-color:var(--cc-accent-fg);box-shadow:0 0 0 3px rgba(31,111,235,.25)}
-.cc-q-search-clear{background:none;border:none;color:var(--cc-muted-2);cursor:pointer;font-size:1rem;line-height:1;padding:2px 4px;display:none}
+.cc-q-search{display:flex;align-items:center;gap:var(--sp-4);padding:10px 20px;border-bottom:1px solid var(--line-subtle)}
+.cc-q-search-ic{color:var(--text-faint);font-size:.85rem;flex-shrink:0;line-height:1}
+.cc-q-search input{flex:1;min-width:0;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:7px;color:var(--text);font:inherit;font-size:var(--fs-base);padding:6px 10px;outline:none;transition:border-color .15s,box-shadow .15s}
+.cc-q-search input::placeholder{color:var(--text-faint)}
+.cc-q-search input:focus{border-color:var(--cc-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--cc-accent) 25%%,transparent)}
+.cc-q-search-clear{background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:1rem;line-height:1;padding:var(--sp-1) var(--sp-2);display:none}
 .cc-q-search.has-text .cc-q-search-clear{display:inline-flex}
-.cc-q-search-clear:hover{color:var(--cc-text-2)}
-.cc-q-filternote{padding:6px 20px;font-size:.72rem;color:var(--cc-muted-2);border-bottom:1px solid var(--cc-border-2)}
+.cc-q-search-clear:hover{color:var(--text)}
+.cc-q-filternote{padding:var(--sp-3) var(--sp-7);font-size:.72rem;color:var(--text-faint);border-bottom:1px solid var(--line-subtle)}
 /* ── Your contribution (#6543) — the signed-in contributor's own numbers ────────
    A quiet tile row: issues worked (24h), issues worked (total), PRs produced
    (24h, #7894), PRs produced (total), and failures. The PR tiles carry the
@@ -1045,33 +968,33 @@ select.admin-act{min-width:0;max-width:100%%}
    auto-promotion counts. Same sober ops register as the panels around it; no
    new colour tokens. */
 .cc-mine{display:grid;grid-template-columns:repeat(auto-fit,minmax(94px,1fr));gap:10px;padding:14px 20px}
-.cc-mine-tile{background:var(--cc-surface);border:1px solid var(--cc-border-2);border-radius:8px;padding:9px 11px}
-.cc-mine-val{font-size:1.35rem;font-weight:700;line-height:1.15;color:var(--cc-text)}
+.cc-mine-tile{background:var(--surface-2);border:1px solid var(--line-subtle);border-radius:8px;padding:9px 11px}
+.cc-mine-val{font-size:1.35rem;font-weight:700;line-height:1.15;color:var(--text)}
 .cc-mine-tile.is-pr .cc-mine-val{color:var(--cc-green)}
-.cc-mine-lbl{font-size:.68rem;letter-spacing:.03em;text-transform:uppercase;color:var(--cc-muted);margin-top:3px}
-.cc-mine-sub{font-size:.68rem;color:var(--cc-muted-2);margin-top:2px}
-.cc-mine-eligible{grid-column:1/-1;font-size:.78rem;color:var(--cc-amber);background:rgba(210,153,34,.10);border:1px solid rgba(210,153,34,.28);border-radius:8px;padding:8px 10px}
+.cc-mine-lbl{font-size:var(--fs-xs);letter-spacing:.03em;text-transform:uppercase;color:var(--text-muted);margin-top:3px}
+.cc-mine-sub{font-size:var(--fs-xs);color:var(--text-faint);margin-top:var(--sp-1)}
+.cc-mine-eligible{grid-column:1/-1;font-size:.78rem;color:var(--status-attention);background:color-mix(in srgb,var(--status-attention) var(--component-tint-soft),transparent);border:var(--line-width) solid color-mix(in srgb,var(--status-attention) var(--component-border),transparent);border-radius:8px;padding:var(--sp-4) 10px}
 /* When the body carries a message instead of tiles (signed out, no profile yet,
    or a load fault — #6937) the tile grid would squeeze that one sentence into a
    94px column, so the grid steps aside for a plain block. The message itself is
    the Profile tab's .me-signin, reused verbatim; only its trailing margin is
    dropped because the card's own note sits directly under it. */
 .cc-mine.is-message{display:block}
-.cc-mine.is-message .me-signin{margin-bottom:0}
+.cc-mine.is-message .me-signin{margin-bottom:var(--sp-0)}
 /* ── My label interests (#2637) — contributor-declared label affinity ───────────
    A quiet self-service editor on the queue card: chips for the labels this viewer
    subscribed to, plus an add field. Shown only to a signed-in contributor. Matching
    queue rows are highlighted (.cc-q-mine) and a small "for you" tag explains why.
    Sober palette to match the SRE ops register; the page's green accent marks a
    personal match without shouting. */
-.cc-interests{padding:10px 20px;border-bottom:1px solid var(--cc-border-2)}
-.cc-interests-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:6px}
-.cc-interests-title{font-size:.74rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--cc-muted)}
-.cc-interests-hint{font-size:.68rem;color:var(--cc-muted-2)}
-.cc-interests-chips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
-.cc-interests-empty{font-size:.72rem;color:var(--cc-muted-2)}
-.cc-interests-empty code{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:4px;padding:0 4px;font-size:.9em}
-.cc-interest-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:.74rem;background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3)}
+.cc-interests{padding:10px 20px;border-bottom:1px solid var(--line-subtle)}
+.cc-interests-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--sp-4);margin-bottom:var(--sp-3)}
+.cc-interests-title{font-size:.74rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--text-muted)}
+.cc-interests-hint{font-size:var(--fs-xs);color:var(--text-faint)}
+.cc-interests-chips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:var(--sp-3)}
+.cc-interests-empty{font-size:.72rem;color:var(--text-faint)}
+.cc-interests-empty code{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r-sm);padding:var(--sp-0) var(--sp-2);font-size:.9em}
+.cc-interest-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:var(--r-pill);font-size:.74rem;background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3)}
 .cc-interest-x{cursor:pointer;opacity:.7;font-size:.95rem;line-height:1}
 .cc-interest-x:hover{opacity:1}
 /* #2677: read-only mirror of a contributor's OWN label interests, shown on their
@@ -1079,124 +1002,121 @@ select.admin-act{min-width:0;max-width:100%%}
    the .cc-interest-chip visual (same green affinity color) in a compact, non-
    interactive line so an owner gets a fleet-wide view without editing anything
    here — editing stays contributor-owned via My label interests above. */
-.clanker-interests{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;font-size:.68rem;color:var(--cc-muted-2)}
-.clanker-interests-label{color:var(--cc-muted-2)}
-.clanker-interest-chip{display:inline-flex;padding:1px 7px;border-radius:999px;font-size:.68rem;background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3)}
+.clanker-interests{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-top:3px;font-size:var(--fs-xs);color:var(--text-faint)}
+.clanker-interests-label{color:var(--text-faint)}
+.clanker-interest-chip{display:inline-flex;padding:1px 7px;border-radius:var(--r-pill);font-size:var(--fs-xs);background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3)}
 /* #2547 peer compatibility: the hub-vs-client protocol comparison, rendered ONLY
    when the versions actually differ so a healthy fleet stays quiet. Amber (not
    red) on purpose — a drifted peer is still fully served; this is a notice, not
    an error state, and must not read as "this clanker is broken/blocked". */
-.clanker-proto{margin-top:3px;font-size:.68rem;color:var(--cc-amber)}
+.clanker-proto{margin-top:3px;font-size:var(--fs-xs);color:var(--cc-amber)}
 .clanker-proto.incompatible{color:var(--cc-red)}
-.clanker-knowledge{display:inline-flex;padding:1px 7px;border-radius:999px;font-size:.68rem;background:rgba(218,54,51,.10);color:var(--cc-amber);border:1px solid rgba(210,153,34,.35)}
-.clanker-knowledge.neutral{background:rgba(139,148,158,.10);color:var(--cc-muted);border-color:rgba(139,148,158,.35)}
+.clanker-knowledge{display:inline-flex;padding:var(--badge-pad-y) var(--badge-pad-x);border-radius:var(--r-pill);font-size:var(--fs-xs);background:color-mix(in srgb,var(--status-attention) var(--component-tint-soft),transparent);color:var(--status-attention);border:var(--line-width) solid color-mix(in srgb,var(--status-attention) var(--component-border),transparent)}
+.clanker-knowledge.neutral{background:rgba(139,148,158,.10);color:var(--text-muted);border-color:rgba(139,148,158,.35)}
 /* #2637 owner roster: an OWNER-facing aggregate of which labels connected
    contributors subscribe to, and who — so the owner can label matching issues to
    route work. Reuses the green .cc-interest-chip affinity color. Read-only. */
-.label-affinity{margin-top:14px;padding-top:12px;border-top:1px solid var(--cc-border-2)}
-.label-affinity-head{display:flex;align-items:center;gap:2px;margin-bottom:8px}
-.label-affinity-title{font-size:.82rem;font-weight:600;color:var(--cc-text-2)}
+.label-affinity{margin-top:14px;padding-top:var(--sp-5);border-top:1px solid var(--line-subtle)}
+.label-affinity-head{display:flex;align-items:center;gap:var(--sp-1);margin-bottom:var(--sp-4)}
+.label-affinity-title{font-size:var(--fs-base);font-weight:600;color:var(--text)}
 .label-affinity-body{display:flex;flex-direction:column;gap:7px}
-.affinity-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;font-size:.78rem}
-.affinity-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:.74rem;background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3);flex-shrink:0}
+.affinity-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--sp-4);font-size:.78rem}
+.affinity-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:var(--r-pill);font-size:.74rem;background:rgba(46,160,67,.12);color:var(--cc-green);border:1px solid rgba(46,160,67,.3);flex-shrink:0}
 .affinity-count{font-weight:700;color:var(--cc-green);font-size:.7rem}
-.affinity-who{color:var(--cc-muted);word-break:break-word}
-.affinity-empty{font-size:.74rem;color:var(--cc-muted-2);line-height:1.5}
-.cc-interests-add{display:flex;gap:6px}
-.cc-interests-add input{flex:1;min-width:0;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:7px;color:var(--cc-text);font:inherit;font-size:.8rem;padding:5px 9px;outline:none;transition:border-color .15s,box-shadow .15s}
-.cc-interests-add input::placeholder{color:var(--cc-muted-2)}
-.cc-interests-add input:focus{border-color:var(--cc-accent-fg);box-shadow:0 0 0 3px rgba(31,111,235,.25)}
-.cc-interests-add button{background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:7px;color:var(--cc-text-2);cursor:pointer;font:inherit;font-size:.78rem;padding:5px 12px}
+.affinity-who{color:var(--text-muted);word-break:break-word}
+.affinity-empty{font-size:.74rem;color:var(--text-faint);line-height:1.5}
+.cc-interests-add{display:flex;gap:var(--sp-3)}
+.cc-interests-add input{flex:1;min-width:0;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:7px;color:var(--text);font:inherit;font-size:.8rem;padding:5px 9px;outline:none;transition:border-color .15s,box-shadow .15s}
+.cc-interests-add input::placeholder{color:var(--text-faint)}
+.cc-interests-add input:focus{border-color:var(--cc-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--cc-accent) 25%%,transparent)}
+.cc-interests-add button{background:var(--surface-2);border:1px solid var(--line-strong);border-radius:7px;color:var(--text);cursor:pointer;font:inherit;font-size:.78rem;padding:5px 12px}
 .cc-interests-add button:hover{border-color:var(--cc-green);color:var(--cc-green)}
 /* A queue row matching one of the viewer's label interests: a soft green rail on
    the leading edge + faint tint. Never hides the row — pure emphasis. */
 .cc-q-item.cc-q-mine{background:rgba(46,160,67,.06);box-shadow:inset 3px 0 0 0 #2ea043}
 .cc-q-item.cc-q-mine:first-child{background:rgba(46,160,67,.1)}
-.cc-q-mine-tag{margin-left:7px;font-size:.6rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-green);background:rgba(46,160,67,.12);border:1px solid rgba(46,160,67,.3);border-radius:999px;padding:0 6px;vertical-align:middle}
+.cc-q-mine-tag{margin-left:7px;font-size:var(--fs-2xs);font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-green);background:rgba(46,160,67,.12);border:1px solid rgba(46,160,67,.3);border-radius:var(--r-pill);padding:var(--sp-0) var(--sp-3);vertical-align:middle}
 /* Per-row "⋯" context affordance — owner/read-write only (rendered only when
    adminEnabled). Sits at the row's trailing edge, quiet until hover/open. */
 .cc-q-menu-wrap{position:relative;flex-shrink:0;margin-left:auto;align-self:center}
-.cc-q-menu-btn{background:none;border:none;color:var(--cc-muted-2);cursor:pointer;font-size:1rem;line-height:1;padding:4px 6px;border-radius:6px}
-.cc-q-menu-btn:hover,.cc-q-menu-btn[aria-expanded=true]{color:var(--cc-text);background:var(--cc-border-2)}
-.cc-q-menu{position:fixed;top:0;left:0;right:auto;bottom:auto;z-index:10002;min-width:190px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:10px;box-shadow:0 8px 28px rgba(1,4,9,.55);padding:6px;display:none}
+.cc-q-menu-btn{line-height:1}
+.cc-q-menu{position:fixed;top:0;left:0;right:auto;bottom:auto;z-index:10002;min-width:190px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 8px 28px rgba(1,4,9,.55);padding:var(--sp-3);display:none}
 .cc-q-menu.open{display:block}
 /* Fixed-positioned so the per-row menu escapes the scrolling .cc-queue overflow
    clip; ccBindQueueMenus measures the trigger and flips/clamps inside the viewport
    (and visible queue panel) before paint. */
-.cc-q-menu button.cc-q-act{display:flex;align-items:center;gap:8px;width:100%%;background:none;border:none;color:var(--cc-text-2);font:inherit;font-size:.82rem;text-align:left;padding:7px 9px;border-radius:6px;cursor:pointer}
-.cc-q-menu button.cc-q-act:hover{background:var(--cc-border-2);color:var(--cc-text)}
-.cc-q-menu-ic{color:var(--cc-muted-2);flex-shrink:0;width:16px;text-align:center}
-.cc-q-menu-sep{height:1px;background:var(--cc-border-2);margin:5px 2px}
-.cc-q-moverow{display:flex;align-items:center;gap:6px;padding:7px 9px}
-.cc-q-moverow label{font-size:.78rem;color:var(--cc-muted);flex:1}
+.cc-q-menu button.cc-q-act{justify-content:flex-start;width:100%%}
+.cc-q-menu-ic{color:var(--text-faint);flex-shrink:0;width:16px;text-align:center}
+.cc-q-menu-sep{height:1px;background:var(--line-subtle);margin:5px 2px}
+.cc-q-moverow{display:flex;align-items:center;gap:var(--sp-3);padding:7px 9px}
+.cc-q-moverow label{font-size:.78rem;color:var(--text-muted);flex:1}
 /* color-scheme makes the native number-input spinner arrows theme-aware, so they
    render legibly against the field in BOTH appearances (previously black-on-black
    and effectively invisible on dark). The tokenized background/color are kept as a
    belt-and-braces fallback for engines that don't honour color-scheme on the
    control; the field itself flips with the (#2612) light/dark tokens. */
-.cc-q-moverow input[type=number]{width:56px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text);font:inherit;font-size:.8rem;padding:4px 6px;outline:none;color-scheme:light dark}
-.cc-q-moverow input:focus{border-color:var(--cc-accent-fg)}
-.cc-q-moverow button{background:#1f6feb;border:none;color:#fff;font:inherit;font-size:.76rem;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer}
+.cc-q-moverow input[type=number]{width:56px;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:var(--r);color:var(--text);font:inherit;font-size:.8rem;padding:var(--sp-2) var(--sp-3);outline:none;color-scheme:light dark}
+.cc-q-moverow input:focus{border-color:var(--cc-accent)}
+.cc-q-moverow button{background:var(--cc-accent-fg);border:none;color:var(--surface-0);font:inherit;font-size:.76rem;font-weight:600;padding:5px 10px;border-radius:var(--r);cursor:pointer}
 .cc-q-moverow button:hover{background:#388bfd}
 /* Optional hold-reason field (#queue-hold-reason) in the ⋯ menu — a compact inline
    note the operator can fill before Hold. Empty is fine (holding without a note). */
 .cc-q-holdreason{padding:2px 9px 7px}
-.cc-q-holdreason-input{width:100%%;box-sizing:border-box;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text);font:inherit;font-size:.76rem;padding:4px 7px;outline:none}
-.cc-q-holdreason-input:focus{border-color:var(--cc-accent-fg)}
+.cc-q-holdreason-input{width:100%%;box-sizing:border-box;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:var(--r);color:var(--text);font:inherit;font-size:.76rem;padding:4px 7px;outline:none}
+.cc-q-holdreason-input:focus{border-color:var(--cc-accent)}
 /* On-hold rows (#queue-hold): a manually-parked issue stays VISIBLE but is clearly
    not going to be offered — dimmed to ~55%% opacity with an amber "on hold" pill.
    Never hidden, so the operator can always see and Resume it. */
 .cc-q-item.cc-q-held{opacity:.55}
 .cc-q-item.cc-q-held:hover{opacity:.8}
-.cc-q-held-tag{margin-left:7px;font-size:.6rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-amber);background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.3);border-radius:999px;padding:0 6px;vertical-align:middle}
+.cc-q-held-tag{margin-left:7px;font-size:var(--fs-2xs);font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--status-attention);background:color-mix(in srgb,var(--status-attention) var(--component-tint),transparent);border:var(--line-width) solid color-mix(in srgb,var(--status-attention) var(--component-border),transparent);border-radius:var(--r-pill);padding:var(--sp-0) var(--sp-3);vertical-align:middle}
 /* Resume-all (#queue-hold): a small amber header button. Hidden until there is at
    least one held issue and the viewer is owner/read-write (JS-toggled display). */
-.queue-resume-all-btn{margin-left:8px;font-size:.7rem;font-weight:600;color:var(--cc-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.35);border-radius:6px;padding:2px 8px;cursor:pointer;vertical-align:middle;line-height:1.4}
-.queue-resume-all-btn:hover{background:rgba(210,153,34,.2)}
+.queue-resume-all-btn{margin-left:var(--sp-4);vertical-align:middle}
 /* ── Opportunistic Work (#2592) — a small, CALM discovery panel. Intentionally
    quiet: no loud "recommended!" chrome, just a short curated list with a subtle
    heat dot and an unobtrusive "add to queue" affordance (owner/read-write only). */
-.opp-list{padding:2px 0}
-.opp-item{display:flex;align-items:flex-start;gap:10px;padding:11px 20px;border-bottom:1px solid var(--cc-border-2)}
+.opp-list{padding:var(--sp-1) var(--sp-0)}
+.opp-item{display:flex;align-items:flex-start;gap:10px;padding:11px 20px;border-bottom:1px solid var(--line-subtle)}
 .opp-item:last-child{border-bottom:none}
-.opp-heat{flex-shrink:0;width:8px;height:8px;border-radius:50%%;margin-top:5px;background:var(--cc-green);box-shadow:0 0 0 3px rgba(63,185,80,.14)}
-.opp-heat.warm{background:var(--cc-amber);box-shadow:0 0 0 3px rgba(210,153,34,.14)}
-.opp-heat.cool{background:var(--cc-muted-2);box-shadow:none}
+.opp-heat{flex-shrink:0;width:8px;height:8px;border-radius:50%%;margin-top:5px;background:var(--cc-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--cc-green) 14%%,transparent)}
+.opp-heat.warm{background:var(--cc-amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--cc-amber) 14%%,transparent)}
+.opp-heat.cool{background:var(--text-faint);box-shadow:none}
 .opp-body{flex:1;min-width:0}
-.opp-repo{font-size:.72rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.opp-title{font-size:.86rem;color:var(--cc-text);margin:2px 0 3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.opp-reason{font-size:.7rem;color:var(--cc-muted-2)}
-.opp-add{flex-shrink:0;align-self:center;background:none;border:1px solid var(--cc-border);color:var(--cc-text-2);font:inherit;font-size:.74rem;font-weight:600;padding:5px 11px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
-.opp-add:hover{border-color:var(--cc-accent-fg);color:#fff;background:rgba(31,111,235,.15)}
-.opp-add:disabled{opacity:.55;cursor:default;border-color:var(--cc-border);color:var(--cc-muted);background:none}
+.opp-repo{font-size:.72rem;color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.opp-title{font-size:.86rem;color:var(--text);margin:2px 0 3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.opp-reason{font-size:.7rem;color:var(--text-faint)}
+.opp-add{flex-shrink:0;align-self:center;background:none;border:1px solid var(--line-strong);color:var(--text);font:inherit;font-size:.74rem;font-weight:600;padding:5px 11px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.opp-add:hover{border-color:var(--cc-accent);color:var(--surface-0);background:color-mix(in srgb,var(--cc-accent) 15%%,transparent)}
+.opp-add:disabled{opacity:.55;cursor:default;border-color:var(--line-strong);color:var(--text-muted);background:none}
 /* ── End-of-queue + hive-settings (#2595) — turn a short queue into an intentional,
    reassuring moment: a calm "all caught up" marker, the managed-queue rate limits
    presented readably, and the viewer's own daily quota. Sober, ranked-family styling. */
 .cc-q-end{padding:18px 20px 6px;text-align:center}
-.cc-q-end-badge{display:inline-flex;align-items:center;gap:8px;font-size:.82rem;color:var(--cc-muted);background:var(--cc-bg);border:1px solid var(--cc-border-2);border-radius:999px;padding:7px 16px}
+.cc-q-end-badge{display:inline-flex;align-items:center;gap:var(--sp-4);font-size:var(--fs-base);color:var(--text-muted);background:var(--surface-0);border:1px solid var(--line-subtle);border-radius:var(--r-pill);padding:7px 16px}
 .cc-q-end-badge .cc-q-end-ic{color:var(--cc-green);font-size:.95rem;line-height:1}
-.hive-settings{margin:14px 20px 4px;background:var(--cc-bg);border:1px solid var(--cc-border-2);border-radius:10px;padding:14px 16px}
-.hive-settings h4{margin:0 0 4px;font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-muted)}
-.hive-settings p.hs-lead{margin:0 0 10px;font-size:.82rem;color:var(--cc-text-2);line-height:1.5}
-.hs-tiers{display:flex;flex-wrap:wrap;gap:8px}
-.hs-tier{flex:1 1 130px;min-width:120px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:8px;padding:9px 11px}
-.hs-tier__name{font-size:.72rem;font-weight:600;text-transform:capitalize;color:var(--cc-text);display:flex;align-items:center;gap:6px}
-.hs-tier__lim{font-size:.74rem;color:var(--cc-muted);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.hs-tier.is-you{border-color:var(--cc-accent-fg);box-shadow:0 0 0 2px rgba(31,111,235,.18)}
-.hs-tier__youtag{font-size:.6rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent)}
+.hive-settings{margin:14px 20px 4px;background:var(--surface-0);border:1px solid var(--line-subtle);border-radius:10px;padding:14px 16px}
+.hive-settings h4{margin:var(--sp-0) var(--sp-0) var(--sp-2);font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.hive-settings p.hs-lead{margin:0 0 10px;font-size:var(--fs-base);color:var(--text);line-height:1.5}
+.hs-tiers{display:flex;flex-wrap:wrap;gap:var(--sp-4)}
+.hs-tier{flex:1 1 130px;min-width:120px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:9px 11px}
+.hs-tier__name{font-size:.72rem;font-weight:600;text-transform:capitalize;color:var(--text);display:flex;align-items:center;gap:var(--sp-3)}
+.hs-tier__lim{font-size:.74rem;color:var(--text-muted);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.hs-tier.is-you{border-color:var(--cc-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--cc-accent) 18%%,transparent)}
+.hs-tier__youtag{font-size:var(--fs-2xs);font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cc-accent)}
 /* Daily quota widget — a slim progress meter, calm. Used at end-of-queue AND on
    the Me card. Fill width is set inline from the REAL used/limit ratio. */
-.quota{margin-top:12px}
-.quota__head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
-.quota__lbl{font-size:.76rem;color:var(--cc-muted)}
-.quota__val{font-size:.82rem;color:var(--cc-text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.quota__bar{height:7px;border-radius:999px;background:var(--cc-border-2);overflow:hidden}
-.quota__fill{height:100%%;border-radius:999px;background:linear-gradient(90deg,#1f6feb,#388bfd);transition:width .4s ease}
+.quota{margin-top:var(--sp-5)}
+.quota__head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-4);margin-bottom:var(--sp-3)}
+.quota__lbl{font-size:.76rem;color:var(--text-muted)}
+.quota__val{font-size:var(--fs-base);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.quota__bar{height:7px;border-radius:var(--r-pill);background:var(--line-subtle);overflow:hidden}
+.quota__fill{height:100%%;border-radius:var(--r-pill);background:linear-gradient(90deg,#1f6feb,#388bfd);transition:width .4s ease}
 .quota__fill.near{background:linear-gradient(90deg,#d29922,#e3b341)}
 .quota__fill.full{background:linear-gradient(90deg,#f85149,#ff7b72)}
-.quota__sub{font-size:.7rem;color:var(--cc-muted-2);margin-top:5px}
+.quota__sub{font-size:.7rem;color:var(--text-faint);margin-top:5px}
 /* Me-card quota variant — sits inside a me-sec, so it inherits the card padding. */
-.me-quota .quota__lbl{color:var(--cc-muted)}
+.me-quota .quota__lbl{color:var(--text-muted)}
 @media(prefers-reduced-motion:reduce){.quota__fill{transition:none!important}}
 /* Sparklines (#persistent-history): tiny dependency-free inline-SVG trend charts
    fed by /api/contribute/metrics (7-day hourly history). Muted stroke to sit
@@ -1204,68 +1124,68 @@ select.admin-act{min-width:0;max-width:100%%}
    prefers-reduced-motion. The SVG scales to its slot via width/height attrs. */
 .spark{display:inline-block;vertical-align:middle;line-height:0}
 .spark svg{display:block;overflow:visible}
-.spark-inline{margin-left:8px}
+.spark-inline{margin-left:var(--sp-4)}
 /* Header-adjacent sparkline sits next to a panel title/count without shoving it. */
 .ops-card-head .spark{margin-left:auto}
 /* Leaderboard per-row sparkline: occupies its own narrow column, muted so the
    numerals stay the focus. */
 .lb-spark{display:flex;align-items:center;justify-content:flex-end}
 /* Hive-wide trend strip pinned above the standings. */
-.lb-trend{display:flex;align-items:center;gap:10px;padding:8px 20px 12px;color:var(--cc-muted);font-size:.76rem;border-bottom:1px solid var(--cc-border-2)}
+.lb-trend{display:flex;align-items:center;gap:10px;padding:var(--sp-4) var(--sp-7) var(--sp-5);color:var(--text-muted);font-size:.76rem;border-bottom:1px solid var(--line-subtle)}
 .lb-trend .spark{margin-left:auto}
 /* "File an issue on this page" link (#2594) — a subtle footer affordance present
    on every tab. Quiet grey, matches the sober dashboard chrome; an outbound link. */
-.cc-page-foot{padding:26px 48px 34px;border-top:1px solid var(--cc-border-2);margin-top:28px;display:flex;justify-content:center}
-.cc-report-link{display:inline-flex;align-items:center;gap:7px;color:var(--cc-muted);font-size:.8rem;text-decoration:none;border:1px solid var(--cc-border);border-radius:8px;padding:7px 14px;transition:color .15s,border-color .15s,background .15s}
-.cc-report-link:hover{color:var(--cc-text);border-color:#484f58;background:var(--cc-surface)}
+.cc-page-foot{padding:26px 48px 34px;border-top:1px solid var(--line-subtle);margin-top:28px;display:flex;justify-content:center}
+.cc-report-link{display:inline-flex;align-items:center;gap:7px;color:var(--text-muted);font-size:.8rem;text-decoration:none;border:1px solid var(--line-strong);border-radius:8px;padding:7px 14px;transition:color .15s,border-color .15s,background .15s}
+.cc-report-link:hover{color:var(--text);border-color:#484f58;background:var(--surface-2)}
 .cc-report-link .cc-report-ic{font-size:.9rem;line-height:1}
 /* The travelling token that flies from the queue to a clanker on task_assign */
-.cc-token{position:fixed;z-index:1200;pointer-events:none;background:#1f6feb;color:#fff;font-size:.72rem;font-weight:600;padding:6px 12px;border-radius:999px;box-shadow:0 6px 20px rgba(31,111,235,.5);white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;transition:transform .9s cubic-bezier(.5,0,.2,1),opacity .9s ease;will-change:transform,opacity}
+.cc-token{position:fixed;z-index:1200;pointer-events:none;background:var(--cc-accent);color:var(--surface-0);font-size:.72rem;font-weight:600;padding:var(--sp-3) var(--sp-5);border-radius:var(--r-pill);box-shadow:0 6px 20px rgba(31,111,235,.5);white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;transition:transform .9s cubic-bezier(.5,0,.2,1),opacity .9s ease;will-change:transform,opacity}
 /* Dev-log — a running chat log of the development */
-.cc-log{max-height:360px;overflow-y:auto;padding:4px 0}
-.cc-log-line{display:flex;align-items:flex-start;gap:10px;padding:8px 20px;font-size:.83rem;border-bottom:1px solid var(--cc-border-2);animation:cc-logline .45s ease}
+.cc-log{max-height:360px;overflow-y:auto;padding:var(--sp-2) var(--sp-0)}
+.cc-log-line{display:flex;align-items:flex-start;gap:10px;padding:var(--sp-4) var(--sp-7);font-size:.83rem;border-bottom:1px solid var(--line-subtle);animation:cc-logline .45s ease}
 @keyframes cc-logline{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .cc-log-line:last-child{border-bottom:none}
 .cc-log-ic{flex-shrink:0}
-.cc-log-body{flex:1;min-width:0;color:var(--cc-text-2);line-height:1.45}
-.cc-log-body b{color:var(--cc-text)}
+.cc-log-body{flex:1;min-width:0;color:var(--text);line-height:1.45}
+.cc-log-body b{color:var(--text)}
 .cc-log-body .who{color:var(--cc-accent);font-weight:600}
-.cc-log-body .ref{color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem}
+.cc-log-body .ref{color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem}
 .cc-log-body a.ref.cc-issue-link{color:var(--cc-accent)}
-.cc-log-body a.ref.cc-issue-link:hover,.cc-log-body a.ref.cc-issue-link:focus-visible{color:var(--cc-accent-2)}
-.cc-log-time{flex-shrink:0;color:var(--cc-muted-2);font-size:.72rem;white-space:nowrap;padding-top:1px}
+.cc-log-body a.ref.cc-issue-link:hover,.cc-log-body a.ref.cc-issue-link:focus-visible{color:var(--cc-accent)}
+.cc-log-time{flex-shrink:0;color:var(--text-faint);font-size:.72rem;white-space:nowrap;padding-top:1px}
 /* Achievement pops — tasteful badge toast, top-right, debounced */
-.cc-ach-wrap{position:fixed;top:16px;right:16px;z-index:1150;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-.cc-ach{display:flex;align-items:center;gap:10px;background:linear-gradient(135deg,var(--cc-surface),#1c2333);border:1px solid rgba(210,153,34,.4);border-radius:10px;padding:10px 14px;box-shadow:0 8px 28px rgba(1,4,9,.55);animation:cc-ach-in .4s ease;max-width:300px}
+.cc-ach-wrap{position:fixed;top:16px;right:16px;z-index:1150;display:flex;flex-direction:column;gap:var(--sp-4);pointer-events:none}
+.cc-ach{display:flex;align-items:center;gap:10px;background:linear-gradient(135deg,var(--surface-2),#1c2333);border:1px solid rgba(210,153,34,.4);border-radius:10px;padding:10px 14px;box-shadow:0 8px 28px rgba(1,4,9,.55);animation:cc-ach-in .4s ease;max-width:300px}
 @keyframes cc-ach-in{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
 .cc-ach.cc-ach-out{animation:cc-ach-out .4s ease forwards}
 @keyframes cc-ach-out{to{opacity:0;transform:translateX(24px)}}
 .cc-ach-ic{font-size:1.3rem;flex-shrink:0}
 .cc-ach-txt{min-width:0}
 .cc-ach-h{font-size:.7rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--cc-amber)}
-.cc-ach-s{font-size:.82rem;color:var(--cc-text);margin-top:1px}
+.cc-ach-s{font-size:var(--fs-base);color:var(--text);margin-top:1px}
 /* ── Operations two-region shell: MAIN area + full-height DEV-LOG RAIL ──────────
    The main area flexes to fill remaining width; the rail is a fixed-width panel
    pinned to the tab's height. When the rail collapses it shrinks to a thin strip
    and the main area reflows to reclaim the freed width. The width change is driven
    by the rail's own flex-basis so main widening is automatic (no JS resize). */
-.ops-shell{display:flex;gap:20px;margin-top:24px;align-items:stretch}
+.ops-shell{display:flex;gap:var(--sp-7);margin-top:var(--sp-8);align-items:stretch}
 .ops-main{flex:1 1 auto;min-width:0}
-.ops-main .ops-grid{margin-top:0}
+.ops-main .ops-grid{margin-top:var(--sp-0)}
 /* The rail: a self-contained chat/notifications panel that runs the tab's height.
    It sticks so the feed stays in view while the (taller) main area scrolls. */
 .ops-rail{flex:0 0 340px;position:sticky;top:0;align-self:flex-start;max-height:calc(100vh - 80px);
-  background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:12px;overflow:hidden;
+  background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r-lg);overflow:hidden;
   display:flex;flex-direction:column;transition:flex-basis .28s ease}
 .ops-rail-inner{display:flex;flex-direction:column;min-height:0;flex:1 1 auto;opacity:1;transition:opacity .2s ease}
-.ops-rail-head{padding:16px 20px;border-bottom:1px solid var(--cc-border);display:flex;align-items:center;gap:10px;flex-shrink:0}
-.ops-rail-head h3{font-size:.95rem;color:var(--cc-text);margin:0}
+.ops-rail-head{padding:var(--sp-6) var(--sp-7);border-bottom:1px solid var(--line-strong);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.ops-rail-head h3{font-size:.95rem;color:var(--text);margin:var(--sp-0)}
 .ops-rail .cc-log{flex:1 1 auto;max-height:none;min-height:0}
 /* The collapse toggle sits on the rail's leading edge (a slim handle). */
-.ops-rail-toggle{display:flex;align-items:center;gap:6px;width:100%%;background:var(--cc-bg);border:none;
-  border-bottom:1px solid var(--cc-border);color:var(--cc-muted);font-family:inherit;font-size:.74rem;font-weight:600;
+.ops-rail-toggle{display:flex;align-items:center;gap:var(--sp-3);width:100%%;background:var(--surface-0);border:none;
+  border-bottom:1px solid var(--line-strong);color:var(--text-muted);font-family:inherit;font-size:.74rem;font-weight:600;
   letter-spacing:.03em;text-transform:uppercase;padding:9px 14px;cursor:pointer;flex-shrink:0}
-.ops-rail-toggle:hover{color:var(--cc-text);background:var(--cc-surface)}
+.ops-rail-toggle:hover{color:var(--text);background:var(--surface-2)}
 .ops-rail-chevron{display:inline-block;font-size:1rem;line-height:1;transition:transform .28s ease}
 /* Collapsed: rail narrows to a strip; the toggle label + inner feed hide; the
    chevron flips to point "open" (right) as a "show log" affordance. */
@@ -1291,107 +1211,106 @@ select.admin-act{min-width:0;max-width:100%%}
    their tool visually; clicking a tile just drives the existing #cli-select so
    nothing about the copy-block logic changes. CSP-safe (inline assets only),
    theme-consistent with the dark palette, reduced-motion safe. */
-.client-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px;margin:4px 0 20px}
-.client-tile{display:flex;align-items:flex-start;gap:9px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:10px;padding:9px 11px;cursor:pointer;text-align:left;font-family:inherit;color:var(--cc-text);font-size:.82rem;transition:border-color .15s,background .15s,transform .1s}
+.client-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:var(--sp-4);margin:var(--sp-2) var(--sp-0) var(--sp-7)}
+.client-tile{display:flex;align-items:flex-start;gap:9px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:10px;padding:9px 11px;cursor:pointer;text-align:left;font-family:inherit;color:var(--text);font-size:var(--fs-base);transition:border-color .15s,background .15s,transform .1s}
 .client-tile:hover{border-color:var(--cc-accent);background:#1b2230}
 .client-tile:active{transform:translateY(1px)}
 .client-tile:focus-visible{outline:2px solid var(--cc-accent);outline-offset:2px}
 .client-tile.sel{border-color:var(--cc-accent);background:rgba(88,166,255,.10);box-shadow:inset 0 0 0 1px rgba(88,166,255,.35)}
-.client-tile .ct-emblem{width:24px;height:24px;flex:0 0 24px;display:flex;align-items:center;justify-content:center;border-radius:6px;background:var(--cc-bg);overflow:hidden}
+.client-tile .ct-emblem{width:24px;height:24px;flex:0 0 24px;display:flex;align-items:center;justify-content:center;border-radius:var(--r);background:var(--surface-0);overflow:hidden}
 .client-tile .ct-emblem svg{width:18px;height:18px;display:block}
 .client-tile .ct-name{font-weight:600;line-height:1.15;min-width:0}
-.client-tile .ct-name small{display:block;font-weight:400;color:var(--cc-muted);font-size:.7rem}
+.client-tile .ct-name small{display:block;font-weight:400;color:var(--text-muted);font-size:.7rem}
 /* min-width:0 keeps the name ellipsising rather than overflowing the tile. */
 .client-tile .ct-body{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0}
 /* "Open in <tool>" onboarding affordance — deliberately understated and clearly a
    SETUP helper, never a "contributing" surface. Only rendered for a client with a
    real, vendor-documented deep-link scheme. */
-.openin-row{display:none;align-items:flex-start;gap:10px;background:var(--cc-bg);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:8px;padding:11px 14px;margin:0 0 16px}
+.openin-row{display:none;align-items:flex-start;gap:10px;background:var(--surface-0);border:1px solid var(--line-strong);border-left:3px solid #d29922;border-radius:8px;padding:11px 14px;margin:var(--sp-0) var(--sp-0) var(--sp-6)}
 .openin-row.show{display:flex}
-.openin-row .oi-body{min-width:0;font-size:.8rem;color:var(--cc-muted);line-height:1.4}
-.openin-row .oi-body strong{color:var(--cc-text)}
-.openin-link{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-accent);text-decoration:none;font-size:.8rem;padding:6px 12px;font-family:inherit;cursor:pointer}
+.openin-row .oi-body{min-width:0;font-size:.8rem;color:var(--text-muted);line-height:1.4}
+.openin-row .oi-body strong{color:var(--text)}
+.openin-link{flex:0 0 auto;display:inline-flex;align-items:center;gap:var(--sp-3);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r);color:var(--cc-accent);text-decoration:none;font-size:.8rem;padding:var(--sp-3) var(--sp-5);font-family:inherit;cursor:pointer}
 .openin-link:hover{border-color:var(--cc-accent)}
 .openin-link svg{width:14px;height:14px}
 .oi-note{color:var(--cc-amber);font-weight:600}
 /* Customizable, copy-pasteable per-client PROMPT (kept in an editable block the
    contributor can read/tweak, NOT compressed into a URL). Additive to the shell
    command copy block above it. */
-.prompt-block{margin:18px 0 8px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;padding:14px 16px 16px;position:relative}
-.prompt-block h4{margin:0 0 6px;font-size:.82rem;color:var(--cc-text);font-weight:600}
-.prompt-block p.pb-sub{margin:0 0 10px;color:var(--cc-muted);font-size:.76rem;line-height:1.4}
-.prompt-block textarea{width:100%%;min-height:118px;resize:vertical;background:var(--cc-bg-deep);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;line-height:1.5}
+.prompt-block{margin:18px 0 8px;background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;padding:14px 16px 16px;position:relative}
+.prompt-block h4{margin:var(--sp-0) var(--sp-0) var(--sp-3);font-size:var(--fs-base);color:var(--text);font-weight:600}
+.prompt-block p.pb-sub{margin:0 0 10px;color:var(--text-muted);font-size:.76rem;line-height:1.4}
+.prompt-block textarea{width:100%%;min-height:118px;resize:vertical;background:var(--surface-1);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;line-height:1.5}
 .prompt-block textarea:focus{outline:none;border-color:var(--cc-accent)}
-.announcement-banner{display:none;margin:0 0 16px;border:1px solid var(--cc-border);border-left:4px solid #58a6ff;border-radius:10px;background:var(--cc-surface);color:var(--cc-text);padding:12px 42px 12px 14px;position:relative;line-height:1.45;font-size:.9rem}
+.announcement-banner{display:none;margin:var(--sp-0) var(--sp-0) var(--sp-6);border:1px solid var(--line-strong);border-left:4px solid #58a6ff;border-radius:10px;background:var(--surface-2);color:var(--text);padding:var(--sp-5) 42px 12px 14px;position:relative;line-height:1.45;font-size:.9rem}
 .announcement-banner.warning{border-left-color:var(--cc-amber);background:rgba(210,153,34,.12)}
-.announcement-banner .ann-level{font-weight:700;text-transform:uppercase;font-size:.68rem;letter-spacing:.08em;color:var(--cc-muted);margin-right:8px}
-.announcement-banner button{position:absolute;right:10px;top:8px;background:transparent;border:0;color:var(--cc-muted);font-size:1.2rem;cursor:pointer}
-.announcement-reverse{display:none;margin:12px 0 10px;padding:10px 12px;background:var(--cc-text);color:var(--cc-bg);border-radius:6px;font-weight:700;line-height:1.4}
+.announcement-banner .ann-level{font-weight:700;text-transform:uppercase;font-size:var(--fs-xs);letter-spacing:.08em;color:var(--text-muted);margin-right:var(--sp-4)}
+.announcement-banner button{position:absolute;right:10px;top:8px;background:transparent;border:0;color:var(--text-muted);font-size:1.2rem;cursor:pointer}
+.announcement-reverse{display:none;margin:12px 0 10px;padding:10px 12px;background:var(--text);color:var(--surface-0);border-radius:var(--r);font-weight:700;line-height:1.4}
 .announcement-reverse.warning{background:var(--cc-amber);color:#0d1117}
-.help-links{display:none;margin:12px 0 16px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:10px;padding:12px 14px;color:var(--cc-text-2);font-size:.84rem;line-height:1.45}
-.help-links h4{margin:0 0 8px;color:var(--cc-text);font-size:.86rem}
-.help-links .links{display:flex;flex-wrap:wrap;gap:8px}
-.help-links a{display:inline-flex;align-items:center;gap:5px;color:var(--cc-accent);text-decoration:none;border:1px solid var(--cc-border);border-radius:999px;padding:4px 10px;background:var(--cc-bg)}
+.help-links{display:none;margin:var(--sp-5) var(--sp-0) var(--sp-6);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:10px;padding:var(--sp-5) 14px;color:var(--text);font-size:.84rem;line-height:1.45}
+.help-links h4{margin:var(--sp-0) var(--sp-0) var(--sp-4);color:var(--text);font-size:.86rem}
+.help-links .links{display:flex;flex-wrap:wrap;gap:var(--sp-4)}
+.help-links a{display:inline-flex;align-items:center;gap:5px;color:var(--cc-accent);text-decoration:none;border:1px solid var(--line-strong);border-radius:var(--r-pill);padding:4px 10px;background:var(--surface-0)}
 .help-links a:hover{border-color:var(--cc-accent);text-decoration:none}
-.pb-copy{position:absolute;top:10px;right:12px;background:#238636;color:#fff;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:.72rem;font-family:inherit}
+.pb-copy,.cc-copy-overlay{position:absolute;top:var(--sp-5);right:var(--sp-5)}
 @media(prefers-reduced-motion:reduce){
   .client-tile{transition:none!important}
 }
 /* Trusted invite banner (issue #2598) — shown on onboarding when arriving via an
    attributed invite link. Subtle, informational; makes clear the invitee joins
    as a newcomer. */
-.invite-banner{margin:0 0 20px;padding:11px 15px;border:1px solid #388bfd55;border-radius:8px;background:#1c2f4a55;color:var(--cc-text-2);font-size:.85rem;line-height:1.45}
-.invite-banner b{color:var(--cc-text)}
-.invite-banner .invite-tier{color:var(--cc-muted)}
+.invite-banner{margin:var(--sp-0) var(--sp-0) var(--sp-7);padding:11px 15px;border:1px solid #388bfd55;border-radius:8px;background:#1c2f4a55;color:var(--text);font-size:.85rem;line-height:1.45}
+.invite-banner b{color:var(--text)}
+.invite-banner .invite-tier{color:var(--text-muted)}
 /* Trusted "Invite someone" action inside the Me card (issue #2598). */
-.me-invite{margin-top:12px;padding-top:12px;border-top:1px solid #ffffff14}
-.me-invite__btn{display:inline-flex;align-items:center;gap:6px;background:#1f6feb;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:.82rem;font-family:inherit;cursor:pointer}
-.me-invite__btn:hover{background:#388bfd}
-.me-invite__row{display:none;margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap}
+.me-invite{margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid #ffffff14}
+.me-invite__btn{white-space:nowrap}
+.me-invite__row{display:none;margin-top:10px;gap:var(--sp-4);align-items:center;flex-wrap:wrap}
 .me-invite__row.open{display:flex}
-.me-invite__link{flex:1 1 220px;min-width:0;background:var(--cc-bg-deep);color:var(--cc-text-2);border:1px solid var(--cc-border);border-radius:6px;padding:7px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem}
-.me-invite__copy{background:#238636;color:#fff;border:none;border-radius:6px;padding:7px 12px;font-size:.78rem;font-family:inherit;cursor:pointer}
-.me-invite__hint{width:100%%;margin-top:6px;color:var(--cc-muted);font-size:.74rem;line-height:1.4}
+.me-invite__link{flex:1 1 220px;min-width:0;background:var(--surface-1);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:7px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem}
+.me-invite__copy{background:#238636;color:var(--surface-0);border:none;border-radius:var(--r);padding:7px 12px;font-size:.78rem;font-family:inherit;cursor:pointer}
+.me-invite__hint{width:100%%;margin-top:var(--sp-3);color:var(--text-muted);font-size:.74rem;line-height:1.4}
 /* ── Triage ladder (#2612 part b) — a lifecycle view over contribute issues.
    Themed entirely with the (d) tokens so it flips light/dark with the rest of the
    page. The ladder is a row of level chips (count per rung); below it, per-level
    groups list the issues with an optional PR badge (part c). Sober SRE register:
    muted neutrals, the level accent only on the chip dot + count. */
-.cc-triage-ladder{display:flex;flex-wrap:wrap;gap:8px;padding:14px 20px;border-bottom:1px solid var(--cc-border-2)}
-.cc-triage-chip{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:.76rem;font-weight:600;color:var(--cc-text-2);background:var(--cc-bg);border:1px solid var(--cc-border)}
-.cc-triage-chip .cc-tl-dot{width:8px;height:8px;border-radius:50%%;flex:none;background:var(--cc-muted)}
-.cc-triage-chip .cc-tl-n{font-variant-numeric:tabular-nums;color:var(--cc-text);font-weight:700}
-.cc-triage-chip .cc-tl-lbl{color:var(--cc-muted);font-weight:600}
+.cc-triage-ladder{display:flex;flex-wrap:wrap;gap:var(--sp-4);padding:14px 20px;border-bottom:1px solid var(--line-subtle)}
+.cc-triage-chip{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:var(--r-pill);font-size:.76rem;font-weight:600;color:var(--text);background:var(--surface-0);border:1px solid var(--line-strong)}
+.cc-triage-chip .cc-tl-dot{width:8px;height:8px;border-radius:50%%;flex:none;background:var(--text-muted)}
+.cc-triage-chip .cc-tl-n{font-variant-numeric:tabular-nums;color:var(--text);font-weight:700}
+.cc-triage-chip .cc-tl-lbl{color:var(--text-muted);font-weight:600}
 /* Per-level accent on the dot only — meaning without shouting. */
-.cc-triage-chip.lv-triaging .cc-tl-dot{background:var(--cc-muted)}
+.cc-triage-chip.lv-triaging .cc-tl-dot{background:var(--text-muted)}
 .cc-triage-chip.lv-ready .cc-tl-dot{background:var(--cc-accent)}
 .cc-triage-chip.lv-implementing .cc-tl-dot{background:var(--cc-accent-fg)}
 .cc-triage-chip.lv-reviewing .cc-tl-dot{background:var(--cc-amber)}
 .cc-triage-chip.lv-closed .cc-tl-dot{background:var(--cc-green)}
 .cc-triage-groups{max-height:520px;overflow-y:auto}
-.cc-tg{border-bottom:1px solid var(--cc-border-2)}
+.cc-tg{border-bottom:1px solid var(--line-subtle)}
 .cc-tg:last-child{border-bottom:none}
-.cc-tg-head{display:flex;align-items:center;gap:8px;padding:10px 20px;font-size:.74rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--cc-muted);position:sticky;top:0;background:var(--cc-surface);z-index:1}
-.cc-tg-head .cc-tg-dot{width:8px;height:8px;border-radius:50%%;flex:none;background:var(--cc-muted)}
+.cc-tg-head{display:flex;align-items:center;gap:var(--sp-4);padding:10px 20px;font-size:.74rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--text-muted);position:sticky;top:0;background:var(--surface-2);z-index:1}
+.cc-tg-head .cc-tg-dot{width:8px;height:8px;border-radius:50%%;flex:none;background:var(--text-muted)}
 .cc-tg.lv-ready .cc-tg-dot{background:var(--cc-accent)}
 .cc-tg.lv-implementing .cc-tg-dot{background:var(--cc-accent-fg)}
 .cc-tg.lv-reviewing .cc-tg-dot{background:var(--cc-amber)}
 .cc-tg.lv-closed .cc-tg-dot{background:var(--cc-green)}
-.cc-tg-count{margin-left:auto;color:var(--cc-muted-2);font-weight:600;font-variant-numeric:tabular-nums}
-.cc-tg-item{display:flex;align-items:flex-start;gap:10px;padding:10px 20px;border-top:1px solid var(--cc-border-2)}
+.cc-tg-count{margin-left:auto;color:var(--text-faint);font-weight:600;font-variant-numeric:tabular-nums}
+.cc-tg-item{display:flex;align-items:flex-start;gap:10px;padding:10px 20px;border-top:1px solid var(--line-subtle)}
 .cc-tg-body{flex:1;min-width:0}
-.cc-tg-repo{font-size:.72rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.cc-tg-title{font-size:.86rem;color:var(--cc-text);margin:2px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cc-tg-empty{padding:8px 20px 12px;font-size:.76rem;color:var(--cc-muted-2)}
+.cc-tg-repo{font-size:.72rem;color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cc-tg-title{font-size:.86rem;color:var(--text);margin:var(--sp-1) var(--sp-0) var(--sp-0);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cc-tg-empty{padding:var(--sp-4) var(--sp-7) var(--sp-5);font-size:.76rem;color:var(--text-faint)}
 /* PR→issue badge (#2612 part c) — a small link chip on a queue/triage row telling
    whether a fixing PR is open or merged. Reuses the status-pill palette so its
    meaning matches the rest of the page (open = review-amber, merged = done-green). */
-.cc-pr-badge{flex-shrink:0;display:inline-flex;align-items:center;gap:4px;align-self:center;font-size:.68rem;font-weight:600;padding:2px 8px;border-radius:999px;text-decoration:none;border:1px solid transparent;white-space:nowrap}
-.cc-pr-badge.pr-open{background:rgba(210,153,34,.12);color:var(--cc-amber);border-color:rgba(210,153,34,.3)}
-.cc-pr-badge.pr-merged{background:rgba(63,185,80,.12);color:var(--cc-green);border-color:rgba(63,185,80,.3)}
+.cc-pr-badge{flex-shrink:0;display:inline-flex;align-items:center;gap:var(--sp-2);align-self:center;font-size:var(--fs-xs);font-weight:600;padding:var(--sp-1) var(--sp-4);border-radius:var(--r-pill);text-decoration:none;border:1px solid transparent;white-space:nowrap}
+.cc-pr-badge.pr-open{background:color-mix(in srgb,var(--cc-amber) var(--component-tint),transparent);color:var(--cc-amber);border-color:color-mix(in srgb,var(--cc-amber) var(--component-border),transparent)}
+.cc-pr-badge.pr-merged{background:color-mix(in srgb,var(--cc-green) var(--component-tint),transparent);color:var(--cc-green);border-color:color-mix(in srgb,var(--cc-green) var(--component-border),transparent)}
 .cc-pr-badge:hover{filter:brightness(1.1);text-decoration:underline}
 /* Inline PR badge riding on a ready-queue row (smaller, sits after the title). */
-.cc-q-body .cc-pr-badge{margin-top:4px}
+.cc-q-body .cc-pr-badge{margin-top:var(--sp-2)}
 /* ── (#2612 part d) Light-mode fixups for the handful of DARK one-off surfaces
    that are not part of the tokenized neutral ramp (small gradient washes and a
    couple of hover fills baked as literal dark hex). On a light appearance those
@@ -1399,24 +1318,24 @@ select.admin-act{min-width:0;max-width:100%%}
    gentle contrast lift on the muted status-pill fills, whose ~12%% dark-tuned
    rgba washes go faint on white — a gentle solid tint keeps them legible without
    changing their hue/meaning. Applies under BOTH light signals. */
-@media(prefers-color-scheme:light){:root:not([data-theme="dark"]) .ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,var(--cc-border-2) 0%%,var(--cc-surface) 100%%)}
-:root:not([data-theme="dark"]) .cc-ach{background:var(--cc-surface)}
-:root:not([data-theme="dark"]) .client-tile:hover{background:var(--cc-border-2)}
+@media(prefers-color-scheme:light){:root:not([data-theme="dark"]) .ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,var(--line-subtle) 0%%,var(--surface-2) 100%%)}
+:root:not([data-theme="dark"]) .cc-ach{background:var(--surface-2)}
+:root:not([data-theme="dark"]) .client-tile:hover{background:var(--line-subtle)}
 :root:not([data-theme="dark"]) .invite-banner{background:#ddf4ff;border-color:#b6e3ff}
-:root:not([data-theme="dark"]) .cc-report-link:hover{border-color:var(--cc-muted)}
-:root:not([data-theme="dark"]) .pill-progress{background:rgba(9,105,218,.10);color:var(--cc-accent-fg);border-color:rgba(9,105,218,.30)}
+:root:not([data-theme="dark"]) .cc-report-link:hover{border-color:var(--text-muted)}
+:root:not([data-theme="dark"]) .pill-progress{background:color-mix(in srgb,var(--cc-accent) 10%%,transparent);color:var(--cc-accent-fg);border-color:color-mix(in srgb,var(--cc-accent-fg) 30%%,transparent)}
 :root:not([data-theme="dark"]) .pill-review,:root:not([data-theme="dark"]) .clanker-status.reviewing{background:rgba(154,103,0,.12);color:var(--cc-amber);border-color:rgba(154,103,0,.30)}
 :root:not([data-theme="dark"]) .pill-passed{background:rgba(26,127,55,.12);color:var(--cc-green);border-color:rgba(26,127,55,.30)}
 :root:not([data-theme="dark"]) .pill-blocked{background:rgba(207,34,46,.10);color:var(--cc-red);border-color:rgba(207,34,46,.30)}
 :root:not([data-theme="dark"]) .cc-live{background:rgba(26,127,55,.08);border-color:rgba(26,127,55,.30);color:#116329}
 :root:not([data-theme="dark"]) .cc-live.stale{background:rgba(154,103,0,.08);border-color:rgba(154,103,0,.30);color:#7d4e00}
 }
-:root[data-theme="light"] .ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,var(--cc-border-2) 0%%,var(--cc-surface) 100%%)}
-:root[data-theme="light"] .cc-ach{background:var(--cc-surface)}
-:root[data-theme="light"] .client-tile:hover{background:var(--cc-border-2)}
+:root[data-theme="light"] .ops-card.card-accent>.ops-card-head{background:linear-gradient(180deg,var(--line-subtle) 0%%,var(--surface-2) 100%%)}
+:root[data-theme="light"] .cc-ach{background:var(--surface-2)}
+:root[data-theme="light"] .client-tile:hover{background:var(--line-subtle)}
 :root[data-theme="light"] .invite-banner{background:#ddf4ff;border-color:#b6e3ff}
-:root[data-theme="light"] .cc-report-link:hover{border-color:var(--cc-muted)}
-:root[data-theme="light"] .pill-progress{background:rgba(9,105,218,.10);color:var(--cc-accent-fg);border-color:rgba(9,105,218,.30)}
+:root[data-theme="light"] .cc-report-link:hover{border-color:var(--text-muted)}
+:root[data-theme="light"] .pill-progress{background:color-mix(in srgb,var(--cc-accent) 10%%,transparent);color:var(--cc-accent-fg);border-color:color-mix(in srgb,var(--cc-accent-fg) 30%%,transparent)}
 :root[data-theme="light"] .pill-review,:root[data-theme="light"] .clanker-status.reviewing{background:rgba(154,103,0,.12);color:var(--cc-amber);border-color:rgba(154,103,0,.30)}
 :root[data-theme="light"] .pill-passed{background:rgba(26,127,55,.12);color:var(--cc-green);border-color:rgba(26,127,55,.30)}
 :root[data-theme="light"] .pill-blocked{background:rgba(207,34,46,.10);color:var(--cc-red);border-color:rgba(207,34,46,.30)}
@@ -1426,14 +1345,14 @@ select.admin-act{min-width:0;max-width:100%%}
    densest grids (the onboarding stat row and the Operations cards). No card
    removed, no structural/layout change — just a touch more gap/padding so the
    packed panels read less cramped, identically in both themes. */
-.stat-row{gap:12px}
+.stat-row{gap:var(--sp-5)}
 .stat{padding:16px 10px}
-.ops-grid{gap:24px}
+.ops-grid{gap:var(--sp-8)}
 .ops-card-head{padding:18px 20px}
-.lb-custom-style-note{margin:0 0 16px;padding:10px 12px;border:1px solid rgba(88,166,255,.35);border-radius:8px;background:rgba(88,166,255,.10);color:var(--cc-text);font-size:.86rem}
+.lb-custom-style-note{margin:var(--sp-0) var(--sp-0) var(--sp-6);padding:10px 12px;border:var(--line-width) solid color-mix(in srgb,var(--status-info) var(--component-border),transparent);border-radius:8px;background:color-mix(in srgb,var(--status-info) var(--component-tint-soft),transparent);color:var(--text);font-size:.86rem}
 .lb-custom-style-note code{color:var(--cc-accent)}
-.lb-custom-style-note--warn{border-color:rgba(210,153,34,.45);background:rgba(210,153,34,.12)}
-.lb-custom-style-note button{margin-left:8px;background:transparent;border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text);padding:2px 8px;cursor:pointer}
+.lb-custom-style-note--warn{border-color:color-mix(in srgb,var(--cc-amber) var(--component-border),transparent);background:color-mix(in srgb,var(--cc-amber) var(--component-tint),transparent)}
+.lb-custom-style-note button{margin-left:var(--sp-4);background:transparent;border:1px solid var(--line-strong);border-radius:var(--r);color:var(--text);padding:var(--sp-1) var(--sp-4);cursor:pointer}
 /* ── #4549 Theme control ─────────────────────────────────────────────────────
    The light ramp above has existed since #2612 but was reachable only if the
    visitor's OS already asked for it — there was no in-page selector and no
@@ -1450,12 +1369,10 @@ select.admin-act{min-width:0;max-width:100%%}
    used to paint up to the wrapper so the two sit in one continuous bar. The
    control deliberately does NOT go inside the tablist — a non-tab child of a
    role=tablist is announced as a stray tab. */
-.page-chrome{display:flex;align-items:stretch;background:var(--cc-surface);border-bottom:1px solid var(--cc-border)}
+.page-chrome{display:flex;align-items:stretch;background:var(--surface-2);border-bottom:1px solid var(--line-strong)}
 .page-chrome>.page-tabs{flex:1 1 auto;min-width:0;background:none;border-bottom:none}
-.theme-toggle{flex:0 0 auto;align-self:center;display:inline-flex;align-items:center;gap:6px;margin:0 48px 0 12px;padding:5px 11px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:999px;color:var(--cc-muted);font-family:inherit;font-size:.76rem;line-height:1;cursor:pointer}
-.theme-toggle:hover{color:var(--cc-text);border-color:var(--cc-muted)}
-.theme-toggle:focus-visible{outline:2px solid var(--cc-accent);outline-offset:2px}
-.theme-toggle__glyph{font-size:.92rem;line-height:1}
+.theme-toggle{flex:0 0 auto;align-self:center;margin:var(--sp-0) var(--sp-9) var(--sp-0) var(--sp-5);line-height:1}
+.theme-toggle__glyph{font-size:var(--fs-md);line-height:1}
 /* The swap must not animate. The sheet puts transitions on tiles, buttons, the
    ops rail and the quota bar; letting every one of them run at once turns a
    theme change into a half-second wobble across the whole page. ccApplyTheme
@@ -1487,10 +1404,10 @@ select.admin-act{min-width:0;max-width:100%%}
   /* Wrap rather than scroll: a horizontal scroller with no visible scrollbar
      hides the trailing tabs just as effectively as the overflow did. Wrapping
      puts all five on screen and tappable. */
-  .page-tabs{flex-wrap:wrap;padding:0 16px}
+  .page-tabs{flex-wrap:wrap;padding:var(--sp-0) var(--sp-6)}
   .page-chrome{flex-wrap:wrap}
   .theme-toggle{margin:0 16px 6px auto}
-  .page-tab{flex:0 0 auto;padding:12px 12px;font-size:.88rem}
+  .page-tab{flex:0 0 auto;padding:var(--sp-5) var(--sp-5);font-size:.88rem}
 
   /* Gutters back to something a phone can spare, and the horizontal axis stated
      outright. The overflow sources are fixed above, so hidden is a backstop
@@ -1510,7 +1427,7 @@ select.admin-act{min-width:0;max-width:100%%}
      the same order, so the header keeps sitting over the column it labels. The
      stat tracks stay fixed rem widths for exactly that reason: auto would size
      per row and the header would drift out of alignment with the numbers. */
-  .lb-row{grid-template-columns:2.1rem minmax(0,1fr) 3.2rem 3.2rem 3.4rem;column-gap:6px;row-gap:4px}
+  .lb-row{grid-template-columns:2.1rem minmax(0,1fr) 3.2rem 3.2rem 3.4rem;column-gap:var(--sp-3);row-gap:var(--sp-2)}
   .lb-row>:nth-child(1){grid-column:1;grid-row:1}
   .lb-row>:nth-child(2){grid-column:2/-1;grid-row:1}
   .lb-row>:nth-child(3){grid-column:1/3;grid-row:2}
@@ -1520,11 +1437,11 @@ select.admin-act{min-width:0;max-width:100%%}
   .lb-row>:nth-child(7){grid-column:1/-1;grid-row:3;text-align:left}
   /* The uppercase, letter-spaced header labels are the widest thing in the stat
      tracks; drop them a notch so "Findings" fits 3.4rem. */
-  .lb-head .lb-stat,.lb-head .lb-rank{font-size:.6rem}
+  .lb-head .lb-stat,.lb-head .lb-rank{font-size:var(--fs-2xs)}
   .lb-spark{justify-content:flex-start}
   .lb-trend{padding-left:14px;padding-right:14px}
 }
-</style>%s</head><body>
+</style>%s%s</head><body>
 <div class="page-chrome">
 <div class="page-tabs" role="tablist">
 <button class="page-tab active" role="tab" id="ptab-onboarding" aria-selected="true" data-panel="tab-onboarding">Onboarding</button>
@@ -1541,7 +1458,7 @@ select.admin-act{min-width:0;max-width:100%%}
 <h1>🐝 Contribute to %s</h1>
 <div id="invite-banner" class="invite-banner" hidden role="status"></div>
 <p class="subtitle">Donate your CLI + API tokens to help this project's AI agent swarm.</p>
-<p class="subtitle" style="font-size:.95rem;margin-top:-24px;margin-bottom:32px">Powered by <strong style="color:var(--cc-text)">ClankeR</strong>, the contributor relay &mdash; it hands tasks from this hive's backlog to the agent running on your machine. Your compute, their backlog. Bring your own inference &mdash; how you want to contribute is up to you.</p>
+<p class="subtitle" style="font-size:.95rem;margin-top:-24px;margin-bottom:var(--sp-9)">Powered by <strong style="color:var(--text)">ClankeR</strong>, the contributor relay &mdash; it hands tasks from this hive's backlog to the agent running on your machine. Your compute, their backlog. Bring your own inference &mdash; how you want to contribute is up to you.</p>
 <div class="stat-row">
 <div class="stat"><div class="stat-num" style="color:var(--cc-accent)">%d</div><div class="stat-label">Total</div></div>
 %s
@@ -1552,7 +1469,7 @@ select.admin-act{min-width:0;max-width:100%%}
      JS from the CLIENTS metadata (inline SVG emblems, all CSP-safe). Clicking a
      tile drives the existing #cli-select below, so the copy-block logic is
      unchanged. Falls back gracefully: the plain selector still works if JS is off. -->
-<p style="color:var(--cc-muted);margin:0 0 8px;font-size:.9rem">Find your tool:</p>
+<p style="color:var(--text-muted);margin:var(--sp-0) var(--sp-0) var(--sp-4);font-size:.9rem">Find your tool:</p>
 <div id="client-tiles" class="client-tiles" role="listbox" aria-label="Choose your CLI tool"></div>
 <!-- "Open in <tool>" ONBOARDING affordance. Only shown for a client with a real,
      vendor-documented deep-link scheme. It opens a chat in the vendor's own app to
@@ -1562,19 +1479,19 @@ select.admin-act{min-width:0;max-width:100%%}
 <div class="oi-body"><strong id="openin-title">Open in your tool</strong><br><span id="openin-desc"></span> <span class="oi-note">This is onboarding help &mdash; it opens a chat in the vendor&rsquo;s app to walk you through setup. It does NOT connect your tool to this hive; you still contribute by running the commands below.</span></div>
 <a id="openin-link" class="openin-link" href="#" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6.5 3.5H3.5A1.5 1.5 0 0 0 2 5v7.5A1.5 1.5 0 0 0 3.5 14H11a1.5 1.5 0 0 0 1.5-1.5v-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M9.5 2.5H14v4.5M14 2.5 7.5 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="openin-label">Open in tool</span></a>
 </div>
-<div style="margin-bottom:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-<span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap">
-<label style="font-size:.9rem;color:var(--cc-muted)">OS:</label>
-<select id="os-select" style="background:var(--cc-surface);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:6px 12px;font-size:.9rem;cursor:pointer">
+<div style="margin-bottom:var(--sp-6);display:flex;align-items:center;gap:var(--sp-6);flex-wrap:wrap">
+<span style="display:inline-flex;align-items:center;gap:var(--sp-4);white-space:nowrap">
+<label style="font-size:.9rem;color:var(--text-muted)">OS:</label>
+<select id="os-select" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:.9rem;cursor:pointer">
 <option value="macos" selected>macOS</option>
 <option value="linux">Linux</option>
 <option value="windows">Windows</option>
 </select>
 </span>
-<span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap">
-<label style="font-size:.9rem;color:var(--cc-muted)">Choose your CLI:</label>
+<span style="display:inline-flex;align-items:center;gap:var(--sp-4);white-space:nowrap">
+<label style="font-size:.9rem;color:var(--text-muted)">Choose your CLI:</label>
 <!-- Keep this curated contributor list cross-checked with config/backends.conf KNOWN_BACKENDS; not every registered backend is ready for this picker. -->
-<select id="cli-select" style="background:var(--cc-surface);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:6px 12px;font-size:.9rem;cursor:pointer">
+<select id="cli-select" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:.9rem;cursor:pointer">
 <option value="claude" data-install="npm i -g @anthropic-ai/claude-code" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="">Claude Code</option>
 <option value="codex" data-install="npm i -g @openai/codex" data-host-install="npm i -g @openai/codex\ncodex login --device-auth   # or export CODEX_API_KEY / OPENAI_API_KEY for API-key mode" data-model-flag="--model" data-default-model="" data-env="# Optional: Codex reasoning effort — the relay passes it as -c model_reasoning_effort.\n# export AGENT_REASONING_EFFORT=high">OpenAI Codex</option>
 <option value="copilot" data-install="" data-host-install="npm install -g @github/copilot # uses your existing gh auth" data-model-flag="--model" data-default-model="">GitHub Copilot</option>
@@ -1591,35 +1508,35 @@ select.admin-act{min-width:0;max-width:100%%}
 <option value="other" data-install="" data-host-install="# Install your CLI tool" data-model-flag="" data-default-model="">Other (host only)</option>
 </select>
 </span>
-<span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap">
-<label style="font-size:.9rem;color:var(--cc-muted)">Mode:</label>
-<select id="mode-select" style="background:var(--cc-surface);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:6px 12px;font-size:.9rem;cursor:pointer">
+<span style="display:inline-flex;align-items:center;gap:var(--sp-4);white-space:nowrap">
+<label style="font-size:.9rem;color:var(--text-muted)">Mode:</label>
+<select id="mode-select" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:.9rem;cursor:pointer">
 <option value="containerized">Containerized (recommended)</option>
 <option value="host">Host (non-containerized)</option>
 <option value="kubernetes">Kubernetes (cluster)</option>
 </select>
 </span>
-<span id="runtime-group" style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap">
-<label style="font-size:.9rem;color:var(--cc-muted)">Runtime:</label>
-<select id="runtime-select" style="background:var(--cc-surface);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:6px 12px;font-size:.9rem;cursor:pointer">
+<span id="runtime-group" style="display:inline-flex;align-items:center;gap:var(--sp-4);white-space:nowrap">
+<label style="font-size:.9rem;color:var(--text-muted)">Runtime:</label>
+<select id="runtime-select" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:.9rem;cursor:pointer">
 <option value="">Auto-detect</option>
 <option value="docker">Docker</option>
 <option value="podman">Podman</option>
 </select>
 </span>
 </div>
-<div id="model-row" style="margin-bottom:12px;display:none;align-items:center;gap:8px">
-<label style="font-size:.9rem;color:var(--cc-muted)">Model (optional):</label>
-<input id="model-input" type="text" placeholder="e.g. claude-sonnet-4-6, gpt-4o" style="background:var(--cc-surface);color:var(--cc-text);border:1px solid var(--cc-border);border-radius:6px;padding:6px 12px;font-size:.85rem;flex:1;max-width:300px" data-input-action="updateCmds">
+<div id="model-row" style="margin-bottom:var(--sp-5);display:none;align-items:center;gap:var(--sp-4)">
+<label style="font-size:.9rem;color:var(--text-muted)">Model (optional):</label>
+<input id="model-input" type="text" placeholder="e.g. claude-sonnet-4-6, gpt-4o" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:.85rem;flex:1;max-width:300px" data-input-action="updateCmds">
 </div>
 <!-- #2549 Kubernetes-mode note. Hidden except in Kubernetes mode. States the two
      honest constraints up front: only headless-capable backends run in a cluster
      (a headless pod has no TTY), and the credential stored in the cluster Secret
      is a long-lived personal token that is more exposed than a laptop file, with
      the per-task credential boundary tracked in #2537. -->
-<div id="k8s-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">Kubernetes is the advanced path.</strong> It needs a cluster, a kubeconfig and RBAC &mdash; not a first-timer&rsquo;s happy path. The workload runs the relay <strong>headless</strong> (no TTY), so only headless-capable backends work in a cluster: <strong>Claude Code, LiteLLM, Copilot, Codex</strong>. Other backends will refuse work at pod startup.<br>
-<span style="color:var(--cc-muted)">Credential note (interim): the generated Secret stores a long-lived personal <code>GH_TOKEN</code> &mdash; base64, not encrypted, and readable by anyone with <code>get secrets</code> in that namespace or by cluster-scoped operators/backups. That is materially more exposed than a <code>0600</code> file on your laptop. Revoke any time with <code>gh auth logout</code>. Gating the credential on explicit task acceptance is tracked in <a href="https://github.com/hivecommons/hive/issues/2537" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2537</a> and is not solved by this path.</span>
+<div id="k8s-note" style="display:none;margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid #d29922;border-radius:var(--r);padding:var(--sp-5) 14px;font-size:.85rem;color:var(--text);line-height:1.5">
+<strong style="color:var(--text)">Kubernetes is the advanced path.</strong> It needs a cluster, a kubeconfig and RBAC &mdash; not a first-timer&rsquo;s happy path. The workload runs the relay <strong>headless</strong> (no TTY), so only headless-capable backends work in a cluster: <strong>Claude Code, LiteLLM, Copilot, Codex</strong>. Other backends will refuse work at pod startup.<br>
+<span style="color:var(--text-muted)">Credential note (interim): the generated Secret stores a long-lived personal <code>GH_TOKEN</code> &mdash; base64, not encrypted, and readable by anyone with <code>get secrets</code> in that namespace or by cluster-scoped operators/backups. That is materially more exposed than a <code>0600</code> file on your laptop. Revoke any time with <code>gh auth logout</code>. Gating the credential on explicit task acceptance is tracked in <a href="https://github.com/hivecommons/hive/issues/2537" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2537</a> and is not solved by this path.</span>
 </div>
 <!-- Host-only note. Shown for backends the containerized/Kubernetes paths cannot
      run at all: "other" has no image by definition. (agy used to force Host
@@ -1628,8 +1545,8 @@ select.admin-act{min-width:0;max-width:100%%}
      binary just needed adding) and the second half unverified, so agy now
      offers Container like every other backend; see #agy-confinement-note for
      its own, narrower caveat.) -->
-<div id="hostonly-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">This backend runs on your host, not in a container.</strong> The mode selector has been switched to <strong>Host</strong> for you.
+<div id="hostonly-note" style="display:none;margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid #d29922;border-radius:var(--r);padding:var(--sp-5) 14px;font-size:.85rem;color:var(--text);line-height:1.5">
+<strong style="color:var(--text)">This backend runs on your host, not in a container.</strong> The mode selector has been switched to <strong>Host</strong> for you.
 </div>
 <!-- agy confinement note. agy has no OS-level sandbox at all (see
      config/backends.conf's "no confinement mechanism" section): local mode
@@ -1637,20 +1554,20 @@ select.admin-act{min-width:0;max-width:100%%}
      Container is the only mode with any host boundary. Shown only for agy,
      regardless of the selected mode, so the constraint is visible before a
      contributor picks Local and hits the refusal. -->
-<div id="agy-confinement-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">Antigravity (agy) has no OS-level sandbox of its own.</strong> <strong>Container</strong> mode (the default) is the only mode with any host boundary &mdash; it runs agy inside the contributor container, which now ships the <code>agy</code> binary. agy signs in through an interactive Google OAuth flow with no API-key mode: run <code>agy</code> once inside the container (or on the host first &mdash; <code>just contribute-hive agy</code> stages a signed-in <code>~/.gemini</code> into the container, though whether a staged credential re-authenticates an unattended agy has not been confirmed end-to-end). <strong>Local</strong> mode refuses to launch agy at all unless you explicitly set <code>HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1</code>, which drops the container boundary and leaves agy running directly against your host filesystem &mdash; not recommended.
+<div id="agy-confinement-note" style="display:none;margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid #d29922;border-radius:var(--r);padding:var(--sp-5) 14px;font-size:.85rem;color:var(--text);line-height:1.5">
+<strong style="color:var(--text)">Antigravity (agy) has no OS-level sandbox of its own.</strong> <strong>Container</strong> mode (the default) is the only mode with any host boundary &mdash; it runs agy inside the contributor container, which now ships the <code>agy</code> binary. agy signs in through an interactive Google OAuth flow with no API-key mode: run <code>agy</code> once inside the container (or on the host first &mdash; <code>just contribute-hive agy</code> stages a signed-in <code>~/.gemini</code> into the container, though whether a staged credential re-authenticates an unattended agy has not been confirmed end-to-end). <strong>Local</strong> mode refuses to launch agy at all unless you explicitly set <code>HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1</code>, which drops the container boundary and leaves agy running directly against your host filesystem &mdash; not recommended.
 </div>
-<div id="omp-confinement-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">Oh My Pi (omp) has no verified local sandbox.</strong> <strong>Container</strong> mode (the default) is the supported boundary and runs the pinned <code>omp</code> binary from the contributor image. <strong>Host</strong> mode launches the CLI directly on your machine and refuses to run unless you intentionally opt out with <code>HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED=1</code>; use it only if you understand that trade-off.
+<div id="omp-confinement-note" style="display:none;margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid #d29922;border-radius:var(--r);padding:var(--sp-5) 14px;font-size:.85rem;color:var(--text);line-height:1.5">
+<strong style="color:var(--text)">Oh My Pi (omp) has no verified local sandbox.</strong> <strong>Container</strong> mode (the default) is the supported boundary and runs the pinned <code>omp</code> binary from the contributor image. <strong>Host</strong> mode launches the CLI directly on your machine and refuses to run unless you intentionally opt out with <code>HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED=1</code>; use it only if you understand that trade-off.
 </div>
-<div id="multi-hub-note" style="margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #58a6ff;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">Contribute to multiple hives:</strong> after registering with each hive, set <code>HIVE_HUB</code> to comma-separated WebSocket URLs and <code>HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order. One relay shares one CLI/tmux session, works on one task at a time, keeps each hub connected with its own heartbeat, and rotates only when the active hub says no task is available. Added by <a href="https://github.com/hanthor" target="_blank" rel="noopener" style="color:var(--cc-accent)">@hanthor</a> in <a href="https://github.com/hivecommons/hive/pull/2846" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2846</a>.
+<div id="multi-hub-note" style="margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid #58a6ff;border-radius:var(--r);padding:var(--sp-5) 14px;font-size:.85rem;color:var(--text);line-height:1.5">
+<strong style="color:var(--text)">Contribute to multiple hives:</strong> after registering with each hive, set <code>HIVE_HUB</code> to comma-separated WebSocket URLs and <code>HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order. One relay shares one CLI/tmux session, works on one task at a time, keeps each hub connected with its own heartbeat, and rotates only when the active hub says no task is available. Added by <a href="https://github.com/hanthor" target="_blank" rel="noopener" style="color:var(--cc-accent)">@hanthor</a> in <a href="https://github.com/hivecommons/hive/pull/2846" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2846</a>.
 </div>
-<p style="color:var(--cc-muted);margin-bottom:8px">Copy and paste these commands to get started:</p>
+<p style="color:var(--text-muted);margin-bottom:var(--sp-4)">Copy and paste these commands to get started:</p>
 <div id="onboarding-announcement" class="announcement-reverse" role="status"></div>
-<div style="margin-top:16px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;padding:16px;position:relative">
-<button id="copy-btn" style="position:absolute;top:8px;right:8px;background:#238636;color:#fff;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:.75rem">Copy</button>
-<pre id="copy-cmds" style="color:var(--cc-text);font-size:.85rem;margin:0;overflow-x:auto;white-space:pre"># Default shown: macOS + Claude Code + containerized mode.
+<div style="margin-top:var(--sp-6);background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;padding:var(--sp-6);position:relative">
+<button id="copy-btn" class="hv-btn btn-primary btn-sm cc-copy-overlay">Copy</button>
+<pre id="copy-cmds" style="color:var(--text);font-size:.85rem;margin:var(--sp-0);overflow-x:auto;white-space:pre"># Default shown: macOS + Claude Code + containerized mode.
 # Use the OS / CLI / Mode / Runtime selectors above to customize.
 brew install just gh
 git clone -b {{HIVE_BRANCH}} https://github.com/hivecommons/hive && cd hive
@@ -1664,7 +1581,7 @@ just contribute-hive</pre>
      tweak — deliberately NOT compressed into a deep-link URL. Prefilled per selected
      client by the script below; edits are preserved until the client changes. -->
 <div class="prompt-block">
-<button type="button" id="prompt-copy" class="pb-copy">Copy</button>
+<button type="button" id="prompt-copy" class="hv-btn btn-primary btn-sm pb-copy">Copy</button>
 <h4>Prompt to paste into <span id="prompt-tool">your tool</span></h4>
 <p class="pb-sub">Optional. Paste this into <span id="prompt-tool2">your tool</span> and it will walk you through joining this hive on your machine. Edit it freely &mdash; it is yours to customize.</p>
 <textarea id="prompt-text" spellcheck="false" aria-label="Customizable onboarding prompt"></textarea>
@@ -1834,11 +1751,11 @@ setTimeout(function(){btn.textContent='Copy';btn.style.background='#238636'},200
 // labeled onboarding-not-contribution in the UI.
 var EMB={
 claude:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#d97757" d="M12 2 3.5 20h3.2l1.6-3.7h7.4L17.3 20h3.2L12 2Zm-2.4 11.2L12 7.6l2.4 5.6H9.6Z"/></svg>',
-codex:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l6.93 4v8L12 20l-6.93-4V8z" fill="none" stroke="#10a37f" stroke-width="1.5" stroke-linejoin="round"/><path d="M10 10.5l2 1.5-2 1.5M13.5 15h3" stroke="#10a37f" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+codex:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l6.93 4v8L12 20l-6.93-4V8z" fill="none" stroke="var(--vendor-openai)" stroke-width="1.5" stroke-linejoin="round"/><path d="M10 10.5l2 1.5-2 1.5M13.5 15h3" stroke="var(--vendor-openai)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 copilot:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12.5" r="8" fill="none" stroke="#e6edf3" stroke-width="1.6"/><circle cx="9" cy="12" r="1.3" fill="#e6edf3"/><circle cx="15" cy="12" r="1.3" fill="#e6edf3"/><path d="M12 4.5V2M8 5l-1-2M16 5l1-2" stroke="#e6edf3" stroke-width="1.4" stroke-linecap="round"/></svg>',
 pi:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16" stroke="#7c93ff" stroke-width="2" stroke-linecap="round"/><path d="M9 8v10M15.5 8v7.5a2 2 0 0 0 2 2" stroke="#7c93ff" stroke-width="2" stroke-linecap="round"/></svg>',
 goose:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#3fb0ac" d="M6 14a6 6 0 0 1 6-6c1 0 1.6.9 1 1.7 2.5.4 4 2.4 4 5.1 0 .6-.5 1.2-1.2 1.2H8.5A2.5 2.5 0 0 1 6 13.5V14Z"/><circle cx="10.5" cy="10.8" r=".8" fill="#0d1117"/><path d="M13 9.7l2.4-1" stroke="#f0b429" stroke-width="1.4" stroke-linecap="round"/></svg>',
-litellm:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="#58a6ff" stroke-width="1.5"/><path d="M8 10l2 2-2 2M12.5 14h3.5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+litellm:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="var(--status-info)" stroke-width="1.5"/><path d="M8 10l2 2-2 2M12.5 14h3.5" stroke="var(--status-info)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 openrouter:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h4l3-4 3 8 3-4h3" fill="none" stroke="#8b5cf6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 vllm:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l4 14 3-9 3 9 4-14" fill="none" stroke="#f0b429" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 'llm-d':'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="#4d9375" stroke-width="1.5"/><path d="M8 9h4a3 3 0 0 1 0 6H8V9Z" fill="none" stroke="#4d9375" stroke-width="1.5" stroke-linejoin="round"/></svg>',
@@ -1982,11 +1899,11 @@ update();  // initial paint: copy block + branded UI in sync from first load
 })();
 </script>
 </div>
-<p style="color:var(--cc-muted-2);font-size:.78rem;margin-top:8px">Containerized mode auto-detects docker, then podman &mdash; when both are present, Docker wins. Docker's daemon runs rootful (docker-group membership is effectively root on the host); Podman here runs rootless (user namespace via <code>--userns=keep-id</code>, SELinux labels). Force either explicitly with <code>export HIVE_CONTAINER_RUNTIME=podman</code> (or <code>docker</code>). Rootless Podman handling is best-effort today, not yet covered by CI &mdash; see <a href="https://github.com/hivecommons/hive/blob/HEAD/src/docs/podman-rootless-ci.md" target="_blank" style="color:var(--cc-accent)">docs/podman-rootless-ci.md</a>.</p>
-<p style="color:var(--cc-muted-2);font-size:.78rem;margin-top:8px">Don't see your CLI? <a href="https://github.com/hivecommons/hive/issues/new?title=CLI+request:+&labels=enhancement" target="_blank" style="color:var(--cc-accent)">Open an issue</a> and we'll add support for it.</p>
+<p style="color:var(--text-faint);font-size:.78rem;margin-top:var(--sp-4)">Containerized mode auto-detects docker, then podman &mdash; when both are present, Docker wins. Docker's daemon runs rootful (docker-group membership is effectively root on the host); Podman here runs rootless (user namespace via <code>--userns=keep-id</code>, SELinux labels). Force either explicitly with <code>export HIVE_CONTAINER_RUNTIME=podman</code> (or <code>docker</code>). Rootless Podman handling is best-effort today, not yet covered by CI &mdash; see <a href="https://github.com/hivecommons/hive/blob/HEAD/src/docs/podman-rootless-ci.md" target="_blank" style="color:var(--cc-accent)">docs/podman-rootless-ci.md</a>.</p>
+<p style="color:var(--text-faint);font-size:.78rem;margin-top:var(--sp-4)">Don't see your CLI? <a href="https://github.com/hivecommons/hive/issues/new?title=CLI+request:+&labels=enhancement" target="_blank" style="color:var(--cc-accent)">Open an issue</a> and we'll add support for it.</p>
 <div id="onboarding-help-links" class="help-links" aria-label="Help and community links"><h4>Help &amp; community</h4><div class="links"></div></div>
-<div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap">
-<button type="button" id="goto-leaderboard-tab" style="display:inline-block;padding:8px 20px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-accent);text-decoration:none;font-size:.9rem;font-family:inherit;cursor:pointer">🏆 View Leaderboard</button>
+<div style="margin-top:var(--sp-7);display:flex;gap:var(--sp-5);flex-wrap:wrap">
+<button type="button" id="goto-leaderboard-tab" class="hv-btn btn-secondary">🏆 View Leaderboard</button>
 </div>
 <div class="how">
 <h3>What you bring vs. what the hive provides</h3>
@@ -2022,7 +1939,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="tab-panel" id="tab-manage" role="tabpanel" aria-labelledby="ptab-manage">
 <div class="ops">
 <h1>Management</h1>
-<p class="subtitle" style="font-size:.95rem">Operator admin controls for the contributor (&ldquo;clanker&rdquo;) fleet, mirrored from the Governor Hub configuration. Owner &amp; read-write only &mdash; a read viewer sees no controls here. Live monitoring of the fleet lives under the <strong style="color:var(--cc-text)">Operations</strong> tab.</p>
+<p class="subtitle" style="font-size:.95rem">Operator admin controls for the Contributor agent (ClankeR) fleet, mirrored from the Governor Hub configuration. Owner &amp; read-write only &mdash; a read viewer sees no controls here. Live monitoring of the fleet lives under the <strong style="color:var(--text)">Operations</strong> tab.</p>
 
 <!-- #2534 Operator admin controls. Hidden by default; shown only after /api/role
      reports owner or read-write. These mirror the Governor Hub config section
@@ -2033,7 +1950,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="ops-card ops-admin" id="ops-admin">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Operator admin controls</h3><span class="admin-badge" id="admin-role-badge"></span></div>
 <div class="admin-body">
-<p class="ops-note" style="margin-top:0">Mirrored from the Governor Hub configuration. Changes here write the same <code>Config.Hub.*</code> fields the Governor config dialog edits. Owner &amp; read-write only.</p>
+<p class="ops-note" style="margin-top:var(--sp-0)">Mirrored from the Governor Hub configuration. Changes here write the same <code>Config.Hub.*</code> fields the Governor config dialog edits. Owner &amp; read-write only.</p>
 
 <section class="admin-section" aria-labelledby="admin-section-announcement">
 <div class="admin-section-head"><h3 id="admin-section-announcement">Announcement</h3><p>Broadcast a short contributor announcement on Operations, Onboarding, profile, and relays. Empty text clears it.</p></div>
@@ -2041,7 +1958,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <label for="admin-announcement-text">Contributor announcement</label>
 <textarea class="admin-textarea admin-textarea--announcement" id="admin-announcement-text" maxlength="500" placeholder="e.g. Hive upgrade at 18:00 UTC; relays may reconnect automatically."></textarea>
 <div class="admin-control-note">Stored as <code>hub.contribute_announcement</code>. The server rotates the announcement id when the text changes.</div>
-<div class="admin-action-row"><select id="admin-announcement-level"><option value="info">Info</option><option value="warning">Warning</option></select><input type="datetime-local" id="admin-announcement-expires"><button type="button" class="admin-save" id="admin-announcement-save">Save announcement</button></div>
+<div class="admin-action-row"><select id="admin-announcement-level"><option value="info">Info</option><option value="warning">Warning</option></select><input type="datetime-local" id="admin-announcement-expires"><button type="button" class="hv-btn btn-primary admin-save" id="admin-announcement-save">Save announcement</button></div>
 </div>
 </section>
 
@@ -2051,7 +1968,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <label for="admin-help-links-text">Help &amp; community links</label>
 <textarea class="admin-textarea admin-textarea--links" id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://discord.gg/your-hive&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
 <div class="admin-control-note">Stored as <code>contribute.help_links</code>. Use <code>https://discord.gg/...</code> invites for Discord; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
-<div class="admin-action-row"><button type="button" class="admin-save" id="admin-help-links-save">Save help links</button></div>
+<div class="admin-action-row"><button type="button" class="hv-btn btn-primary admin-save" id="admin-help-links-save">Save help links</button></div>
 </div>
 </section>
 
@@ -2060,7 +1977,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="admin-toggle-grid">
 <div class="admin-toggle">
 <div class="admin-switch" id="admin-suspend-switch" data-key="contribute_suspended"></div>
-<div><div class="admin-toggle-label">Suspend contributions</div><div class="admin-toggle-sub">Stop assigning tasks. Connected clankers stay online but idle.</div></div>
+<div><div class="admin-toggle-label">Suspend contributions</div><div class="admin-toggle-sub">Stop assigning tasks. Connected contributor agents stay online but idle.</div></div>
 </div>
 <div class="admin-toggle">
 <div class="admin-switch" id="admin-wall-switch" data-key="contribute_wall_enabled"></div>
@@ -2075,11 +1992,11 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div><div class="admin-toggle-label">Task cooldown</div><div class="admin-toggle-sub">After a task completes with a verified PR, keep that issue out of the queue for the period below. Off = no cooldown gating. Failure quarantine is separate and always on.</div></div>
 </div>
 <div class="admin-field admin-nested-field" id="admin-cooldown-hours-wrap">
-<label for="admin-cooldown-hours">Cooldown period (hours) <span style="color:var(--cc-muted-2)">— 168 = one week (default). Range 1&ndash;8760.</span></label>
+<label for="admin-cooldown-hours">Cooldown period (hours) <span style="color:var(--text-faint)">— 168 = one week (default). Range 1&ndash;8760.</span></label>
 <div class="admin-inline-input"><input type="number" id="admin-cooldown-hours" min="1" max="8760"><span class="admin-unit">hours</span></div>
 <!-- Live tally of issues currently within their cooldown window (#2649 companion),
      hydrated by ccRenderCooldownCount from the fleet payload. Hidden when 0. -->
-<div id="admin-cooldown-count" class="admin-toggle-sub" style="margin-top:4px;display:none"></div>
+<div id="admin-cooldown-count" class="admin-toggle-sub" style="margin-top:var(--sp-2);display:none"></div>
 </div>
 </div>
 </section>
@@ -2091,40 +2008,40 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="admin-field" id="admin-filter-authors"></div>
 <div class="admin-field" id="admin-filter-labels"></div>
 <div class="admin-field">
-<label for="admin-needs-decision-label">Maintainer-decision label <span style="color:var(--cc-muted-2)">&mdash; applied when a relay reports <code>no_work_needed — decision:</code>. Empty disables relay labelling.</span></label>
+<label for="admin-needs-decision-label">Maintainer-decision label <span style="color:var(--text-faint)">&mdash; applied when a relay reports <code>no_work_needed — decision:</code>. Empty disables relay labelling.</span></label>
 <input type="text" id="admin-needs-decision-label" placeholder="needs-decision">
 <div class="admin-toggle-sub">Stored as <code>hub.contribute_needs_decision_label</code>; matching labels are skipped by the contribute queue until a human removes them.</div>
 </div>
 
 <div class="admin-field">
-<label>Allowed models <span style="color:var(--cc-muted-2)">— wildcards (*) and /regex/. Empty = allow all.</span></label>
+<label>Allowed models <span style="color:var(--text-faint)">— wildcards (*) and /regex/. Empty = allow all.</span></label>
 <div class="admin-chips" id="admin-allow-models"></div>
-<div class="admin-addrow"><input type="text" id="admin-allow-model-input" placeholder="e.g. claude-opus*, /gemini-\d/"><button type="button" id="admin-add-model">Add</button></div>
-<div class="admin-toggle" style="padding-top:8px"><div class="admin-switch" id="admin-reject-switch" data-key="contribute_reject_unknown_models"></div><div class="admin-toggle-sub">Reject unknown models at connect time (only when the allowlist is non-empty).</div></div>
+<div class="admin-addrow"><input type="text" id="admin-allow-model-input" placeholder="e.g. claude-opus*, /gemini-\d/"><button class="hv-btn btn-primary" type="button" id="admin-add-model">Add</button></div>
+<div class="admin-toggle" style="padding-top:var(--sp-4)"><div class="admin-switch" id="admin-reject-switch" data-key="contribute_reject_unknown_models"></div><div class="admin-toggle-sub">Reject unknown models at connect time (only when the allowlist is non-empty).</div></div>
 </div>
 </div>
 </section>
 
 <hr class="admin-hr">
-<h3 style="font-size:.9rem;color:var(--cc-text);margin:0 0 4px">Repos for Contribute</h3>
-<p class="ops-note" style="margin-top:0">Which repos feed the contribute queue. A repo is enabled unless toggled off. Mirrors the Governor Hub repo list; persists as <code>disabled_repos</code>.</p>
+<h3 style="font-size:.9rem;color:var(--text);margin:var(--sp-0) var(--sp-0) var(--sp-2)">Repos for Contribute</h3>
+<p class="ops-note" style="margin-top:var(--sp-0)">Which repos feed the contribute queue. A repo is enabled unless toggled off. Mirrors the Governor Hub repo list; persists as <code>disabled_repos</code>.</p>
 <div id="admin-repos"></div>
 
 <hr class="admin-hr">
-<h3 style="font-size:.9rem;color:var(--cc-text);margin:0 0 4px">Tier access &amp; rate limits</h3>
-<p class="ops-note" style="margin-top:0">Per-tier managed-queue limits. Enable/disable a tier and set tasks per hour / per day / concurrent. 0 means unlimited. Persists as <code>tier_limits</code> + <code>disabled_tiers</code>.</p>
+<h3 style="font-size:.9rem;color:var(--text);margin:var(--sp-0) var(--sp-0) var(--sp-2)">Tier access &amp; rate limits</h3>
+<p class="ops-note" style="margin-top:var(--sp-0)">Per-tier managed-queue limits. Enable/disable a tier and set tasks per hour / per day / concurrent. 0 means unlimited. Persists as <code>tier_limits</code> + <code>disabled_tiers</code>.</p>
 <div id="admin-tiers"></div>
 
-<button type="button" class="admin-save" id="admin-save-btn" disabled>Save filters</button>
+<button type="button" class="hv-btn btn-primary admin-save" id="admin-save-btn" disabled>Save filters</button>
 <p class="admin-note" id="admin-save-hint">Suspend / skip toggles apply immediately. Filter edits apply on Save. Both persist through <code>PUT /api/config/governor/hub</code>.</p>
 <hr class="admin-hr">
-<h3 style="font-size:.9rem;color:var(--cc-text);margin:0 0 4px">Wall moderation</h3>
+<h3 style="font-size:.9rem;color:var(--text);margin:var(--sp-0) var(--sp-0) var(--sp-2)">Wall moderation</h3>
 <div id="admin-wall-flags"><div class="ops-empty">Enable the wall to review flagged posts and mutes.</div></div>
 </div>
 </div>
 </div>
 </div>
-<!-- Operations tab — MONITORING. The Connected-clankers list (with its per-row
+<!-- Operations tab — MONITORING. The connected contributor agents list (with its per-row
      trust / Revoke / Remove controls, still owner/read-write gated), Fleet work
      queue, and the read-only Pipeline & policy panel. Split out of the former
      "Management & Operations" tab; the admin CONTROLS moved to the Management
@@ -2133,8 +2050,8 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="ops">
 <h1>Operations</h1>
 <div id="operator-message-banner-ops"></div>
-<p class="subtitle" style="font-size:.95rem">A live view over the contributor (&ldquo;clanker&rdquo;) fleet and its in-flight work. The panels below surface what this hive already knows; the per-clanker trust / revoke / remove controls are owner &amp; read-write only. Admin controls (suspend, admission filters) live under the <strong style="color:var(--cc-text)">Management</strong> tab.</p>
-<div id="ops-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
+<p class="subtitle" style="font-size:.95rem">A live view over the Contributor agent (ClankeR) fleet and its in-flight work. The panels below surface what this hive already knows; the per-contributor trust / revoke / remove controls are owner &amp; read-write only. Admin controls (suspend, admission filters) live under the <strong style="color:var(--text)">Management</strong> tab.</p>
+<div id="ops-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button class="hv-btn btn-secondary" type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
 <div id="ops-help-links" class="help-links" aria-label="Help and community links"><h4>Help &amp; community</h4><div class="links"></div></div>
 
 <!-- Two-region shell: a MAIN area (fleet / pipeline / queue / my-work) beside a
@@ -2148,19 +2065,19 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="ops-grid">
 <div>
 <div class="ops-card card-accent">
-<div class="ops-card-head"><span class="feed-dot"></span><h3>Connected clankers</h3><span class="ops-card-count count-strong" id="clanker-count"></span><!-- 7-day fleet-size trend (#persistent-history) --><span class="spark spark-inline" id="spark-fleet" title="Connected clankers, last 7 days (hourly)"></span></div>
+<div class="ops-card-head"><span class="feed-dot"></span><h3>Connected contributor agents (ClankeR)</h3><span class="ops-card-count count-strong" id="clanker-count"></span><!-- 7-day fleet-size trend (#persistent-history) --><span class="spark spark-inline" id="spark-fleet" title="Connected contributor agents (ClankeR), last 7 days (hourly)"></span></div>
 <!-- Army roster header: live count + at-a-glance status split, fed by the fleet snapshot. -->
 <div class="cc-army" id="cc-army">
-  <span style="color:var(--cc-text);font-weight:600">Your army</span>
+  <span style="color:var(--text);font-weight:600">Your army</span>
   <span class="cc-army-stat working"><span class="dot"></span><b id="cc-army-working">0</b>&nbsp;working</span>
   <span class="cc-army-stat reviewing"><span class="dot"></span><b id="cc-army-reviewing">0</b>&nbsp;reviewing</span>
   <span class="cc-army-stat idle"><span class="dot"></span><b id="cc-army-idle">0</b>&nbsp;idle</span>
 </div>
 <div id="clanker-list"><div class="ops-empty">Loading fleet&hellip;</div></div>
 </div>
-<div class="ops-card" style="margin-top:20px">
+<div class="ops-card mt-7">
 <div class="ops-card-head"><h3>Pipeline &amp; policy</h3><!-- Tasks-completed/hour throughput trend (#persistent-history) --><span class="spark spark-inline" id="spark-throughput" title="Tasks completed per hour, last 7 days"></span></div>
-<div style="padding:16px 20px">
+<div style="padding:var(--sp-6) var(--sp-7)">
 <div class="pipeline">
 <span class="pipe-node">opened</span><span class="pipe-arrow">&rarr;</span>
 <span class="pipe-node">review <span class="lgtm">[lgtm]</span></span><span class="pipe-arrow">&rarr;</span>
@@ -2215,18 +2132,18 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
      are no numbers (#6937). It used to stay hidden for an anonymous viewer, which
      made an identity-dependent panel indistinguishable from a page that simply
      had nothing more to say. -->
-<div class="ops-card" id="cc-mine-card" style="display:none;margin-bottom:20px">
+<div class="ops-card" id="cc-mine-card" style="display:none;margin-bottom:var(--sp-7)">
 <div class="ops-card-head"><h3>Your contribution</h3><span class="ops-card-count" id="cc-mine-tier"></span><!-- Your own completions/hour, last 7 days. Same series as the quota trend;
      hydrated by ccMetricsPoll once metrics and identity have both loaded. --><span class="spark spark-inline" id="spark-mine" title="Your completions per hour, last 7 days"></span></div>
 <div class="cc-mine" id="cc-mine-body"><div class="ops-empty">Loading your stats&hellip;</div></div>
-<p class="ops-note" id="cc-mine-note" style="padding:0 20px 14px;margin:0"></p>
+<p class="ops-note" id="cc-mine-note" style="padding:0 20px 14px;margin:var(--sp-0)"></p>
 </div>
-<div class="ops-card" id="cc-wall-card" style="display:none;margin-bottom:20px">
+<div class="ops-card" id="cc-wall-card" style="display:none;margin-bottom:var(--sp-7)">
 <div class="ops-card-head"><h3>Contributor wall</h3><span class="ops-card-count" id="cc-wall-count"></span></div>
-<form class="runs-lookup" id="cc-wall-form" autocomplete="off" style="display:none;padding:12px 20px;border-bottom:1px solid var(--cc-border)">
+<form class="runs-lookup" id="cc-wall-form" autocomplete="off" style="display:none;padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-strong)">
 <input type="text" id="cc-wall-text" maxlength="500" placeholder="Share a model/setup note (plain text, 500 chars)" aria-label="Wall post">
 <input type="text" id="cc-wall-model" placeholder="model tag (optional)" aria-label="Model tag" style="max-width:180px">
-<button type="submit" class="admin-act">Post</button>
+<button type="submit" class="hv-btn btn-secondary btn-sm admin-act">Post</button>
 </form>
 <div class="runs-list" id="cc-wall-list"><div class="ops-empty">Loading wall&hellip;</div></div>
 </div>
@@ -2235,19 +2152,19 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
      only model/CLI aggregates — no contributor names or tokens — and splits
      small samples into "Not enough data yet" so a one-lucky-PR model does not
      lead the ranked list. -->
-<div class="ops-card" id="effective-models-card" style="margin-bottom:20px">
+<div class="ops-card mb-7" id="effective-models-card">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Most effective models</h3><span class="ops-card-count" id="effective-models-count"></span></div>
 <div class="effective-controls" role="group" aria-label="Effective model filters">
-  <button type="button" class="effective-chip active" data-eff-window="7d">7d</button>
-  <button type="button" class="effective-chip" data-eff-window="30d">30d</button>
-  <button type="button" class="effective-chip" data-eff-window="all">All</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip active" data-eff-window="7d">7d</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip" data-eff-window="30d">30d</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip" data-eff-window="all">All</button>
   <span class="ops-filters__sep" aria-hidden="true"></span>
-  <button type="button" class="effective-chip active" data-eff-filter="all">All work</button>
-  <button type="button" class="effective-chip" data-eff-filter="contributor">Contributor relays</button>
-  <button type="button" class="effective-chip" data-eff-filter="hive">Hive agents</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip active" data-eff-filter="all">All work</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip" data-eff-filter="contributor">Contributor relays</button>
+  <button type="button" class="hv-btn btn-secondary btn-sm effective-chip" data-eff-filter="hive">Hive agents</button>
 </div>
 <div id="effective-models-ranked"><div class="ops-empty">Loading effective models&hellip;</div></div>
-<p class="ops-note" style="padding:10px 20px 14px;margin:0">Ranked by first-pass merge rate, then merged PR count. Rows below the sample threshold are listed under <b>Not enough data yet</b>; every number is an aggregate for model + CLI.</p>
+<p class="ops-note" style="padding:10px 20px 14px;margin:var(--sp-0)">Ranked by first-pass merge rate, then merged PR count. Rows below the sample threshold are listed under <b>Not enough data yet</b>; every number is an aggregate for model + CLI.</p>
 </div>
 <!-- Fleet work (#6945): this panel was titled "My work" while rendering the work
      of EVERY connected clanker to every visitor, anonymous ones included — the
@@ -2261,17 +2178,17 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 <div class="ops-card">
 <div class="ops-card-head"><h3>Fleet work</h3><span class="ops-card-count" id="work-count"></span></div>
 <div class="ops-filters" role="tablist">
-<button class="ops-filter active" data-filter="all">All</button>
-<button class="ops-filter" data-filter="active">Active</button>
-<button class="ops-filter" data-filter="review">Review requests</button>
-<button class="ops-filter" data-filter="done">Done</button>
+<button class="hv-btn btn-secondary btn-sm ops-filter active" data-filter="all">All</button>
+<button class="hv-btn btn-secondary btn-sm ops-filter" data-filter="active">Active</button>
+<button class="hv-btn btn-secondary btn-sm ops-filter" data-filter="review">Review requests</button>
+<button class="hv-btn btn-secondary btn-sm ops-filter" data-filter="done">Done</button>
 <!-- Scope chips. A SEPARATE class from .ops-filter (they share styling, not
      wiring): the status handler deactivates every .ops-filter it finds, so
      folding these in would make picking "Mine" silently clear the status
      filter. data-scope=mine stays clickable while anonymous on purpose — the
      empty state is what tells a signed-out viewer that signing in fills it. -->
 <span class="ops-filters__sep" aria-hidden="true"></span>
-<button class="ops-scope active" data-scope="all" title="Work from every connected clanker">All contributors</button>
+<button class="ops-scope active" data-scope="all" title="Work from every connected contributor agent">All contributors</button>
 <button class="ops-scope" data-scope="mine" title="Only the work running under your GitHub account">Mine</button>
 </div>
 <div class="work-list" id="work-list"><div class="ops-empty">Loading work&hellip;</div></div>
@@ -2283,11 +2200,11 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
      the run log is the only thing left that says why. The "history" link on a
      fleet row just fills this box. Reasons are public; pane output is served
      only to owner/read-write viewers (the server strips it, this only says so). -->
-<div class="ops-card" id="runs-card" style="margin-top:20px">
+<div class="ops-card mt-7" id="runs-card">
 <div class="ops-card-head"><h3>Contributor run history</h3><span class="ops-card-count" id="runs-count"></span></div>
 <form class="runs-lookup" id="runs-lookup" autocomplete="off">
 <input type="text" id="runs-user" name="username" placeholder="GitHub login, e.g. from the log rail" aria-label="Contributor GitHub login" spellcheck="false">
-<button type="submit" class="admin-act" id="runs-go">Look up</button>
+<button type="submit" class="hv-btn btn-secondary btn-sm admin-act" id="runs-go">Look up</button>
 </form>
 <div id="runs-message-actions"></div>
 <div class="runs-list" id="runs-list"><div class="ops-empty">Enter a contributor&rsquo;s login to see their recent runs: outcome, duration, the failure reason, and &mdash; for owners &mdash; what was on the agent&rsquo;s terminal when it stopped.</div></div>
@@ -2302,14 +2219,14 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
      and configured rate limits); a 403 renders as a gate notice, not an error.
      In-memory only: an empty list means "nothing since the hub started", which
      the card says out loud so a post-restart blank is not read as innocence. -->
-<div class="ops-card" id="decisions-card" style="margin-top:20px">
+<div class="ops-card mt-7" id="decisions-card">
 <div class="ops-card-head"><h3>Hub decisions</h3><span class="ops-card-count" id="decisions-count"></span></div>
 <div class="dec-list" id="decisions-list"><div class="ops-empty">Look up a contributor above to see what the hub decided about them: reports it fenced as stale, tasks it took back, and times it declined to hand out work.</div></div>
 </div>
-<div class="ops-card card-accent" style="margin-top:20px">
+<div class="ops-card card-accent mt-7">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Ready-work queue</h3><span class="ops-card-count" id="queue-count"></span><!-- Resume-all (#queue-hold): bulk-clears the operator hold set. Hidden by default;
      ccRenderResumeAll() reveals it only for an owner/read-write viewer when at least
-     one issue is on hold. Themed confirm (adminConfirm), never native confirm. --><button type="button" class="queue-resume-all-btn" id="queue-resume-all-btn" style="display:none" title="Resume every held issue">&#x25B6; Resume all</button><!-- Cooldown explainer (#2649 companion): a circled-i affordance whose popover
+     one issue is on hold. Themed confirm (adminConfirm), never native confirm. --><button type="button" class="hv-btn btn-secondary btn-sm queue-resume-all-btn" id="queue-resume-all-btn" style="display:none" title="Resume every held issue">&#x25B6; Resume all</button><!-- Cooldown explainer (#2649 companion): a circled-i affordance whose popover
      explains what "in cooldown" in the count means and how an issue lands there.
      Numbers here are the REAL server constants (168h with-PR, ~4h no-PR, ~6h
      quarantine after 3 consecutive failures) — keep them in sync with
@@ -2337,7 +2254,7 @@ It clears automatically when the period elapses. An operator can shorten or disa
      (#queue-suspend-pill), which is read-only info. -->
 <span id="queue-suspend-wrap">
 <span class="pill pill-passed" id="queue-suspend-pill" style="display:none">active</span>
-<button type="button" class="queue-suspend-btn" id="queue-suspend-btn" title="Pause contributions" aria-label="Pause contributions" style="display:none"><span id="queue-suspend-icon"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2" width="2.4" height="8" rx="0.6"/><rect x="7.1" y="2" width="2.4" height="8" rx="0.6"/></svg></span></button>
+<button type="button" class="hv-btn btn-icon btn-sm queue-suspend-btn btn-secondary" id="queue-suspend-btn" title="Pause contributions" aria-label="Pause contributions" style="display:none"><span id="queue-suspend-icon"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2" width="2.4" height="8" rx="0.6"/><rect x="7.1" y="2" width="2.4" height="8" rx="0.6"/></svg></span></button>
 </span>
 <span class="cc-live stale" id="cc-live"><span class="cc-live-dot"></span><span id="cc-live-label">connecting</span></span></div>
 <!-- Playlist-style SEARCH (#2592). A pure VIEW filter over the loaded queue
@@ -2346,7 +2263,7 @@ It clears automatically when the period elapses. An operator can shorten or disa
 <div class="cc-q-search" id="cc-q-search-wrap">
   <span class="cc-q-search-ic" aria-hidden="true">&#x1F50D;</span>
   <input type="text" id="cc-q-search" placeholder="Filter queue by repo, number, title, or label&hellip;" aria-label="Filter the ready-work queue" autocomplete="off" spellcheck="false">
-  <button type="button" class="cc-q-search-clear" id="cc-q-search-clear" aria-label="Clear filter" title="Clear filter">&times;</button>
+  <button type="button" class="hv-btn btn-icon btn-sm cc-q-search-clear" id="cc-q-search-clear" aria-label="Clear filter" title="Clear filter">&times;</button>
 </div>
 <div class="cc-q-filternote" id="cc-q-filternote" style="display:none"></div>
 <!-- My label interests (#2637): a signed-in contributor's OPT-IN set of labels they
@@ -2362,7 +2279,7 @@ It clears automatically when the period elapses. An operator can shorten or disa
   <div class="cc-interests-chips" id="cc-interests-chips"></div>
   <div class="cc-interests-add">
     <input type="text" id="cc-interests-input" placeholder="e.g. nvidia" aria-label="Add a label interest" autocomplete="off" spellcheck="false">
-    <button type="button" id="cc-interests-add-btn">Add</button>
+    <button class="hv-btn btn-primary" type="button" id="cc-interests-add-btn">Add</button>
   </div>
 </div>
 <div class="cc-queue" id="cc-queue"><div class="ops-empty">Loading queue&hellip;</div></div>
@@ -2376,22 +2293,22 @@ It clears automatically when the period elapses. An operator can shorten or disa
      queue stays uncluttered and nobody pays for an explanation they did not ask
      for. Read-only: these rows carry no grip and no reorder menu, because they
      are not in the offer order — displaying one must never make it assignable. -->
-<div id="cc-withheld-wrap" style="display:none;border-top:1px solid var(--cc-border-2)">
+<div id="cc-withheld-wrap" style="display:none;border-top:1px solid var(--line-subtle)">
   <button type="button" id="cc-withheld-toggle" class="cc-withheld-toggle" aria-expanded="false" aria-controls="cc-withheld">
     <span class="cc-withheld-caret">&#x25B8;</span> <span id="cc-withheld-label">Withheld</span>
   </button>
   <div class="cc-withheld" id="cc-withheld" style="display:none"></div>
 </div>
-<p class="ops-note" style="padding:10px 20px 14px;margin:0">The stack of admissible issues waiting to be picked off &mdash; top is next up. When a clanker grabs one you&rsquo;ll see it fly from here to that clanker. Derived from this hive&rsquo;s actionable backlog; read-only.</p>
+<p class="ops-note" style="padding:10px 20px 14px;margin:var(--sp-0)">The stack of admissible issues waiting to be picked off &mdash; top is next up. When a contributor agent grabs one you&rsquo;ll see it fly from here to that agent. Derived from this hive&rsquo;s actionable backlog; read-only.</p>
 </div>
 <!-- Opportunistic Work (#2592): a small, CALM discovery panel of admissible
      issues NOT already at the top of the queue, ranked by a light recency heat
      proxy. Read-only for everyone; the per-item "add to queue" pins it into the
      operator order (owner/read-write only, rendered only when adminEnabled). -->
-<div class="ops-card" id="opp-card" style="margin-top:20px">
+<div class="ops-card mt-7" id="opp-card">
 <div class="ops-card-head"><h3>Opportunistic work</h3><span class="ops-card-count" id="opp-count"></span></div>
 <div class="opp-list" id="opp-list"><div class="ops-empty">Looking for fresh work&hellip;</div></div>
-<p class="ops-note" style="padding:10px 20px 14px;margin:0">A light, calm read of fresh, actionable issues beyond what&rsquo;s already lined up &mdash; surfaced by recency, not a heavy recommender. Owner/read-write operators can add one to the queue; it becomes offer-priority only and still obeys every admission filter.</p>
+<p class="ops-note" style="padding:10px 20px 14px;margin:var(--sp-0)">A light, calm read of fresh, actionable issues beyond what&rsquo;s already lined up &mdash; surfaced by recency, not a heavy recommender. Owner/read-write operators can add one to the queue; it becomes offer-priority only and still obeys every admission filter.</p>
 </div>
 </div>
 </div>
@@ -2402,13 +2319,13 @@ It clears automatically when the period elapses. An operator can shorten or disa
      (a future enhancement, out of scope). A SECTION within Operations — NOT a new
      page/tab. Fetched from /api/contribute/triage after load so a slow GitHub
      PR-link lookup never delays the page. Full-width card below the ops grid. -->
-<div class="ops-card cc-triage-card" id="cc-triage-card" style="margin-top:20px">
+<div class="ops-card cc-triage-card mt-7" id="cc-triage-card">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Issue triage</h3><span class="ops-card-count count-strong" id="cc-triage-total"></span></div>
 <!-- Compact ladder summary: one chip per level with its live count. -->
 <div class="cc-triage-ladder" id="cc-triage-ladder"><div class="ops-empty">Loading triage&hellip;</div></div>
 <!-- Grouped per-level issue lists (each collapsible-ish section, capped). -->
 <div class="cc-triage-groups" id="cc-triage-groups"></div>
-<p class="ops-note" style="padding:10px 20px 14px;margin:0">A live lifecycle view of this hive&rsquo;s contribute issues &mdash; raw candidates withheld by admission remain in Triaging, while ready work, the fleet&rsquo;s in-flight work, and fixing PRs advance issues through the ladder. Read-only and recomputed on each load; there is no stored per-issue state.</p>
+<p class="ops-note" style="padding:10px 20px 14px;margin:var(--sp-0)">A live lifecycle view of this hive&rsquo;s contribute issues &mdash; raw candidates withheld by admission remain in Triaging, while ready work, the fleet&rsquo;s in-flight work, and fixing PRs advance issues through the ladder. Read-only and recomputed on each load; there is no stored per-issue state.</p>
 </div>
 </div>
 <!-- Dedicated full-height LIVE ACTIVITY RAIL. Holds ONLY the live activity feed
@@ -2468,10 +2385,10 @@ It clears automatically when the period elapses. An operator can shorten or disa
      subtle sign-in prompt rather than an error. The SAME renderer serves the
      public route /contribute/dossier/{username}; owner-only controls are gated
      server-side there and by ME_IS_OWNER here. -->
-<div id="profile-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
+<div id="profile-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button class="hv-btn btn-secondary" type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
 <div id="operator-message-banner-profile"></div>
 <div id="me-card-mount"></div>
-<div class="ops-card" id="dossier-wall-card" style="display:none;margin-top:20px">
+<div class="ops-card" id="dossier-wall-card" style="display:none;margin-top:var(--sp-7)">
 <div class="ops-card-head"><h3>Recent wall posts</h3><span class="ops-card-count" id="dossier-wall-count"></span></div>
 <div class="runs-list" id="dossier-wall-list"><div class="ops-empty">Loading posts&hellip;</div></div>
 </div>
@@ -2811,6 +2728,7 @@ function tabFromLocation(){
   // pushing so we never add a spurious history entry for the initial page.
   if(target)activateTab(target,false);
   // Surface the trusted-invite banner if we arrived via ?invite=<token> (#2598).
+  try{loadContributorThemes();}catch(e){console.error('loadContributorThemes failed',e);}
   try{initInviteBanner();}catch(e){console.error('initInviteBanner failed',e);}
   // Build the tab-aware "file an issue" link on load even when we DON'T activate
   // (bare /contribute = onboarding, no activateTab call). Guarded.
@@ -3029,15 +2947,17 @@ function renderLeaderboard(contribs){
 // and render a pride-forward personal card pinned above the standings. Anonymous
 // or unknown viewers get a subtle sign-in prompt — never an error. All data is
 // real (tier / stats / milestones / hives / rank come straight from the hub).
-var ME_STYLE_KEY='hive.me.cardStyle';   // localStorage key for the chosen skin
-var ME_STYLE_COUNT=7;                    // number of profile-style skins offered
+var ME_STYLE_KEY='hive.me.cardStyle';   // legacy localStorage key; values may be old 1..7 skin ids or new theme ids
+var ME_STYLE_COUNT=7;                    // number of legacy profile-style skins offered
 var ME_STYLE_NAMES=['Rank metal','Verdant','Amber rank','Violet advisor','Minimal','Rose','Roomy ranked'];
+var ME_LEGACY_THEME_IDS=['contributor-rank-metal','contributor-verdant','contributor-amber-rank','contributor-violet-advisor','contributor-minimal','contributor-rose','contributor-roomy-ranked'];
+var ME_CONTRIBUTOR_THEMES=ME_LEGACY_THEME_IDS.map(function(id,i){return {id:id,name:ME_STYLE_NAMES[i]||id,description:'Contributor profile style',dark:true,scopes:['dashboard','contributor']};});
 // Ceremony rank metals: trust tier → [designation, metal accent, soft wash].
 // The metal drives style1 ("Rank metal", the default skin) via --me-metal;
 // picking any other skin overrides --me-accent and beats the metal.
 var ME_RANK_META={
   newcomer:['RECRUIT','#9aa3ae','rgba(154,163,174,.12)'],
-  contributor:['OPERATOR','#58a6ff','rgba(88,166,255,.14)'],
+  contributor:['OPERATOR','var(--status-info)','color-mix(in srgb,var(--status-info) var(--component-tint),transparent)'],
   trusted:['SPECIALIST','#4db8a0','rgba(77,184,160,.14)'],
   merger:['SPECIALIST','#4db8a0','rgba(77,184,160,.14)'],
   advisor:['WARDEN','#8a97f7','rgba(138,151,247,.14)']
@@ -3079,10 +2999,31 @@ function meEmblemProps(seed){
   };
 }
 
-function meStyleClass(){
-  var n=parseInt(localStorage.getItem(ME_STYLE_KEY)||'1',10);
-  if(!(n>=1&&n<=ME_STYLE_COUNT))n=1;
-  return n;
+function meThemeID(){
+  var raw='';
+  try{raw=localStorage.getItem(ME_STYLE_KEY)||'';}catch(e){raw='';}
+  var n=parseInt(raw||'1',10);
+  if(String(n)===String(raw||'1')&&n>=1&&n<=ME_LEGACY_THEME_IDS.length)return ME_LEGACY_THEME_IDS[n-1];
+  return raw||ME_LEGACY_THEME_IDS[0];
+}
+function applyContributorTheme(id){
+  id=id||ME_LEGACY_THEME_IDS[0];
+  var link=document.getElementById('contributor-theme-css');
+  if(link)link.href='/api/theme.css?scope=contributor&theme='+encodeURIComponent(id)+'&v='+Date.now();
+  var card=document.getElementById('me-card');
+  if(card)card.setAttribute('data-theme-id',id);
+}
+function loadContributorThemes(){
+  return fetch('/api/themes?scope=contributor').then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(d&&Array.isArray(d.themes)&&d.themes.length)ME_CONTRIBUTOR_THEMES=d.themes;
+    applyContributorTheme(meThemeID());
+    var sel=document.getElementById('me-style-select');
+    if(sel)renderContributorThemeOptions(sel);
+  }).catch(function(){applyContributorTheme(meThemeID());});
+}
+function renderContributorThemeOptions(sel){
+  var current=meThemeID();
+  sel.innerHTML=ME_CONTRIBUTOR_THEMES.map(function(t){return '<option value="'+esc(t.id)+'"'+(t.id===current?' selected':'')+'>'+esc(t.name||t.id)+'</option>';}).join('');
 }
 function leaderboardCustomStyleLabel(src){
   var base=String(src||'').split('@')[0].split('/');
@@ -3307,14 +3248,14 @@ function meCollaborators(p){
 
 function meHivesRows(p){
   var hs=(p.hives||[]);
-  if(!hs.length)return '<div class="me-hive"><span style="color:var(--cc-muted);font-size:.8rem">No federated hives registered yet.</span></div>';
+  if(!hs.length)return '<div class="me-hive"><span style="color:var(--text-muted);font-size:.8rem">No federated hives registered yet.</span></div>';
   var out=[];
   for(var i=0;i<hs.length;i++){
     var rel=hs[i].relationship||'contributor';
     var relCls=(rel==='owner')?'me-hive__rel me-hive__rel--owner':'me-hive__rel';
     var label=esc(hs[i].project_name||hs[i].org||hs[i].id||'hive');
     out.push('<div class="me-hive"><span class="me-hive__name">'+label
-      +(hs[i].org?(' <span style="color:var(--cc-muted);font-weight:400;text-transform:none">('+esc(hs[i].org)+')</span>'):'')+'</span>'
+      +(hs[i].org?(' <span style="color:var(--text-muted);font-weight:400;text-transform:none">('+esc(hs[i].org)+')</span>'):'')+'</span>'
       +'<span class="'+relCls+'">'+esc(rel)+'</span></div>');
   }
   return out.join('');
@@ -3333,7 +3274,7 @@ function meInviteSection(p){
   if(!ME_IS_OWNER)return ''; // minting invites is never offered on someone else's record
   if(!p||!INVITE_TIERS[p.trust_tier])return '';
   return '<div class="me-invite">'
-    +'<button type="button" class="me-invite__btn" id="me-invite-btn">✉️ Invite someone to contribute</button>'
+    +'<button type="button" class="hv-btn btn-primary me-invite__btn" id="me-invite-btn">✉️ Invite someone to contribute</button>'
     +'<div class="me-invite__row" id="me-invite-row">'
       +'<input type="text" class="me-invite__link" id="me-invite-link" readonly aria-label="Invite link" value="">'
       +'<button type="button" class="me-invite__copy" id="me-invite-copy">Copy</button>'
@@ -3431,15 +3372,15 @@ function meLoadFieldLog(username){
 function renderMeCard(mount,p){
   var tier=p.trust_tier||'newcomer';
   var avatar=p.avatar_url||('https://github.com/'+encodeURIComponent(p.github_username)+'.png');
-  var styleN=meStyleClass();
+  var themeID=meThemeID();
   var rankMeta=ME_RANK_META[tier]||ME_RANK_META.newcomer;
   var em=meEmblemProps(p.emblem_seed||p.github_username||'');
 
   var styleOpts='';
   var customStyleSrc=window.HIVE_LEADERBOARD_CUSTOM_STYLE_SRC||'';
-  for(var i=1;i<=ME_STYLE_COUNT;i++){
-    styleOpts+='<option value="'+i+'"'+(!customStyleSrc&&i===styleN?' selected':'')+'>'+esc(ME_STYLE_NAMES[i-1]||('Style '+i))+'</option>';
-  }
+  ME_CONTRIBUTOR_THEMES.forEach(function(t){
+    styleOpts+='<option value="'+esc(t.id)+'"'+(!customStyleSrc&&t.id===themeID?' selected':'')+'>'+esc(t.name||t.id)+'</option>';
+  });
   if(customStyleSrc){
     var dropped=parseInt(window.HIVE_LEADERBOARD_CUSTOM_STYLE_DROPPED||'0',10)||0;
     var customLabel=dropped>0?('Custom ('+dropped+' rules removed by sanitizer)'):('Custom ('+leaderboardCustomStyleLabel(customStyleSrc)+')');
@@ -3485,7 +3426,7 @@ function renderMeCard(mount,p){
   var footId=(p.hives&&p.hives[0]&&p.hives[0].id)?p.hives[0].id:ccProjectName;
 
   var html=''
-  +'<div class="me-card me-card--style'+styleN+'" id="me-card" style="--me-metal:'+rankMeta[1]+';--me-metal-soft:'+rankMeta[2]+'">'
+  +'<div class="me-card" id="me-card" data-theme-id="'+esc(themeID)+'" style="--me-metal:'+rankMeta[1]+';--me-metal-soft:'+rankMeta[2]+'">'
   // Masthead + epigraph (per-hive flavor; defaults ship on generic hives).
   +'<header class="dz-masthead"><span class="brand">'+ccProjectName+' · contributor record</span>'
     +'<span class="id">DOSSIER '+esc(p.github_username)+'</span></header>'
@@ -3506,7 +3447,7 @@ function renderMeCard(mount,p){
     +meProfileRows(p)+meTestimonySection(p)+meDossierForm(p)+'</section>'
   +'</div>'
   // Full-width — The Golden Path.
-  +'<section class="dz-zcard" style="margin-bottom:16px" aria-label="The Golden Path">'
+  +'<section class="dz-zcard mb-6" aria-label="The Golden Path">'
   +'<div class="dz-path-head"><div class="dz-zone-head">The Golden Path</div>'
     +(nextRung?('<div class="dz-path-next">'+(nextIsConferred?'<b>'+nextRung+'</b> is conferred, not counted toward':'next designation <b>'+nextRung+'</b>')+'</div>'):'')+'</div>'
   +mePathProgress(p)+meLadder(p)
@@ -3516,7 +3457,7 @@ function renderMeCard(mount,p){
   +'<section class="dz-zcard" aria-label="Triumphs"><div class="dz-zone-head">Triumphs</div>'
     +meSeals(p)
     +'<div class="dz-heraldry-head"><span>Heraldry · verified via Credly</span></div>'
-    +'<div id="me-heraldry-slot"><div class="ops-note" style="margin:0">Loading heraldry&hellip;</div></div></section>'
+    +'<div id="me-heraldry-slot"><div class="ops-note m-0">Loading heraldry&hellip;</div></div></section>'
   +'<section class="dz-zcard" aria-label="Collaborators"><div class="dz-zone-head">Collaborators</div>'
     +meCollaborators(p)+'</section>'
   +'</div>'
@@ -3533,12 +3474,12 @@ function renderMeCard(mount,p){
   // A visitor reading someone else's record gets none of them: they are personal
   // affordances, not part of the record itself.
   +(ME_IS_OWNER?(
-     '<section class="dz-zcard" style="margin-top:16px" aria-label="Daily quota"><div class="dz-zone-head">Daily quota</div>'
-    +'<div class="me-quota-wrap" id="me-quota-slot"><div class="ops-note" style="margin:0">Loading your quota&hellip;</div></div>'
+     '<section class="dz-zcard mt-6" aria-label="Daily quota"><div class="dz-zone-head">Daily quota</div>'
+    +'<div class="me-quota-wrap" id="me-quota-slot"><div class="ops-note m-0">Loading your quota&hellip;</div></div>'
     +'<div class="me-actions">'
       +'<a class="me-share" href="'+esc(meLinkedInURL(p))+'" target="_blank" rel="noopener noreferrer">\u{1F4E3} Share achievement on LinkedIn</a>'
       +'<span class="me-stylepick">Profile style <select id="me-style-select" aria-label="Profile style">'+styleOpts+'</select></span>'
-      +'<span class="info-affordance custom-css-help"><button type="button" class="info-btn" id="custom-css-info-btn" aria-haspopup="true" aria-expanded="false" aria-controls="custom-css-info-pop" aria-label="Custom CSS stylesheet help" title="Custom CSS">Custom CSS</button>'
+      +'<span class="info-affordance custom-css-help"><button type="button" class="hv-btn btn-icon btn-sm info-btn" id="custom-css-info-btn" aria-haspopup="true" aria-expanded="false" aria-controls="custom-css-info-pop" aria-label="Custom CSS stylesheet help" title="Custom CSS">Custom CSS</button>'
       +'<div class="info-pop custom-css-pop" id="custom-css-info-pop" role="tooltip" hidden><h4>Custom CSS</h4>'
       +'Use <code>?style=owner/repo/path/theme.css@ref</code> to load a theme. Example:'
       +'<input class="custom-css-example" readonly aria-label="Custom CSS example" value="?style=castrojo/themes/lb/bluefin.css@main" data-select-on-click="1">'
@@ -3561,16 +3502,16 @@ function renderMeCard(mount,p){
     else if(typeof ccLoadLimits==='function'){try{ccLoadLimits();}catch(e){}}
   }
 
+  applyContributorTheme(themeID);
   var sel=document.getElementById('me-style-select');
   if(sel)sel.addEventListener('change',function(){
     if(sel.value==='custom')return;
-    var v=parseInt(sel.value,10);if(!(v>=1&&v<=ME_STYLE_COUNT))v=1;
-    localStorage.setItem(ME_STYLE_KEY,String(v));
+    var v=sel.value||ME_LEGACY_THEME_IDS[0];
+    localStorage.setItem(ME_STYLE_KEY,v);
     clearLeaderboardCustomStyleParam();
     var customOpt=sel.querySelector('option[value="custom"]');
     if(customOpt)customOpt.remove();
-    var card=document.getElementById('me-card');
-    if(card){for(var k=1;k<=ME_STYLE_COUNT;k++)card.classList.remove('me-card--style'+k);card.classList.add('me-card--style'+v);}
+    applyContributorTheme(v);
   });
 }
 
@@ -3606,7 +3547,7 @@ function meProfileRows(p){
   var loadout=p.cli_backend?esc(p.cli_backend):'';
   rows.push(['Loadout',loadout||unset,loadout?' mono':'']);
   var clanker=(p.model?esc(p.model):'')+(ccAdvisorLabel(p)?((p.model?' + ':'')+ccAdvisorLabel(p)):'');
-  rows.push(['Clanker',clanker||unset,clanker?' mono':'']);
+  rows.push(['Contributor agent',clanker||unset,clanker?' mono':'']);
   rows.push(['Sponsor',p.invited_by?esc(p.invited_by):unset,'']);
   var active='since '+esc(meYearMonth(p.registered_at)||'—');
   if(p.last_active){var ago=meTimeAgo(p.last_active);if(ago)active+=' · last op '+esc(ago);}
@@ -3872,9 +3813,9 @@ function ccMetricsPoll(){
     // (a) Ready-work queue header → queue-depth trend.
     setSpark('spark-queue',ccMetrics.queue_depth,SPARK_W,SPARK_H,'#388bfd');
     // (b) Tasks-completed / hour throughput.
-    setSpark('spark-throughput',ccMetrics.tasks_done,SPARK_W,SPARK_H,'#3fb950');
+    setSpark('spark-throughput',ccMetrics.tasks_done,SPARK_W,SPARK_H,getComputedStyle(document.documentElement).getPropertyValue('--status-ok').trim()||'currentColor');
     // (c) Connected-clanker fleet-size trend.
-    setSpark('spark-fleet',ccMetrics.fleet_size,SPARK_W,SPARK_H,'#d29922');
+    setSpark('spark-fleet',ccMetrics.fleet_size,SPARK_W,SPARK_H,getComputedStyle(document.documentElement).getPropertyValue('--status-warn').trim()||'currentColor');
     // (d) Your own per-hour completions — the daily-quota trend and the matching
     // trend on the "Your contribution" card. Both read the SAME series, which is
     // now zero-filled onto the shared 168-bucket timeline (#6543), so it lines up
@@ -3891,7 +3832,7 @@ function ccMetricsPoll(){
 function ccRenderLeaderboardSparklines(){
   if(!ccMetrics)return;
   var trend=document.getElementById('spark-lb-trend');
-  if(trend)trend.innerHTML=sparkline(ccMetrics.tasks_done,120,20,'#3fb950');
+  if(trend)trend.innerHTML=sparkline(ccMetrics.tasks_done,120,20,getComputedStyle(document.documentElement).getPropertyValue('--status-ok').trim()||'currentColor');
   var pud=ccMetrics.per_user_done||{};
   var rows=document.querySelectorAll('.lb-spark[data-user]');
   for(var i=0;i<rows.length;i++){
@@ -3955,7 +3896,7 @@ var privilegedAgentRoles={};
 function toast(msg,ok){
   var t=document.createElement('div');
   t.textContent=msg;
-  t.style.cssText='position:fixed;bottom:24px;left:50%%;transform:translateX(-50%%);z-index:1100;padding:10px 18px;border-radius:8px;font-size:.85rem;color:#fff;background:'+(ok===false?'#da3633':'#238636')+';box-shadow:0 4px 16px rgba(1,4,9,.5)';
+  t.style.cssText='position:fixed;bottom:24px;left:50%%;transform:translateX(-50%%);z-index:1100;padding:10px 18px;border-radius:8px;font-size:.85rem;color:var(--surface-0);background:'+(ok===false?'#da3633':'#238636')+';box-shadow:0 4px 16px rgba(1,4,9,.5)';
   document.body.appendChild(t);
   setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .4s';setTimeout(function(){t.remove();},400);},2600);
 }
@@ -4185,7 +4126,7 @@ function renderAdminFilter(fieldId,label,noun,modeKey,kind){
       '<button type="button" data-mode="allow"'+(mode==='allow'?' class="on"':'')+'>Allow</button>'+
     '</div>'+
     '<div class="admin-chips">'+(chips||'<span class="admin-toggle-sub">none</span>')+'</div>'+
-    '<div class="admin-addrow"><input type="text" data-add-list="'+listKey+'" placeholder="add '+esc(noun)+'&hellip;"><button type="button" data-add-list-btn="'+listKey+'">Add</button></div>';
+    '<div class="admin-addrow"><input type="text" data-add-list="'+listKey+'" placeholder="add '+esc(noun)+'&hellip;"><button class="hv-btn btn-primary" type="button" data-add-list-btn="'+listKey+'">Add</button></div>';
 }
 
 function renderAdminModels(){
@@ -4238,7 +4179,7 @@ function renderAdminRepoFilter(repo){
       '<button type="button" data-mode="deny"'+(mode==='deny'?' class="on"':'')+'>Deny</button>'+
       '<button type="button" data-mode="allow"'+(mode==='allow'?' class="on"':'')+'>Allow</button></div>'+
       '<div class="admin-chips">'+(chips||'<span class="admin-toggle-sub">none</span>')+'</div>'+
-      '<div class="admin-addrow"><input type="text" data-repo-filter-add="'+listKey+'" data-repo="'+esc(repo)+'" placeholder="add '+esc(noun)+'&hellip;"><button type="button" data-repo-filter-add-btn="'+listKey+'" data-repo="'+esc(repo)+'">Add</button></div></div>';
+      '<div class="admin-addrow"><input type="text" data-repo-filter-add="'+listKey+'" data-repo="'+esc(repo)+'" placeholder="add '+esc(noun)+'&hellip;"><button class="hv-btn btn-primary" type="button" data-repo-filter-add-btn="'+listKey+'" data-repo="'+esc(repo)+'">Add</button></div></div>';
   }
   return '<details class="admin-repo-filter"'+(adminRepoHasFilter(f)?' open':'')+'><summary>Filters '+(adminRepoHasFilter(f)?'<span class="pill pill-warn">override</span>':'<span class="admin-toggle-sub">inherit hive-wide</span>')+'</summary>'+
     '<p class="admin-toggle-sub">Applied after hive-wide filters; allow mode narrows only this repo and deny mode extends the hive-wide deny lists.</p>'+
@@ -4568,10 +4509,10 @@ onEl('clanker-list','click',function(e){
     // clanker, so it moves to different work. Uses the existing
     // POST /api/contributors/{id}/requeue endpoint (owner/read-write only), whose handler
     // now performs the release + reassignment.
-    adminConfirm('Reassign '+user,'Take '+user+' off their current task and hand them their next-priority item; that task goes back to the ready queue for someone else. The released task won&rsquo;t be re-offered to '+user+' for a short window. If nothing else is available the clanker is simply released and idle. This uses the existing POST /api/contributors/{id}/requeue endpoint.','Reassign',function(){
+    adminConfirm('Reassign '+user,'Take '+user+' off their current task and hand them their next-priority item; that task goes back to the ready queue for someone else. The released task won&rsquo;t be re-offered to '+user+' for a short window. If nothing else is available the contributor agent is simply released and idle. This uses the existing POST /api/contributors/{id}/requeue endpoint.','Reassign',function(){
       // Let the operator attach an optional reason. It is recorded in the audit +
       // activity log and pushed to the still-connected worker on task_revoke.
-      var reason=(window.prompt('Reason for reassigning this clanker (optional):','wedged: moving to different work')||'').trim();
+      var reason=(window.prompt('Reason for reassigning this contributor agent (optional):','wedged: moving to different work')||'').trim();
       fetch('/api/contributors/'+encodeURIComponent(cid)+'/requeue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:reason})})
         .then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
         .then(function(x){
@@ -4773,19 +4714,19 @@ function clankerActingAsControl(c,cid){
   var opts='<option value="none"'+(!current?' selected':'')+'>none (general work)</option>'+
     roles.map(function(r){return '<option value="'+esc(r)+'"'+(r===current?' selected':'')+'>'+esc(r)+'</option>';}).join('');
   var tip=c.role_mismatch||'Owner assignment takes effect on the next task request and never rewrites the current in-flight task.';
-  return '<select class="admin-act" title="'+esc(tip)+'" data-cid="'+cid+'" data-role="agent-role">'+opts+'</select>';
+  return '<select class="hv-btn btn-secondary btn-sm admin-act" title="'+esc(tip)+'" data-cid="'+cid+'" data-role="agent-role">'+opts+'</select>';
 }
 function clankerAgentRoleGrantControl(c,cid){
   var grants=(c.agent_role_grants||[]).map(function(r){return String(r||'').trim().toLowerCase();}).filter(Boolean);
   var seen={};grants=grants.filter(function(r){if(seen[r])return false;seen[r]=true;return true;}).sort();
   var chips=grants.length?grants.map(function(r){
-    return '<span class="agent-role-chip">'+esc(r)+'<button type="button" aria-label="Remove '+esc(r)+' grant" title="Remove '+esc(r)+' grant" data-cid="'+cid+'" data-agent-role="'+esc(r)+'" data-role="agent-role-remove">&times;</button></span>';
+    return '<span class="agent-role-chip">'+esc(r)+'<button class="hv-btn btn-danger" type="button" aria-label="Remove '+esc(r)+' grant" title="Remove '+esc(r)+' grant" data-cid="'+cid+'" data-agent-role="'+esc(r)+'" data-role="agent-role-remove">&times;</button></span>';
   }).join(''):'<span class="clanker-sub">none</span>';
   var granted={};grants.forEach(function(r){granted[r]=true;});
   var addOpts=adminGrantableAgentRoles.filter(function(r){return !granted[r];}).map(function(r){return '<option value="'+esc(r)+'">'+esc(r)+'</option>';}).join('');
   var add=addOpts?('<select class="agent-role-add" title="Grant a privileged agent role" data-cid="'+cid+'" data-role="agent-role-add"><option value="">+ grant</option>'+addOpts+'</select>'):'';
   var tip='Defaults scanner, quality and outreach need no grant. Privileged roles require trusted+ tier, hive allow-listing and this per-contributor grant. Supervisor is never delegatable.';
-  return '<div class="agent-role-grants"><span class="agent-role-grants__label">Agent roles</span><span class="info-affordance"><button type="button" class="info-btn" tabindex="-1" aria-label="How agent-role grants work" title="'+tip+'">&#9432;</button></span>'+chips+add+'</div>';
+  return '<div class="agent-role-grants"><span class="agent-role-grants__label">Agent roles</span><span class="info-affordance"><button type="button" class="hv-btn btn-icon btn-sm info-btn" tabindex="-1" aria-label="How agent-role grants work" title="'+tip+'">&#9432;</button></span>'+chips+add+'</div>';
 }
 function updateContributorAgentRoleGrants(cid,removeRole,addRole){
   if(!cid)return;
@@ -4818,9 +4759,9 @@ function renderClankers(list){
   // a malformed row can't leave the roster stuck on "Loading…".
   try{ccRenderInterestRoster(list);}catch(e){console.error('interest roster render failed',e);}
   if(!el)return;
-  if(!list.length){el.innerHTML='<div class="ops-empty">No clankers connected right now.</div>';return;}
+  if(!list.length){el.innerHTML='<div class="ops-empty">No contributor agents connected right now.</div>';return;}
   el.innerHTML=list.map(function(c){
-    var user=c.github_username||c.contributor_id||'clanker';
+    var user=c.github_username||c.contributor_id||'contributor agent';
     var av=c.github_username?'<img class="clanker-av" src="https://github.com/'+esc(c.github_username)+'.png" alt="">':'<span class="clanker-av"></span>';
     // Trust tier is now surfaced as a compact medallion beside the identity (below),
     // so drop it from the middot sub-line to avoid duplicating the same string.
@@ -4874,18 +4815,18 @@ function renderClankers(list){
       // task AND immediately reassigns this clanker its next-priority item. An ⓘ marker
       // (same info-btn affordance as the cooldown explainer) states the outcome on hover,
       // so the operator understands it WITHOUT opening the confirm dialog.
-      var reassignInfo='Reassign takes this clanker off its current task and immediately hands it the next-priority item, so it keeps working. The released task goes back to the ready queue for another contributor, and isn&rsquo;t re-offered to this clanker for a short window.';
+      var reassignInfo='Reassign takes this contributor agent off its current task and immediately hands it the next-priority item, so it keeps working. The released task goes back to the ready queue for another contributor, and isn&rsquo;t re-offered to this agent for a short window.';
       var requeueBtn=c.current_task
-        ?('<span class="info-affordance"><button type="button" class="admin-act" title="'+reassignInfo+'" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="requeue">Reassign</button>'+
-          '<button type="button" class="info-btn" tabindex="-1" aria-label="What does Reassign do?" title="'+reassignInfo+'">&#9432;</button></span>')
+        ?('<span class="info-affordance"><button type="button" class="hv-btn btn-secondary btn-sm admin-act" title="'+reassignInfo+'" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="requeue">Reassign</button>'+
+          '<button type="button" class="hv-btn btn-icon btn-sm info-btn" tabindex="-1" aria-label="What does Reassign do?" title="'+reassignInfo+'">&#9432;</button></span>')
         :'';
       actions='<div class="admin-actions" data-role-grants-cid="'+cid+'">'+
-        '<select class="admin-act" title="Set trust tier (maintainer voucher)" data-cid="'+cid+'" data-role="tier">'+opts+'</select>'+
+        '<select class="hv-btn btn-secondary btn-sm admin-act" title="Set trust tier (maintainer voucher)" data-cid="'+cid+'" data-role="tier">'+opts+'</select>'+
         '<label class="clanker-act-as">Acting as '+clankerActingAsControl(c,cid)+'</label>'+
         requeueBtn+
         ccOperatorMessageStatus(c)+
-        '<button type="button" class="admin-act" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="message">Message</button>'+        '<button type="button" class="admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="revoke">Revoke</button>'+
-        '<button type="button" class="admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="remove">Remove</button>'+
+        '<button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="message">Message</button>'+        '<button type="button" class="hv-btn btn-danger btn-sm admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="revoke">Revoke</button>'+
+        '<button type="button" class="hv-btn btn-danger btn-sm admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="remove">Remove</button>'+
         clankerAgentRoleGrantControl(c,cid)+
         '</div>';
     }
@@ -4973,7 +4914,7 @@ function ccRenderInterestRoster(list){
   // the display label; matching is case-insensitive so 'nvidia'/'NVIDIA' aggregate.
   var agg={};
   list.forEach(function(c){
-    var who=c.github_username||c.contributor_id||'clanker';
+    var who=c.github_username||c.contributor_id||'contributor agent';
     var interests=c.label_interests||[];
     for(var i=0;i<interests.length;i++){
       var raw=(interests[i]||'').trim();if(!raw)continue;
@@ -5217,7 +5158,7 @@ function ccRenderRunsMessageAction(user){
   var el=document.getElementById('runs-message-actions');if(!el)return;
   user=(user||'').trim().replace(/^@/,'');
   if(!adminEnabled||!user){el.innerHTML='';return;}
-  el.innerHTML='<div class="admin-actions"><button type="button" class="admin-act" data-user="'+esc(user)+'" data-role="message-runs">Message '+esc(user)+'</button></div><div id="runs-message-form"></div>';
+  el.innerHTML='<div class="admin-actions"><button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-user="'+esc(user)+'" data-role="message-runs">Message '+esc(user)+'</button></div><div id="runs-message-form"></div>';
 }
 onEl('runs-message-actions','click',function(e){var b=e.target;if(!adminEnabled||!b||b.getAttribute('data-role')!=='message-runs')return;ccToggleMessageForm(b.getAttribute('data-user'),b.getAttribute('data-user'),b);});
 
@@ -5234,7 +5175,7 @@ function ccToggleMessageForm(cid,user,btn){
   var old=host.querySelector('.op-msg-form'); if(old){old.remove();return;}
   var target=cid||user;
   var form=document.createElement('div'); form.className='op-msg-form';
-  form.innerHTML='<textarea maxlength="1000" placeholder="Short note for '+esc(user)+'"></textarea><button type="button" class="admin-act">Send</button>';
+  form.innerHTML='<textarea maxlength="1000" placeholder="Short note for '+esc(user)+'"></textarea><button type="button" class="hv-btn btn-secondary btn-sm admin-act">Send</button>';
   form.querySelector('button').addEventListener('click',function(){
     var text=form.querySelector('textarea').value;
     fetch('/api/contribute/operators/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contributor:target,text:text})})
@@ -5353,7 +5294,7 @@ function ccRenderOperatorMessages(messages){
   messages=(messages||[]).filter(function(m){return m&&!m.acknowledged_at;});
   var html='';
   if(messages.length){
-    html=messages.map(function(m){return '<div class="op-msg-banner"><b>Message from the hive operator</b><pre>'+esc(m.text||'')+'</pre><div class="op-msg-actions"><input class="op-msg-reply" data-id="'+esc(m.id)+'" placeholder="Optional short reply"><button type="button" class="admin-act" data-role="ack-operator-message" data-id="'+esc(m.id)+'">Acknowledge</button></div></div>';}).join('');
+    html=messages.map(function(m){return '<div class="op-msg-banner"><b>Message from the hive operator</b><pre>'+esc(m.text||'')+'</pre><div class="op-msg-actions"><input class="op-msg-reply" data-id="'+esc(m.id)+'" placeholder="Optional short reply"><button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-role="ack-operator-message" data-id="'+esc(m.id)+'">Acknowledge</button></div></div>';}).join('');
   }
   mounts.forEach(function(el){if(el)el.innerHTML=html;});
 }
@@ -5407,16 +5348,16 @@ function ccWallPostHTML(p){
     evidence='<div class="ops-note">model evidence: '+(p.model_evidence.runs||0)+' runs · '+Math.round((p.model_evidence.verified_pr_share||0)*100)+'%% verified PR · '+Math.round((p.model_evidence.failure_rate||0)*100)+'%% failed</div>';
   }
   var controls='';
-  if(ccMeUsername&&p.author&&p.author.toLowerCase()===ccMeUsername.toLowerCase())controls+='<button type="button" class="admin-act" data-wall-del="'+esc(p.id)+'">delete</button>';
-  else if(ccMeUsername)controls+='<button type="button" class="admin-act" data-wall-flag="'+esc(p.id)+'">flag</button>';
-  if(adminEnabled)controls+='<button type="button" class="admin-act" data-wall-hide="'+esc(p.id)+'">hide</button>';
+  if(ccMeUsername&&p.author&&p.author.toLowerCase()===ccMeUsername.toLowerCase())controls+='<button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-wall-del="'+esc(p.id)+'">delete</button>';
+  else if(ccMeUsername)controls+='<button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-wall-flag="'+esc(p.id)+'">flag</button>';
+  if(adminEnabled)controls+='<button type="button" class="hv-btn btn-secondary btn-sm admin-act" data-wall-hide="'+esc(p.id)+'">hide</button>';
   var hidden=p.hidden?'<span class="pill pill-blocked">hidden</span> ':'';
   var tagLine=(tags.model||tags.backend||tags.repo)?'<div class="ops-note">'+(tags.model?('model '+esc(tags.model)+' '):'')+(tags.backend?('backend '+esc(tags.backend)+' '):'')+(tags.repo?('repo '+esc(tags.repo)):'')+'</div>':'';
   var head='<b>'+esc(p.author||'unknown')+'</b> '+tierBadge(p.author_trust_tier,'tier-lb')+' <span class="ops-note">'+(p.author_verified_prs||0)+' verified PRs</span>';
-  return '<div class="cc-wall-post" style="padding:12px 20px;border-bottom:1px solid var(--cc-border)">'+
-    '<div>'+hidden+head+'</div><div style="white-space:pre-wrap;margin-top:6px">'+esc(p.text||'')+'</div>'+tagLine+evidence+
-    '<div style="display:flex;gap:6px;margin-top:8px">'+controls+'</div>'+
-    ((p.replies||[]).length?'<div style="margin-left:18px;margin-top:8px;border-left:2px solid var(--cc-border)">'+(p.replies||[]).map(ccWallPostHTML).join('')+'</div>':'')+
+  return '<div class="cc-wall-post" style="padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-strong)">'+
+    '<div>'+hidden+head+'</div><div style="white-space:pre-wrap;margin-top:var(--sp-3)">'+esc(p.text||'')+'</div>'+tagLine+evidence+
+    '<div style="display:flex;gap:var(--sp-3);margin-top:var(--sp-4)">'+controls+'</div>'+
+    ((p.replies||[]).length?'<div style="margin-left:18px;margin-top:var(--sp-4);border-left:2px solid var(--line-strong)">'+(p.replies||[]).map(ccWallPostHTML).join('')+'</div>':'')+
     '</div>';
 }
 function ccRenderWall(){
@@ -5879,12 +5820,12 @@ function ccQueueMenuHTML(key,pos,total,isHeld){
       '<input type="text" id="hr-'+esc(key)+'" class="cc-q-holdreason-input" maxlength="200" placeholder="Optional hold reason&hellip;" data-qkey="'+esc(key)+'" aria-label="Optional hold reason" autocomplete="off">'+
     '</div>');
   return '<span class="cc-q-menu-wrap">'+
-    '<button type="button" class="cc-q-menu-btn" aria-haspopup="true" aria-expanded="false" title="More actions" data-qkey="'+esc(key)+'">&#x22EF;</button>'+
+    '<button type="button" class="hv-btn btn-icon btn-sm cc-q-menu-btn" aria-haspopup="true" aria-expanded="false" title="More actions" data-qkey="'+esc(key)+'">&#x22EF;</button>'+
     '<div class="cc-q-menu" role="menu">'+
-      '<button type="button" class="cc-q-act" role="menuitem" data-act="top" data-qkey="'+esc(key)+'"'+(atTop?' disabled style="opacity:.5;cursor:default"':'')+'><span class="cc-q-menu-ic">&#x2B06;</span>Move to top</button>'+
-      '<button type="button" class="cc-q-act" role="menuitem" data-act="bottom" data-qkey="'+esc(key)+'"'+(atBottom?' disabled style="opacity:.5;cursor:default"':'')+'><span class="cc-q-menu-ic">&#x2B07;</span>Move to bottom</button>'+
+      '<button type="button" class="hv-btn btn-ghost btn-sm cc-q-act btn-danger" role="menuitem" data-act="top" data-qkey="'+esc(key)+'"'+(atTop?' disabled':'')+'><span class="cc-q-menu-ic">&#x2B06;</span>Move to top</button>'+
+      '<button type="button" class="hv-btn btn-ghost btn-sm cc-q-act btn-danger" role="menuitem" data-act="bottom" data-qkey="'+esc(key)+'"'+(atBottom?' disabled':'')+'><span class="cc-q-menu-ic">&#x2B07;</span>Move to bottom</button>'+
       '<div class="cc-q-menu-sep"></div>'+
-      '<button type="button" class="cc-q-act" role="menuitem" data-act="hold" data-held="'+(isHeld?'1':'0')+'" data-qkey="'+esc(key)+'"><span class="cc-q-menu-ic">'+holdIcon+'</span>'+holdLabel+'</button>'+
+      '<button type="button" class="hv-btn btn-ghost btn-sm cc-q-act" role="menuitem" data-act="hold" data-held="'+(isHeld?'1':'0')+'" data-qkey="'+esc(key)+'"><span class="cc-q-menu-ic">'+holdIcon+'</span>'+holdLabel+'</button>'+
       reasonRow+
       '<div class="cc-q-menu-sep"></div>'+
       '<div class="cc-q-moverow">'+
@@ -6353,7 +6294,7 @@ function ccMaybeAchieve(e){
   } else if(e.action==='failed'){
     if(e.username)ccCompleteStreak[e.username]=0; // a failure breaks the streak
   } else if(e.action==='promoted'){
-    ccAchievement('Achievement unlocked','<span class="who">'+esc(e.username||'a clanker')+'</span> reached <b>'+esc(e.task||'contributor')+'</b>','🎖️');
+    ccAchievement('Achievement unlocked','<span class="who">'+esc(e.username||'a contributor agent')+'</span> reached <b>'+esc(e.task||'contributor')+'</b>','🎖️');
   }
 }
 
@@ -6735,7 +6676,7 @@ function ccQuotaHTML(variant){
     // over the last 7 days, hydrated by ccMetricsPoll once metrics + identity load.
     // Only on the end-of-queue variant (variant==='') so the id stays unique — the
     // Me-card renders the same quota widget with a different variant.
-    ((variant||'')===''?'<div class="quota__sub" style="text-align:right;margin-top:2px"><span class="spark" id="spark-quota" title="Your completions per hour, last 7 days"></span></div>':'')+
+    ((variant||'')===''?'<div class="quota__sub" style="text-align:right;margin-top:var(--sp-1)"><span class="spark" id="spark-quota" title="Your completions per hour, last 7 days"></span></div>':'')+
     '<div class="quota__bar"><div class="quota__fill '+cls+'" style="width:'+pct+'%%"></div></div>'+
     '<div class="quota__sub">'+(remaining>0?(remaining+' left in your allowance today.'):'You&rsquo;ve used your daily allowance — it refreshes on a rolling 24h window.')+'</div>'+
   '</div>';
@@ -6903,8 +6844,9 @@ function ccUserSeries(){
 function ccRenderMineSpark(){
   var mine=ccUserSeries();
   if(!mine)return;
-  setSpark('spark-mine',mine,SPARK_W,SPARK_H,'#3fb950');
-  setSpark('spark-quota',mine,SPARK_W,SPARK_H,'#388bfd');
+  var cs=getComputedStyle(document.documentElement);
+  setSpark('spark-mine',mine,SPARK_W,SPARK_H,cs.getPropertyValue('--status-ok').trim()||'currentColor');
+  setSpark('spark-quota',mine,SPARK_W,SPARK_H,cs.getPropertyValue('--status-info').trim()||'currentColor');
 }
 // ccRenderQueueEnd paints the end-of-queue block (#2595). show=false (a filter is
 // active) hides it — a partial view isn't "the end". Loads limits lazily on first
@@ -6932,7 +6874,7 @@ function ccRenderQueueEnd(show){
 function ccRenderMeQuota(){
   var slot=document.getElementById('me-quota-slot');if(!slot)return;
   var html=ccQuotaHTML('me-quota');
-  slot.innerHTML=html||'<div class="ops-note" style="margin:0">Ship a task to start tracking your daily quota.</div>';
+  slot.innerHTML=html||'<div class="ops-note m-0">Ship a task to start tracking your daily quota.</div>';
 }
 
 // ── Global menu-dismiss: click outside or Escape closes any open row menu ───────
@@ -6980,7 +6922,7 @@ const verb=verbs[e.action]||e.action;
 const taskInfo=e.task?' <span class="feed-cli">'+feedEsc(e.task)+'</span>':'';
 const role=e.role?' as <span class="feed-role">'+feedEsc(e.role)+'</span>':'';
 const cliModel=feedLoadout(e,'feed-cli');
-return '<div class="feed-entry"'+(i===0&&isNew?' style="background:rgba(63,185,80,.08)"':'')+'>'+
+return '<div class="feed-entry"'+(i===0&&isNew?' style="background:color-mix(in srgb,var(--cc-green) 8%%,transparent)"':'')+'>'+
 '<div class="feed-text">'+icon+' <b>'+feedEsc(e.username)+'</b> '+verb+taskInfo+role+cliModel+'</div>'+
 '<span class="feed-time">'+t+' '+tz+'</span></div>'
 }).join('');
@@ -6997,10 +6939,10 @@ poll();setInterval(poll,3000);
 <div class="admin-modal">
 <h4 id="admin-confirm-title">Confirm</h4>
 <p id="admin-confirm-msg"></p>
-<div class="admin-modal-btns"><button type="button" id="admin-confirm-cancel">Cancel</button><button type="button" class="confirm" id="admin-confirm-ok">Confirm</button></div>
+<div class="admin-modal-btns"><button class="hv-btn btn-primary" type="button" id="admin-confirm-cancel">Cancel</button><button type="button" class="confirm" id="admin-confirm-ok">Confirm</button></div>
 </div>
 </div>
-<div style="margin-top:40px;padding:16px 0;border-top:1px solid var(--cc-border);font-size:.75rem;color:var(--cc-muted);display:flex;align-items:center;gap:8px">
+<div style="margin-top:40px;padding:var(--sp-6) var(--sp-0);border-top:1px solid var(--line-strong);font-size:var(--fs-sm);color:var(--text-muted);display:flex;align-items:center;gap:var(--sp-4)">
   <span id="hive-version">loading...</span>
 </div>
 <script>
@@ -7010,7 +6952,7 @@ fetch('/api/version').then(function(r){return r.json()}).then(function(d){
   el.innerHTML=dot+' Hive v'+d.version+' ('+d.short+')' + (d.behind?' · <span style="color:var(--cc-amber)">update available</span>':' · up to date');
 }).catch(function(){});
 </script>
-</body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), "{{HIVE_HUB_PROXIED}}", hubProxiedJS), "{{KNOWLEDGE_STATE_PROTOCOL_VERSION}}", knowledgeStateProtocolVersionJS), projectName, webstatic.MichromaFontFaceCSS, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
+</body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), "{{HIVE_HUB_PROXIED}}", hubProxiedJS), "{{KNOWLEDGE_STATE_PROTOCOL_VERSION}}", knowledgeStateProtocolVersionJS), projectName, webstatic.MichromaFontFaceCSS, themeHeadHTML, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
 	webstatic.ApplyDocumentScriptSrcElem(w, page.Bytes())
 	_, _ = w.Write(page.Bytes())
 }
