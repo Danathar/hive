@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.39.3)
+
+### Fixed
+
+- Fix #8674: recognize per-App-ID GitHub App keys and update the hosted public App slug to hivecommons-hive while preserving legacy slug compatibility.
+
 ## 2026-09-24 (v5.39.2)
 
 ### Fixed
