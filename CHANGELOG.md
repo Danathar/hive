@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.7)
+
+### Fixed
+
+- Pinned Flue, OMP, and Wavefront smoke lanes now mark the bind-mounted checkout as a safe Git directory inside the contributor container, and the pinned Flue/OMP builds avoid writing into the read-only checkout, so Go VCS stamping no longer aborts the scheduled canaries ([#8599](https://github.com/hivecommons/hive/issues/8599), [#8600](https://github.com/hivecommons/hive/issues/8600)).
+
 ## 2026-09-24 (v5.35.6)
 
 ### Changed
