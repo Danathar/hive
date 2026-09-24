@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.37.1)
+
+### Fixed
+
+- Fixed hub error pages so missing paths and status-carrying errors return their real status codes and point at hive.hivecommons.dev (#8628).
+- Fixed #8635 by serving embedded dashboard CSS assets through the Node proxy and returning 404 for unknown asset-looking SPA paths.
+
 ## 2026-09-24 (v5.37.0)
 
 ### Added

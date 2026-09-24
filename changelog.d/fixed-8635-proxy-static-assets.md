@@ -1,1 +1,0 @@
-- Fixed #8635 by serving embedded dashboard CSS assets through the Node proxy and returning 404 for unknown asset-looking SPA paths.

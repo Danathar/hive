@@ -1,1 +1,0 @@
-- Fixed hub error pages so missing paths and status-carrying errors return their real status codes and point at hive.hivecommons.dev (#8628).
