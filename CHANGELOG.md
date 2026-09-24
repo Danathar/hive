@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.0)
+
+### Added
+
+- Record human plan checkpoint approvals as distinct run timeline events surfaced in run detail responses (#8582).
+- Add shared dashboard component CSS recipes and an unlinked design-system preview page for future migrations.
+
 ## 2026-09-24 (v5.34.0)
 
 ### Added
