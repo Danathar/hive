@@ -1,1 +1,0 @@
-- Treat Spektacular artifact_id as the run artifact join key and hold stale strict-mode plans for human re-plan/re-approval.
