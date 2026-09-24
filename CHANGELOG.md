@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.31.0)
+
+### Added
+
+- Added the opt-in Discord factory feed for org-wide GitHub issue/PR activity (#8569).
+
+### Changed
+
+- Rerun failed Go tests in CI with gotestsum, surface rerun flakes, and file deduplicated ci-flake issues.
+
+### Fixed
+
+- Hold v5 run plan leases at the plan checkpoint until the imported plan is approved, so a run can no longer reach `stage=implement` with a draft plan. Adds the `runs.checkpoints.{spec,plan,implement}` config, `runs.wait_timeout_seconds`, and the ACMM floor that keeps the implement checkpoint closed below ACMM L5.
+- Fix dashboard navbar clock drift by ticking locally and flagging stale hub status payloads (#8556).
+
 ## 2026-09-24 (v5.30.0)
 
 ### Added

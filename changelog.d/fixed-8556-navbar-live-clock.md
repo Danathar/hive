@@ -1,1 +1,0 @@
-- Fix dashboard navbar clock drift by ticking locally and flagging stale hub status payloads (#8556).
