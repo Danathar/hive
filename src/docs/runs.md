@@ -49,6 +49,20 @@ cheap for polling. Each item reports `key` as `<owner/repo>#<number>`, `repo` as
 `<owner/repo>`, and `lease_key` as the current stage lease key
 (`<repo>!<run-key>:<stage>`) while the run is active.
 
+`GET /api/runs/audit` is the owner-only cross-repo audit query for runs. It is
+read-only and joins only existing retained artifacts: dashboard audit log rows
+that carry a canonical run key, lifecycle timeline events, `stage_receipt` lease
+receipts, and plan epics from configured bead stores. Query parameters are
+`repo`, `run`, `since`, `until`, `kind`, `limit`, and `page_token`; results are
+normalized rows with `source`, `kind`, `run`, `repo`, `at`, `actor`,
+`artifact_id`, and `attrs`, plus `next_page_token` when more rows remain. The
+retention block in every response states the reused retention knobs: audit log
+rotation is 90 days / 5 MiB / 3 backups (or the 500-entry memory ring when no
+log files exist), and timeline retention is the existing 500-journey lifecycle
+capacity. If a requested window reaches before retained coverage, Hive returns
+an explicit `expired` row with `status=expired` and `state=Unknown` rather than
+silently omitting aged-out artifacts.
+
 `GET /api/runs/{key}` returns the same run detail plus timeline-derived stage
 history. `{key}` may be the canonical key (URL-escape `#` as `%23`) or, for
 backward compatibility with early v5 run leases, the lease-shaped key. It also
@@ -151,6 +165,14 @@ Expected evidence: ready nodes advance by dependency wave, a dependent node only
 becomes ready after its upstream receipt lands, a graph revision change refuses
 stale work, crash reconciliation reports Unknown rather than duplicating a node,
 and burndown is read across waves.
+
+When a plan checkpoint holds a run, the runner records the plan stage receipt
+when the final plan arrives. A human approval that releases the held plan is
+recorded separately as a `stage_approval` timeline event rather than as another
+stage receipt. The event carries the run key, released stage (`plan`), held
+lease generation, approving actor, plan epic id, and timestamp; `GET
+/api/runs/{key}` includes it in the observed `stages` timeline between the held
+plan receipt and the implement-stage transition.
 
 When `governor.work_source.wavefront.enabled` is true, a final Spektacular plan
 that declares repositories with `[repo:<owner/name>]` annotations fans out the

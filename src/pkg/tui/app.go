@@ -451,6 +451,11 @@ type model struct {
 	// any received event.
 	sseBackoff time.Duration
 
+	// streamHook is nil in production. Integration tests install it to observe
+	// the model immediately after stream state changes are applied instead of
+	// polling a rendered frame until the event loop catches up.
+	streamHook func(streamHookRecord)
+
 	// hiveID is the last successful identity read, and governorStatus and
 	// governorInterval the last successful live and configured governor reads
 	// (T29). All three are the header's and the Governor pane's data.
@@ -498,6 +503,25 @@ type model struct {
 	tokensLoaded bool
 	costSummary  client.CostSummary
 	costLoaded   bool
+}
+
+type streamHookEvent int
+
+const (
+	streamHookApplied streamHookEvent = iota
+	streamHookFallbackActivated
+	streamHookOpened
+)
+
+type streamHookRecord struct {
+	kind  streamHookEvent
+	model model
+}
+
+func (m model) notifyStreamHook(event streamHookEvent) {
+	if m.streamHook != nil {
+		m.streamHook(streamHookRecord{kind: event, model: m})
+	}
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -1914,6 +1938,7 @@ func (m model) handleSSEOpen(msg sseOpenMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.sse = msg.stream
+	m.notifyStreamHook(streamHookOpened)
 	return m, waitSSE(msg.stream)
 }
 
@@ -1957,6 +1982,7 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	}
+	m.notifyStreamHook(streamHookApplied)
 	return m, tea.Batch(cmds...)
 }
 
@@ -2021,6 +2047,7 @@ func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
 		// first data would be a whole pollInterval away — spent showing a
 		// frame the stream has already stopped updating.
 		cmds = append(cmds, m.scheduleReconcileTick(), m.pollReconcile())
+		m.notifyStreamHook(streamHookFallbackActivated)
 	}
 	return m, tea.Batch(cmds...)
 }

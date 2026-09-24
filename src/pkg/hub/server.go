@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -901,11 +902,12 @@ type HeartbeatHealthEntry struct {
 }
 
 type HubServer struct {
-	mux      *http.ServeMux
-	registry Registry
-	mu       sync.RWMutex
-	logger   *slog.Logger
-	saveCh   chan struct{}
+	mux                *http.ServeMux
+	registry           Registry
+	mu                 sync.RWMutex
+	logger             *slog.Logger
+	saveCh             chan struct{}
+	githubActivityFeed *GitHubActivityFeed
 	// saveLoopStop / saveLoopDone make the debounced saveLoop goroutine
 	// joinable (#4774). A hub built by NewHubServer used to leak its saveLoop
 	// forever: in tests, the loop could wake up to registrySaveDelay after the
@@ -1591,6 +1593,8 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	s.mux.HandleFunc("GET /learn", s.serveStatic("static/learn.html"))
 	s.mux.HandleFunc("GET /get-started", s.serveStatic("static/get-started.html"))
 	s.mux.HandleFunc("GET /api/docs", s.serveStatic("static/api-docs.html"))
+	s.mux.HandleFunc("GET /tokens.css", s.serveStatic("static/tokens.css"))
+	s.mux.HandleFunc("GET /components.css", s.serveStatic("static/components.css"))
 	s.mux.HandleFunc("GET /api/reading-list", s.handleReadingList)
 	s.mux.HandleFunc("GET /reading", s.serveStatic("static/reading.html"))
 	// Unlinked page (not in nav, noindex) — direct-URL only. The CNCF End User
@@ -4197,7 +4201,11 @@ func (s *HubServer) serveStatic(path string) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if ct := mime.TypeByExtension(filepath.Ext(path)); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		} else {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		}
 		_, _ = w.Write(data)
 	}
 }

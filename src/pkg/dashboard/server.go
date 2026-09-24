@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -35,6 +36,14 @@ var staticFS embed.FS
 
 func secureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func dashboardTimeZoneName() string {
+	name := time.Now().Location().String()
+	if name == "Local" {
+		return ""
+	}
+	return name
 }
 
 const agentSkipAfterFullBroadcastS = 5 * time.Second
@@ -374,6 +383,7 @@ type Server struct {
 // StatusPayload matches the JSON contract the dashboard frontend render() expects.
 type StatusPayload struct {
 	Timestamp string `json:"timestamp"`
+	TimeZone  string `json:"timeZone,omitempty"`
 	// StatusSeq is a monotonic publish sequence (#4348): the frontend drops
 	// any status payload whose seq is older than the last one it rendered,
 	// so a stale in-flight poll/SSE response can never repaint over a newer
@@ -1159,20 +1169,21 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("loading embedded static files: %w", err)
 	}
-	// The SPA document gets a dedicated handler with startup-precomputed gzip
-	// and a strong ETag (see pkg/dashboard/webstatic): http.FileServer would serve the
+	// The SPA document gets a dedicated handler with a strong ETag and one-time
+	// gzip cache (see pkg/dashboard/webstatic): http.FileServer would serve the
 	// ~1.3 MB inline document uncompressed with no cache validators (embed.FS
 	// has a zero ModTime, so not even Last-Modified), forcing a full re-download
 	// on every visit. "/{$}" matches the root path exactly; every other static
 	// path falls through to the plain file server below.
+	var idx *webstatic.IndexDocument
 	if rawIndex, err := fs.ReadFile(staticContent, "index.html"); err == nil {
 		// Strings are baked in ONCE here, unlike custom.css which is read per
-		// request: the document carries a precomputed gzip body and a strong
-		// ETag, so its content cannot vary per request without discarding both.
+		// request: the document carries a strong ETag and one immutable gzip
+		// body, so its content cannot vary per request without discarding both.
 		// Editing branding.json therefore needs a restart; editing the
 		// stylesheet does not. That asymmetry is documented in branding.md.
 		branded := webstatic.InjectBranding(applyBranding(rawIndex, s.loadBranding()))
-		idx := webstatic.NewIndexDocument(branded)
+		idx = webstatic.NewIndexDocument(branded)
 		// Hand the FINAL served bytes to the CSP layer explicitly, rather than
 		// having the document constructor reach out and set global state:
 		// constructing a document should not silently change the process-wide
@@ -1191,7 +1202,7 @@ func (s *Server) Start() error {
 	//
 	// Read per request (not cached at startup) so dropping a file in takes
 	// effect on reload. It is a single small stylesheet on local disk; the
-	// index document itself remains startup-precompressed.
+	// index document itself remains immutable and one-time precompressed.
 	s.mux.HandleFunc("GET /branding/custom.css", s.handleBrandingCSS)
 
 	s.mux.Handle("GET /", http.FileServer(http.FS(staticContent)))
@@ -1210,7 +1221,16 @@ func (s *Server) Start() error {
 		ReadTimeout: dashboardReadTimeout,
 		IdleTimeout: dashboardIdleTimeout,
 	}
-	return srv.ListenAndServe()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	if idx != nil {
+		// Bind before BestCompression work so readiness/liveness probes can
+		// answer even when a saturated node is slow to build the static cache.
+		go idx.Precompress()
+	}
+	return srv.Serve(ln)
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -1660,6 +1680,21 @@ func isPublicPath(path string) bool {
 	case path == "/api/style":
 		// Sanitized, same-origin CSS for public snapshot/read-only preview links.
 		return true
+	case path == "/api/themes" || path == "/api/theme.css":
+		// Shared dashboard/contributor theme catalog and stylesheet. /contribute is
+		// public, so its same-origin theme CSS and contributor-scoped picker data
+		// must be public too. The owner-only config API remains private.
+		return true
+	case path == "/tokens.css":
+		// Shared ADR-0018 design-token sheet. /contribute is public when a
+		// spoke uses dashboard auth, so its same-origin stylesheet must be public
+		// too; the sheet contains only static custom properties and aliases.
+		return true
+	case path == "/components.css":
+		// Shared ADR-0018 component recipes. /contribute is public when a spoke
+		// uses dashboard auth, so its same-origin stylesheet must be public too.
+		// The unlinked /design-system.html preview remains auth-gated.
+		return true
 	case path == "/contribute" || strings.HasPrefix(path, "/contribute/"):
 		return true
 	case path == "/api/contribute" || strings.HasPrefix(path, "/api/contribute/"):
@@ -2035,6 +2070,9 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	status.StatusSeq = s.statusSeq
 	status.StatusInstance = strconv.FormatInt(s.startedAt.UnixNano(), 10)
 	status.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	if status.TimeZone == "" {
+		status.TimeZone = dashboardTimeZoneName()
+	}
 	s.status = status
 	s.lastFullBroadcast = time.Now()
 	s.statusMu.Unlock()

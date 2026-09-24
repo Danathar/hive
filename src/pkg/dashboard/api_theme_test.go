@@ -12,12 +12,13 @@ import (
 
 func TestThemeCSSServesETagAndEffectiveTokens(t *testing.T) {
 	s := govServer(t)
-	s.deps.Config.Dashboard.Theme = "honeycomb"
+	s.deps.Config.Dashboard.Theme = "hive"
 	s.deps.Config.Dashboard.ThemeOverrides.Tokens = map[string]string{"--accent": "#e0a33a"}
 	rec := doGet(s, "/api/theme.css")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/theme.css = %d: %s", rec.Code, rec.Body.String())
 	}
+
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
 		t.Fatalf("Content-Type = %q", ct)
 	}
@@ -25,7 +26,7 @@ func TestThemeCSSServesETagAndEffectiveTokens(t *testing.T) {
 	if etag == "" {
 		t.Fatal("missing ETag")
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "#e0a33a") || !strings.Contains(body, "honeycomb") {
+	if body := rec.Body.String(); !strings.Contains(body, "#e0a33a") || !strings.Contains(body, "hive") {
 		t.Fatalf("theme css missing expected content: %s", body)
 	}
 	rec304 := httptest.NewRecorder()
@@ -34,6 +35,75 @@ func TestThemeCSSServesETagAndEffectiveTokens(t *testing.T) {
 	s.mux.ServeHTTP(rec304, req)
 	if rec304.Code != http.StatusNotModified {
 		t.Fatalf("conditional GET = %d, want 304", rec304.Code)
+	}
+}
+
+func TestThemesListAndExplicitThemeCSS(t *testing.T) {
+	s := govServer(t)
+	rec := doGet(s, "/api/themes")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/themes = %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Themes []struct {
+			ID       string   `json:"id"`
+			Name     string   `json:"name"`
+			Swatches []string `json:"swatches"`
+			Scopes   []string `json:"scopes"`
+		} `json:"themes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode /api/themes: %v", err)
+	}
+	if len(payload.Themes) < 10 {
+		t.Fatalf("theme list has %d themes, want at least 10", len(payload.Themes))
+	}
+	found := false
+	for _, th := range payload.Themes {
+		if th.ID == "star-wars" {
+			found = th.Name != "" && len(th.Swatches) >= 4
+		}
+		key := strings.Join(th.Swatches, "|")
+		if key == "" {
+			t.Fatalf("%s has no swatches", th.ID)
+		}
+	}
+	if !found {
+		t.Fatalf("/api/themes missing star-wars with swatches: %+v", payload.Themes)
+	}
+	seenSwatches := map[string]string{}
+	for _, th := range payload.Themes {
+		key := strings.Join(th.Swatches, "|")
+		if other := seenSwatches[key]; other != "" {
+			t.Fatalf("%s and %s expose identical swatches %v", other, th.ID, th.Swatches)
+		}
+		seenSwatches[key] = th.ID
+	}
+	contrib := doGet(s, "/api/themes?scope=contributor")
+	if contrib.Code != http.StatusOK {
+		t.Fatalf("GET /api/themes?scope=contributor = %d: %s", contrib.Code, contrib.Body.String())
+	}
+	var scoped struct {
+		Themes []struct {
+			ID string `json:"id"`
+		} `json:"themes"`
+	}
+	if err := json.Unmarshal(contrib.Body.Bytes(), &scoped); err != nil {
+		t.Fatalf("decode scoped themes: %v", err)
+	}
+	if len(scoped.Themes) <= len(payload.Themes)-7 {
+		t.Fatalf("contributor scope did not include migrated profile skins: got %d of %d", len(scoped.Themes), len(payload.Themes))
+	}
+	css := doGet(s, "/api/theme.css?theme=terminal")
+	if css.Code != http.StatusOK || !strings.Contains(css.Body.String(), "green-on-black") && !strings.Contains(css.Body.String(), "terminal") {
+		t.Fatalf("explicit terminal css = %d: %s", css.Code, css.Body.String())
+	}
+	contribCSS := doGet(s, "/api/theme.css?scope=contributor&theme=contributor-violet-advisor")
+	if contribCSS.Code != http.StatusOK || !strings.Contains(contribCSS.Body.String(), "--cc-bg") || !strings.Contains(contribCSS.Body.String(), "--me-accent") {
+		t.Fatalf("contributor theme css = %d: %s", contribCSS.Code, contribCSS.Body.String())
+	}
+	if bad := doGet(s, "/api/theme.css?theme=missing"); bad.Code != http.StatusNotFound {
+		t.Fatalf("missing theme css = %d, want 404", bad.Code)
 	}
 }
 
@@ -76,8 +146,8 @@ func TestDashboardThemeAPIRejectsUnsafeCSSAndTokens(t *testing.T) {
 	s := govServer(t)
 	for _, body := range []map[string]any{
 		{"theme": "missing"},
-		{"theme": "openclaw", "theme_overrides": map[string]any{"tokens": map[string]string{"--typo": "red"}}},
-		{"theme": "openclaw", "theme_overrides": map[string]any{"custom_css": ".x{background:url(http://example.org/x.png)}"}},
+		{"theme": "hive", "theme_overrides": map[string]any{"tokens": map[string]string{"--typo": "red"}}},
+		{"theme": "hive", "theme_overrides": map[string]any{"custom_css": ".x{background:url(http://example.org/x.png)}"}},
 	} {
 		rec := doPut(s, "/api/config/dashboard/theme", body)
 		if rec.Code != http.StatusBadRequest {

@@ -33,10 +33,13 @@ const (
 )
 
 type RunStage struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Gen     uint64 `json:"gen"`
-	Receipt string `json:"receipt,omitempty"`
+	Name    string            `json:"name"`
+	Status  string            `json:"status"`
+	Gen     uint64            `json:"gen"`
+	Receipt string            `json:"receipt,omitempty"`
+	Actor   string            `json:"actor,omitempty"`
+	At      string            `json:"at,omitempty"`
+	Attrs   map[string]string `json:"attrs,omitempty"`
 	// Reason is the owner's explanation on a stage transition that carried one,
 	// today only an owner reset (#8350); it is read back from the timeline
 	// event so the run's history says why it stepped back.
@@ -208,6 +211,9 @@ type runHumanReviewHold struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// runCheckpointPolicy is the resolved answer to "does this stage boundary
+// wait for a human?", carried with the provenance an audit entry needs: which
+// config said so, and why.
 type runCheckpointPolicy struct {
 	stage  string
 	blocks bool
@@ -561,17 +567,13 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 	}
 	plans := s.runPlanSnapshots()
 	holds := runHumanReviewHolds(runReviewDispatchStatePath)
-	var cfg *config.Config
-	if s.deps != nil {
-		cfg = s.deps.Config
-	}
 	runs := make([]Run, 0, len(leases))
 	active := map[string]bool{}
 	for _, lease := range leases {
 		active[lease.key] = true
 		active[lease.leaseKey] = true
 		plan := firstRunPlanSnapshot(plans[lease.key], plans[lease.leaseKey])
-		run := runFromLease(lease, plan, firstRunHold(holds[lease.key], holds[lease.leaseKey]), cfg)
+		run := runFromLease(lease, plan, firstRunHold(holds[lease.key], holds[lease.leaseKey]), s.runsConfigSnapshot())
 		if run.PlanEpicID != "" {
 			run.ReviewWaves = s.planReviewWaves(run.PlanEpicID)
 		}
@@ -740,6 +742,17 @@ func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanRev
 	return run
 }
 
+// runsConfigSnapshot is the nil-safe accessor for the running config the run
+// projection consults.
+func (s *Server) runsConfigSnapshot() *config.Config {
+	if s == nil || s.deps == nil {
+		return nil
+	}
+	return s.deps.Config
+}
+
+// runCheckpointPolicy resolves the checkpoint decision for one stage against
+// this server's running config.
 func (s *Server) runCheckpointPolicy(stage string) runCheckpointPolicy {
 	var cfg *config.Config
 	if s != nil && s.deps != nil {
@@ -748,10 +761,15 @@ func (s *Server) runCheckpointPolicy(stage string) runCheckpointPolicy {
 	return runCheckpointPolicyForConfig(cfg, stage)
 }
 
+// runCheckpointBlocks is the boolean shorthand over runCheckpointPolicyForConfig.
 func runCheckpointBlocks(cfg *config.Config, stage string) bool {
 	return runCheckpointPolicyForConfig(cfg, stage).blocks
 }
 
+// runCheckpointPolicyForConfig fails closed: with no config, an unrecognised
+// stage, or an ACMM level below RunImplementCheckpointMinACMM for the
+// implement boundary, the checkpoint blocks. Only an explicit `false` on a
+// recognised stage at a permitted ACMM level opens the gate.
 func runCheckpointPolicyForConfig(cfg *config.Config, stage string) runCheckpointPolicy {
 	normalized := strings.TrimSpace(strings.ToLower(stage))
 	policy := runCheckpointPolicy{stage: normalized, blocks: true, reason: "checkpoint_enabled", source: "runtime config"}
@@ -875,7 +893,17 @@ func mergeRunTimelineStages(stages []RunStage, events []timeline.Event) []RunSta
 			receipt = firstRunNonEmpty(ev.Attrs["receipt"], ev.Attrs["receipt_digest"], ev.Attrs["path"], ev.Attrs["digest"])
 			reason = ev.Attrs["reason"]
 		}
-		out = append(out, RunStage{Name: name, Status: "observed", Gen: gen, Receipt: receipt, Reason: reason})
+		attrs := map[string]string(nil)
+		if len(ev.Attrs) > 0 {
+			attrs = make(map[string]string, len(ev.Attrs))
+			for k, v := range ev.Attrs {
+				attrs[k] = v
+			}
+		}
+		out = append(out, RunStage{
+			Name: name, Status: "observed", Gen: gen, Receipt: receipt, Reason: reason,
+			Actor: ev.Agent, At: formatRunTime(time.UnixMilli(ev.At)), Attrs: attrs,
+		})
 	}
 	return out
 }
