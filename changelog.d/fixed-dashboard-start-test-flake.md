@@ -1,1 +1,0 @@
-- Dashboard startup now answers readiness before building the heavy static UI gzip cache, preventing saturated CI runners from flaking `TestStart_ServesEndpoints` while preserving compressed dashboard responses.

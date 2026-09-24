@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.30.0)
+
+### Added
+
+- Add dashboard theme configuration, built-in presets, `/api/theme.css`, and a Settings → Appearance preset/background/custom-CSS UI for hive-wide dashboard customization (#8536).
+- Added `src/scripts/ci-flake-tally.sh` so maintainers can rank flaky Go tests and packages from recent GitHub Actions runs with one command.
+- Added ADR-0018 and the dashboard design-system reference so the spoke, contributor portal, and hub can converge on shared tokens and theme overrides for #8536.
+
+### Fixed
+
+- Improved the contributor Management tab layout so admin controls read as grouped settings sections on desktop and mobile.
+- Dashboard startup now answers readiness before building the heavy static UI gzip cache, preventing saturated CI runners from flaking `TestStart_ServesEndpoints` while preserving compressed dashboard responses.
+- tui: make stream integration tests deterministic (sync hook instead of wall-clock polling), fixing recurring CI flake.
+
 ## 2026-09-24 (v5.29.0)
 
 ### Added
