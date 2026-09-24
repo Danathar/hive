@@ -2,7 +2,8 @@
 
 **Status: design only.** Nothing here is implemented yet. It belongs to the v6
 dashboard-optional line ([#7563](https://github.com/hivecommons/hive/issues/7563)) and, per
-that line's policy, lands on the `v6` branch only.
+that line's policy, lands on the `v6` branch only. Tracked by
+[#8697](https://github.com/hivecommons/hive/issues/8697).
 
 Read [task-mcp.md](task-mcp.md) first. This page is written as its complement and does not
 repeat its reasoning.
@@ -29,7 +30,7 @@ dashboard token itself is still accepted on the endpoint, but only for the dashb
 calls; it is never placed in an agent's environment, launch flags, or MCP configuration."
 
 This serves an **operator** — the person who already holds the dashboard token and already has
-owner authority through the SPA. Its axes are the inverse of task-mcp's on every one that
+owner authority through the SPA. The axes are the inverse of task-mcp's on everything that
 matters:
 
 | | `hive-task` | admin MCP |
@@ -38,22 +39,42 @@ matters:
 | Scope | one task | whole hive |
 | Direction | read-only | read and write |
 | Credential | HMAC lease bearer | dashboard token |
-| Transport | streamable HTTP, on the dashboard mux | stdio, separate process |
-| Shape | an endpoint on the hub | a `cmd/` client binary |
 
-**The shape row is the one that matters most.** task-mcp is a server surface: it accepts
-requests, so it needed its own authentication, its own scoping, its own rate limits, and a lease
-lifecycle to revoke. The admin MCP is a *client*: it adds no endpoint, no change to any
-endpoint's request or response shape, no configuration schema, and nothing for an attacker on
-the pod network to reach. From the hub's side it is indistinguishable from `hivectl`.
+## Shape: both transports, endpoint required
 
-That is also why it lives in tree rather than beside the tree. `cmd/hivectl` and `pkg/tui` are
-already exactly this — standalone client binaries of the dashboard REST API, shipped in this
-repository — so there is an established shape to follow and no reason for this one surface to be
-external. In tree it *uses* `pkg/hivectl`'s client, `pkg/logscrub` and `pkg/ioscan` rather than
-imitating them, which is what makes the line's guard invariant literally true instead of
-promised. An out-of-tree client would have to reimplement the safety machinery, and
-reimplementing it is precisely what "no surface grows its own authz" forbids.
+The tools, the preview-and-confirm contract, the refusal machinery, the caps and the outbound
+scrubbing are all transport-independent. They live in one package; each transport is a thin
+shell over it, so a tool is defined once and the two cannot drift apart.
+
+**The endpoint is the one that must exist.** It needs no install — a URL and a token, and any
+MCP client can use it, including clients that cannot spawn a local process. That is the v6
+theme: reachable from where people already are, rather than asking every operator to obtain and
+run a binary first. It administers the hive that serves it, so there is no hive selection: the
+endpoint *is* the scope.
+
+**The stdio binary ships beside it.** stdio is MCP's primary transport and is what an agent CLI
+spawns directly, and `cmd/hivectl` and `pkg/tui` are the precedent — standalone client binaries
+of this same API, already in tree. Because it runs on the operator's machine rather than on a
+hive, it is also the only transport that can hold a roster and address more than one.
+
+An earlier draft of this page argued for the binary alone, on the grounds that a client adds
+nothing for an attacker on the pod network to reach. That argument is real but it loses to
+reachability, and the two shapes are not exclusive. The honest accounting:
+
+- The endpoint **is** a new authenticated write surface on the hub, which `pkg/taskmcp` is not —
+  that one is read-only. It exposes no authority the dashboard REST API does not already give
+  the same credential, but it is new request-handling code on the hub and should be read as
+  such. Every write on both transports is gated by the preview-and-confirm contract, and the
+  surface is read-only until that contract exists.
+- Because it is served by the hub, the endpoint needs no authentication of its own: the existing
+  `authenticate` path already resolves a dashboard token to owner. Unlike `pkg/taskmcp` it needs
+  no lease minting, no per-lease scoping and no revocation record, because the credential is the
+  operator's own and the scope is the whole hive by design.
+
+In tree, both transports *use* `pkg/hivectl`'s client, `pkg/logscrub` and `pkg/ioscan` rather
+than reimplementing them. That is what makes the guard invariant literally true instead of
+promised: an out-of-tree client would have to carry its own copy of the safety machinery, and
+carrying one's own copy is what "no surface grows its own authz" forbids.
 
 Its scope is hive administration **broadly** — not a fixed short list of operations — with a
 named set of exclusions, each recorded below with the reason it was excluded rather than as a
@@ -409,9 +430,11 @@ rather than papered over.
 
 `src/pkg/hivectl/client.go` is already a Go client for this API: it validates the base URL
 (http/https only), joins paths against a trimmed base, and attaches
-`Authorization: Bearer <token>`. The admin MCP **uses** it rather than carrying a second copy —
-there is no reason for two clients in one repository to disagree about how a Hive is addressed,
-and a change to that (a new auth path, a base-URL quirk on a GHE deployment) should land once.
+`Authorization: Bearer <token>`. The **stdio** transport uses it rather than carrying a second
+copy — there is no reason for two clients in one repository to disagree about how a Hive is
+addressed, and a change to that (a new auth path, a base-URL quirk on a GHE deployment) should
+land once. The endpoint does not need it: served by the hub, it reaches the same state
+in-process.
 
 The difference is upstream of the transport. `hivectl` is driven by an operator typing a
 command; the admin MCP is driven by a model proposing one. That single difference is the
