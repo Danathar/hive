@@ -51,14 +51,14 @@ func TestAgentClosedFindingIsNotReportedResolved(t *testing.T) {
 
 	md := FormatDigestMarkdown(d, opts)
 	resolvedAt := strings.Index(md, "### ✅ Recently Resolved (1)")
-	closedAt := strings.Index(md, "### ☑️ Recently Closed by Agents — Fix Not Verified (1)")
+	closedAt := strings.Index(md, "### ☑️ Recently Closed — Fix Not Verified (1)")
 	if resolvedAt < 0 || closedAt < 0 {
 		t.Fatalf("want one evidenced resolution and one unverified agent close as separate sections:\n%s", md)
 	}
 	if strings.Contains(md, "~~"+agentTitle+"~~") {
 		t.Errorf("agent-closed finding is struck through as resolved:\n%s", md)
 	}
-	if !strings.Contains(md, "_closed by guide "+time.Now().Format("Jan 2")+" — fix not verified_") {
+	if !strings.Contains(md, "_guide — closed "+time.Now().Format("Jan 2")+", fix not verified_") {
 		t.Errorf("agent-closed finding is not captioned as unverified:\n%s", md)
 	}
 	if !strings.Contains(md, "~~"+fixedTitle+"~~") {
@@ -78,7 +78,72 @@ func TestAllClearDigestDoesNotOverclaimAgentCloses(t *testing.T) {
 	if strings.Contains(md, "all previously reported findings are resolved") {
 		t.Errorf("all-clear digest claims resolution on agent closes alone:\n%s", md)
 	}
-	if !strings.Contains(md, "1 recently closed by agents without a verified fix") {
+	if !strings.Contains(md, "1 recently closed without a verified fix") {
 		t.Errorf("all-clear digest does not report the unverified close:\n%s", md)
+	}
+}
+
+// TestCappedUnverifiedClosesAreNotSummarizedAsResolved: the changelog cap
+// keeps the newest entries, so older bare closes can all fall past it. The
+// hidden remainder must not then be announced as "resolved", and the
+// zero-findings summary must not claim everything was resolved.
+func TestCappedUnverifiedClosesAreNotSummarizedAsResolved(t *testing.T) {
+	store, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	for i := range 3 {
+		b, err := store.Create("bare close "+string(rune('a'+i)), beads.TypeAdvisory, beads.PriorityHigh, "guide", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Older than every evidence-backed close below, so the cap drops these.
+		if err := store.SetMetadata(b.ID, resolvedAtMetadataKey, formatResolvedAt(time.Now().Add(-time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedResolved(t, store, "guide", 2)
+
+	opts := DigestOptions{MaxFindings: 2}
+	d := BuildDigestFromBeads(map[string]*beads.Store{"guide": store}, "busy", opts)
+	if d.ResolvedOverflowCount != 3 || d.UnverifiedOverflowCount != 3 {
+		t.Fatalf("overflow = %d (unverified %d), want 3 (3)", d.ResolvedOverflowCount, d.UnverifiedOverflowCount)
+	}
+	md := FormatDigestMarkdown(d, opts)
+	if strings.Contains(md, "all previously reported findings are resolved") {
+		t.Errorf("summary claims all resolved while bare closes sit past the cap:\n%s", md)
+	}
+	if !strings.Contains(md, "…plus 3 more closed without a verified fix") {
+		t.Errorf("hidden bare closes are not labelled unverified:\n%s", md)
+	}
+}
+
+// TestGuideFindingNotPRLinkedByFMATitles pins that the #6262 guide finding was
+// NOT retired by title-similarity PR auto-close: none of the FMA PRs merged
+// around the false "resolved Sep 24" clears prLinkThreshold against it, so the
+// close came from the agent and belongs in the unverified section.
+func TestGuideFindingNotPRLinkedByFMATitles(t *testing.T) {
+	store, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	const title = "dual-pods controller log-tail capture on stopped vLLM instances is undocumented in docs/dual-pods.md and docs/launcher.md"
+	if _, err := store.Create(title, beads.TypeAdvisory, beads.PriorityMedium, "guide", "docs/dual-pods.md#launcher-based-pods"); err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]*beads.Store{"guide": store}
+	for _, pr := range []string{
+		"Tweak dependency bump review instructions",
+		"deps(actions): bump docker/setup-buildx-action from 4.3.0 to 4.4.1",
+		"deps(actions): bump docker/setup-qemu-action from 4.3.0 to 4.4.0",
+		"deps(actions): bump docker/build-push-action from 7.3.0 to 7.4.0",
+		"Correct testing of releases wrt --debug-gpu-memory",
+	} {
+		if closed := ClosePRLinkedAdvisoryBeads(stores, pr); len(closed) != 0 {
+			t.Errorf("PR %q closed %v; the guide finding shares no fix with it", pr, closed)
+		}
 	}
 }

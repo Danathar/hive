@@ -91,13 +91,13 @@ type ResolvedFinding struct {
 	Title    string    `json:"title"`
 	ClosedAt time.Time `json:"closed_at"`
 	File     string    `json:"file,omitempty"`
-	// AgentClosed marks a bead an agent closed itself with nothing the hive
-	// can check behind it: no hive auto-close reason (merged PR, healed
-	// access) and no referenced GitHub issue or PR that has closed. Advisory
-	// agents re-verify their own findings with an LLM and close the ones they
-	// judge gone or invalid; that judgement is routinely wrong (#6262), so the
-	// digest reports such entries as "closed by <agent>, fix not verified"
-	// instead of claiming the condition was resolved.
+	// AgentClosed marks a bead closed with nothing the hive can check behind
+	// it: no hive auto-close reason (merged PR, healed access) and no
+	// referenced GitHub issue or PR that has closed. Advisory agents re-verify
+	// their own findings with an LLM and `bd close` the ones they judge gone or
+	// invalid; that judgement is routinely wrong (#6262), so the digest reports
+	// such entries as "closed, fix not verified" instead of claiming the
+	// condition was resolved. The bead does not record who closed it.
 	AgentClosed bool `json:"agent_closed,omitempty"`
 }
 
@@ -120,6 +120,10 @@ type Digest struct {
 	// holds what is RENDERED and this carries the part the reader cannot see,
 	// which the renderer announces rather than dropping silently.
 	ResolvedOverflowCount int `json:"resolved_overflow_count,omitempty"`
+	// UnverifiedOverflowCount is how many of those ResolvedOverflowCount
+	// entries are AgentClosed. The renderer needs it so a close hidden by the
+	// cap cannot be summarized as "resolved" (#6262).
+	UnverifiedOverflowCount int `json:"unverified_overflow_count,omitempty"`
 	// AnalyzedSnapshot, when set, pins the digest to a single repo commit: the
 	// latest commit of the target repo as of when this post cycle started. It is
 	// cited in the rendered comment and used by VerifyFindingPaths to detect
@@ -879,21 +883,27 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 	sort.Slice(resolved, func(i, j int) bool {
 		return resolved[i].ClosedAt.After(resolved[j].ClosedAt)
 	})
-	resolvedOverflow := 0
+	resolvedOverflow, unverifiedOverflow := 0, 0
 	if rc := opts.resolvedRenderCap(); len(resolved) > rc {
 		resolvedOverflow = len(resolved) - rc
+		for _, r := range resolved[rc:] {
+			if r.AgentClosed {
+				unverifiedOverflow++
+			}
+		}
 		resolved = resolved[:rc]
 	}
 	d := &Digest{
-		GeneratedAt:           time.Now(),
-		Mode:                  mode,
-		ByAgent:               byAgent,
-		TotalCount:            total,
-		RecentlyResolved:      resolved,
-		Capped:                overflow > 0,
-		OverflowCount:         overflow,
-		ResolvedOverflowCount: resolvedOverflow,
-		AnalyzedSnapshot:      opts.Snapshot,
+		GeneratedAt:             time.Now(),
+		Mode:                    mode,
+		ByAgent:                 byAgent,
+		TotalCount:              total,
+		RecentlyResolved:        resolved,
+		Capped:                  overflow > 0,
+		OverflowCount:           overflow,
+		ResolvedOverflowCount:   resolvedOverflow,
+		UnverifiedOverflowCount: unverifiedOverflow,
+		AnalyzedSnapshot:        opts.Snapshot,
 	}
 	// When the cap was not reached, applyTopN returned early and never verified
 	// anything, so the surviving findings still need their paths checked before
@@ -1172,15 +1182,17 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 		b.WriteString("This comment is updated periodically.\n\n")
 		writeAdviceSection(&b, opts.Advice)
 		_, agentClosed := splitResolved(d.RecentlyResolved)
+		unverified := len(agentClosed) + d.UnverifiedOverflowCount
 		switch {
 		case len(d.RecentlyResolved) == 0:
 			b.WriteString(fmt.Sprintf("**Findings:** 0 — ✅ No open advisory findings · evaluated %s.\n\n", d.GeneratedAt.Format(time.RFC3339)))
-		case len(agentClosed) == 0:
+		case unverified == 0:
 			b.WriteString("**Findings:** 0 — all previously reported findings are resolved. ✅\n\n")
 		default:
-			// An agent closing its own finding is not evidence the condition
-			// is gone (#6262), so "all resolved" would overclaim here.
-			b.WriteString(fmt.Sprintf("**Findings:** 0 — no open advisory findings; %d recently closed by agents without a verified fix (listed below).\n\n", len(agentClosed)))
+			// A bare close is not evidence the condition is gone (#6262), so
+			// "all resolved" would overclaim here. Counted over the uncapped
+			// set: a close hidden by the changelog cap is no more verified.
+			b.WriteString(fmt.Sprintf("**Findings:** 0 — no open advisory findings; %d recently closed without a verified fix.\n\n", unverified))
 		}
 		writeRecentlyResolved(&b, d, org, primaryRepo)
 		writeAnalyzedFooter(&b, d)
@@ -1402,19 +1414,25 @@ func writeRecentlyResolved(b *strings.Builder, d *Digest, org, primaryRepo strin
 		}
 	}
 	if len(agentClosed) > 0 {
-		fmt.Fprintf(b, "### ☑️ Recently Closed by Agents — Fix Not Verified (%d)\n\n", len(agentClosed))
-		b.WriteString("> The reporting agent closed these on re-check. The hive saw no merged PR or closed issue behind the close, so the condition may still hold.\n\n")
+		fmt.Fprintf(b, "### ☑️ Recently Closed — Fix Not Verified (%d)\n\n", len(agentClosed))
+		b.WriteString("> Closed without a merged PR, closed issue, or other evidence the hive could check, so the condition may still hold.\n\n")
+		// r.Agent is the agent that REPORTED the finding; a bead does not
+		// record who closed it, so the caption must not name a closer.
 		for _, r := range agentClosed {
 			loc := formatFindingRef(r.File, 0, org, primaryRepo, r.Title)
-			fmt.Fprintf(b, "- %s%s _closed by %s %s — fix not verified_\n", linkifyRefs(logscrub.ScrubString(r.Title), org), loc, r.Agent, r.ClosedAt.Format("Jan 2"))
+			fmt.Fprintf(b, "- %s%s _%s — closed %s, fix not verified_\n", linkifyRefs(logscrub.ScrubString(r.Title), org), loc, r.Agent, r.ClosedAt.Format("Jan 2"))
 		}
 	}
 	// The collapsed remainder is named, never merely absent: a changelog that
 	// quietly stops at the cap reads as "this is everything that healed".
 	if d.ResolvedOverflowCount > 0 {
+		// Labelled by what is actually hidden, not by what is visible.
 		what := "resolved"
-		if len(agentClosed) > 0 {
-			what = "resolved or closed by agents"
+		switch {
+		case d.UnverifiedOverflowCount >= d.ResolvedOverflowCount:
+			what = "closed without a verified fix"
+		case d.UnverifiedOverflowCount > 0:
+			what = "resolved or closed without a verified fix"
 		}
 		// The window is read from the constant, not written as "48h": the two
 		// drifting apart would misstate the period the count covers.

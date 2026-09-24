@@ -108,10 +108,11 @@ The digest therefore splits recently closed findings by what backs the close:
 - **✅ Recently Resolved** — struck through, "resolved <date>". Only closes
   the hive has evidence for: a PR-linked auto-close, a healed App or repo-access
   finding, or a finding whose referenced GitHub issues and PRs have all closed.
-- **☑️ Recently Closed by Agents — Fix Not Verified** — not struck through,
-  "closed by <agent> <date> — fix not verified". Every other close, including
-  `bd close` and `bd update --status done|closed`. The condition may still
-  hold.
+- **☑️ Recently Closed — Fix Not Verified** — not struck through,
+  "<agent> — closed <date>, fix not verified", where `<agent>` is the agent
+  that reported the finding (a bead does not record who closed it). Every other
+  close, including `bd close` and `bd update --status done|closed`. The
+  condition may still hold.
 
 Both sections share the `max_findings` changelog cap described below. The
 zero-findings digest says "all previously reported findings are resolved" only
