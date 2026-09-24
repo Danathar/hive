@@ -1,1 +1,0 @@
-- Reconcile dashboard themes with ADR-0018 design tokens by targeting canonical tokens while aliasing deprecated legacy variables for existing themes.

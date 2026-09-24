@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.6)
+
+### Changed
+
+- Reconcile dashboard themes with ADR-0018 design tokens by targeting canonical tokens while aliasing deprecated legacy variables for existing themes.
+
 ## 2026-09-24 (v5.35.5)
 
 ### Changed
