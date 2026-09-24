@@ -8,9 +8,9 @@ import (
 	"github.com/hivecommons/hive/pkg/beads"
 )
 
-// seedResolved creates n advisory beads and closes them the way a merged PR
-// does, so they land in the digest's "Recently Resolved" changelog as
-// evidence-backed resolutions rather than bare agent closes.
+// seedResolved creates n advisory beads and closes them the way a healed
+// access check does, so they land in the digest's "Recently Resolved"
+// changelog as hive-verified resolutions rather than unverified closes.
 func seedResolved(t *testing.T, store *beads.Store, agent string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
@@ -21,7 +21,7 @@ func seedResolved(t *testing.T, store *beads.Store, agent string, n int) {
 		if err := store.Close(b.ID); err != nil {
 			t.Fatalf("closing bead %d: %v", i, err)
 		}
-		if err := store.SetMetadata(b.ID, closeReasonMetadataKey, prLinkedCloseReason); err != nil {
+		if err := store.SetMetadata(b.ID, closeReasonMetadataKey, appAuthHealedCloseReason); err != nil {
 			t.Fatalf("recording close reason %d: %v", i, err)
 		}
 	}

@@ -14,8 +14,8 @@ import (
 // ones it judges fixed. On the FMA digest of 2026-09-24 it closed "dual-pods
 // controller log-tail capture ... is undocumented" although no docs had
 // changed, and the digest struck it through as "resolved Sep 24". A close the
-// hive has no evidence for must not be presented as a resolution; a close the
-// hive does have evidence for (here, a merged PR) still is.
+// hive did not verify must not be presented as a resolution; one it re-checked
+// itself (here, a healed App-auth finding) still is.
 func TestAgentClosedFindingIsNotReportedResolved(t *testing.T) {
 	store, err := beads.NewStore(t.TempDir())
 	if err != nil {
@@ -29,54 +29,121 @@ func TestAgentClosedFindingIsNotReportedResolved(t *testing.T) {
 	if err := store.Close(agentClosed.ID); err != nil { // what `bd close` does
 		t.Fatal(err)
 	}
-	const fixedTitle = "pr-verifier workflow fails on every pull request"
-	fixed, err := store.Create(fixedTitle, beads.TypeAdvisory, beads.PriorityMedium, "guide", "")
+	const healedTitle = "GitHub App cannot post the advisory digest"
+	healed, err := store.Create(healedTitle, beads.TypeAdvisory, beads.PriorityMedium, "guide", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed := ClosePRLinkedAdvisoryBeadsAt(map[string]*beads.Store{"guide": store}, "fix the pr-verifier workflow failing on every pull request", time.Now()); len(closed) != 1 || closed[0] != fixed.Title {
-		t.Fatalf("PR-linked close = %v, want [%q]", closed, fixed.Title)
+	if err := store.Close(healed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(healed.ID, closeReasonMetadataKey, appAuthHealedCloseReason); err != nil {
+		t.Fatal(err)
 	}
 
 	opts := DigestOptions{Org: "acme", PrimaryRepo: "widgets"}
 	d := BuildDigestFromBeads(map[string]*beads.Store{"guide": store}, "busy", opts)
-	if len(d.RecentlyResolved) != 2 {
+	want := map[string]CloseBasis{agentTitle: CloseBasisUnverified, healedTitle: CloseBasisHiveVerified}
+	if len(d.RecentlyResolved) != len(want) {
 		t.Fatalf("RecentlyResolved = %+v, want both closes listed", d.RecentlyResolved)
 	}
 	for _, r := range d.RecentlyResolved {
-		if want := r.Title == agentTitle; r.AgentClosed != want {
-			t.Errorf("%q AgentClosed = %v, want %v", r.Title, r.AgentClosed, want)
+		if r.Basis != want[r.Title] {
+			t.Errorf("%q Basis = %q, want %q", r.Title, r.Basis, want[r.Title])
 		}
 	}
 
 	md := FormatDigestMarkdown(d, opts)
-	resolvedAt := strings.Index(md, "### ✅ Recently Resolved (1)")
-	closedAt := strings.Index(md, "### ☑️ Recently Closed — Fix Not Verified (1)")
-	if resolvedAt < 0 || closedAt < 0 {
-		t.Fatalf("want one evidenced resolution and one unverified agent close as separate sections:\n%s", md)
+	if !strings.Contains(md, "### ✅ Recently Resolved (1)") || !strings.Contains(md, "### ☑️ Recently Closed — Fix Not Verified (1)") {
+		t.Fatalf("want one verified resolution and one unverified close as separate sections:\n%s", md)
 	}
 	if strings.Contains(md, "~~"+agentTitle+"~~") {
 		t.Errorf("agent-closed finding is struck through as resolved:\n%s", md)
 	}
-	if !strings.Contains(md, "_guide — closed "+time.Now().Format("Jan 2")+", fix not verified_") {
+	if !strings.Contains(md, "_guide — closed "+time.Now().Format("Jan 2")+" (no evidence recorded), fix not verified_") {
 		t.Errorf("agent-closed finding is not captioned as unverified:\n%s", md)
 	}
-	if !strings.Contains(md, "~~"+fixedTitle+"~~") {
-		t.Errorf("PR-linked resolution lost its resolved rendering:\n%s", md)
+	if !strings.Contains(md, "~~"+healedTitle+"~~") {
+		t.Errorf("hive-verified resolution lost its resolved rendering:\n%s", md)
+	}
+}
+
+// TestHeuristicClosesAreNotReportedResolved covers the two hive auto-closes
+// that rest on inference rather than a re-check. A merged PR whose title merely
+// shares words with a finding clears prLinkThreshold, and a finding can cite an
+// issue that closes for reasons unrelated to its remedy. Either would strike
+// through a finding whose condition still holds, so both render as closed with
+// the fix not verified, each captioned with its basis.
+func TestHeuristicClosesAreNotReportedResolved(t *testing.T) {
+	store, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	stores := map[string]*beads.Store{"guide": store}
+
+	// The PR bumps the chart; the finding is about missing docs. Same words.
+	const titleMatched = "helm chart metrics exporter values are undocumented"
+	if _, err := store.Create(titleMatched, beads.TypeAdvisory, beads.PriorityMedium, "guide", ""); err != nil {
+		t.Fatal(err)
+	}
+	if closed := ClosePRLinkedAdvisoryBeadsAt(stores, "helm chart: bump metrics exporter values", time.Now()); len(closed) != 1 {
+		t.Fatalf("PR-linked close = %v, want the title-matched finding closed", closed)
+	}
+
+	// #12 is cited for context only; it closing says nothing about the flag.
+	const citesUnrelated = "launcher README still documents the removed --pool flag (see #12 for the old design)"
+	cited, err := store.Create(citesUnrelated, beads.TypeAdvisory, beads.PriorityMedium, "guide", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(cited.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := DigestOptions{
+		Org:         "acme",
+		PrimaryRepo: "widgets",
+		ResolveRef: func(owner, repo string, number int) (RefState, bool) {
+			if owner != "acme" || repo != "widgets" || number != 12 {
+				return RefState{}, false
+			}
+			return RefState{Closed: true, ClosedAt: time.Now().Add(-time.Hour)}, true
+		},
+	}
+	d := BuildDigestFromBeads(stores, "busy", opts)
+	want := map[string]CloseBasis{titleMatched: CloseBasisPRTitleMatch, citesUnrelated: CloseBasisCitedRefsClosed}
+	if len(d.RecentlyResolved) != len(want) {
+		t.Fatalf("RecentlyResolved = %+v, want both closes listed", d.RecentlyResolved)
+	}
+	for _, r := range d.RecentlyResolved {
+		if r.Basis != want[r.Title] {
+			t.Errorf("%q Basis = %q, want %q", r.Title, r.Basis, want[r.Title])
+		}
+	}
+
+	md := FormatDigestMarkdown(d, opts)
+	if strings.Contains(md, "~~") || strings.Contains(md, "Recently Resolved") {
+		t.Errorf("heuristic closes are presented as resolved:\n%s", md)
+	}
+	if !strings.Contains(md, "(a merged PR's title matched), fix not verified_") {
+		t.Errorf("PR title match is not captioned with its basis:\n%s", md)
+	}
+	if !strings.Contains(md, "(the issues/PRs it cites closed), fix not verified_") {
+		t.Errorf("cited-refs close is not captioned with its basis:\n%s", md)
 	}
 }
 
 // TestAllClearDigestDoesNotOverclaimAgentCloses guards the zero-open-findings
-// rendering: with only agent closes behind it, "all previously reported
+// rendering: with only unverified closes behind it, "all previously reported
 // findings are resolved" is the same false claim in a different place.
 func TestAllClearDigestDoesNotOverclaimAgentCloses(t *testing.T) {
 	d := &Digest{
 		GeneratedAt:      time.Now(),
-		RecentlyResolved: []ResolvedFinding{{Agent: "guide", Title: "gap", ClosedAt: time.Now(), AgentClosed: true}},
+		RecentlyResolved: []ResolvedFinding{{Agent: "guide", Title: "gap", ClosedAt: time.Now(), Basis: CloseBasisPRTitleMatch}},
 	}
 	md := FormatDigestMarkdown(d, DigestOptions{})
 	if strings.Contains(md, "all previously reported findings are resolved") {
-		t.Errorf("all-clear digest claims resolution on agent closes alone:\n%s", md)
+		t.Errorf("all-clear digest claims resolution on unverified closes alone:\n%s", md)
 	}
 	if !strings.Contains(md, "1 recently closed without a verified fix") {
 		t.Errorf("all-clear digest does not report the unverified close:\n%s", md)
@@ -100,7 +167,7 @@ func TestCappedUnverifiedClosesAreNotSummarizedAsResolved(t *testing.T) {
 		if err := store.Close(b.ID); err != nil {
 			t.Fatal(err)
 		}
-		// Older than every evidence-backed close below, so the cap drops these.
+		// Older than every verified close below, so the cap drops these.
 		if err := store.SetMetadata(b.ID, resolvedAtMetadataKey, formatResolvedAt(time.Now().Add(-time.Hour))); err != nil {
 			t.Fatal(err)
 		}
