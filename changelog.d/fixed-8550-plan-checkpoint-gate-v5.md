@@ -1,1 +1,0 @@
-- Hold v5 run plan leases at the plan checkpoint until the imported plan is approved, so a run can no longer reach `stage=implement` with a draft plan. Adds the `runs.checkpoints.{spec,plan,implement}` config, `runs.wait_timeout_seconds`, and the ACMM floor that keeps the implement checkpoint closed below ACMM L5.
