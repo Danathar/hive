@@ -1,1 +1,0 @@
-- Fix #8674: recognize per-App-ID GitHub App keys and update the hosted public App slug to hivecommons-hive while preserving legacy slug compatibility.
