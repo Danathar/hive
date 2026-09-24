@@ -1,1 +1,0 @@
-- Provider headroom probing now has a narrow library boundary so Hive can adopt the proposed ccleft implementation without changing rotation or `/api/providers/headroom` consumers ([#8753](https://github.com/hivecommons/hive/issues/8753)).
