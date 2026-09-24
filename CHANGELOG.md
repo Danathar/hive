@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.5)
+
+### Changed
+
+- Dedicated dashboard light-mode surface, text, shadow, brand, status, and ACMM tokens now replace inverted dark alpha tints and are covered by WCAG contrast tests.
+
 ## 2026-09-24 (v5.35.4)
 
 ### Changed
