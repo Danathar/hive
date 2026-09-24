@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.43.0)
+
+### Added
+
+- Added Spektacular Jam Sessions phase 1 for campaign threads, suggestions, polls, decisions, and attributed spec revisions. Refs #8687.
+
 ## 2026-09-24 (v5.42.1)
 
 ### Changed
