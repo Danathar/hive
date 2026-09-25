@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.49.0)
+
+### Added
+
+- The Commons now includes a loopback-only `hivectl hives web` page for contributors to subscribe or unsubscribe hives, reorder their rank by buttons or drag/drop, and choose the routing strategy without exposing registration tokens.
+- Add opt-in contributor distro/OS/agent team metadata with public team sub-leaderboards and a dashboard team leagues panel.
+- Dossiers and the contributor leaderboard now surface Achievement System 2.0 teamwork tiers, Spektacular/Jam SDLC role coverage, cross-hive Commons badges, pair-cap guardrail annotations, richer Raid/swarm sequencing, local-model achievements, and the “local always wins” mastery path from existing Hive contribution data ([#8832](https://github.com/hivecommons/hive/issues/8832)).
+
 ## 2026-09-25 (v5.48.0)
 
 ### Added
