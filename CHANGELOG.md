@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.57.1)
+
+### Fixed
+
+- Fixed dashboard repo-card issue and PR pills so columns do not overlap, single-sided cards use the full pill width, and pill titles ellipsize while keeping #N visible.
+
 ## 2026-09-25 (v5.57.0)
 
 ### Added
