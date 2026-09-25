@@ -31,29 +31,52 @@ const (
 	swarmEnvDuration      = "HIVE_SWARM_DURATION"
 	swarmEnvPrepTimeout   = "HIVE_SWARM_PREP_TIMEOUT"
 	swarmEnvUnlockIdlePct = "HIVE_SWARM_UNLOCK_IDLE_PCT"
+	swarmEnvEventName     = "HIVE_SWARM_EVENT_NAME"
+	swarmEnvCallToArms    = "HIVE_SWARM_CALL_TO_ARMS"
+	swarmEnvThemesJSON    = "HIVE_SWARM_THEMES_JSON"
 )
 
 type SwarmScore struct {
-	IssuesClosed int      `json:"issues_closed"`
-	PRsMerged    int      `json:"prs_merged"`
-	Participants []string `json:"participants,omitempty"`
+	IssuesClosed        int      `json:"issues_closed"`
+	PRsMerged           int      `json:"prs_merged"`
+	SpeksCompleted      int      `json:"speks_completed,omitempty"`
+	LocalModelPRs       int      `json:"local_model_prs,omitempty"`
+	ObjectivesCompleted int      `json:"objectives_completed,omitempty"`
+	Participants        []string `json:"participants,omitempty"`
 }
 
-func (s SwarmScore) Total() int { return s.IssuesClosed + s.PRsMerged }
+func (s SwarmScore) Total() int {
+	return s.IssuesClosed + s.PRsMerged + s.SpeksCompleted*3 + s.LocalModelPRs*2 + s.ObjectivesCompleted*2
+}
 
 type SwarmRecord struct {
-	Repo         string     `json:"repo"`
-	DisplayName  string     `json:"display_name"`
-	Start        time.Time  `json:"start"`
-	End          time.Time  `json:"end"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"`
-	Score        SwarmScore `json:"score"`
-	Participants []string   `json:"participants,omitempty"`
-	Prep         *SwarmPrep `json:"prep,omitempty"`
-	PrepAgents   []string   `json:"prep_agents,omitempty"`
-	PrepErrors   []string   `json:"prep_errors,omitempty"`
-	EndReason    string     `json:"end_reason,omitempty"`
-	ScoringError string     `json:"scoring_error,omitempty"`
+	Repo         string           `json:"repo"`
+	DisplayName  string           `json:"display_name"`
+	Start        time.Time        `json:"start"`
+	End          time.Time        `json:"end"`
+	EndedAt      *time.Time       `json:"ended_at,omitempty"`
+	Score        SwarmScore       `json:"score"`
+	Participants []string         `json:"participants,omitempty"`
+	Theme        SwarmTheme       `json:"theme,omitempty"`
+	Objectives   []SwarmObjective `json:"objectives,omitempty"`
+	Prep         *SwarmPrep       `json:"prep,omitempty"`
+	PrepAgents   []string         `json:"prep_agents,omitempty"`
+	PrepErrors   []string         `json:"prep_errors,omitempty"`
+	EndReason    string           `json:"end_reason,omitempty"`
+	ScoringError string           `json:"scoring_error,omitempty"`
+}
+
+type SwarmTheme struct {
+	EventName        string `json:"event_name"`
+	CallToArms       string `json:"call_to_arms"`
+	LeaderboardTitle string `json:"leaderboard_title"`
+}
+
+type SwarmObjective struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Completed   bool   `json:"completed"`
 }
 
 type SwarmPrep struct {
@@ -68,6 +91,7 @@ type SwarmPrep struct {
 
 type SwarmStatus struct {
 	Name          string       `json:"name"`
+	Theme         SwarmTheme   `json:"theme"`
 	Duration      string       `json:"duration"`
 	Active        *SwarmRecord `json:"active,omitempty"`
 	ExpiresIn     string       `json:"expires_in,omitempty"`
@@ -78,6 +102,7 @@ type SwarmStatus struct {
 
 type SwarmHistoryResponse struct {
 	Name        string        `json:"name"`
+	Theme       SwarmTheme    `json:"theme"`
 	History     []SwarmRecord `json:"history"`
 	Leaderboard []SwarmLeader `json:"leaderboard"`
 	TopPlayers  []SwarmPlayer `json:"top_players,omitempty"`
@@ -94,6 +119,7 @@ type swarmState struct {
 	Active  *SwarmRecord            `json:"active,omitempty"`
 	History []SwarmRecord           `json:"history,omitempty"`
 	Players map[string]*SwarmPlayer `json:"players,omitempty"`
+	Themes  map[string]SwarmTheme   `json:"themes,omitempty"`
 }
 
 type swarmScorer interface {
@@ -108,6 +134,8 @@ type swarmStore struct {
 	now                  func() time.Time
 	duration             time.Duration
 	name                 string
+	defaultTheme         SwarmTheme
+	configuredThemes     map[string]SwarmTheme
 	state                swarmState
 	loaded               bool
 	scorer               swarmScorer
@@ -115,7 +143,19 @@ type swarmStore struct {
 }
 
 func newSwarmStore(path string, scorer swarmScorer) *swarmStore {
-	return &swarmStore{path: path, now: time.Now, duration: configuredSwarmDuration(), name: configuredSwarmName(), scorer: scorer}
+	return newSwarmStoreWithConfig(path, scorer, nil)
+}
+
+func newSwarmStoreWithConfig(path string, scorer swarmScorer, cfg *config.Config) *swarmStore {
+	return &swarmStore{
+		path:             path,
+		now:              time.Now,
+		duration:         configuredSwarmDuration(),
+		name:             configuredSwarmName(),
+		defaultTheme:     defaultSwarmTheme(cfg),
+		configuredThemes: configuredSwarmThemes(cfg),
+		scorer:           scorer,
+	}
 }
 
 func configuredSwarmName() string {
@@ -143,6 +183,116 @@ func configuredSwarmPrepTimeout() time.Duration {
 	return DefaultSwarmPrepTimeout
 }
 
+func defaultSwarmTheme(cfg *config.Config) SwarmTheme {
+	theme := SwarmTheme{EventName: configuredSwarmName(), CallToArms: "All hands on deck!", LeaderboardTitle: "Swarm leaderboard"}
+	if cfg != nil {
+		mergeSwarmTheme(&theme, SwarmTheme{
+			EventName:        cfg.Swarm.EventName,
+			CallToArms:       cfg.Swarm.CallToArms,
+			LeaderboardTitle: cfg.Swarm.LeaderboardTitle,
+		})
+	}
+	if v := strings.TrimSpace(os.Getenv(swarmEnvEventName)); v != "" {
+		theme.EventName = v
+	}
+	if v := strings.TrimSpace(os.Getenv(swarmEnvCallToArms)); v != "" {
+		theme.CallToArms = v
+	}
+	return theme
+}
+
+func mergeSwarmTheme(dst *SwarmTheme, src SwarmTheme) {
+	if strings.TrimSpace(src.EventName) != "" {
+		dst.EventName = src.EventName
+	}
+	if strings.TrimSpace(src.CallToArms) != "" {
+		dst.CallToArms = src.CallToArms
+	}
+	if strings.TrimSpace(src.LeaderboardTitle) != "" {
+		dst.LeaderboardTitle = src.LeaderboardTitle
+	}
+}
+
+func defaultSwarmObjectives() []SwarmObjective {
+	return []SwarmObjective{
+		{ID: "spec-written", Title: "Spec written", Description: "Capture the problem and acceptance criteria before implementation."},
+		{ID: "plan-approved", Title: "Plan approved", Description: "Agree on a modest implementation plan."},
+		{ID: "review-done", Title: "Review done", Description: "Complete a human or hive review pass."},
+		{ID: "docs-updated", Title: "Docs updated", Description: "Update user-facing or operator documentation."},
+	}
+}
+
+func completedSwarmObjectives(objectives []SwarmObjective) int {
+	n := 0
+	for _, obj := range objectives {
+		if obj.Completed {
+			n++
+		}
+	}
+	return n
+}
+
+func (st *swarmStore) themeForRepoLocked(repo string) SwarmTheme {
+	theme := st.defaultTheme
+	if strings.TrimSpace(theme.EventName) == "" {
+		theme = defaultSwarmTheme(nil)
+	}
+	if st.state.Themes == nil {
+		st.state.Themes = copySwarmThemes(st.configuredThemes)
+	}
+	if custom, ok := st.state.Themes[strings.ToLower(strings.TrimSpace(repo))]; ok {
+		mergeSwarmTheme(&theme, custom)
+	}
+	return theme
+}
+
+func configuredSwarmThemes(cfg *config.Config) map[string]SwarmTheme {
+	normalized := map[string]SwarmTheme{}
+	if cfg != nil {
+		for repo, theme := range cfg.Swarm.Themes {
+			if key := strings.ToLower(strings.TrimSpace(repo)); key != "" {
+				normalized[key] = SwarmTheme{
+					EventName:        theme.EventName,
+					CallToArms:       theme.CallToArms,
+					LeaderboardTitle: theme.LeaderboardTitle,
+				}
+			}
+		}
+	}
+	raw := strings.TrimSpace(os.Getenv(swarmEnvThemesJSON))
+	if raw == "" {
+		return normalizedOrNil(normalized)
+	}
+	var themes map[string]SwarmTheme
+	if err := json.Unmarshal([]byte(raw), &themes); err != nil {
+		return normalizedOrNil(normalized)
+	}
+	for repo, theme := range themes {
+		if key := strings.ToLower(strings.TrimSpace(repo)); key != "" {
+			normalized[key] = theme
+		}
+	}
+	return normalizedOrNil(normalized)
+}
+
+func normalizedOrNil(themes map[string]SwarmTheme) map[string]SwarmTheme {
+	if len(themes) == 0 {
+		return nil
+	}
+	return themes
+}
+
+func copySwarmThemes(themes map[string]SwarmTheme) map[string]SwarmTheme {
+	if len(themes) == 0 {
+		return nil
+	}
+	out := make(map[string]SwarmTheme, len(themes))
+	for repo, theme := range themes {
+		out[repo] = theme
+	}
+	return out
+}
+
 func configuredSwarmUnlockIdlePct() int {
 	if v := strings.TrimSpace(os.Getenv(swarmEnvUnlockIdlePct)); v != "" {
 		pct, err := strconv.Atoi(v)
@@ -162,6 +312,10 @@ func (s *Server) registerSwarmRoutes() {
 	s.mux.HandleFunc("DELETE /api/swarm", s.handleSwarmDelete)
 	s.mux.HandleFunc("GET /api/swarm/history", s.handleSwarmHistory)
 	s.mux.HandleFunc("GET /api/swarm/players", s.handleSwarmPlayers)
+	s.mux.HandleFunc("GET /api/swarm/themes", s.handleSwarmThemesGet)
+	s.mux.HandleFunc("PUT /api/swarm/themes", s.handleSwarmThemesPut)
+	s.mux.HandleFunc("PATCH /api/swarm/objectives", s.handleSwarmObjectivesPatch)
+	s.mux.HandleFunc("GET /api/leaderboard/swarm", s.handleSwarmPublicLeaderboard)
 }
 
 func (s *Server) swarmStore() *swarmStore {
@@ -171,7 +325,11 @@ func (s *Server) swarmStore() *swarmStore {
 	s.swarmMu.Lock()
 	defer s.swarmMu.Unlock()
 	if s.swarm == nil {
-		s.swarm = newSwarmStore(filepath.Join(s.dataRootOrDefault(), SwarmStateFileName), s.depsGHClient())
+		var cfg *config.Config
+		if s.deps != nil {
+			cfg = s.deps.Config
+		}
+		s.swarm = newSwarmStoreWithConfig(filepath.Join(s.dataRootOrDefault(), SwarmStateFileName), s.depsGHClient(), cfg)
 	}
 	return s.swarm
 }
@@ -196,7 +354,7 @@ func (s *Server) dataRootOrDefault() string {
 func (s *Server) SwarmSnapshot() SwarmStatus {
 	store := s.swarmStore()
 	if store == nil {
-		status := SwarmStatus{Name: DefaultSwarmName, Duration: DefaultSwarmDuration.String()}
+		status := SwarmStatus{Name: DefaultSwarmName, Theme: defaultSwarmTheme(nil), Duration: DefaultSwarmDuration.String()}
 		return s.withSwarmUnlockStatus(status, false)
 	}
 	status, _ := store.status(context.Background())
@@ -231,7 +389,7 @@ func (st *swarmStore) status(ctx context.Context) (SwarmStatus, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if err := st.loadLocked(); err != nil {
-		return SwarmStatus{Name: st.name, Duration: st.duration.String()}, err
+		return SwarmStatus{Name: st.name, Theme: st.defaultTheme, Duration: st.duration.String()}, err
 	}
 	_ = st.expireLocked(ctx)
 	var active *SwarmRecord
@@ -243,7 +401,7 @@ func (st *swarmStore) status(ctx context.Context) (SwarmStatus, error) {
 			expiresIn = remaining.Round(time.Second).String()
 		}
 	}
-	return SwarmStatus{Name: st.name, Duration: st.duration.String(), Active: active, ExpiresIn: expiresIn}, nil
+	return SwarmStatus{Name: st.name, Theme: st.defaultTheme, Duration: st.duration.String(), Active: active, ExpiresIn: expiresIn}, nil
 }
 
 func (st *swarmStore) hasHistory(ctx context.Context) (bool, error) {
@@ -270,7 +428,7 @@ func (st *swarmStore) history(ctx context.Context) (SwarmHistoryResponse, error)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if err := st.loadLocked(); err != nil {
-		return SwarmHistoryResponse{Name: st.name}, err
+		return SwarmHistoryResponse{Name: st.name, Theme: st.defaultTheme}, err
 	}
 	_ = st.expireLocked(ctx)
 	history := append([]SwarmRecord(nil), st.state.History...)
@@ -279,7 +437,7 @@ func (st *swarmStore) history(ctx context.Context) (SwarmHistoryResponse, error)
 	if len(players) > 10 {
 		players = players[:10]
 	}
-	return SwarmHistoryResponse{Name: st.name, History: history, Leaderboard: swarmLeaderboard(history), TopPlayers: players}, nil
+	return SwarmHistoryResponse{Name: st.name, Theme: st.defaultTheme, History: history, Leaderboard: swarmLeaderboard(history), TopPlayers: players}, nil
 }
 
 func (st *swarmStore) players(ctx context.Context) ([]SwarmPlayer, error) {
@@ -334,7 +492,8 @@ func (st *swarmStore) start(repo string, prep func(string) ([]string, []string))
 		return SwarmRecord{}, errSwarmActive
 	}
 	now := st.now().UTC()
-	rec := SwarmRecord{Repo: repo, DisplayName: st.name, Start: now, End: now.Add(st.duration)}
+	theme := st.themeForRepoLocked(repo)
+	rec := SwarmRecord{Repo: repo, DisplayName: theme.EventName, Theme: theme, Objectives: defaultSwarmObjectives(), Start: now, End: now.Add(st.duration)}
 	if prep != nil {
 		rec.PrepAgents, rec.PrepErrors = prep(repo)
 	}
@@ -393,12 +552,13 @@ func (st *swarmStore) finishActiveLocked(ctx context.Context, reason string) (Sw
 	}
 	rec.EndedAt = &ended
 	rec.EndReason = reason
+	rec.Score.ObjectivesCompleted = completedSwarmObjectives(rec.Objectives)
 	if st.scorer != nil {
 		score, err := st.scorer.ScoreSwarm(ctx, rec.Repo, rec.Start, ended)
 		if err != nil {
 			rec.ScoringError = err.Error()
 		} else {
-			rec.Score = SwarmScore{IssuesClosed: score.IssuesClosed, PRsMerged: score.PRsMerged, Participants: score.Participants}
+			rec.Score = SwarmScore{IssuesClosed: score.IssuesClosed, PRsMerged: score.PRsMerged, SpeksCompleted: score.SpeksCompleted, LocalModelPRs: score.LocalModelPRs, ObjectivesCompleted: rec.Score.ObjectivesCompleted, Participants: score.Participants}
 			rec.Participants = append([]string(nil), score.Participants...)
 			st.updatePlayersLocked(rec, score)
 		}
@@ -448,8 +608,14 @@ func (st *swarmStore) updatePlayersLocked(rec SwarmRecord, score ghpkg.SwarmScor
 		p.Swarms++
 		p.currentSwarmPRs = score.PRsByAuthor[login]
 		p.currentSwarmIssues = score.IssuesClosedBy[login]
+		p.currentSwarmSpeks = score.SpeksCompletedBy[login]
+		p.currentSwarmLocalPRs = score.LocalModelPRsBy[login]
+		p.currentSwarmObjectives = completedSwarmObjectives(rec.Objectives)
 		p.PRsMerged += p.currentSwarmPRs
 		p.IssuesClosed += p.currentSwarmIssues
+		p.SpeksCompleted += p.currentSwarmSpeks
+		p.LocalModelPRs += p.currentSwarmLocalPRs
+		p.ObjectivesCompleted += p.currentSwarmObjectives
 		rank := 0
 		if maxPRs > 0 && p.currentSwarmPRs == maxPRs {
 			rank = 1
@@ -520,6 +686,108 @@ func (s *Server) handleSwarmPlayers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, swarmPlayersResponse{Players: players, AchievementsCatalog: swarmAchievementCatalog})
+}
+
+func (s *Server) handleSwarmThemesGet(w http.ResponseWriter, r *http.Request) {
+	store := s.swarmStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.loadLocked(); err != nil {
+		jsonError(w, "swarm themes unavailable: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if store.state.Themes == nil {
+		store.state.Themes = copySwarmThemes(store.configuredThemes)
+	}
+	jsonResponse(w, map[string]any{"default": store.defaultTheme, "repos": store.state.Themes})
+}
+
+func (s *Server) handleSwarmThemesPut(w http.ResponseWriter, r *http.Request) {
+	if !requireOwnerRole(w, r) {
+		return
+	}
+	var body struct {
+		Repo  string     `json:"repo"`
+		Theme SwarmTheme `json:"theme"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	repo, err := s.normalizeSwarmRepo(body.Repo)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	store := s.swarmStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.loadLocked(); err != nil {
+		jsonError(w, "swarm themes unavailable: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if store.state.Themes == nil {
+		store.state.Themes = copySwarmThemes(store.configuredThemes)
+	}
+	if store.state.Themes == nil {
+		store.state.Themes = map[string]SwarmTheme{}
+	}
+	store.state.Themes[strings.ToLower(repo)] = body.Theme
+	if err := store.saveLocked(); err != nil {
+		jsonError(w, "saving swarm theme failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]any{"repo": repo, "theme": store.themeForRepoLocked(repo)})
+}
+
+func (s *Server) handleSwarmObjectivesPatch(w http.ResponseWriter, r *http.Request) {
+	if !requireOwnerRole(w, r) {
+		return
+	}
+	var body struct {
+		Objectives []SwarmObjective `json:"objectives"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	store := s.swarmStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.loadLocked(); err != nil {
+		jsonError(w, "swarm state unavailable: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if store.state.Active == nil {
+		jsonError(w, "no active swarm", http.StatusNotFound)
+		return
+	}
+	byID := map[string]SwarmObjective{}
+	for _, obj := range body.Objectives {
+		if id := strings.TrimSpace(obj.ID); id != "" {
+			obj.ID = id
+			byID[id] = obj
+		}
+	}
+	for i, obj := range store.state.Active.Objectives {
+		if incoming, ok := byID[obj.ID]; ok {
+			store.state.Active.Objectives[i].Completed = incoming.Completed
+		}
+	}
+	if err := store.saveLocked(); err != nil {
+		jsonError(w, "saving swarm objectives failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, store.state.Active)
+}
+
+func (s *Server) handleSwarmPublicLeaderboard(w http.ResponseWriter, r *http.Request) {
+	history, err := s.swarmStore().history(r.Context())
+	if err != nil {
+		jsonError(w, "swarm leaderboard unavailable: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, history)
 }
 
 func (s *Server) handleSwarmPost(w http.ResponseWriter, r *http.Request) {
@@ -668,7 +936,11 @@ func (s *Server) announceSwarmStart(rec SwarmRecord) {
 	if len(rec.PrepAgents) > 0 {
 		prep = strings.Join(rec.PrepAgents, ", ")
 	}
-	s.announceSwarm(fmt.Sprintf("🐝 **%s started** for `%s` — ends %s. Prep: %s.", rec.DisplayName, rec.Repo, rec.End.Format(time.RFC1123), prep))
+	call := strings.TrimSpace(rec.Theme.CallToArms)
+	if call == "" {
+		call = "All hands on deck!"
+	}
+	s.announceSwarm(fmt.Sprintf("🐝 **%s started** %s for `%s` — ends %s. Prep: %s.", rec.DisplayName, call, rec.Repo, rec.End.Format(time.RFC1123), prep))
 }
 
 func (s *Server) announceSwarmEnd(rec SwarmRecord) {
