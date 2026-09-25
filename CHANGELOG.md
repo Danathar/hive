@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.51.0)
+
+### Added
+
+- Add a public leaderboard Battle Log plus Hive of the Week gource source export, weekly render workflow, and README embed documentation.
+
 ## 2026-09-25 (v5.50.0)
 
 ### Added
