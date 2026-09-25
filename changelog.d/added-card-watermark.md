@@ -1,1 +1,0 @@
-- Added an Appearance watermark scope control so dashboard background watermarks can render on the page, cards, or both.
