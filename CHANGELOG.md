@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.55.5)
+
+### Fixed
+
+- Fix dashboard section expansion so tall Repositories, Beads, and Agents content is no longer clipped by a fixed max-height cap.
+
 ## 2026-09-25 (v5.55.4)
 
 ### Fixed
