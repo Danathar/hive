@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.55.1)
+
+### Fixed
+
+- Clear Manage Access Add User search feedback with an inline typeahead, keyboard navigation, selected-user chip, and explicit empty/error states.
+- Dashboard NEXT RUN now reports due/overdue instead of showing a stale past timestamp after a hive restart or delayed status refresh.
+
 ## 2026-09-25 (v5.55.0)
 
 ### Added
