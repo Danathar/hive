@@ -11,6 +11,41 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.46.0)
+
+### Added
+
+- Added asynchronous Discord announcements for swarm starts, endings, and expirations.
+- Added an idle-unlock gate and owner force bypass for follow-up repo swarms.
+- Added per-player swarm records, top players, and achievement awards.
+- Added persisted repo-prep metrics for swarm starts.
+- Added an Appearance watermark scope control so dashboard background watermarks can render on the page, cards, or both.
+
+### Changed
+
+- CI: feature-branch pushes no longer build the six platform images in docker.yml; v2-ci's `docker` job is now a matrix over all three Dockerfiles, and `gosec`/`golangci-lint` moved to the hive runner fleet, freeing the shared GitHub-hosted queue that was the last check to finish on every PR.
+- CI: rest-bucket package weights re-measured on the self-hosted fleet (pkg/hub/spoke was unweighted at 3 and landed beside pkg/github+config; cmd/hive was 138 vs 30 measured), so the five buckets now spread the heavy packages apart.
+
+### Fixed
+
+- Fix #8714 by deriving agy launch effort from -low/-medium/-high model suffixes when unset.
+- Fix dashboard cost-panel pricing and labels for LiteLLM-routed model aliases, add cost windows, and prevent cost-per-session table clipping (#8766).
+- Hub: the "restart storms" pill's reset action is now an inline text link inside the pill instead of a full-size button that inflated the pill to twice the height of its neighbours.
+- Dashboard: the Settings modal (and other modal dialogs) no longer renders see-through and behind agent cards when an Appearance background/watermark is set. The theme no longer puts a stacking context on every top-level page element (regressed in #8734); the watermark now sits behind content via an isolated body instead.
+
+### Security
+
+- Jam GitHub Projects sync no longer forwards the hive's `GITHUB_TOKEN` to a
+  custom `HIVE_JAM_PROJECT_SYNC_URL`: the token is sent only to
+  `api.github.com` over https, overrides must use https (http only for
+  loopback), and custom endpoints authenticate with the new
+  `HIVE_JAM_PROJECT_SYNC_TOKEN` instead (#8811).
+- Reject cross-origin Jam live WebSocket handshakes: the upgrader accepted any
+  Origin while authenticating via the dashboard session cookie, letting a
+  malicious page hijack a logged-in operator's session to read jam state and
+  push live spec edits (CSWSH). Both dashboard WebSocket upgraders now share the
+  same-origin CheckOrigin policy (#8809).
+
 ## 2026-09-25 (v5.45.0)
 
 ### Added

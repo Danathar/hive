@@ -1,1 +1,0 @@
-- Added asynchronous Discord announcements for swarm starts, endings, and expirations.
