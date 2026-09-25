@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.55.0)
+
+### Added
+
+- Added hub-managed admin grants so root hub admins can add or remove additional hub admins from the dashboard without changing deployment environment variables.
+
+### Fixed
+
+- Fixed Model Gateway/LiteLLM key rotation so saved keys immediately refresh live agent proxy routes, surface the effective key SHA-256 in APIs/UI, and log only the hash for operator correlation.
+- Fixed the dashboard PRs by model panel so it renders on initial load instead of waiting for a day-filter change.
+
 ## 2026-09-25 (v5.54.0)
 
 ### Added
