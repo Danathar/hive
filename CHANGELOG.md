@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.54.0)
+
+### Added
+
+- Surface verified covered-by-PR and likely-done issue claims as labels and linked PR badges without hiding issues on comment evidence alone.
+- Hub Admin — Users now shows each user's most-engaged repo/org as a sortable TOP REPO column.
+- Add the explicit Spek `!runs spec owner/repo#N` example to Hive Chat hints.
+
 ## 2026-09-25 (v5.53.0)
 
 ### Added
