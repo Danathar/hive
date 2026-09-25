@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.56.0)
+
+### Added
+
+- Let each viewer drag or keyboard-reorder the `/contribute` Operations cards across columns, with their layout remembered in browser localStorage and a reset control for restoring the default order.
+
 ## 2026-09-25 (v5.55.5)
 
 ### Fixed
