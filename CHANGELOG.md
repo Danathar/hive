@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.57.0)
+
+### Added
+
+- Band and sort repository-card pull requests by human gate, merge eligibility, blocked, review, open, and draft states, with updated_at in the PR payload.
+
 ## 2026-09-25 (v5.56.0)
 
 ### Added
