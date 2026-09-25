@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.52.0)
+
+### Added
+
+- Add public SVG social cards and share landing pages for contributor dossiers, Achievement System 2.0 unlocks, and public leaderboard summaries.
+
 ## 2026-09-25 (v5.51.0)
 
 ### Added
