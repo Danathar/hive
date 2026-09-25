@@ -1,1 +1,0 @@
-- Swarm mode now supports per-repo themes, a stable public leaderboard record, SDLC objectives, and scoring/achievements for Spektacular and local-model work.
