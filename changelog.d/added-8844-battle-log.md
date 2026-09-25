@@ -1,1 +1,0 @@
-- Add a public leaderboard Battle Log plus Hive of the Week gource source export, weekly render workflow, and README embed documentation.
