@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.48.0)
+
+### Added
+
+- The Commons lets contributors subscribe to multiple hives, rank them in `hivectl hives` and the TUI Hives overlay, and have the contributor relay choose the next hive between tasks with `ranked`, `spread`, or `neediest` routing while preserving in-flight leases.
+- Dossiers and the contributor leaderboard now surface Achievement System 2.0 teamwork tiers, local-model achievements, and the “local always wins” mastery path from existing Hive contribution data ([#8832](https://github.com/hivecommons/hive/issues/8832)).
+
 ## 2026-09-25 (v5.47.0)
 
 ### Added
