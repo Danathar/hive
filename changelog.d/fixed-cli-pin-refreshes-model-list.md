@@ -1,1 +1,0 @@
-- Fixed the agent config dialog keeping the old backend's Model list after CLI Pin Value changed; the list now follows the new backend without a save and reopen.

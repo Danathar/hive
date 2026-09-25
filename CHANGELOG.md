@@ -11,6 +11,27 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.53.0)
+
+### Added
+
+- Add Jira Data Center TLS settings for custom CA bundles, unsafe skip-verify testing, and optional mTLS client certificates in the work-source config and dashboard.
+- Add a collapsible Repositories pill legend and band actionable repo-card issues into ready, in-progress, agent-filed, waiting-on-human, and likely-done groups with state badges and stale counters.
+- Add a richer terminal-style Hive Chat with slash-command help, history, cheat sheet hints, presence, resizing, persistence, and safer rich rendering.
+
+### Changed
+
+- Consolidate v6 readiness tracker references into the #7563 epic's v6 readiness bar section, preventing docs and agents from reopening the retired standalone tracker.
+
+### Fixed
+
+- Fixed Hive Chat and Discord agent lifecycle messages so completed/working notices show useful summaries and links instead of captured CLI TUI footer chrome.
+- Fixed Hive Chat free-text inputs so common questions get local answers and unavailable responders return a visible message instead of appearing silent.
+- Fixed the agent config dialog keeping the old backend's Model list after CLI Pin Value changed; the list now follows the new backend without a save and reopen.
+- Fix hub-launched Codex agents so they run unattended with approvals/sandbox bypassed, classify Codex approval/update prompts, and seed CODEX_HOME to disable startup update checks.
+- Fix dashboard repository hold pills so toggles immediately update the cached status snapshot, return a status-sequence floor, and render distinct Hold/Release controls.
+- Replace flat 60% knowledge confidence defaults with signal-based scores and show unscored facts honestly.
+
 ## 2026-09-25 (v5.52.0)
 
 ### Added
