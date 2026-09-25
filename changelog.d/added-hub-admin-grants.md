@@ -1,1 +1,0 @@
-- Added hub-managed admin grants so root hub admins can add or remove additional hub admins from the dashboard without changing deployment environment variables.
