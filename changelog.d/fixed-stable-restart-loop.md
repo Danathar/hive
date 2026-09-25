@@ -1,1 +1,0 @@
-- Hub: auto-upgrade now chases each spoke's release-channel commit (:stable/:candidate/:edge) instead of the branch tip, ending the ~8-minute restart loop that left :stable spokes latched "Upgrading" on the SHA they already run.
