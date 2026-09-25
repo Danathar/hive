@@ -1,1 +1,0 @@
-- Fix #8720: tolerate codex-cli 0.156 rate-limit schema drift, including string credit balances.

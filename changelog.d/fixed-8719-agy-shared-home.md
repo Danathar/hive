@@ -1,1 +1,0 @@
-- Fix #8719: run the Agy headroom prober with the shared CLI home when it exists.

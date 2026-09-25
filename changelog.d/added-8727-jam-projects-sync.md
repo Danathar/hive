@@ -1,1 +1,0 @@
-- Add opt-in Spektacular Jam GitHub Projects sync with status/error visibility (#8727).

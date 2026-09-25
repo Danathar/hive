@@ -1,1 +1,0 @@
-- Fix #8721: classify Claude usage throttling as rate-limited and serve recent last-good headroom during backoff.

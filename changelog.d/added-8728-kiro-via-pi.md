@@ -1,1 +1,0 @@
-- Added documented Kiro-via-pi support with Kiro model picker fallbacks and contributor credential forwarding. Fixes #8728.
