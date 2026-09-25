@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.47.0)
+
+### Added
+
+- Swarm mode now supports per-repo themes, a stable public leaderboard record, SDLC objectives, and scoring/achievements for Spektacular and local-model work.
+
+### Changed
+
+- The README now leads Linux contributors to the published `hivecommons/hive/contribute` tap formula while keeping the from-source `just contribute-hive` flow and linking platform notes for macOS and Windows.
+
 ## 2026-09-25 (v5.46.1)
 
 ### Fixed
