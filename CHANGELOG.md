@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.49.1)
+
+### Fixed
+
+- Hub: auto-upgrade now chases each spoke's release-channel commit (:stable/:candidate/:edge) instead of the branch tip, ending the ~8-minute restart loop that left :stable spokes latched "Upgrading" on the SHA they already run.
+
 ## 2026-09-25 (v5.49.0)
 
 ### Added
