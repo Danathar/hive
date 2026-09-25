@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.55.2)
+
+### Changed
+
+- Added an authoritative operator reference for Hive labels and control signals, replacing the short issue-label page and documenting how holds, approvals, contributor skips, planning labels, and dashboard bands affect work selection.
+
+### Fixed
+
+- Let the Manage Access Add User combobox browse the full grantable-user list before typing, with a chevron opener and large-list narrowing hint.
+
+### Security
+
+- Stop interpolating pull-request-controlled ref names directly in workflows.
+
 ## 2026-09-25 (v5.55.1)
 
 ### Fixed
