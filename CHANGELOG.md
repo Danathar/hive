@@ -11,6 +11,33 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-25 (v5.44.0)
+
+### Added
+
+- Add live Spektacular Jam presence and conflict-aware co-editing over WebSocket (#8724).
+- Add #8726: probe read-only Kiro usage limits when an `aws-kiro` provider and `KIRO_API_KEY` are configured.
+- Add opt-in Spektacular Jam GitHub Projects sync with status/error visibility (#8727).
+- Added documented Kiro-via-pi support with Kiro model picker fallbacks and contributor credential forwarding. Fixes #8728.
+
+### Changed
+
+- Changed CI to report open-PR file overlaps, auto-update stale PR branches after base pushes, and avoid redundant Go cache archiving on self-hosted runners.
+- Quality and ci-maintainer policies gain a "CI Throughput and Merge Order" section: fleet-wide reds are triaged by runner fleet before any PR is touched, saturated runners are reported as capacity, sibling-PR conflicts are checked with `git merge-tree` before repair, behind-base PRs are updated immediately, and concrete CI throughput fixes (concurrency cancel, warm caches, registry layer cache) are proposed as PRs.
+
+### Fixed
+
+- Fix #8713 by repairing agy's shared onboarding cache permissions on the fast paths.
+- Fix #8718: expose publish-only headroom readings from `/api/providers/headroom` while keeping rotation disabled.
+- Fix #8719: run the Agy headroom prober with the shared CLI home when it exists.
+- Fix #8720: tolerate codex-cli 0.156 rate-limit schema drift, including string credit balances.
+- Fix #8721: classify Claude usage throttling as rate-limited and serve recent last-good headroom during backoff.
+- Fix #8722: log and publish scrubbed headroom probe error text with more specific causes.
+- Hub pages (dashboard, API docs, Get Started, Learn, Reading) use the shared UI font again instead of the browser default serif (#8759).
+- Advisory digests no longer turn "PR#756" / "issue#12" into links to a nonexistent `<org>/PR` repository (#8768).
+- Fixed Operations rework metrics to count hive COMMENTED verdicts, durable auto-fix dispatch attempts, and comment-driven follow-up commits for first-pass model ranking. Fixes #8772.
+- The "Agent needs re-authentication (PaneShowsLogin)" banner now clears once the agent's pane stops showing login chrome. Copilot/codex agents have no positive credential signal, so their verdict recovers to Unknown rather than True, and the banner previously stayed up forever over a working agent.
+
 ## 2026-09-24 (v5.43.1)
 
 ### Fixed

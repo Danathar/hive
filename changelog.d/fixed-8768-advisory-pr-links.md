@@ -1,1 +1,0 @@
-- Advisory digests no longer turn "PR#756" / "issue#12" into links to a nonexistent `<org>/PR` repository (#8768).
