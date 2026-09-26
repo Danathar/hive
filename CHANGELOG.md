@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.66.0)
+
+### Added
+
+- Added per-repository `project.repo_policies[].auto_merge` controls so admins can disable Hive auto-merge for one repo while leaving the rest of an L6 hive unchanged; the switch is enforced at the merge relay, App self-merge sweep, and proxy direct-merge paths, and can be toggled from the dashboard repo card.
+
 ## 2026-09-26 (v5.65.0)
 
 ### Added
