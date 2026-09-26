@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.59.0)
+
+### Added
+
+- Add a dashboard Settings editor for project.writing_guide so owners can update agent writing style without editing hive.yaml.
+- List Jev by TypeSafe AI as a Hive Commons partner integration on the hub landing page.
+
 ## 2026-09-26 (v5.58.0)
 
 ### Added
