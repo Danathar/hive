@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.60.2)
+
+### Fixed
+
+- Repo-card PR review pill (`💬×N`) and the other action-slot glyphs are no longer clipped: action slots keep their 1.65rem floor but grow to content, and the slot no longer hides overflow. (#9004)
+
 ## 2026-09-26 (v5.60.1)
 
 ### Changed
