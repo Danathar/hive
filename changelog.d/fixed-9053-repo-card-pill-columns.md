@@ -1,1 +1,0 @@
-- Fixed narrow repository cards so issue and PR pill columns stack before action chips squeeze titles down to bare issue numbers.

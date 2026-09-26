@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.66.1)
+
+### Fixed
+
+- Fixed narrow repository cards so issue and PR pill columns stack before action chips squeeze titles down to bare issue numbers.
+
 ## 2026-09-26 (v5.66.0)
 
 ### Added
