@@ -121,9 +121,10 @@ func TestInstallJevForAgent_AssistSharedUIDWritesToHome(t *testing.T) {
 }
 
 // TestInstallJevForAgent_OffRemovesEarlierSkill: an agent that ran with
-// assist and is restarted with jev_mode off loses the SKILL.md (the whole
-// jev-decide dir), so it stops advertising a tool the hive now refuses.
-// Sibling skills in the same skills dir are untouched.
+// assist and is restarted with jev_mode off loses SKILL.md, so it stops
+// advertising a tool the hive now refuses. Only the file the hive wrote is
+// removed: a user's extra file inside jev-decide survives (and keeps the
+// dir); once the dir is empty it is pruned too.
 func TestInstallJevForAgent_OffRemovesEarlierSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -134,25 +135,79 @@ func TestInstallJevForAgent_OffRemovesEarlierSkill(t *testing.T) {
 	agent.UID = 0
 	m.installJevForAgent(agent, "claude")
 	skillDir := filepath.Join(home, ".claude", "skills", "jev-decide")
-	if _, err := os.Stat(filepath.Join(skillDir, jev.SkillFile)); err != nil {
+	skill := filepath.Join(skillDir, jev.SkillFile)
+	if _, err := os.Stat(skill); err != nil {
 		t.Fatalf("assist must install the skill: %v", err)
 	}
-	other := filepath.Join(home, ".claude", "skills", "other", "SKILL.md")
-	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(other, []byte("# other"), 0o644); err != nil {
+	extra := filepath.Join(skillDir, "notes.md")
+	if err := os.WriteFile(extra, []byte("mine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	agent.Config.JevMode = config.JevModeOff
 	m.installJevForAgent(agent, "claude")
-	if _, err := os.Lstat(skillDir); !os.IsNotExist(err) {
-		t.Fatalf("jev_mode off must remove the earlier skill dir (lstat err=%v)", err)
+	if _, err := os.Lstat(skill); !os.IsNotExist(err) {
+		t.Fatalf("jev_mode off must remove SKILL.md (lstat err=%v)", err)
 	}
-	if _, err := os.Stat(other); err != nil {
-		t.Errorf("sibling skill must survive: %v", err)
+	if data, err := os.ReadFile(extra); err != nil || string(data) != "mine" {
+		t.Fatalf("a user's file inside jev-decide must survive: %v %q", err, data)
 	}
-	// Idempotent: a second off launch with nothing to remove is a no-op.
+
+	// With the user's file gone, the next off launch prunes the empty dir.
+	if err := os.Remove(extra); err != nil {
+		t.Fatal(err)
+	}
 	m.installJevForAgent(agent, "claude")
+	if _, err := os.Lstat(skillDir); !os.IsNotExist(err) {
+		t.Fatalf("empty jev-decide dir must be pruned (lstat err=%v)", err)
+	}
+	// And with nothing installed at all, off is a no-op: the parent skills
+	// dir (left by the assist install) is neither removed nor repopulated.
+	m.installJevForAgent(agent, "claude")
+	entries, err := os.ReadDir(filepath.Join(home, ".claude", "skills"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("off with nothing installed must change nothing: err=%v entries=%d", err, len(entries))
+	}
+}
+
+// TestRemoveJevSkill_AsUser drives the su-exec branch through a stand-in
+// su-exec that drops the user spec and execs the rest, so the shell script is
+// what runs: only SKILL.md goes, a sibling survives, an empty dir is pruned,
+// and a missing file reports nothing removed without an error.
+func TestRemoveJevSkill_AsUser(t *testing.T) {
+	bin := t.TempDir()
+	stub := filepath.Join(bin, "su-exec")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nshift\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := filepath.Join(t.TempDir(), "jev-decide")
+	if err := installJevSkill(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	extra := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(extra, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := removeJevSkill(dir, "1001:1001")
+	if err != nil || !removed {
+		t.Fatalf("removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, jev.SkillFile)); !os.IsNotExist(err) {
+		t.Fatalf("SKILL.md must be gone (lstat err=%v)", err)
+	}
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatalf("sibling must survive: %v", err)
+	}
+	if err := os.Remove(extra); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = removeJevSkill(dir, "1001:1001")
+	if err != nil || removed {
+		t.Fatalf("nothing to remove: removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("empty dir must be pruned (lstat err=%v)", err)
+	}
 }

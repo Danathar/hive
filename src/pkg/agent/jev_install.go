@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/hivecommons/hive/pkg/jev"
 )
@@ -31,14 +33,14 @@ func (m *Manager) installJevForAgent(agent *AgentProcess, backend string) {
 		if dir == "" {
 			return
 		}
-		if _, err := os.Lstat(dir); err != nil {
-			return // never installed (or home not yet created): nothing to undo
-		}
-		if err := removeJevSkill(dir, m.agentExecUserSpec(agent)); err != nil {
+		removed, err := removeJevSkill(dir, m.agentExecUserSpec(agent))
+		if err != nil {
 			m.logger.Warn("jev skill removal failed; agent keeps a stale skill file", "agent", agent.Name, "backend", backend, "dir", dir, "error", err)
 			return
 		}
-		m.logger.Info("removed jev skill (jev_mode off)", "agent", agent.Name, "backend", backend, "dir", dir)
+		if removed {
+			m.logger.Info("removed jev skill (jev_mode off)", "agent", agent.Name, "backend", backend, "dir", dir)
+		}
 		return
 	}
 	if dir == "" {
@@ -83,15 +85,26 @@ func installJevSkill(dir, userSpec string) error {
 	return writeFileAsUser(userSpec, path, jev.SkillMarkdown())
 }
 
-// removeJevSkill deletes the jev-decide skill directory (ours in full: it
-// holds only SKILL.md). A non-empty userSpec removes it through su-exec as
-// that user, mirroring installJevSkill.
-func removeJevSkill(dir, userSpec string) error {
+// removeJevSkill deletes SKILL.md from dir — only the file the hive wrote,
+// never siblings a user may have added — and then the directory if that left
+// it empty. A missing file is not an error (nothing was installed). A
+// non-empty userSpec runs the removal through su-exec as that user, mirroring
+// installJevSkill: per-UID homes are agent-owned 0700, so the manager cannot
+// even stat them itself. Reports whether a file was removed.
+func removeJevSkill(dir, userSpec string) (bool, error) {
+	path := filepath.Join(dir, jev.SkillFile)
 	if userSpec == "" {
-		return os.RemoveAll(dir)
+		err := os.Remove(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		_ = os.Remove(dir) // fails when not empty; that is the point
+		return err == nil, nil
 	}
-	if out, err := exec.Command("su-exec", userSpec, "rm", "-rf", dir).CombinedOutput(); err != nil {
-		return fmt.Errorf("rm -rf %s as %s: %w: %s", dir, userSpec, err, string(out))
+	script := `if [ -e "$1" ]; then rm -f -- "$1" && echo removed; fi; rmdir -- "$2" 2>/dev/null; exit 0`
+	out, err := exec.Command("su-exec", userSpec, "sh", "-c", script, "sh", path, dir).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("removing %s as %s: %w: %s", path, userSpec, err, string(out))
 	}
-	return nil
+	return strings.TrimSpace(string(out)) == "removed", nil
 }
