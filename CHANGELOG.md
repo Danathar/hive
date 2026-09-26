@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.67.1)
+
+### Fixed
+
+- The contributor agent now fetches knowledge exports per hub when `HIVE_HUB` lists multiple hubs, so a bad first hub no longer prevents installing `agent.md` ([#9058](https://github.com/hivecommons/hive/issues/9058)).
+
 ## 2026-09-26 (v5.67.0)
 
 ### Added
