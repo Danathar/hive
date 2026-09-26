@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.61.0)
+
+### Added
+
+- Added a collapsible dashboard Overview section with issue and PR band charts across the hive.
+
 ## 2026-09-26 (v5.60.2)
 
 ### Fixed
