@@ -78,7 +78,7 @@ additional grant beside the mode ladder (`proxy.AllowedByModeCaps`,
 `Kind: "comment"` request that posts a comment as the App bot
 (`src/pkg/github/issue_request_watcher.go:70`). Outbound comment text is
 canary-scanned and secret-scrubbed on the way out
-(`Client.CreateIssueComment`, `src/pkg/github/client.go:1236`).
+(`Client.CreateIssueComment`, `src/pkg/github/client.go:1291`).
 
 **A GitHub webhook receiver.** The hub verifies `X-Hub-Signature-256` fail-closed
 and dispatches on `X-GitHub-Event` (`src/pkg/hub/webhook.go:53`), today for
@@ -129,7 +129,7 @@ comment (or issue) node id, so a mention seen twice is handled once.
 
 A mention is a comment or issue body containing `@<app-login>` where
 `<app-login>` is the installation's bot login, the value the hive already knows
-as `appBotLogin` (`isHiveAppReviewAuthor`, `src/pkg/github/automerge/automerge_sweep.go:1207`).
+as `appBotLogin` (`isHiveAppReviewAuthor`, `src/pkg/github/automerge/automerge_sweep.go:1221`).
 The text after the mention is the request. Two optional forms route it:
 
 ```
@@ -180,7 +180,7 @@ The agent replies the way it already can: by writing an issue-request file of
 `Kind: "comment"` (or a review-request with `Event: "comment"` on a PR), which
 the watchers post as the App bot — audited under `agent_comment_created`
 (`src/pkg/github/attribution.go:53`), canary-gated and secret-scrubbed
-(`src/pkg/github/client.go:1236`), gated by `Converse` at the proxy. **Nothing
+(`src/pkg/github/client.go:1291`), gated by `Converse` at the proxy. **Nothing
 new is added to the write path.** An ADVISORY agent with `Converse` can answer
 a mention; without `Converse` its kick still runs, but the only thing it can
 do with the answer is leave it in its own output — which is the correct,
@@ -356,7 +356,7 @@ the decision follows each one, with the code on `v6` that now carries it.
 - `src/pkg/github/review_request_watcher.go`, `review_threads.go` — the
   App-authored in-thread reply path and its attempt counter.
 - `src/pkg/github/issue_request_watcher.go:70` — `Kind: "comment"`.
-- `src/pkg/github/client.go:1236` — canary-gated, scrubbed comment posting.
+- `src/pkg/github/client.go:1291` — canary-gated, scrubbed comment posting.
 - `src/pkg/hub/webhook.go:53` — the fail-closed GitHub webhook verifier.
 - `src/pkg/ioscan/enforce.go:24`, `src/pkg/scheduler/ioscan_enforce.go:122`,
   [ADR-0008](../adr/0008-ioscan-untrusted-input.md) — untrusted kick input.

@@ -1,1 +1,0 @@
-- Clear Manage Access Add User search feedback with an inline typeahead, keyboard navigation, selected-user chip, and explicit empty/error states.

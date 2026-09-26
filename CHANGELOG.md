@@ -11,6 +11,202 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.68.0)
+
+### Added
+
+- Dashboard viewers can now drag or keyboard-reorder main sections, persist the order locally, reset it, and see the sidebar follow the custom order ([#9062](https://github.com/hivecommons/hive/issues/9062)).
+
+## 2026-09-26 (v5.67.1)
+
+### Fixed
+
+- The contributor agent now fetches knowledge exports per hub when `HIVE_HUB` lists multiple hubs, so a bad first hub no longer prevents installing `agent.md` ([#9058](https://github.com/hivecommons/hive/issues/9058)).
+
+## 2026-09-26 (v5.67.0)
+
+### Added
+
+- Added Overview CSV exports for issue and PR band summaries, including per-band downloads from each legend row.
+
+## 2026-09-26 (v5.66.1)
+
+### Fixed
+
+- Fixed narrow repository cards so issue and PR pill columns stack before action chips squeeze titles down to bare issue numbers.
+
+## 2026-09-26 (v5.66.0)
+
+### Added
+
+- Added per-repository `project.repo_policies[].auto_merge` controls so admins can disable Hive auto-merge for one repo while leaving the rest of an L6 hive unchanged; the switch is enforced at the merge relay, App self-merge sweep, and proxy direct-merge paths, and can be toggled from the dashboard repo card.
+
+## 2026-09-26 (v5.65.0)
+
+### Added
+
+- Added click- and keyboard-sortable column headers to the `/contribute` Operations tables for effective models, Rankings, and tier limits, with browser-local persistence across live refreshes.
+
+## 2026-09-26 (v5.64.2)
+
+### Fixed
+
+- dashboard: Overview ◀ ▶ arrows now step through every chart type out of the box (auto-play still rotates only the ticked ones, and the dots show which types are ticked); donut edge labels stay inside the SVG and grow away from the ring instead of crowding the legend or clipping at the card edge (#9036)
+- Fixed repo-card PR rows so long status labels and the Release chip stay within narrow cards by letting the title column absorb shrinkage.
+
+## 2026-09-26 (v5.64.1)
+
+### Fixed
+
+- Hive Chat: `/jam who is online?` (and plain "who is here" / "online" questions) now answers from the live presence roster instead of bouncing off the free-text responder.
+- Dashboard: Overview bar and age-histogram charts render as aligned HTML rows at the legend font size (no more labels running into bars), and each panel shows a visible ⏵/⏸ auto-play toggle and transition picker; transitions are slower so they are actually visible.
+
+## 2026-09-26 (v5.64.0)
+
+### Added
+
+- Added configurable Overview chart types, timed carousel rotation, transition styles, and browser-local persistence for dashboard band charts. (#9025)
+
+## 2026-09-26 (v5.63.1)
+
+### Changed
+
+- The dashboard's issue and PR bands are now named after the action an operator takes instead of how the classifier sorted them ([#9019](https://github.com/hivecommons/hive/issues/9019)): Ready → **Unclaimed**, In progress → **Claimed**, Agent-filed → **Needs triage**, Waiting on human → **Needs human** (issues and PRs), Likely done → **Confirm & close**, with short status chips `unclaimed` / `claimed` / `triage` / `needs human` / `close?`. "Needs triage" is keyed on #5117 acknowledgment rather than the `agent/<role>` label alone: an agent-filed issue leaves the band as soon as a human adds `approved-direction` or is assigned (the snapshot's `human_acknowledged`), falling through to Unclaimed/Claimed with the role badge still on the pill, so the band is exactly the agent proposals nobody has looked at. Every place a band is named — repo-card band headers, Overview donut slices and legend rows, and the pill legend — now carries the band's rule as a tooltip, all rendered from one shared spec table (`issueBandSpec` / `prBandSpec`) so the legend can no longer drift from the cards. Display only: enumeration, holds, ranking, and kick behaviour are unchanged.
+- Dashboard: the Overview band charts now sit above the Governor panel with an Overview entry in the sidebar, and legend counts stay right-aligned but close to their band names instead of at the far edge of the card.
+
+## 2026-09-26 (v5.63.0)
+
+### Added
+
+- Per-agent `jev_mode: assist` gives an agent the Jev typed-decision tool (like `caveman_mode`): a `jev-decide` skill plus `hive jev decide` for quick choice / score / probability judgments, proxied through the hive's loopback endpoint so the Jev key never reaches the agent, counted against the token budget and written to the audit log. Toggle from `hive.yaml`, the agent's General settings (disabled until a Jev/OpenRouter key is ready), or `hivectl agent jev-mode-set`. Off by default: nothing installed, no Jev calls ([#8939](https://github.com/hivecommons/hive/issues/8939)).
+
+## 2026-09-26 (v5.62.1)
+
+### Fixed
+
+- Fix stale scale-envelope citations and anchor docs citation checks on nearby symbols.
+
+## 2026-09-26 (v5.62.0)
+
+### Added
+
+- Repository-card PR pills now show GitHub review signals: the review decision (👍 approved / 👎 changes requested / 👀 review required, which also places the PR in the In review band; reviewer opinions are shown as opinions when GitHub reports no decision), requested reviewers and teams (👥), comment and review-thread totals (🗨 N), and a 🔗 badge for the issues the PR closes. `requested_reviewers`, `requested_teams`, `comment_count`, `review_thread_count`, and `linked_issues` join the PR payload without an additional API request — the list payload and the existing per-repository review-decision query carry them — and stale drafts receive the same signals ([#8968](https://github.com/hivecommons/hive/issues/8968)).
+
+## 2026-09-26 (v5.61.1)
+
+### Fixed
+
+- Hold semantics are now the same everywhere a Hive sweep acts on its own listing ([#8927](https://github.com/hivecommons/hive/issues/8927)): both auto-merge sweeps and the task-list sweep gate on the enumeration hold predicate, so the dashboard `hive-pause/<hive-id>` label blocks merges and task-list closure exactly as it blocks kicks; the SHA-hold sweep lifts only a `hold` it applied itself (newest `hold` event labeled by the App bot and paired with its own notice) instead of any hold that happens to be present; agent policy templates name the enforced hold set (`hold`, `on-hold`, `hold/review`, `hive-pause/<hive-id>`); and the `gh` wrapper always writes `agent/<lane>` from the lane name rather than the display name, so PR ownership and label routing recognise it.
+
+## 2026-09-26 (v5.61.0)
+
+### Added
+
+- Added a collapsible dashboard Overview section with issue and PR band charts across the hive.
+
+## 2026-09-26 (v5.60.2)
+
+### Fixed
+
+- Repo-card PR review pill (`💬×N`) and the other action-slot glyphs are no longer clipped: action slots keep their 1.65rem floor but grow to content, and the slot no longer hides overflow. (#9004)
+
+## 2026-09-26 (v5.60.1)
+
+### Changed
+
+- Tidy repository card issue and PR pills with aligned row grids, fixed action slots, and readable titles.
+
+## 2026-09-26 (v5.60.0)
+
+### Added
+
+- List Flue and Crustify / Wavefront in the public integration surfaces.
+
+## 2026-09-26 (v5.59.0)
+
+### Added
+
+- Add a dashboard Settings editor for project.writing_guide so owners can update agent writing style without editing hive.yaml.
+- List Jev by TypeSafe AI as a Hive Commons partner integration on the hub landing page.
+
+## 2026-09-26 (v5.58.0)
+
+### Added
+
+- Add an owner-only redacted effective configuration JSON export and tidy the avatar menu grouping/backup caption, closes #8935.
+
+### Changed
+
+- Hub Admin — Users now shows an AFFILIATION column that identifies who each signup is likely affiliated with from public GitHub/GHE profile signals (company, orgs, contribution owners, bio/location context, cached daily), with top repo and public activity as supporting detail instead of a Hive-derived association.
+- Replace browser-native hub and spoke dialogs with in-app modals/toasts and add ratchet tests to keep them out.
+
+### Fixed
+
+- The Jira work source no longer fails to enumerate issues on Jira Cloud with `search: returned 410`. Atlassian removed the classic `/rest/api/3/search` endpoint ([CHANGE-2046](https://developer.atlassian.com/changelog/#CHANGE-2046)); the Cloud path now calls the enhanced `POST /rest/api/3/search/jql` endpoint with an explicit fields list and `nextPageToken` pagination. Jira Data Center/Server, which still supports the classic `/search` endpoint, is unaffected.
+
+## 2026-09-26 (v5.57.2)
+
+### Fixed
+
+- Governor: the advisory digest no longer re-resolves every long-closed advisory bead against GitHub on every eval cycle; closed beads with a persisted `resolved_at` outside the recently-resolved window skip the lookup, and the remaining lookups share one memoized, budgeted resolver per build. This stops the digest from draining the installation rate-limit quota and from pinning the governor loop (stale `/api/status`) under post-reset slow-start pacing.
+
+## 2026-09-25 (v5.57.1)
+
+### Fixed
+
+- Fixed dashboard repo-card issue and PR pills so columns do not overlap, single-sided cards use the full pill width, and pill titles ellipsize while keeping #N visible.
+
+## 2026-09-25 (v5.57.0)
+
+### Added
+
+- Band and sort repository-card pull requests by human gate, merge eligibility, blocked, review, open, and draft states, with updated_at in the PR payload.
+
+## 2026-09-25 (v5.56.0)
+
+### Added
+
+- Let each viewer drag or keyboard-reorder the `/contribute` Operations cards across columns, with their layout remembered in browser localStorage and a reset control for restoring the default order.
+
+## 2026-09-25 (v5.55.5)
+
+### Fixed
+
+- Fix dashboard section expansion so tall Repositories, Beads, and Agents content is no longer clipped by a fixed max-height cap.
+
+## 2026-09-25 (v5.55.4)
+
+### Fixed
+
+- Bump the bundled LiteLLM proxy from 1.96.2 to 1.102.1 so hives with `governor.litellm.local_proxy: true` no longer crash-loop on `ImportError: get_flat_dependant` after FastAPI 0.141 removed that symbol ([#8936](https://github.com/hivecommons/hive/pull/8936), thanks @sideeffffect).
+
+## 2026-09-25 (v5.55.3)
+
+### Fixed
+
+- Applying an ACMM pack now persists reconciled pack-owned agent fields into per-agent overlays, so config reloads keep the selected level while preserving operator-owned model/backend/pause/effort choices ([#8938](https://github.com/hivecommons/hive/issues/8938)).
+
+## 2026-09-25 (v5.55.2)
+
+### Changed
+
+- Added an authoritative operator reference for Hive labels and control signals, replacing the short issue-label page and documenting how holds, approvals, contributor skips, planning labels, and dashboard bands affect work selection.
+
+### Fixed
+
+- Let the Manage Access Add User combobox browse the full grantable-user list before typing, with a chevron opener and large-list narrowing hint.
+
+### Security
+
+- Stop interpolating pull-request-controlled ref names directly in workflows.
+
+## 2026-09-25 (v5.55.1)
+
+### Fixed
+
+- Clear Manage Access Add User search feedback with an inline typeahead, keyboard navigation, selected-user chip, and explicit empty/error states.
+- Dashboard NEXT RUN now reports due/overdue instead of showing a stale past timestamp after a hive restart or delayed status refresh.
+
 ## 2026-09-25 (v5.55.0)
 
 ### Added

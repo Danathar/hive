@@ -576,8 +576,35 @@ type PullRequest struct {
 	ReviewState string     `json:"review_state,omitempty"`
 	ReviewCount int        `json:"review_count,omitempty"`
 	ReviewedAt  *time.Time `json:"reviewed_at,omitempty"`
+	// RequestedReviewers and RequestedTeams are the logins and team slugs a
+	// review is currently requested from, read from the list payload at
+	// enumeration time — no extra call (hivecommons/hive#8968). Display
+	// only: the repo-card pill names who a PR is waiting on; no gate reads
+	// them.
+	RequestedReviewers []string `json:"requested_reviewers,omitempty"`
+	RequestedTeams     []string `json:"requested_teams,omitempty"`
+	// CommentCount and ReviewThreadCount are GitHub's conversation-comment
+	// and review-thread totals, and LinkedIssues are the issues GitHub
+	// reports this PR will close (closingIssuesReferences). All three ride
+	// the one-query-per-repository GraphQL pass that already carries the
+	// review decision (protection_facts.go): no additional request, only a
+	// larger response. EnrichReviewSignals stamps them on stale drafts.
+	// Display only: the 🔗 #N badge on a PR pill mirrors the issue column's
+	// linked-PR badge (#8876); nothing gates on any of them.
+	CommentCount      int             `json:"comment_count,omitempty"`
+	ReviewThreadCount int             `json:"review_thread_count,omitempty"`
+	LinkedIssues      []PRLinkedIssue `json:"linked_issues,omitempty"`
 }
 
+// PRLinkedIssue is an issue GitHub reports a PR will close on merge
+// (closingIssuesReferences) — the PR-side mirror of IssueLinkedPR. State is
+// GitHub's issue state lower-cased ("open" / "closed"), as on Issue.State.
+type PRLinkedIssue struct {
+	Number int    `json:"number"`
+	Repo   string `json:"repo,omitempty"`
+	State  string `json:"state,omitempty"`
+	URL    string `json:"url,omitempty"`
+}
 type PRReworkStats struct {
 	ReviewRounds        int       `json:"review_rounds,omitempty"`
 	FixAttempts         int       `json:"fix_attempts,omitempty"`
@@ -743,6 +770,14 @@ type HoldItem struct {
 	// full. Both are omitted when unset so older snapshots round-trip.
 	URL    string   `json:"url,omitempty"`
 	Labels []string `json:"labels,omitempty"`
+	// Assignees and HumanAcknowledged are populated for Type=="issue" holds
+	// so the repo card bands a held issue the same way it bands an
+	// actionable one: assigned ⇒ claimed, and an agent-filed issue a human
+	// has acknowledged (#5117: approved-direction or a human assignee) is
+	// not a triage item (#9019). Both come from the list response — no
+	// extra API call — and are omitted when unset.
+	Assignees         []string `json:"assignees,omitempty"`
+	HumanAcknowledged bool     `json:"human_acknowledged,omitempty"`
 }
 
 type IssueCluster struct {
@@ -1002,13 +1037,15 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		if c.isHeld(labels) {
 			breakdown.Hold++
 			held = append(held, HoldItem{
-				Number:    issue.GetNumber(),
-				Repo:      repo,
-				Title:     issue.GetTitle(),
-				Type:      "issue",
-				CreatedAt: issue.GetCreatedAt().Time,
-				URL:       issue.GetHTMLURL(),
-				Labels:    labels,
+				Number:            issue.GetNumber(),
+				Repo:              repo,
+				Title:             issue.GetTitle(),
+				Type:              "issue",
+				CreatedAt:         issue.GetCreatedAt().Time,
+				URL:               issue.GetHTMLURL(),
+				Labels:            labels,
+				Assignees:         extractAssignees(issue.Assignees),
+				HumanAcknowledged: c.issueHasCheapHumanAcknowledgement(issue),
 			})
 			continue
 		}
@@ -1090,6 +1127,28 @@ func prBaseRef(pr *gh.PullRequest) string {
 	return pr.GetBase().GetRef()
 }
 
+// prRequestedReviews reads the logins and team slugs a review is requested
+// from, as carried by the list payload. nil slices when none, so the JSON
+// field is omitted rather than emitted as [].
+func prRequestedReviews(pr *gh.PullRequest) (logins, teams []string) {
+	for _, u := range pr.RequestedReviewers {
+		if login := safeGetLogin(u); login != "" {
+			logins = append(logins, login)
+		}
+	}
+	for _, t := range pr.RequestedTeams {
+		if t == nil {
+			continue
+		}
+		if slug := t.GetSlug(); slug != "" {
+			teams = append(teams, slug)
+		} else if name := t.GetName(); name != "" {
+			teams = append(teams, name)
+		}
+	}
+	return logins, teams
+}
+
 func reviewScopeContract(title, body, defaultRepo, runKey, planRef string) string {
 	refs := ParseClaimedIssues(title+"\n"+body, defaultRepo)
 	if len(refs) > 0 {
@@ -1160,29 +1219,32 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			// merge sweep — the hold gate is untouched.
 			if !pr.GetDraft() {
 				headRef, headRepo, fromFork := prHeadOrigin(pr)
+				reqLogins, reqTeams := prRequestedReviews(pr)
 				heldPRs = append(heldPRs, PullRequest{
-					Repo:           repo,
-					Number:         pr.GetNumber(),
-					Title:          pr.GetTitle(),
-					Author:         safeGetLogin(pr.GetUser()),
-					Labels:         labels,
-					CreatedAt:      pr.GetCreatedAt().Time,
-					UpdatedAt:      pr.GetUpdatedAt().Time,
-					State:          pr.GetState(),
-					URL:            pr.GetHTMLURL(),
-					ReviewClass:    ClassifyReviewClass(pr.GetTitle(), labels),
-					HiveAttributed: hasAttr,
-					HiveAgent:      attrMeta.Agent,
-					HiveBackend:    attrMeta.Backend,
-					HiveModel:      attrMeta.Model,
-					HiveRun:        runKey,
-					HivePlan:       planRef,
-					ScopeContract:  scopeContract,
-					HeadSHA:        prHeadSHA(pr),
-					HeadRef:        headRef,
-					HeadRepo:       headRepo,
-					FromFork:       fromFork,
-					BaseRef:        prBaseRef(pr),
+					Repo:               repo,
+					Number:             pr.GetNumber(),
+					Title:              pr.GetTitle(),
+					Author:             safeGetLogin(pr.GetUser()),
+					Labels:             labels,
+					CreatedAt:          pr.GetCreatedAt().Time,
+					UpdatedAt:          pr.GetUpdatedAt().Time,
+					State:              pr.GetState(),
+					URL:                pr.GetHTMLURL(),
+					ReviewClass:        ClassifyReviewClass(pr.GetTitle(), labels),
+					HiveAttributed:     hasAttr,
+					HiveAgent:          attrMeta.Agent,
+					HiveBackend:        attrMeta.Backend,
+					HiveModel:          attrMeta.Model,
+					HiveRun:            runKey,
+					HivePlan:           planRef,
+					ScopeContract:      scopeContract,
+					HeadSHA:            prHeadSHA(pr),
+					HeadRef:            headRef,
+					HeadRepo:           headRepo,
+					FromFork:           fromFork,
+					BaseRef:            prBaseRef(pr),
+					RequestedReviewers: reqLogins,
+					RequestedTeams:     reqTeams,
 				})
 			}
 			continue
@@ -1197,17 +1259,20 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			breakdown.Draft++
 			author := safeGetLogin(pr.GetUser())
 			if strings.EqualFold(author, c.appBotLogin) && now.Sub(pr.GetCreatedAt().Time) > staleDraftAfter {
+				reqLogins, reqTeams := prRequestedReviews(pr)
 				staleDrafts = append(staleDrafts, PullRequest{
-					Repo:        repo,
-					Number:      pr.GetNumber(),
-					Title:       pr.GetTitle(),
-					Author:      author,
-					Labels:      labels,
-					Draft:       true,
-					CreatedAt:   pr.GetCreatedAt().Time,
-					UpdatedAt:   pr.GetUpdatedAt().Time,
-					URL:         pr.GetHTMLURL(),
-					ReviewClass: ClassifyReviewClass(pr.GetTitle(), labels),
+					Repo:               repo,
+					Number:             pr.GetNumber(),
+					Title:              pr.GetTitle(),
+					Author:             author,
+					Labels:             labels,
+					Draft:              true,
+					CreatedAt:          pr.GetCreatedAt().Time,
+					UpdatedAt:          pr.GetUpdatedAt().Time,
+					URL:                pr.GetHTMLURL(),
+					ReviewClass:        ClassifyReviewClass(pr.GetTitle(), labels),
+					RequestedReviewers: reqLogins,
+					RequestedTeams:     reqTeams,
 				})
 			}
 			continue
@@ -1224,6 +1289,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		}
 		breakdown.Actionable++
 		author := safeGetLogin(pr.GetUser())
+		reqLogins, reqTeams := prRequestedReviews(pr)
 
 		actionable = append(actionable, PullRequest{
 			Repo:        repo,
@@ -1252,13 +1318,15 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			// per-PR and returns it only from the single-PR GET. Reading it
 			// here would yield false for every PR. EnrichCIStatus fills it in
 			// from a per-PR fetch; until then it stays MergeableUnknown.
-			MergeableState: pr.GetMergeableState(),
-			HeadSHA:        headSHA,
-			BaseSHA:        baseSHA,
-			HeadRef:        headRef,
-			HeadRepo:       headRepo,
-			FromFork:       fromFork,
-			BaseRef:        prBaseRef(pr),
+			MergeableState:     pr.GetMergeableState(),
+			HeadSHA:            headSHA,
+			BaseSHA:            baseSHA,
+			HeadRef:            headRef,
+			HeadRepo:           headRepo,
+			FromFork:           fromFork,
+			BaseRef:            prBaseRef(pr),
+			RequestedReviewers: reqLogins,
+			RequestedTeams:     reqTeams,
 		})
 	}
 
@@ -1349,6 +1417,23 @@ func (c *Client) EnrichCIStatus(ctx context.Context, prs []PullRequest) {
 	for i := range prs {
 		reported := c.enrichPRCI(ctx, &prs[i])
 		facts.attach(ctx, &prs[i], reported)
+	}
+}
+
+// EnrichReviewSignals stamps only the review-decision and repo-card triage
+// signals (protection.review_decision, comment/thread counts, linked
+// issues — hivecommons/hive#8968) onto prs, with at most one GraphQL query
+// per repository and no per-PR REST calls. It exists for the stale-draft
+// list, which the dashboard shows beside the actionable PRs but which
+// EnrichCIStatus deliberately never touches: a draft is not a merge
+// candidate, so its mergeability and check runs are never fetched.
+func (c *Client) EnrichReviewSignals(ctx context.Context, prs []PullRequest) {
+	if c == nil {
+		return
+	}
+	facts := newProtectionCollector(c)
+	for i := range prs {
+		facts.attach(ctx, &prs[i], nil)
 	}
 }
 
@@ -2436,11 +2521,20 @@ func (c *Client) SearchOutreachPRCount(ctx context.Context, author, org, project
 
 var shaPattern = regexp.MustCompile(`[0-9a-f]{7,40}\b`)
 
-const shaHoldComment = "Thanks for filing this issue! To help us reproduce and investigate, " +
+// shaHoldMarker is the hidden ownership marker on the SHA-hold notice. The
+// sweep only lifts a `hold` whose newest label event is paired with an
+// App-authored notice carrying this marker (or the legacy notice sentence,
+// for holds applied before the marker existed).
+const shaHoldMarker = "<!-- hive:sha-hold -->"
+
+const shaHoldLegacyNoticeSentence = "_This issue will be on hold until a SHA is provided."
+
+const shaHoldComment = shaHoldMarker + "\n" +
+	"Thanks for filing this issue! To help us reproduce and investigate, " +
 	"could you please include the **commit SHA** of the build you're running?\n\n" +
 	"You can find it by running:\n```\ngit rev-parse --short HEAD\n```\n\n" +
 	"Or check the bottom of the console UI for the version string.\n\n" +
-	"_This issue will be on hold until a SHA is provided. " +
+	shaHoldLegacyNoticeSentence + " " +
 	"Simply add a comment with the SHA and the hold will be automatically removed._"
 
 type SHAHoldConfig struct {
@@ -2485,22 +2579,39 @@ func (c *Client) EnforceSHAHold(ctx context.Context, cfg SHAHoldConfig) (*SHAHol
 		}
 
 		labels := extractLabels(issue.Labels)
-		held := isHeld(labels)
+		held := c.isHeld(labels)
 		hasSHA := shaPattern.MatchString(issue.GetBody())
 
 		if !hasSHA {
 			hasSHA = c.checkCommentsForSHA(ctx, owner, repo, issue.GetNumber(), author)
 		}
 
-		if hasSHA && held {
+		switch {
+		case hasSHA && held:
+			// Only release a hold this sweep applied. A human's `hold`, a hold
+			// applied by another Hive subsystem through the same App (the
+			// dashboard hold on a hive with no id), or any non-literal hold
+			// spelling (`on-hold`, `hive-pause/<id>`) is left for its owner
+			// to lift (#8927).
+			ok, err := c.shaHoldIsOwn(ctx, owner, repo, issue.GetNumber())
+			if err != nil {
+				c.logger.Warn("SHA-UNHOLD skipped: could not verify hold provenance", "repo", repo, "issue", issue.GetNumber(), "error", err)
+				result.Skipped++
+				continue
+			}
+			if !ok {
+				c.logger.Info("SHA-UNHOLD skipped: current hold was not applied by the SHA-hold sweep", "repo", repo, "issue", issue.GetNumber(), "author", author)
+				result.Skipped++
+				continue
+			}
 			c.unhold(ctx, owner, repo, issue.GetNumber())
 			result.Unheld++
 			c.logger.Info("SHA-UNHOLD", "repo", repo, "issue", issue.GetNumber(), "author", author)
-		} else if !hasSHA && !held {
+		case !hasSHA && !held:
 			c.hold(ctx, owner, repo, issue.GetNumber())
 			result.Held++
 			c.logger.Info("SHA-HOLD", "repo", repo, "issue", issue.GetNumber(), "author", author)
-		} else {
+		default:
 			result.Skipped++
 		}
 	}
@@ -2543,6 +2654,38 @@ func (c *Client) unhold(ctx context.Context, owner, repo string, number int) {
 	if err != nil {
 		c.logger.Warn("failed to remove hold label", "repo", repo, "issue", number, "error", err)
 	}
+}
+
+// shaHoldIsOwn reports whether the issue's current `hold` was applied by this
+// sweep. Two pieces of evidence are required, mirroring the level-hold and
+// #5117 releases and then narrowing to this subsystem: the newest `hold`
+// label event must be a `labeled` by the App bot, and an App-authored
+// SHA-hold notice must have been posted at or after that event — hold() adds
+// the label and immediately posts the notice, so a later re-hold by a human,
+// or by another Hive subsystem through the same App, has no companion notice
+// and is left alone. A blank bot login fails closed.
+func (c *Client) shaHoldIsOwn(ctx context.Context, owner, repo string, number int) (bool, error) {
+	byApp, labeledAt, err := c.latestHoldLabelEventByApp(ctx, owner, repo, number)
+	if err != nil || !byApp {
+		return false, err
+	}
+	comments, err := c.listIssueComments(ctx, owner, repo, number)
+	if err != nil {
+		return false, err
+	}
+	for _, comment := range comments {
+		if comment == nil || !c.isTrustedAppBotCommentAuthor(comment) || !isSHAHoldNotice(comment.GetBody()) {
+			continue
+		}
+		if !comment.GetCreatedAt().Before(labeledAt.Time) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isSHAHoldNotice(body string) bool {
+	return strings.Contains(body, shaHoldMarker) || strings.Contains(body, shaHoldLegacyNoticeSentence)
 }
 
 func isInternalAuthor(author string, internalAuthors []string) bool {
@@ -2606,6 +2749,15 @@ func (c *Client) AppBotLogin() string {
 // IsExemptLabels reports whether labels include a configured merge-exempt label.
 func (c *Client) IsExemptLabels(labels []string) bool {
 	return c.isExempt(labels)
+}
+
+// IsHeldLabels reports whether labels carry a hold: the generic hold
+// substrings (HoldLabels) plus the extra hold labels configured through
+// SetHoldLabels, which is where the exact hive-scoped `hive-pause/<hive-id>`
+// dashboard hold lives. It is the same predicate enumeration uses, exported so
+// the auto-merge sweeps gate on the identical hold set (#8927).
+func (c *Client) IsHeldLabels(labels []string) bool {
+	return c.isHeld(labels)
 }
 
 // RecordPRMergedAudit records the standard PR-merged audit event.

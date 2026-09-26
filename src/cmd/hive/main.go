@@ -51,6 +51,7 @@ import (
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/inference"
 	"github.com/hivecommons/hive/pkg/ioscan"
+	"github.com/hivecommons/hive/pkg/jev"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/loginscan"
 	"github.com/hivecommons/hive/pkg/logscrub"
@@ -2210,6 +2211,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	b.agentMgr.SetExplainModeDefaultResolver(func() string {
 		return b.cfg.Governor.ResolveExplainModeDefault()
 	})
+	b.agentMgr.SetRepoAutoMergeEnabledResolver(func(repo string) bool {
+		return b.cfg.RepoAutoMergeEnabled(repo)
+	})
 	// The launch path also needs to know WHICH FILE the key came from, so it can
 	// check that file is readable by the agent UID rather than only by the hive
 	// process. Returns a loggable source string, never the key value.
@@ -2447,6 +2451,7 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 
 		autoMergeOpts.MutationBoundary = b.mutationBoundary
 		autoMergeOpts.SelfAuthorizationHoldEnabled = func(repo string) bool { return b.cfg.SelfAuthorizationHoldEnabledForRepo(repo) }
+		autoMergeOpts.RepoAutoMergeEnabled = func(repo string) bool { return b.cfg.RepoAutoMergeEnabled(repo) }
 		// Intent tier gate (#6258): the human lane only queues PRs that
 		// survive writeMergeEligible's intent check, but this sweep lists
 		// the App's PRs on its own, so it carries the same policy (same
@@ -4095,6 +4100,7 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 		// config, so re-scoping an agent in the dashboard takes effect on the
 		// next request.
 		b.githubProxy.SetAgentRepoScopeFunc(b.cfg.AgentServesRepo)
+		b.githubProxy.SetRepoAutoMergeEnabledFunc(b.cfg.RepoAutoMergeEnabled)
 		// #1861: the proxy resolves an identified agent to its hub-held scoped
 		// token via the package-level registry WriteAgentToken feeds (NOT via
 		// the appAuth instance, which is replaced on key rotation — a closure
@@ -4122,8 +4128,11 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 		// usage (from the gateway's OpenAI usage block) into the same metrics
 		// dir the token collector scans. Without this, bare-mode inference
 		// agents (litellm/vllm/llm-d) never write a scannable session file and
-		// their consumption reads as zero.
-		b.githubProxy.SetTokenSink(tokens.NewInferenceSink(b.cfg.Data.MetricsDir, b.logger))
+		// their consumption reads as zero. ONE sink: it owns each agent's
+		// usage file and rewrites it from in-memory totals, so a second
+		// instance on the same dir would clobber the first's numbers.
+		inferenceSink := tokens.NewInferenceSink(b.cfg.Data.MetricsDir, b.logger)
+		b.githubProxy.SetTokenSink(inferenceSink)
 		// Live Linear credential for agent requests — see
 		// spokeWire.linearCredentialResolver and proxy.injectLinearCredential.
 		b.githubProxy.SetLinearCredentialResolver(b.linearCredentialResolver)
@@ -4318,6 +4327,26 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 		)
 
 		deps.startProxy(b.githubProxy, b.logger)
+		// Jev decision endpoint (hivecommons/hive#8939). Always bound so a
+		// jev_mode toggle in the dashboard takes effect on the agent's next
+		// call; every predicate reads the LIVE config, and an agent whose
+		// jev_mode is off is refused before any key is resolved or any
+		// provider traffic happens. Identity comes from the proxy's UID
+		// lookup, budget from the same inference sink the translator feeds,
+		// audit from the dashboard's agent audit sink.
+		if deps.startJev != nil {
+			cfg := b.cfg
+			deps.startJev(&jev.Server{
+				Identify: b.githubProxy.IdentifyAgentByUID,
+				Enabled:  cfg.JevAssistEnabled,
+				Key:      cfg.ResolveJevAPIKey,
+				Timeout:  cfg.Jev.EffectiveTimeout(),
+				Client:   jev.NewClient(func() config.JevConfig { return cfg.Jev }, nil),
+				Usage:    inferenceSink,
+				Audit:    b.dashSrv.AgentAuditSink(),
+				Logger:   b.logger,
+			}, b.logger)
+		}
 		if b.cfg.Governor.LiteLLM.LocalProxy {
 			deps.startLocalLiteLLM(b.ctx, b.logger)
 		}
@@ -6653,6 +6682,10 @@ func runEvalCycle(
 	// enriches the held list ONLY for the repair path — held PRs still never
 	// reach the merge sweep, escalation or the queue counts.
 	ghClient.EnrichCIStatus(ctx, actionable.PRs.Held)
+	// Stale drafts sit in the same dashboard PR column; they get the
+	// review/link signals only — no mergeability or check-run fetches, a
+	// draft is not a merge candidate (hivecommons/hive#8968).
+	ghClient.EnrichReviewSignals(ctx, actionable.PRs.StaleDrafts)
 
 	// Publish the human-facing "what should I merge next?" digest. This reads
 	// the PR set enumerated and CI-enriched immediately above, so it must stay
@@ -9390,6 +9423,10 @@ func dispatchSubcommand(args []string, stdout, stderr io.Writer) (bool, int) {
 		// Run from inside a headless agy agent's pane, one per kick; see
 		// pkg/agent/agy_turn.go.
 		return true, agent.RunAgyTurn(args[1:], stdout, stderr)
+	case jev.Subcommand:
+		// Run from inside an agent's pane by the jev-decide skill; see
+		// pkg/jev/cli.go. Talks only to the hive's loopback decision endpoint.
+		return true, jev.Run(args[1:], os.Stdin, stdout, stderr)
 	default:
 		return false, 0
 	}

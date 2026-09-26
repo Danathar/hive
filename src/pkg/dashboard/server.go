@@ -836,6 +836,7 @@ type FrontendRepo struct {
 	PausedBy    string `json:"pausedBy,omitempty"`
 	PausedAt    string `json:"pausedAt,omitempty"`
 	PauseReason string `json:"pauseReason,omitempty"`
+	AutoMerge   bool   `json:"autoMerge"`
 }
 
 type FrontendBeads struct {
