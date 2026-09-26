@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.68.1)
+
+### Fixed
+
+- The contributor relay now gates `ready` work requests behind one tracked retry path so stale no-work timers cannot duplicate an outstanding request and abandon a newly assigned task ([#9063](https://github.com/hivecommons/hive/issues/9063)).
+
 ## 2026-09-26 (v5.68.0)
 
 ### Added
