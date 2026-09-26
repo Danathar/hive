@@ -1,1 +1,0 @@
-- Fixed repo-card PR rows so long status labels and the Release chip stay within narrow cards by letting the title column absorb shrinkage.

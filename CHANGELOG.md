@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.64.2)
+
+### Fixed
+
+- dashboard: Overview ◀ ▶ arrows now step through every chart type out of the box (auto-play still rotates only the ticked ones, and the dots show which types are ticked); donut edge labels stay inside the SVG and grow away from the ring instead of crowding the legend or clipping at the card edge (#9036)
+- Fixed repo-card PR rows so long status labels and the Release chip stay within narrow cards by letting the title column absorb shrinkage.
+
 ## 2026-09-26 (v5.64.1)
 
 ### Fixed
