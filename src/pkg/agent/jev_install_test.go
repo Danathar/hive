@@ -119,3 +119,40 @@ func TestInstallJevForAgent_AssistSharedUIDWritesToHome(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallJevForAgent_OffRemovesEarlierSkill: an agent that ran with
+// assist and is restarted with jev_mode off loses the SKILL.md (the whole
+// jev-decide dir), so it stops advertising a tool the hive now refuses.
+// Sibling skills in the same skills dir are untouched.
+func TestInstallJevForAgent_OffRemovesEarlierSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	m := NewManager(map[string]config.AgentConfig{"a": {Backend: "claude", JevMode: config.JevModeAssist}}, discardLogger(), ProjectContext{})
+	m.mu.RLock()
+	agent := m.agents["a"]
+	m.mu.RUnlock()
+	agent.UID = 0
+	m.installJevForAgent(agent, "claude")
+	skillDir := filepath.Join(home, ".claude", "skills", "jev-decide")
+	if _, err := os.Stat(filepath.Join(skillDir, jev.SkillFile)); err != nil {
+		t.Fatalf("assist must install the skill: %v", err)
+	}
+	other := filepath.Join(home, ".claude", "skills", "other", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("# other"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent.Config.JevMode = config.JevModeOff
+	m.installJevForAgent(agent, "claude")
+	if _, err := os.Lstat(skillDir); !os.IsNotExist(err) {
+		t.Fatalf("jev_mode off must remove the earlier skill dir (lstat err=%v)", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("sibling skill must survive: %v", err)
+	}
+	// Idempotent: a second off launch with nothing to remove is a no-op.
+	m.installJevForAgent(agent, "claude")
+}

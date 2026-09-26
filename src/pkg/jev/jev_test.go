@@ -3,8 +3,10 @@ package jev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -220,6 +222,127 @@ func TestRequestValidate(t *testing.T) {
 	score := Request{Type: TypeScore, Question: "q", Levels: []string{"a", "b"}}
 	if err := score.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRequestValidate_MoreEdges covers the remaining input bounds and the
+// state/criteria checks on a request that is otherwise valid.
+func TestRequestValidate_MoreEdges(t *testing.T) {
+	many := make([]string, MaxOptions+1)
+	for i := range many {
+		many[i] = strconv.Itoa(i)
+	}
+	cases := map[string]Request{
+		"too many options":         {Type: TypeChoice, Question: "q", Options: many},
+		"option too long":          {Type: TypeChoice, Question: "q", Options: []string{"a", strings.Repeat("b", MaxOptionBytes+1)}},
+		"score empty level":        {Type: TypeScore, Question: "q", Levels: []string{"a", " "}},
+		"score level too long":     {Type: TypeScore, Question: "q", Levels: []string{"a", strings.Repeat("b", MaxLevelBytes+1)}},
+		"score stray descriptions": {Type: TypeScore, Question: "q", Levels: []string{"a", "b"}, Descriptions: map[string]string{"a": "d"}},
+		"probability with options": {Type: TypeProbability, Question: "q", Options: []string{"a", "b"}},
+	}
+	for name, req := range cases {
+		if err := req.Validate(); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+	// Levels are trimmed in place but duplicates are allowed: two rubric rows
+	// may legitimately read the same.
+	score := Request{Type: TypeScore, Question: "q", Levels: []string{" same ", "same"}}
+	if err := score.Validate(); err != nil || score.Levels[0] != "same" {
+		t.Fatalf("levels: err=%v levels=%q", err, score.Levels)
+	}
+	// "noul" on the wire is accepted as an alias for probability, and valid
+	// state/criteria JSON passes.
+	p := Request{Type: " NOUL ", Question: "q", State: json.RawMessage(`{"a":1}`), Criteria: json.RawMessage(`{"true":"t","false":"f"}`)}
+	if err := p.Validate(); err != nil || p.Type != TypeProbability {
+		t.Fatalf("noul alias: err=%v type=%q", err, p.Type)
+	}
+}
+
+// TestNewClient_Defaults: nil config and nil http client are usable — the
+// composition root passes both in, but the zero forms must not panic.
+func TestNewClient_Defaults(t *testing.T) {
+	c := NewClient(nil, nil)
+	if c.http != http.DefaultClient {
+		t.Error("nil http client must fall back to http.DefaultClient")
+	}
+	if got, want := c.Model(), (config.JevConfig{}).EffectiveModel(); got != want {
+		t.Errorf("Model() = %q, want default %q", got, want)
+	}
+	named := NewClient(func() config.JevConfig { return config.JevConfig{Model: "typesafe/jev-x"} }, nil)
+	if named.Model() != "typesafe/jev-x" {
+		t.Errorf("Model() = %q", named.Model())
+	}
+}
+
+// TestDecide_RejectsBeforeNetwork: an invalid request never reaches the
+// provider, whatever the key.
+func TestDecide_RejectsBeforeNetwork(t *testing.T) {
+	fp := &fakeProvider{answer: `{"answers":{}}`}
+	c := newFakeClient(t, fp)
+	_, err := c.Decide(context.Background(), Request{Type: TypeChoice, Question: "q", Options: []string{"only"}}, "k")
+	if err == nil || fp.calls != 0 {
+		t.Fatalf("invalid request must fail before any provider call (calls=%d, err=%v)", fp.calls, err)
+	}
+}
+
+// TestDecide_MalformedAnswers pins every provider answer shape the client
+// refuses to pass on to an agent: unparseable JSON, a missing or empty field
+// for the asked type, and values outside the offered range.
+func TestDecide_MalformedAnswers(t *testing.T) {
+	choice := Request{Type: TypeChoice, Question: "q", Options: []string{"yes", "no"}}
+	score := Request{Type: TypeScore, Question: "q", Levels: []string{"low", "mid", "high"}}
+	prob := Request{Type: TypeProbability, Question: "q"}
+	cases := []struct {
+		name   string
+		req    Request
+		answer string
+		want   string
+	}{
+		{"not json", prob, `{"answers":`, "jev response"},
+		{"empty choice", choice, `{"answers":{"decision":{"type":"choice","choice":"  "}}}`, "no choice"},
+		{"missing score", score, `{"answers":{"decision":{"type":"score","confidence":0.5}}}`, "no score"},
+		{"score below range", score, `{"answers":{"decision":{"type":"score","score":-0.5}}}`, "outside the offered levels"},
+		{"score above range", score, `{"answers":{"decision":{"type":"score","score":2.01}}}`, "outside the offered levels"},
+		{"missing noul", prob, `{"answers":{"decision":{"type":"noul"}}}`, "no noul"},
+		{"noul above one", prob, `{"answers":{"decision":{"type":"noul","noul":1.5}}}`, "outside 0–1"},
+	}
+	for _, tc := range cases {
+		fp := &fakeProvider{answer: tc.answer}
+		c := newFakeClient(t, fp)
+		_, err := c.Decide(context.Background(), tc.req, "k")
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// TestDecide_ChoiceConfidenceFromProbabilities: when the provider omits
+// confidence but reports probabilities, the chosen option's probability is
+// the confidence; the model falls back to the configured one when absent.
+func TestDecide_ChoiceConfidenceFromProbabilities(t *testing.T) {
+	fp := &fakeProvider{answer: `{"answers":{"decision":{"type":"choice","choice":"no","probabilities":{"yes":0.25,"no":0.75}}},"usage":{"input_tokens":7}}`}
+	c := newFakeClient(t, fp)
+	res, err := c.Decide(context.Background(), Request{Type: TypeChoice, Question: "q", Options: []string{"yes", "no"}}, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Answer != "no" || res.Confidence != 0.75 || res.Model != "typesafe/jev-test" || res.InputTokens != 7 {
+		t.Errorf("result = %+v", res)
+	}
+}
+
+type failingTransport struct{ err error }
+
+func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+
+// TestDecide_TransportError: a dead provider surfaces as a wrapped request
+// error, not a panic on a nil response.
+func TestDecide_TransportError(t *testing.T) {
+	c := NewClient(nil, &http.Client{Transport: failingTransport{errors.New("dial refused")}})
+	_, err := c.Decide(context.Background(), Request{Type: TypeProbability, Question: "q"}, "k")
+	if err == nil || !strings.Contains(err.Error(), "jev request:") {
+		t.Fatalf("want wrapped transport error, got %v", err)
 	}
 }
 

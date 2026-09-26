@@ -3,12 +3,17 @@ package jev
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/config"
 )
 
 type recordedUsage struct {
@@ -182,5 +187,115 @@ func TestServer_ProviderFailureAuditedNotBudgeted(t *testing.T) {
 	}
 	if len(audit.recs) != 1 || audit.recs[0].fields["outcome"] != "failure" {
 		t.Errorf("audit = %+v", audit.recs)
+	}
+}
+
+// TestServer_ProviderTimeoutIs504: a provider slower than Server.Timeout is
+// cut off with 504 (not 502), audited as a failure and not budgeted.
+func TestServer_ProviderTimeoutIs504(t *testing.T) {
+	// The handler blocks until released; release before Close (LIFO defers) so
+	// Close's wait for in-flight handlers cannot deadlock.
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	defer close(release)
+	usage, audit := &fakeUsage{}, &fakeAudit{}
+	var logs bytes.Buffer
+	srv := &Server{
+		Identify: func(*http.Request) string { return "scanner" },
+		Enabled:  func(string) bool { return true },
+		Key:      func() string { return "k" },
+		Timeout:  50 * time.Millisecond,
+		Client:   NewClient(func() config.JevConfig { return config.JevConfig{Endpoint: slow.URL} }, slow.Client()),
+		Usage:    usage,
+		Audit:    audit,
+		Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	rec := post(srv.Handler(), goodBody)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+	if len(usage.recs) != 0 || len(audit.recs) != 1 || audit.recs[0].fields["outcome"] != "failure" {
+		t.Errorf("usage=%+v audit=%+v", usage.recs, audit.recs)
+	}
+	if !strings.Contains(logs.String(), "jev decision failed") || !strings.Contains(logs.String(), "agent=scanner") {
+		t.Errorf("failure must be logged with the agent: %s", logs.String())
+	}
+}
+
+// TestServer_MinimalWiring: with no Usage, no Audit and a zero Timeout the
+// server still answers (default 5s bound) and logs the decision; nothing to
+// budget or audit is not an error.
+func TestServer_MinimalWiring(t *testing.T) {
+	fp := &fakeProvider{answer: `{"answers":{"decision":{"type":"choice","choice":"yes","confidence":0.7}},"usage":{"input_tokens":3}}`}
+	var logs bytes.Buffer
+	srv := &Server{
+		Identify: func(*http.Request) string { return "scanner" },
+		Enabled:  func(string) bool { return true },
+		Key:      func() string { return "k" },
+		Client:   newFakeClient(t, fp),
+		Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+	}
+	rec := post(srv.Handler(), goodBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+	var res Result
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || res.Answer != "yes" {
+		t.Errorf("body = %s (%v)", rec.Body.String(), err)
+	}
+	if !strings.Contains(logs.String(), "jev decision") || !strings.Contains(logs.String(), "input_tokens=3") {
+		t.Errorf("decision must be logged with token count: %s", logs.String())
+	}
+}
+
+// TestServer_ServeRoutesOnlyDecide: over a real listener the endpoint answers
+// POST /v1/decide (here: 403, unidentified caller) and nothing else; closing
+// the listener ends Serve. The ephemeral port keeps the test independent of
+// whatever holds DecidePort on the host.
+func TestServer_ServeRoutesOnlyDecide(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	srv := &Server{Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	base := "http://" + ln.Addr().String()
+
+	resp, err := http.Post(base+DecidePath, "application/json", strings.NewReader(goodBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("unidentified caller: got %d, want 403", resp.StatusCode)
+	}
+	resp, err = http.Get(base + DecidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET: got %d, want 405", resp.StatusCode)
+	}
+	if !strings.Contains(logs.String(), "jev decision endpoint starting") || !strings.Contains(logs.String(), ln.Addr().String()) {
+		t.Errorf("start must be logged with the bound addr: %s", logs.String())
+	}
+
+	_ = ln.Close()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Serve after close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the listener closed")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -59,12 +60,20 @@ func (s *Server) Handler() http.Handler {
 
 // ListenAndServe binds the fixed loopback port and serves until it fails.
 func (s *Server) ListenAndServe() error {
-	addr := fmt.Sprintf("127.0.0.1:%d", DecidePort)
-	if s.Logger != nil {
-		s.Logger.Info("jev decision endpoint starting", "addr", addr)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", DecidePort))
+	if err != nil {
+		return err
 	}
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	return srv.ListenAndServe()
+	return s.Serve(ln)
+}
+
+// Serve answers on ln until it is closed or serving fails.
+func (s *Server) Serve(ln net.Listener) error {
+	if s.Logger != nil {
+		s.Logger.Info("jev decision endpoint starting", "addr", ln.Addr().String())
+	}
+	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	return srv.Serve(ln)
 }
 
 type errorBody struct {
