@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.58.0)
+
+### Added
+
+- Add an owner-only redacted effective configuration JSON export and tidy the avatar menu grouping/backup caption, closes #8935.
+
+### Changed
+
+- Hub Admin — Users now shows an AFFILIATION column that identifies who each signup is likely affiliated with from public GitHub/GHE profile signals (company, orgs, contribution owners, bio/location context, cached daily), with top repo and public activity as supporting detail instead of a Hive-derived association.
+- Replace browser-native hub and spoke dialogs with in-app modals/toasts and add ratchet tests to keep them out.
+
+### Fixed
+
+- The Jira work source no longer fails to enumerate issues on Jira Cloud with `search: returned 410`. Atlassian removed the classic `/rest/api/3/search` endpoint ([CHANGE-2046](https://developer.atlassian.com/changelog/#CHANGE-2046)); the Cloud path now calls the enhanced `POST /rest/api/3/search/jql` endpoint with an explicit fields list and `nextPageToken` pagination. Jira Data Center/Server, which still supports the classic `/search` endpoint, is unaffected.
+
 ## 2026-09-26 (v5.57.2)
 
 ### Fixed
