@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.60.0)
+
+### Added
+
+- List Flue and Crustify / Wavefront in the public integration surfaces.
+
 ## 2026-09-26 (v5.59.0)
 
 ### Added
