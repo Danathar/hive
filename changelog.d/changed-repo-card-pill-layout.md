@@ -1,1 +1,0 @@
-- Tidy repository card issue and PR pills with aligned row grids, fixed action slots, and readable titles.
