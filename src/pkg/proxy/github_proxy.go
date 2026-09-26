@@ -940,6 +940,15 @@ func (p *GitHubProxy) identifyAgentFromReq(r *http.Request) string {
 	return p.fallbackAgentName(r)
 }
 
+// IdentifyAgent names the agent behind an http.Server-delivered request using
+// the same rules as the MITM path: unforgeable socket-UID lookup first, the
+// self-asserted header only under HIVE_PROXY_ADVISORY_OK. Exported for the
+// loopback services that sit beside the proxy (the Jev decision endpoint,
+// hivecommons/hive#8939) so they never grow a second, weaker identity check.
+func (p *GitHubProxy) IdentifyAgent(r *http.Request) string {
+	return p.identifyAgentFromReq(r)
+}
+
 // identifyAgentFromConn identifies the calling agent for a request read off a
 // raw connection. It MUST be used instead of identifyAgentFromReq on any path
 // where the request came from http.ReadRequest rather than http.Server:

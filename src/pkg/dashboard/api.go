@@ -3592,6 +3592,10 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 		includeRepos = *agentCfg.IncludeRepos
 	}
 
+	// general.jevReady tells the settings panel whether the Jev toggle can be
+	// turned on: a Jev key (JEV_API_KEY or the connected OpenRouter gateway)
+	// must resolve first, else the toggle renders disabled with a hint
+	// (hivecommons/hive#8939). The flag only — never the key itself.
 	jsonResponse(w, map[string]interface{}{
 		"general": map[string]interface{}{
 			"enabled":          agentCfg.Enabled,
@@ -3626,6 +3630,8 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 			"detectKeywords":   agentCfg.DetectKeywords,
 			"aliases":          agentCfg.Aliases,
 			"cavemanMode":      agentCfg.CavemanMode,
+			"jevMode":          agentCfg.JevMode,
+			"jevReady":         s.deps.Config.JevReady(),
 			"explainMode":      agentCfg.ExplainMode,
 			"sandboxEnabled":   agentCfg.Sandbox != nil && agentCfg.Sandbox.Enabled != nil && *agentCfg.Sandbox.Enabled,
 			"sandboxEffective": agentCfg.SandboxEnabled(s.deps.Config.AgentSandbox),
@@ -4327,6 +4333,18 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 				return
 			}
 			agentCfg.CavemanMode = s
+		}
+	}
+	if v, ok := body["jevMode"]; ok {
+		if s, ok := v.(string); ok {
+			s = sanitizeString(s)
+			// Same gate as config.Validate, so the write path cannot persist a
+			// value that would fail the next config load.
+			if !config.ValidateJevMode(s) {
+				jsonError(w, "jev_mode must be one of: off, assist (or empty to disable)", http.StatusBadRequest)
+				return
+			}
+			agentCfg.JevMode = s
 		}
 	}
 	if v, ok := body["explainMode"]; ok {
