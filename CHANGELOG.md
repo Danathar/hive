@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.68.2)
+
+### Security
+
+- `POST /api/repos/auto-merge` now requires a verified owner to re-enable auto-merge; repo-write users can still disable it, so they can no longer restore Hive merge authority an owner removed ([#9070](https://github.com/hivecommons/hive/issues/9070)).
+- Overview CSV export neutralizes spreadsheet formula prefixes (`=`, `+`, `-`, `@`, tab) in attacker-controllable cells such as issue/PR titles, labels, and hold reasons (CWE-1236) ([#9068](https://github.com/hivecommons/hive/issues/9068)).
+
 ## 2026-09-26 (v5.68.1)
 
 ### Fixed
