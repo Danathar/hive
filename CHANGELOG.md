@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.65.0)
+
+### Added
+
+- Added click- and keyboard-sortable column headers to the `/contribute` Operations tables for effective models, Rankings, and tier limits, with browser-local persistence across live refreshes.
+
 ## 2026-09-26 (v5.64.2)
 
 ### Fixed
