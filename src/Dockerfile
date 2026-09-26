@@ -259,12 +259,12 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
 # dashboard's codex model discovery (`codex app-server` model/list — pure
 # local stdio, no network, unaffected by the proxy CA) falls back to the
 # static list, and non-codex backends are unaffected.
-ARG CODEX_VERSION=0.156.1
+ARG CODEX_VERSION=0.157.1
 RUN npm install -g --ignore-scripts --no-fund --no-audit @openai/codex@${CODEX_VERSION} && npm cache clean --force || \
     echo "WARN: OpenAI Codex CLI install failed — skipping"
 
 # --- Layer 7: Claude Code (most frequent updates) ---
-ARG CLAUDE_CODE_VERSION=2.1.281
+ARG CLAUDE_CODE_VERSION=2.1.283
 # --ignore-scripts (kept, deliberately: no arbitrary postinstall runs during the
 # build) skips claude-code's install.cjs, which is what LINKS the platform
 # native binary into the package's bin/. The binary itself ships in the
@@ -312,10 +312,10 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # complete the interactive OAuth flow itself). This enables a self-hosted Hive
 # controller to use its configured agy fallback rung without pretending that
 # generic contributor containers can bootstrap Google login.
-ARG AGY_VERSION=1.2.10
-ARG AGY_BUILD=4751581200121856
-ARG AGY_SHA512_AMD64=e19aef599aaf47a9225e72f2cd420d5f97d6dd974e698685950557ca23a8bda63effe666773178c82912b98e9c197da29829b92e771eb6f66c82236f17864fee
-ARG AGY_SHA512_ARM64=105fee8989456e4cccd444bd34a7294c3315fc8e3bd3d94022e90053532be02a84375546da78758d6dcf2f4955c7d333ccbd4cd6f8b86c18e47667493d35179f
+ARG AGY_VERSION=1.2.11
+ARG AGY_BUILD=6016716732497920
+ARG AGY_SHA512_AMD64=ca12c262343f29a2b87423d1ff1e4244989e936e37fe1f8e56056b0f91cd02f93f133321229ce35c86c2d84b977e919937a3fd9430cfd769a16d6b03ede25081
+ARG AGY_SHA512_ARM64=4fd4f8e1960e000b7803da2365c64a733677f1ed80fedc1c344331978f129171dd1d128e85255a4f2f0d3882cf097b3897cc2704b4faf4d3669f7e3c69cc3012
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64|x86_64) AGY_URL_ARCH=x64; AGY_FILE_ARCH=x64; AGY_SHA512="$AGY_SHA512_AMD64" ;; \
@@ -333,9 +333,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # --- Layer 8.27: OMP CLI (Oh My Pi — backend: omp) ---
 # Mirrored from Dockerfile.contributor so hub agents can launch backend: omp.
 # Downloads are optional like Goose/agy, but checksum mismatches are fatal.
-ARG OMP_VERSION=18.3.0
-ARG OMP_SHA256_AMD64=d2fdaa29affe96e596eb9c78d42f548f1f291df28608631bcc00750a84b94bc3
-ARG OMP_SHA256_ARM64=bdfb9c494e17a2fee1956dae16a010a1953574ce4172c4db8efe06fbe477c637
+ARG OMP_VERSION=18.3.2
+ARG OMP_SHA256_AMD64=8cbbcd4bea7a7b86116a13352f31e3778fd4d93df931036bb1771738b0702534
+ARG OMP_SHA256_ARM64=f56f4775abbf269c481c78799691eaa59a7d69644fa7d592c775e2c65f7b13da
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
   && case "$ARCH" in \
        amd64|x86_64) OMP_ASSET=omp-linux-x64; OMP_SHA256="$OMP_SHA256_AMD64" ;; \
@@ -373,9 +373,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 # credential at $HOME/.config/muse/auth.json seeded by an operator
 # (`muse login` / `muse auth set --api-key-stdin`). The image supplies only the
 # binary, exactly as the agy layer does for Google OAuth.
-ARG MUSE_VERSION=1.3.0-R3401.1
-ARG MUSE_SHA256_AMD64=71b089d055dfe6e4562092bc484896b61bd96fd6ef9fef9da54a14aa174e2a33
-ARG MUSE_SHA256_ARM64=5e5ea2a3de3a3fabdff8982aec9423d20eaa7dad05df37efb4264356d0d2e223
+ARG MUSE_VERSION=1.4.0-R4161.1
+ARG MUSE_SHA256_AMD64=1b68bd4518d53a2aaff063915df4d141b0a205e6d79038299d04e3a14e85a5b9
+ARG MUSE_SHA256_ARM64=38a0e3b7f59825ffc60f7fae65ac9727cf9bbb47fe4e687cc29cede9deb8fabf
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64|x86_64) MUSE_FILE=muse-x86-linux; MUSE_SHA256="$MUSE_SHA256_AMD64" ;; \
@@ -416,10 +416,10 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
 # package.json declares "bin": {"bob": "dist/bob.js"} — npm therefore creates
 # /usr/local/bin/bob directly, matching the binary name the agent launcher
 # invokes (manager.go maps "bob" -> "bob"). No symlink is required.
-ARG BOBSHELL_VERSION=2.0.4
+ARG BOBSHELL_VERSION=2.0.5
 ARG BOBSHELL_BASE_URL=https://s3.us-south.cloud-object-storage.appdomain.cloud/bob-shell
-ARG BOBSHELL_SHA256_AMD64=10de047ffdc23a50f3e1ef69fad3b6313ff6dda0010589a22efe26b24685254b
-ARG BOBSHELL_SHA256_ARM64=10de047ffdc23a50f3e1ef69fad3b6313ff6dda0010589a22efe26b24685254b
+ARG BOBSHELL_SHA256_AMD64=eff232eb1b69f34f984ddd295e6960470058ca922b1c751879c5a8d06199f566
+ARG BOBSHELL_SHA256_ARM64=eff232eb1b69f34f984ddd295e6960470058ca922b1c751879c5a8d06199f566
 # Tolerant of download failure now, like the copilot/codex/goose/pi layers
 # above (issue #5203) — IBM COS (s3.us-south.cloud-object-storage.appdomain.cloud)
 # has gone unreachable for multi-minute windows three times in one day
@@ -672,7 +672,7 @@ RUN (which git && \
 # forwards to the remote LiteLLM endpoint via the Go inference translator.
 # All heavy deps ship manylinux aarch64 wheels, so multi-arch builds work
 # without compilation. || echo matches the Nous/Goose optional-layer convention.
-ARG LITELLM_VERSION=1.96.2
+ARG LITELLM_VERSION=1.102.1
 RUN (python3 -m venv /opt/litellm/venv && \
     /opt/litellm/venv/bin/pip install --no-cache-dir "litellm[proxy]==${LITELLM_VERSION}" && \
     ln -s /opt/litellm/venv/bin/litellm /usr/local/bin/litellm) || \

@@ -285,9 +285,11 @@
     .contact-panel-cell { text-align: left; }
     .contact-panel-cell input, .contact-panel-cell textarea { text-align: left; }
     .access-typeahead { position: relative; flex: 1 1 340px; min-width: 260px; }
-    .access-typeahead-input { width: 100%; box-sizing: border-box; padding: var(--sp-4) var(--sp-5); background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-size: 0.85rem; }
+    .access-typeahead-input { width: 100%; box-sizing: border-box; padding: var(--sp-4) calc(var(--sp-9) + var(--sp-2)) var(--sp-4) var(--sp-5); background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-size: 0.85rem; }
     .access-typeahead-input[aria-expanded="true"] { border-color: var(--hub-dashboard-accent); }
-    .access-typeahead-list { display: none; position: absolute; z-index: 130; left: 0; right: 0; top: calc(100% + 4px); max-height: 260px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow-raised); }
+    .access-typeahead-toggle { position: absolute; top: 1px; right: 1px; width: 36px; height: 36px; border: 0; border-left: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; }
+    .access-typeahead-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--hub-dashboard-accent) 8%, transparent); }
+    .access-typeahead-list { display: none; position: absolute; z-index: 130; left: 0; right: 0; top: calc(100% + 4px); max-height: 300px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow-raised); }
     .access-typeahead-list.open { display: block; }
     .access-typeahead-option { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); cursor: pointer; border-bottom: 1px solid var(--border); }
     .access-typeahead-option:last-child { border-bottom: 0; }
@@ -10106,7 +10108,7 @@
 
     // Number of columns in the admin users table. Panel/expand rows span the
     // full width, so this must track the <th> count in renderUsers.
-    // 10 since the Top Repo column landed.
+    // 10 since the Affiliation column landed.
     var USERS_TABLE_COLSPAN = 10;
     // Rows of the notes textarea. Big enough for a short paragraph without
     // pushing the next user off screen. It is the only free-form prose field,
@@ -10936,12 +10938,26 @@
         ';font-weight:' + meta.weight + ';cursor:help">' + esc(label) + '</span>';
     }
 
-    function topRepoCell(u) {
-      var label = String((u && u.top_repo) || '').trim();
-      if (!label) return '<span class="text-muted">—</span>';
+    function affiliationCell(u) {
+      var affiliation = String((u && u.affiliation) || '').trim();
+      var repo = String((u && u.top_repo) || '').trim();
+      var activity = String((u && u.public_activity) || '').trim();
+      var bio = String((u && u.profile_bio) || '').trim();
+      var location = String((u && u.profile_location) || '').trim();
+      if (!affiliation && !repo && !activity && !bio && !location) return '<span class="text-muted">—</span>';
+      var source = String((u && u.affiliation_source) || '').trim();
+      var tips = [source ? 'Affiliation source: ' + source : 'Likely affiliation from GitHub/GHE profile'];
+      if (activity) tips.push('Public GitHub activity: ' + activity);
+      if (bio) tips.push('Bio: ' + bio);
+      if (location) tips.push('Location: ' + location);
+      var title = tips.join('\n');
+      var primary = affiliation ? '<strong title="' + escAttr(title) + '">' + esc(affiliation) + '</strong>' : '<span class="text-muted">independent</span>';
+      if (!repo && !activity) return primary;
       var href = String((u && u.top_repo_url) || '').trim();
-      if (!href) return '<span class="fs-sm">' + esc(label) + '</span>';
-      return '<a href="' + escAttr(href) + '" target="_blank" class="dash-link" title="Most-engaged repo/org">' + esc(label) + '</a>';
+      var repoHTML = href ? '<a href="' + escAttr(href) + '" target="_blank" class="dash-link" title="Top contributing repo">' + esc(repo) + '</a>' : esc(repo);
+      var detail = repo ? repoHTML : '';
+      if (activity) detail += (detail ? ' · ' : '') + esc(activity);
+      return primary + '<div class="fs-sm text-muted" title="' + escAttr(title) + '">' + detail + '</div>';
     }
 
     /* userTaskActivity sums this user's per-hive leaderboard entries across every
@@ -11169,7 +11185,7 @@
           '<td>' + countryCell(u) + '</td>' +
           '<td>' + statusCell + '</td>' +
           '<td><input type="number" min="0" max="10" value="' + (u.saas_quota || 0) + '" style="width:50px;padding:var(--sp-2);background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--text);text-align:center" onchange="updateUser(\'' + esc(u.github_username) + '\',{saas_quota:parseInt(this.value)||0})"></td>' +
-          '<td>' + topRepoCell(u) + '</td>' +
+          '<td>' + affiliationCell(u) + '</td>' +
           '<td>' + (hiveCount > 0 ? '<a href="#" onclick="toggleAdminExpand(\'' + esc(u.github_username) + '\');return false" style="color:var(--blue);font-size:0.8rem">' + hiveCount + ' hive' + (hiveCount > 1 ? 's' : '') + '</a>' : '<span class="text-muted">0</span>') + '</td>' +
           '<td>' + (isAdmin ? '' : '<button class="hv-btn btn-primary btn-sm" onclick="startImpersonation(\'' + esc(u.github_username) + '\')" title="See the hub exactly as this user does — read-only">View as</button> <button class="hv-btn btn-danger btn-sm" onclick="updateUser(\'' + esc(u.github_username) + '\',{blocked:' + (!u.blocked) + '})" style="padding:3px 10px;background:' + (u.blocked ? 'var(--green)' : 'var(--amber)') + ';color:' + (u.blocked ? '#fff' : '#1a1a1a') + ';border:none;border-radius:var(--r-sm);cursor:pointer;font-size:0.7rem">' + (u.blocked ? 'Unblock' : 'Block') + '</button> <button class="hv-btn btn-danger btn-sm" onclick="deleteUser(\'' + esc(u.github_username) + '\',' + hiveCount + ')">Delete</button>') + '</td>' +
           '</tr>' + renderContactPanelRow(u) + hiveRows;
@@ -11180,7 +11196,7 @@
         // as new companies are entered.
         '<datalist id="contact-company-suggestions">' + companyDatalistOptionsHTML() + '</datalist>' +
         '<table class="hive-table"><thead><tr>' +
-        '<th onclick="sortUsers(\'github_username\')" style="cursor:pointer">User ⇅</th><th onclick="sortUsers(\'created_at\')" style="cursor:pointer">Joined ⇅</th><th onclick="sortUsers(\'last_login\')" style="cursor:pointer">Last Login ⇅</th><th onclick="sortUsers(\'full_name\')" style="cursor:pointer">Contact ⇅</th><th onclick="sortUsers(\'country\')" style="cursor:pointer">Country ⇅</th><th onclick="sortUsers(\'status\')" style="cursor:pointer">Status ⇅</th><th onclick="sortUsers(\'saas_quota\')" style="cursor:pointer">Quota ⇅</th><th onclick="sortUsers(\'top_repo\')">Top Repo ⇅</th><th onclick="sortUsers(\'hiveCount\')" style="cursor:pointer">Hives ⇅</th><th>Actions</th>' +
+        '<th onclick="sortUsers(\'github_username\')" style="cursor:pointer">User ⇅</th><th onclick="sortUsers(\'created_at\')" style="cursor:pointer">Joined ⇅</th><th onclick="sortUsers(\'last_login\')" style="cursor:pointer">Last Login ⇅</th><th onclick="sortUsers(\'full_name\')" style="cursor:pointer">Contact ⇅</th><th onclick="sortUsers(\'country\')" style="cursor:pointer">Country ⇅</th><th onclick="sortUsers(\'status\')" style="cursor:pointer">Status ⇅</th><th onclick="sortUsers(\'saas_quota\')" style="cursor:pointer">Quota ⇅</th><th onclick="sortUsers(\'affiliation\')">AFFILIATION ⇅</th><th onclick="sortUsers(\'hiveCount\')" style="cursor:pointer">Hives ⇅</th><th>Actions</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>';
       // The contact panels are built as raw HTML above; wire their listeners
       // once the rows are actually in the DOM. Inline on* handlers are avoided
@@ -11954,6 +11970,7 @@
               role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="access-user-results"
               aria-activedescendant="" oninput="filterAccessUserDropdown()" onkeydown="accessUserSearchKeydown(event)"
               onfocus="openAccessUserResults()">
+            <button id="access-user-toggle" class="access-typeahead-toggle" type="button" aria-label="Show grantable users" onclick="toggleAccessUserResults()">▾</button>
             <input id="access-username" type="hidden" value="">
             <div id="access-selected-user-chip" class="access-typeahead-chip"></div>
             <div id="access-user-results" class="access-typeahead-list" role="listbox" aria-label="Matching hub users"></div>
@@ -12322,6 +12339,7 @@
     var _accessUserActive = -1;
     var _selectedAccessUser = null;
     var ACCESS_USER_DEBOUNCE_MS = 200;
+    var ACCESS_USER_RESULT_LIMIT = 200;
 
     /* enrichGrantableUserLabels upgrades GitHub rows whose label is still the
        bare login with the profile display name, then re-renders the typeahead
@@ -12451,6 +12469,17 @@
       renderAccessUserOptions(accessUserQuery());
     }
 
+    function toggleAccessUserResults() {
+      var list = document.getElementById('access-user-results');
+      if (list && list.classList.contains('open')) {
+        setAccessTypeaheadOpen(false);
+        return;
+      }
+      var box = document.getElementById('access-user-search');
+      if (box) box.focus();
+      renderAccessUserOptions(accessUserQuery());
+    }
+
     function renderAccessStatus(msg, isError) {
       var list = document.getElementById('access-user-results');
       if (!list) return;
@@ -12490,13 +12519,19 @@
       if (!_accessUsersLoaded) { renderAccessStatus('Searching…'); return; }
       if (!_grantableUsers.length) { renderAccessStatus('No hub users yet — they must sign in to the hub first.'); return; }
       var seen = {};
-      var matches = _grantableUsers.filter(function(e) {
+      var allMatches = _grantableUsers.filter(function(e) {
         if (!e || !e.id || !accessGrantableMatches(e, q)) return false;
         if (seen[accessUserKey(e.id)]) return false;
         seen[accessUserKey(e.id)] = true;
         e.already_role = accessRoleForUser(e.id);
         return true;
-      }).slice(0, 20);
+      }).sort(function(a, b) {
+        var la = String(a.label || a.id || '').toLowerCase();
+        var lb = String(b.label || b.id || '').toLowerCase();
+        if (la !== lb) return la.localeCompare(lb);
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+      var matches = allMatches.slice(0, ACCESS_USER_RESULT_LIMIT);
       var exactExisting = _grantableUsers.some(function(e) { return accessUserKey(e.id) === accessUserKey(q); });
       var exactGranted = !!accessRoleForUser(q);
       if (q && isValidBareGitHubLogin(q) && !exactExisting && !exactGranted) {
@@ -12509,8 +12544,12 @@
       _accessUserResults = matches;
       if (_accessUserActive < 0 || _accessUserActive >= matches.length) _accessUserActive = matches.findIndex(function(e) { return !e.already_role; });
       var selectableCount = matches.filter(function(e) { return !e.already_role; }).length;
-      var status = q ? (matches.length + ' match' + (matches.length === 1 ? '' : 'es') + ' for "' + esc(q) + '"') : (matches.length + ' grantable user' + (matches.length === 1 ? '' : 's'));
+      var hiddenCount = Math.max(0, allMatches.length - ACCESS_USER_RESULT_LIMIT);
+      var status = q
+        ? (allMatches.length + ' match' + (allMatches.length === 1 ? '' : 'es') + ' for "' + esc(q) + '"')
+        : (allMatches.length + ' user' + (allMatches.length === 1 ? '' : 's') + ' — type to filter');
       if (selectableCount !== matches.length) status += ' (' + (matches.length - selectableCount) + ' already granted)';
+      if (hiddenCount > 0) status += ' — showing first ' + ACCESS_USER_RESULT_LIMIT + ', type to narrow ' + hiddenCount + ' more';
       list.innerHTML = '<div class="access-typeahead-status">' + status + '</div>' + matches.map(function(e, i) { return accessResultRow(e, i, q); }).join('');
       setAccessTypeaheadOpen(true);
       updateAccessActiveDescendant();

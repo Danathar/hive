@@ -172,8 +172,10 @@ type GitHubProxy struct {
 	// Enforcement lives HERE rather than in an agent prompt on purpose: a
 	// prompt-only pause has already been observed to fail when an agent's model
 	// changes, and a run-state the operator relies on must not be advisory.
-	pausedMu   sync.RWMutex
-	repoPaused func(repo string) bool
+	pausedMu        sync.RWMutex
+	repoPaused      func(repo string) bool
+	autoMergeMu     sync.RWMutex
+	repoAutoMergeOn func(repo string) bool
 	// agentServesRepo reports whether an agent is scoped to a repo (#6204).
 	// Guarded because the dashboard can re-scope an agent while request
 	// goroutines are reading it.
@@ -494,6 +496,29 @@ func (p *GitHubProxy) repoPauseRefusal(method, path string) (string, bool) {
 	paused := p.repoPaused
 	p.pausedMu.RUnlock()
 	return RepoPauseRefusal(paused, method, path)
+}
+
+// SetRepoAutoMergeEnabledFunc installs the live per-repo auto-merge predicate.
+// The proxy uses it to give flagged repositories their specific deny reason at
+// direct merge endpoints. Passing nil preserves default-on behavior.
+func (p *GitHubProxy) SetRepoAutoMergeEnabledFunc(fn func(repo string) bool) {
+	p.autoMergeMu.Lock()
+	p.repoAutoMergeOn = fn
+	p.autoMergeMu.Unlock()
+}
+
+func (p *GitHubProxy) autoMergeRefusal(method, path string) (string, bool) {
+	p.autoMergeMu.RLock()
+	enabled := p.repoAutoMergeOn
+	p.autoMergeMu.RUnlock()
+	return RepoAutoMergeRefusal(enabled, method, path)
+}
+
+func (p *GitHubProxy) graphQLAutoMergeRefusal(body []byte) (string, bool) {
+	p.autoMergeMu.RLock()
+	enabled := p.repoAutoMergeOn
+	p.autoMergeMu.RUnlock()
+	return GraphQLAutoMergeRefusal(enabled, body)
 }
 
 // SetAgentRepoScopeFunc installs the per-repo agent-scope predicate (#6204).
@@ -940,6 +965,21 @@ func (p *GitHubProxy) identifyAgentFromReq(r *http.Request) string {
 	return p.fallbackAgentName(r)
 }
 
+// IdentifyAgentByUID names the agent behind an http.Server-delivered request
+// from the socket owner's UID ALONE. Unlike identifyAgentFromReq it never
+// falls back to the caller-controlled Proxy-Authorization header, not even
+// under HIVE_PROXY_ADVISORY_OK: see fallbackAgentName for why a self-asserted
+// name is impersonation, and for the loopback services beside the proxy (the
+// Jev decision endpoint, hivecommons/hive#8939) there is no "degraded but
+// functional" mode worth that trade — an unidentified caller is refused.
+// Returns "" when no UID map was loaded or the connection's UID is unmapped.
+func (p *GitHubProxy) IdentifyAgentByUID(r *http.Request) string {
+	if p.uidMap == nil || r == nil {
+		return ""
+	}
+	return p.identifyAgentByUID(r.RemoteAddr)
+}
+
 // identifyAgentFromConn identifies the calling agent for a request read off a
 // raw connection. It MUST be used instead of identifyAgentFromReq on any path
 // where the request came from http.ReadRequest rather than http.Server:
@@ -1180,6 +1220,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 		//
 		// Pause is checked first, so a repo the operator has frozen is refused
 		// as paused even when the agent is also out of scope for it.
+		blockJSON := false
 		if agentName != internalCallerName {
 			if reason, paused := p.repoPauseRefusal(req.Method, req.URL.Path); paused {
 				blocked = true
@@ -1187,6 +1228,10 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 			} else if reason, refused := p.agentRepoScopeRefusal(agentName, req.Method, req.URL.Path); refused {
 				blocked = true
 				blockReason = reason
+			} else if reason, refused := p.autoMergeRefusal(req.Method, req.URL.Path); refused {
+				blocked = true
+				blockReason = reason
+				blockJSON = true
 			}
 		}
 
@@ -1219,8 +1264,13 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 				p.logTimeout("proxy GraphQL request body read timed out", readErr, "agent", agentName, "path", req.URL.Path)
 				return
 			}
+			if reason, refused := p.graphQLAutoMergeRefusal(body); agentName != internalCallerName && refused {
+				blocked = true
+				blockReason = reason
+				blockJSON = true
+			}
 			allowed, isMutation := GraphQLAllowedCaps(autonomyGraphQLMode(agentName, body, mode), caps, body)
-			if !allowed {
+			if !blocked && !allowed {
 				blocked = true
 				if isMutation {
 					blockReason = "graphql mutation"
@@ -1292,15 +1342,25 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 			}
 			p.recordViolation(agentName, req.Method, detail)
 
+			respBody := fmt.Sprintf("⛔ ACMM proxy: %s (%s) blocked %s %s\n", agentName, mode, req.Method, detail)
+			contentType := "text/plain"
+			if blockJSON {
+				contentType = "application/json"
+				payload, _ := json.Marshal(map[string]any{
+					"error":  "repo_auto_merge_disabled",
+					"reason": detail,
+				})
+				respBody = string(payload) + "\n"
+			}
 			resp := &http.Response{
 				StatusCode: http.StatusForbidden,
 				Proto:      "HTTP/1.1",
 				ProtoMajor: 1,
 				ProtoMinor: 1,
 				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("⛔ ACMM proxy: %s (%s) blocked %s %s\n", agentName, mode, req.Method, detail))),
+				Body:       io.NopCloser(strings.NewReader(respBody)),
 			}
-			resp.Header.Set("Content-Type", "text/plain")
+			resp.Header.Set("Content-Type", contentType)
 			resp.Header.Set("X-Hive-Proxy-Blocked", "true")
 			_ = client.SetWriteDeadline(time.Now().Add(httpWriteTimeout))
 			writeErr := resp.Write(client)

@@ -179,8 +179,8 @@ func TestRepoCardHeldPillStructure(t *testing.T) {
 		"const heldIssueKeys = new Set((r.heldIssues || []).map(i => String(i.number)));",
 		"groupedRepoIssues((r.actionableIssues || []).concat(r.heldIssues || [])).map(g => {",
 		"const prPills = groupedRepoPRs(r.openPrs || [], r.heldPrs || []).map(g => {",
-		`<a class="repo-pr-pill${heldClass}${needsHuman ? ' needs-human' : mergeClass}${staleClass}"`,
-		`<a class="repo-issue-pill${bandClass}${heldClass}${staleClass}"`,
+		`<a class="repo-pr-pill repo-pill-main${heldClass}${tintClass}${staleClass}"`,
+		`<a class="repo-issue-pill repo-pill-main${bandClass}${heldClass}${staleClass}"`,
 		// The state chip: ⚠ for the escalation kind of hold, ⏸ otherwise.
 		`<span class="repo-pr-pill needs-human pill-needs-human-badge pill-icon" title="${esc(heldTip)}"`,
 		"holdToggleChip(cardRepo, p, 'pr', held, canToggleHold, heldTip)",

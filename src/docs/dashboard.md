@@ -21,6 +21,10 @@ via YAML tags.
 
 Dashboard UI changes should follow the shared [dashboard design system](dashboard-design-system.md), [dashboard glossary and sidebar IA](dashboard-glossary.md), and [ADR-0018](adr/0018-dashboard-design-tokens.md). The token layer is the theme contract for future user theme/background work and the migration path away from static inline styles; `go test ./pkg/dashboard/... -run StyleRatchet -v` ratchets inline styles and raw CSS values so the debt only goes down.
 
+## Reorder sections
+
+The main dashboard section order is browser-local and display-only. Use the `⠿` grip in each top-level section header to drag a section, or focus the grip and press Space, Up/Down, then Space/Enter to drop; Escape cancels the keyboard move. The order is saved in `localStorage` as `hive.dashboard.layout`, hidden sections keep their slots, the sidebar follows the saved order, and **Reset layout** restores the default v5 order without changing collapse state.
+
 ## Governor card
 
 The dashboard **Governor** card summarizes queue depth, operating mode, budget
@@ -31,8 +35,12 @@ columns from the same aggregation used by the contributor Operations **Most
 effective models** panel: merged PRs, first-pass merge rate, verified-PR run
 rate, failure rate, and completed-without-PR ("nothing to ship") rate. Models
 that meet `HIVE_CONTRIBUTE_EFFECTIVE_MODELS_MIN_PRS` (default `5`) merged PRs
-get rank badges. The default row order is effectiveness rank; operators can
-toggle back to raw PR count without changing the selected window.
+get rank badges. On `/contribute`, Operations-style column headers in Most
+effective models, Rankings, and Fleet controls tier limits are keyboard-clickable
+sort controls; the selected column and direction are saved in browser
+`localStorage`, and a third click restores each card's default live order. The
+default row order is effectiveness rank; operators can toggle back to raw PR
+count without changing the selected window.
 
 ## Hive Chat
 
@@ -93,36 +101,65 @@ ambiguous legacy labels stay held under `hive-pause/<hive-id>` for operator
 review. The card-level `⏸ pause` / `▶ resume` control uses the same permission
 rule.
 
-
 ## Repository card legend, issue bands, and PR bands
 
 The collapsible **Overview** section above Repositories summarizes the same
-client-side issue and PR bands across the current repository view. Its two SVG
-donut charts reuse the repository-card classifiers for actionable plus held
+client-side issue and PR bands across the current repository view. Its SVG
+charts reuse the repository-card classifiers for actionable plus held
 issues/PRs, so their totals match the visible band counters and respect any
-repo filtering without a separate API call.
+repo filtering without a separate API call. Operators can view each Issues or
+PRs panel as a donut, pie, horizontal bar, single 100% stacked bar, line/spark
+trend, or age histogram. Every shape is still driven by the same band slices and
+shared rule tables; hovering a chart element, an Overview legend row, or a
+repository-card band header shows that band's rule from `issueBandSpec` /
+`prBandSpec` in `index.html`, so the three cannot drift. The Issues and PRs
+panels can export the current band slices to UTF-8 CSV from the header, and
+non-empty legend rows include a per-band CSV download; both exports use the
+same ordered slices as the charts, so row counts match the donut legend.
+
+The Overview header's ⚙️ popover stores browser-local chart preferences under
+`hive-overview-charts`: which chart types are in rotation, whether the carousel
+is enabled, the 5-second to 5-minute interval, transition style, duration, and
+the bounded client-side line/spark history. The default remains donut-only with
+the carousel off, a 30-second interval, fade transition, and normal duration.
+Manual arrows and dot indicators are available even when timed rotation is off;
+timed rotation pauses while the panel is hovered or the tab is hidden, and
+reduced-motion users get instant swaps.
 
 The **Repositories** section includes a compact, collapsible pill legend. It is
 stored per browser in `localStorage` and uses the same pill classes as the cards,
-so theme changes update the legend automatically. The legend explains issue
-actionable/held pills, plan chips, hold/release controls, issue state glyphs
-(`⛔`, `❓`, `👤`, `✓`, role badges, stale `🕒`) and PR bands/states (`✓`,
+so theme changes update the legend automatically. The legend lists the issue
+and PR bands (rendered from the shared band table, each with its rule as a
+tooltip), issue held pills, plan chips, hold/release controls, issue state
+glyphs (`⛔`, `❓`, `👤`, `✓`, role badges, stale `🕒`) and PR states (`✓`,
 `◐`, `⚠`, held `⏸`, failing CI `✗ CI`, conflicts `⑂`, stale `🕒`,
 reviewed `💬`, auto-merge `🔀`, agent role badges, and review-class badges
 such as `FIX`).
 
 Actionable issue pills are grouped client-side for display only; enumeration,
-holds, filters, and agent kick behaviour are unchanged. Each issue appears in
-exactly one band, while non-winning states remain as badges on the pill:
+holds, filters, ranking, and agent kick behaviour are unchanged. Bands are
+named after the action the operator should take (or an explicit "nothing
+needed"), not after how the dashboard classified the issue. Each issue appears
+in exactly one band, while non-winning states remain as badges on the pill:
 
-1. **Ready** — no display taxonomy state matched.
-2. **In progress** — assignee set, `claimed`, or `hive/claimed-by-*`.
-3. **Agent-filed** — an `agent/<role>` label; roles render as compact badges.
-4. **Waiting on human** — labels such as `blocked`, `needs-decision`,
-   `2-discussing`, `Epic`, `needs-human`, or `needs-triage`.
-5. **Likely done** — labels such as `hive/already-done`, `hive/covered-by-pr`, and `hive/likely-done`.
+1. **Unclaimed** (`unclaimed`) — no other band matched: nobody is assigned,
+   nothing claimed it, and no human gate applies. This does not by itself mean
+   agents will pick it up.
+2. **Claimed** (`claimed`) — assignee set, `claimed`, or `hive/claimed-by-*`.
+3. **Needs triage** (`triage`) — an `agent/<role>` label and no human has
+   acknowledged the proposal under #5117: no `approved-direction` label and no
+   human assignee (the snapshot's `human_acknowledged`; a human *comment* only
+   satisfies the PR-time gate and is not in the payload). Acknowledge it, or
+   close it. Once acknowledged the issue falls through to Unclaimed/Claimed
+   with the role badge still on the pill.
+4. **Needs human** (`needs human`) — labels such as `blocked`, `needs-decision`,
+   `2-discussing`, `Epic`, `needs-human`, or `needs-triage`. Note that the
+   `needs-triage` *label* lands here, not in the Needs triage band.
+5. **Confirm & close** (`close?`) — labels such as `hive/already-done`,
+   `hive/covered-by-pr`, and `hive/likely-done`: an agent believes the work
+   landed; verify and close.
 
-Precedence is likely done → waiting on human → in progress → agent-filed → ready,
+Precedence is confirm & close → needs human → claimed → needs triage → unclaimed,
 so a human gate beats an assignment and done beats all other display states.
 Within each band, issues sort by `updated_at` oldest first. The issue breakdown
 also shows `N no activity > 14d` for actionable issues older than the stale
@@ -147,17 +184,18 @@ PR pills are also grouped client-side for display only. Open and held PRs appear
 in exactly one band; held PRs are no longer appended after the actionable list.
 First match wins for classification:
 
-1. **Waiting on human** — `needs-human`, held, `needs-decision`,
+1. **Needs human** — `needs-human`, held, `needs-decision`,
    `2-discussing`, or configured `dashboard.issue_bands.waiting_labels`.
 2. **Merge-eligible** — merge verdict `eligible`, or queued for Hive
    auto-merge.
 3. **Blocked** — merge verdict `blocked`, conflicts (`mergeable: no`), or
    failing CI with failing check names.
-4. **In review** — merge verdict `outstanding`, or a recorded Hive review link.
+4. **In review** — merge verdict `outstanding`, a recorded Hive review link,
+   or a GitHub review decision (see below).
 5. **Draft** — draft PRs.
 6. **Open** — everything else.
 
-The display order is waiting on human → merge-eligible → blocked → in review →
+The display order is needs human → merge-eligible → blocked → in review →
 open → draft. Within a band, PRs sort by oldest `updated_at`, then review class
 (`fix`, refactor/docs or unknown, `tests`), oldest `created_at`, and PR number.
 The PR snapshot includes `updated_at` specifically so this order can match issue
@@ -169,6 +207,49 @@ queueing.
 ## Linked PR issue signals
 
 Repository issue pills can show a `🔗 #N` badge when Hive has verified a pull request related to that issue. Open PRs apply `hive/covered-by-pr`; merged PRs on still-open issues apply `hive/likely-done` and render as `🔗 #N merged`. These are pending signals, not resolution: the issue remains in the actionable list until GitHub closes it, GitHub reports the PR in `closingIssuesReferences`, or an operator confirms coverage. The status payload exposes the same evidence as `linked_prs: [{number, state, merged, url, closing}]` on each `github.Issue`.
+
+## PR review and link signals
+
+PR pills also carry GitHub's own review state and conversation evidence
+([#8968](https://github.com/hivecommons/hive/issues/8968)). Every field is
+display-only: no enumeration, review, hold, or merge gate reads any of them.
+
+- **Review decision.** `protection.review_decision` (`APPROVED`,
+  `CHANGES_REQUESTED`, `REVIEW_REQUIRED`), with `protection.approvals_given`
+  and `protection.changes_requested_by`, comes from the one-per-repository
+  GraphQL query the sweep already runs for branch-protection facts
+  (`protectionCollector`, `pkg/github/protection_facts.go`). The pill shows
+  👍 approved, 👎 changes requested (tooltip names the reviewers), or 👀
+  review required. GitHub reports a null decision on a base branch that
+  requires no review; the decision then stays unknown — it is never inferred
+  — and the reviewer opinions GitHub did return are shown as opinions
+  ("2 approvals on GitHub — no review decision", "changes requested by @x —
+  no review decision from GitHub"). Any decision or opinion places the PR in
+  the **In review** band unless a higher band already claimed it.
+- **Requested reviewers and teams.** `requested_reviewers` (logins) and
+  `requested_teams` (slugs) come from the list payload at enumeration time —
+  no additional request — on actionable, held, and stale-draft PRs alike. The
+  pill shows 👥; the tooltip lists them.
+- **Conversation volume.** `comment_count` and `review_thread_count` are
+  GitHub totals (`totalCount` only, no thread nodes) added to the same
+  per-repository GraphQL request as the review decision, so they cost
+  response size rather than an additional request. The pill shows `🗨 N`
+  with the sum; the tooltip splits comments from review threads. Nothing is
+  shown when both are zero.
+- **Linked issues.** `linked_issues: [{number, repo, state, url}]` are the
+  first 20 `closingIssuesReferences` GitHub reports for the PR, from that
+  same request. The pill's action cluster shows a `🔗` badge that opens the
+  first still-open one (else the first); the tooltip lists all. This is the
+  PR-side mirror of the issue column's `linked_prs` badge, and like it comes
+  only from the snapshot — the card never infers or fetches relationships.
+
+The extended request is tried first; a forge that rejects one of the added
+fields (an older GHE) is asked the decision-only query instead, so the review
+decision the merge-block wording depends on is never lost to a display
+field. Stale drafts, which `EnrichCIStatus` never touches, receive these
+signals through `EnrichReviewSignals` — the same per-repository query and no
+per-PR mergeability or check-run fetch, since a draft is not a merge
+candidate.
 
 
 ## Appearance themes

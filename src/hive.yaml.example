@@ -64,6 +64,8 @@ project:
 #   repo_policies:
 #     - repo: console
 #       self_authorization_hold: false
+#     - repo: sensitive-repo
+#       auto_merge: false  # PRs may be opened, but Hive will not merge them.
   # Optional: how the issues and PRs your agents file should read. Rendered as
   # ${WRITING_GUIDE} in every default policy that files an issue or PR, right
   # before the body template the agent fills in — next to the template, which
@@ -106,6 +108,7 @@ agents:
     backend: claude                       # claude | copilot | gemini | goose | bob | pi | codex | aider | vllm | llm-d | litellm | watsonx
     model: claude-sonnet-4-6
     # caveman_mode: lite                  # optional, experimental: lite | full | ultra | wenyan; omit to disable
+    # jev_mode: assist                    # optional: give the agent the Jev typed-decision tool (off | assist); omit to disable
     beads_dir: /data/beads/scanner
     # replicas: 3                         # Optional pool: scanner, scanner-2, scanner-3 (max 5)
     clear_on_kick: true                   # Send /clear before each kick to reset context

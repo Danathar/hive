@@ -59,6 +59,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/theme.css", s.handleThemeCSS)
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	s.mux.HandleFunc("GET /api/config/download", s.handleConfigDownload)
+	s.mux.HandleFunc("GET /api/config/export", s.handleConfigExport)
+	s.mux.HandleFunc("GET /api/config/export.json", s.handleConfigExport)
 	s.mux.HandleFunc("GET /api/config/provenance", s.handleConfigProvenance)
 	s.mux.HandleFunc("GET /api/config/variables", s.handleVariablesList)
 	s.mux.HandleFunc("GET /api/config/authorized-users", s.handleAuthorizedUsersList)
@@ -308,6 +310,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// cannot live in a single {repo} path value.
 	s.mux.HandleFunc("POST /api/repos/pause", s.handleRepoPause)
 	s.mux.HandleFunc("POST /api/repos/resume", s.handleRepoResume)
+	s.mux.HandleFunc("POST /api/repos/auto-merge", s.handleRepoAutoMerge)
 	s.mux.HandleFunc("GET /api/repos/pauses", s.handleRepoPauses)
 	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/hold-permission", s.handleRepoHoldPermission)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/hold", s.handleRepoItemHold)
@@ -3620,6 +3623,10 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 		includeRepos = *agentCfg.IncludeRepos
 	}
 
+	// general.jevReady tells the settings panel whether the Jev toggle can be
+	// turned on: a Jev key (JEV_API_KEY or the connected OpenRouter gateway)
+	// must resolve first, else the toggle renders disabled with a hint
+	// (hivecommons/hive#8939). The flag only — never the key itself.
 	jsonResponse(w, map[string]interface{}{
 		"general": map[string]interface{}{
 			"enabled":          agentCfg.Enabled,
@@ -3654,6 +3661,8 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 			"detectKeywords":   agentCfg.DetectKeywords,
 			"aliases":          agentCfg.Aliases,
 			"cavemanMode":      agentCfg.CavemanMode,
+			"jevMode":          agentCfg.JevMode,
+			"jevReady":         s.deps.Config.JevReady(),
 			"explainMode":      agentCfg.ExplainMode,
 			"sandboxEnabled":   agentCfg.Sandbox != nil && agentCfg.Sandbox.Enabled != nil && *agentCfg.Sandbox.Enabled,
 			"sandboxEffective": agentCfg.SandboxEnabled(s.deps.Config.AgentSandbox),
@@ -4357,6 +4366,24 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			agentCfg.CavemanMode = s
 		}
 	}
+	// jev_mode is applied at launch (skill install + HIVE_JEV_MODE env in
+	// launchInTmux), so a change here restarts the agent below, the same way
+	// model/backend do — otherwise the running CLI keeps neither the skill nor
+	// the env until something else relaunches it (hivecommons/hive#8939).
+	jevModeChanged := false
+	if v, ok := body["jevMode"]; ok {
+		if s, ok := v.(string); ok {
+			s = sanitizeString(s)
+			// Same gate as config.Validate, so the write path cannot persist a
+			// value that would fail the next config load.
+			if !config.ValidateJevMode(s) {
+				jsonError(w, "jev_mode must be one of: off, assist (or empty to disable)", http.StatusBadRequest)
+				return
+			}
+			jevModeChanged = agentCfg.JevEnabled() != (config.AgentConfig{JevMode: s}).JevEnabled()
+			agentCfg.JevMode = s
+		}
+	}
 	if v, ok := body["explainMode"]; ok {
 		if s, ok := v.(string); ok {
 			s = sanitizeString(s)
@@ -4530,9 +4557,9 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			s.logger.Warn("failed to apply backend from config dialog", "agent", name, "error", err)
 		}
 	}
-	if modelChanged || backendChanged {
+	if modelChanged || backendChanged || jevModeChanged {
 		if err := s.deps.AgentMgr.Restart(s.deps.Ctx, name); err != nil {
-			s.logger.Warn("restart after config-dialog model/backend change failed", "agent", name, "error", err)
+			s.logger.Warn("restart after config-dialog model/backend/jev_mode change failed", "agent", name, "error", err)
 		}
 	}
 
@@ -6536,10 +6563,6 @@ func (s *Server) handleHiveIDSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	if !config.RoleAtLeast(r.Header.Get("X-Hive-Role"), config.RoleReadWrite) {
-		jsonError(w, "read-write access required", http.StatusForbidden)
-		return
-	}
 	var body struct {
 		Query   string `json:"query"`
 		History []any  `json:"history"`
@@ -6560,7 +6583,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if answer, ok := s.chatLocalIntentAnswer(safeQuery); ok {
+	if answer, ok := s.chatLocalIntentAnswerFor(r, safeQuery); ok {
 		jsonResponse(w, map[string]interface{}{
 			"answer": answer,
 			"status": "ok",
@@ -6596,6 +6619,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !config.RoleAtLeast(r.Header.Get("X-Hive-Role"), config.RoleReadWrite) {
+		jsonError(w, "read-write access required", http.StatusForbidden)
+		return
+	}
+
 	if s.deps == nil || s.deps.DashboardChatSubmit == nil {
 		jsonError(w, "dashboard chat is not configured", http.StatusServiceUnavailable)
 		return
@@ -6604,34 +6632,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
-	}
-
-	if answer, ok := s.chatLocalIntentAnswer(body.Query); ok {
-		jsonResponse(w, map[string]interface{}{
-			"answer": answer,
-			"status": "ok",
-		})
-		return
-	}
-
-	if s.deps != nil && s.deps.ChatResponder != nil {
-		answer, err := s.deps.ChatResponder(r.Context(), body.Query, body.History)
-		if err != nil {
-			msg := "The configured chat responder is unavailable: " + strings.TrimSpace(err.Error())
-			jsonResponse(w, map[string]interface{}{
-				"answer": msg,
-				"error":  msg,
-				"status": "responder_unavailable",
-			})
-			return
-		}
-		if strings.TrimSpace(answer) != "" {
-			jsonResponse(w, map[string]interface{}{
-				"answer": answer,
-				"status": "ok",
-			})
-			return
-		}
 	}
 
 	jsonResponse(w, map[string]interface{}{
@@ -6671,6 +6671,71 @@ func chatIntentTokens(query string) map[string]bool {
 		tokens[field] = true
 	}
 	return tokens
+}
+
+// chatLocalIntentAnswerFor answers intents that need the caller's identity
+// (presence) before falling back to the identity-free local intents.
+func (s *Server) chatLocalIntentAnswerFor(r *http.Request, query string) (string, bool) {
+	// Explicit slash/bang commands (v6 chat spine) win over the softer presence
+	// intent so `/jam who is online?` keeps its command answer.
+	if answer, ok := s.chatCommandHintAnswer(strings.TrimSpace(query)); ok {
+		return answer, true
+	}
+	tokens := chatIntentTokens(query)
+	if chatPresenceIntent(tokens) {
+		return s.chatPresenceAnswer(chatViewer(s, r)), true
+	}
+	return s.chatLocalIntentAnswer(query)
+}
+
+// chatPresenceIntent is true for `/jam who is online?`-style questions: the
+// jam scope prefix, or an explicit online/presence word alongside "who".
+func chatPresenceIntent(tokens map[string]bool) bool {
+	if tokens["jam"] || tokens["presence"] || tokens["online"] {
+		return true
+	}
+	return tokens["who"] && (tokens["here"] || tokens["active"] || tokens["idle"] || tokens["free"] || tokens["around"])
+}
+
+func chatViewer(s *Server, r *http.Request) string {
+	viewer := strings.TrimSpace(r.Header.Get("X-Hive-User"))
+	if sess := s.sessionFromRequest(r); sess != nil {
+		viewer = strings.TrimSpace(sess.Username)
+	}
+	return viewer
+}
+
+func (s *Server) chatPresenceAnswer(viewer string) string {
+	if viewer == "" {
+		return "No authenticated users are visible. Local dashboards report only `local`. Use `/who` after signing in to see the live roster."
+	}
+	users := s.presenceRoster(viewer)
+	if len(users) == 0 {
+		return "Nobody is online in this hive right now."
+	}
+	active := 0
+	lines := make([]string, 0, len(users))
+	for _, u := range users {
+		name := u.DisplayName
+		if name == "" {
+			name = u.Username
+		}
+		marker, state := "⚪", "idle"
+		if u.Active {
+			marker, state = "🟢", "active"
+			active++
+		}
+		line := fmt.Sprintf("%s **%s**", marker, name)
+		if u.You {
+			line += " (you)"
+		}
+		line += " — " + state
+		if u.LastAction != "" {
+			line += ", last action " + u.LastAction
+		}
+		lines = append(lines, line)
+	}
+	return fmt.Sprintf("%d online (%d active, %d idle):\n%s", len(users), active, len(users)-active, strings.Join(lines, "\n"))
 }
 
 func (s *Server) chatLocalIntentAnswer(query string) (string, bool) {
