@@ -432,6 +432,10 @@ Toggle it per agent from `hive.yaml`, the agent's General settings panel
 assist`. The dashboard select stays disabled with a hint until the hive can
 resolve a Jev key (`JEV_API_KEY`, or an OpenRouter gateway connected under
 Settings → Governor → Model Gateways).
+Because the skill and env are applied at launch, saving a change of
+`jev_mode` from the dashboard or `hivectl` restarts the agent (as a model or
+backend change does); editing `hive.yaml` by hand takes effect on the agent's
+next start.
 
 What turning it on does:
 
@@ -451,9 +455,14 @@ What turning it on does:
   none for it).
 - **Proxying.** The CLI only ever talks to the hive's loopback decision
   endpoint (`127.0.0.1:18446`). The hive identifies the caller from the
-  socket UID (the same unforgeable check the egress proxy uses), refuses any
+  socket UID **only** (the unforgeable half of the egress proxy's check — the
+  self-asserted `Proxy-Authorization` fallback the proxy allows under
+  `HIVE_PROXY_ADVISORY_OK` is deliberately not honoured here), refuses any
   agent whose live `jev_mode` is not `assist`, attaches the Jev key, and
-  forwards to the provider. Agents never see the key.
+  forwards to the provider. Agents never see the key. Consequence: Jev
+  requires per-agent UID isolation (the entrypoint's `uid-map.json`); on a
+  shared-UID or advisory-only deployment every call is refused as
+  unidentified.
 - **Budget and audit.** Input tokens are recorded against the agent through
   the same inference token sink the governor budget reads, and every call is
   written to the audit log as `jev_decision` with `question_type`,

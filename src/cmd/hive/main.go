@@ -4179,7 +4179,7 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 		if deps.startJev != nil {
 			cfg := b.cfg
 			deps.startJev(&jev.Server{
-				Identify: b.githubProxy.IdentifyAgent,
+				Identify: b.githubProxy.IdentifyAgentByUID,
 				Enabled:  cfg.JevAssistEnabled,
 				Key:      cfg.ResolveJevAPIKey,
 				Timeout:  cfg.Jev.EffectiveTimeout(),

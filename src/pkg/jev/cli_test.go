@@ -42,10 +42,9 @@ func TestRun_UsageErrors(t *testing.T) {
 
 // TestRun_DecideRoundTrip drives the real CLI against a fake decision endpoint:
 // the request carries the parsed flags (option descriptions, levels, stdin
-// state, advisory identity header), and the endpoint's JSON is printed as-is.
+// state, no identity header), and the endpoint's JSON is printed as-is.
 func TestRun_DecideRoundTrip(t *testing.T) {
 	t.Setenv(ModeEnvVar, "assist")
-	t.Setenv(agentEnvVar, "scanner")
 	var got Request
 	var gotAuth string
 	ep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,8 +67,8 @@ func TestRun_DecideRoundTrip(t *testing.T) {
 	if got.Type != TypeScore || len(got.Levels) != 2 || string(got.State) != `{"diff":"x"}` {
 		t.Errorf("request = %+v", got)
 	}
-	if gotAuth != "hive scanner" {
-		t.Errorf("Proxy-Authorization = %q", gotAuth)
+	if gotAuth != "" {
+		t.Errorf("CLI must not assert an identity header (UID is the only identity): %q", gotAuth)
 	}
 	var res Result
 	if err := json.Unmarshal(out.Bytes(), &res); err != nil || res.Answer != "1.5" || res.InputTokens != 9 {

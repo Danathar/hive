@@ -96,3 +96,40 @@ func TestAgentConfigGet_JevReadiness(t *testing.T) {
 		t.Errorf("with key: jevReady = %v", g["jevReady"])
 	}
 }
+
+// TestAgentConfigGeneral_JevModeChangeRestarts: jev_mode is applied at launch
+// (skill + HIVE_JEV_MODE), so flipping it from the dialog must restart the
+// agent like a model/backend change does; re-saving the same effective value
+// (assist→assist, ""→off) must not.
+func TestAgentConfigGeneral_JevModeChangeRestarts(t *testing.T) {
+	s := acfgServer(t)
+	restarts := func() int {
+		st, err := s.deps.AgentMgr.GetStatus("scanner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.RestartCount
+	}
+	put := func(mode string) {
+		if rec := doPut(s, "/api/config/agent/scanner/general", map[string]any{"jevMode": mode}); rec.Code != http.StatusOK {
+			t.Fatalf("jevMode=%q: %d %s", mode, rec.Code, rec.Body.String())
+		}
+	}
+	base := restarts()
+	put("off") // "" → off: same effective state, no restart
+	if got := restarts(); got != base {
+		t.Fatalf("\"\"→off restarted (%d→%d)", base, got)
+	}
+	put("assist")
+	if got := restarts(); got != base+1 {
+		t.Fatalf("off→assist must restart once (%d→%d)", base, got)
+	}
+	put("assist")
+	if got := restarts(); got != base+1 {
+		t.Fatalf("assist→assist must not restart (%d→%d)", base+1, got)
+	}
+	put("")
+	if got := restarts(); got != base+2 {
+		t.Fatalf("assist→\"\" must restart once (%d→%d)", base+1, got)
+	}
+}

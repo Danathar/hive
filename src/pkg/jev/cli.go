@@ -22,11 +22,7 @@ const (
 	ModeEnvVar = "HIVE_JEV_MODE"
 	// EndpointEnvVar carries the decision endpoint base URL.
 	EndpointEnvVar = "HIVE_JEV_ENDPOINT"
-	// agentEnvVar is the agent's own name, used only for the advisory-mode
-	// identity fallback the proxy already accepts (HIVE_PROXY_ADVISORY_OK).
-	agentEnvVar = "HIVE_AGENT"
-
-	Subcommand = "jev"
+	Subcommand     = "jev"
 )
 
 const cliUsage = `usage: hive jev decide --type <choice|score|probability> --question <text>
@@ -188,10 +184,9 @@ func callEndpoint(endpoint string, req Request, timeout time.Duration) (Result, 
 	if err != nil {
 		return Result{}, err
 	}
+	// No identity header on purpose: the hive names the caller from the
+	// socket UID and nothing else, so a claimed name would be ignored at best.
 	hreq.Header.Set("Content-Type", "application/json")
-	if agent := strings.TrimSpace(os.Getenv(agentEnvVar)); agent != "" {
-		hreq.Header.Set("Proxy-Authorization", "hive "+agent)
-	}
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
 	resp, err := client.Do(hreq)
 	if err != nil {

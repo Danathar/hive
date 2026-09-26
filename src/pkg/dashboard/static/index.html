@@ -23421,7 +23421,7 @@ function burnAreaChart() {
           </select>
         </div>
         <div class="config-field">
-          <label>Jev Mode <span class="config-info">i<span class="config-tooltip">Give this agent the jev_decide tool: quick yes/no, pick-one and rubric-score judgments answered by Jev, TypeSafe AI's cheap confidence-scored typed-decision model, instead of frontier-model reasoning. Calls go through the hive (the agent never sees the key), count against the token budget and are written to the audit log. Requires JEV_API_KEY or a connected OpenRouter gateway. Leave disabled to install nothing and make no Jev calls.</span></span></label>
+          <label>Jev Mode <span class="config-info">i<span class="config-tooltip">Give this agent the jev_decide tool: quick yes/no, pick-one and rubric-score judgments answered by Jev, TypeSafe AI's cheap confidence-scored typed-decision model, instead of frontier-model reasoning. Calls go through the hive (the agent never sees the key), count against the token budget and are written to the audit log. Requires JEV_API_KEY or a connected OpenRouter gateway, and per-agent UID isolation (the endpoint identifies callers by socket UID only). Saving a change restarts the agent so the skill and env apply. Leave disabled to install nothing and make no Jev calls.</span></span></label>
           <select id="cfg-jev-mode" data-change-action="markDirty" data-arg0="general" data-arg1="jevMode" data-arg-types="s,s,v" ${g.jevReady ? '' : 'disabled'}>
             ${JEV_MODES.map(m => `<option value="${m.value}" ${(g.jevMode || '') === m.value ? 'selected' : ''}>${m.label}</option>`).join('')}
           </select>

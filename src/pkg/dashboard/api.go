@@ -4335,6 +4335,11 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			agentCfg.CavemanMode = s
 		}
 	}
+	// jev_mode is applied at launch (skill install + HIVE_JEV_MODE env in
+	// launchInTmux), so a change here restarts the agent below, the same way
+	// model/backend do — otherwise the running CLI keeps neither the skill nor
+	// the env until something else relaunches it (hivecommons/hive#8939).
+	jevModeChanged := false
 	if v, ok := body["jevMode"]; ok {
 		if s, ok := v.(string); ok {
 			s = sanitizeString(s)
@@ -4344,6 +4349,7 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 				jsonError(w, "jev_mode must be one of: off, assist (or empty to disable)", http.StatusBadRequest)
 				return
 			}
+			jevModeChanged = agentCfg.JevEnabled() != (config.AgentConfig{JevMode: s}).JevEnabled()
 			agentCfg.JevMode = s
 		}
 	}
@@ -4520,9 +4526,9 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			s.logger.Warn("failed to apply backend from config dialog", "agent", name, "error", err)
 		}
 	}
-	if modelChanged || backendChanged {
+	if modelChanged || backendChanged || jevModeChanged {
 		if err := s.deps.AgentMgr.Restart(s.deps.Ctx, name); err != nil {
-			s.logger.Warn("restart after config-dialog model/backend change failed", "agent", name, "error", err)
+			s.logger.Warn("restart after config-dialog model/backend/jev_mode change failed", "agent", name, "error", err)
 		}
 	}
 
