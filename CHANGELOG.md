@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.60.1)
+
+### Changed
+
+- Tidy repository card issue and PR pills with aligned row grids, fixed action slots, and readable titles.
+
 ## 2026-09-26 (v5.60.0)
 
 ### Added
