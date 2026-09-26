@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.67.0)
+
+### Added
+
+- Added Overview CSV exports for issue and PR band summaries, including per-band downloads from each legend row.
+
 ## 2026-09-26 (v5.66.1)
 
 ### Fixed
