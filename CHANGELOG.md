@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-26 (v5.57.2)
+
+### Fixed
+
+- Governor: the advisory digest no longer re-resolves every long-closed advisory bead against GitHub on every eval cycle; closed beads with a persisted `resolved_at` outside the recently-resolved window skip the lookup, and the remaining lookups share one memoized, budgeted resolver per build. This stops the digest from draining the installation rate-limit quota and from pinning the governor loop (stale `/api/status`) under post-reset slow-start pacing.
+
 ## 2026-09-25 (v5.57.1)
 
 ### Fixed
