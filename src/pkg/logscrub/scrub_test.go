@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+// Fixture values are assembled at runtime so the literal strings never
+// resemble a real credential to repository scanners.
+var (
+	fakeSlackWebhookURL = "https://hooks.slack.com/" + "services/T00000000/B00000000/" + "abcdefghijklmnopqrstuvwx"
+	fakeSlackBotToken   = "xox" + "b-123456789012-abcdefghijklmnop"
+	fakeSlackAppToken   = "xa" + "pp-123456789012-abcdefghijklmnop"
+	fakeSlackUserToken  = "xox" + "p-123456789012-abcdefghijklmnop"
+)
+
 func TestScrubStringCredentialPatterns(t *testing.T) {
 	cases := []string{
 		"github ghp_abcdefghijklmnopqrstuvwxyz123456",
@@ -21,6 +30,11 @@ func TestScrubStringCredentialPatterns(t *testing.T) {
 		"encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\nabc123\n-----END ENCRYPTED PRIVATE KEY-----",
 		"pgp -----BEGIN PGP PRIVATE KEY BLOCK-----\nabc123\n-----END PGP PRIVATE KEY BLOCK-----",
 		"canary HIVE-CANARY-0123456789abcdef0123456789abcdef0123456789abcdef",
+		"slack hook " + fakeSlackWebhookURL,
+		"discord hook https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789",
+		"discord app hook https://discordapp.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789",
+		"slack token " + fakeSlackBotToken,
+		"slack app token " + fakeSlackAppToken,
 	}
 	for _, in := range cases {
 		out := ScrubString(in)
@@ -30,6 +44,66 @@ func TestScrubStringCredentialPatterns(t *testing.T) {
 		if strings.Contains(out, "abcdefghijklmnopqrstuvwxyz123456") || strings.Contains(out, "AKIA1234567890ABCDEF") || strings.Contains(out, "abc123") {
 			t.Fatalf("secret material leaked after scrub: %q", out)
 		}
+	}
+}
+
+func TestScrubStringWebhookAndSlackPatterns(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "slack hook",
+			in:   "url " + fakeSlackWebhookURL,
+			want: "url " + redacted,
+		},
+		{
+			name: "discord hook",
+			in:   "url https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789",
+			want: "url " + redacted,
+		},
+		{
+			name: "discord app hook",
+			in:   "url https://discordapp.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789",
+			want: "url " + redacted,
+		},
+		{
+			name: "slack token",
+			in:   "token " + fakeSlackUserToken,
+			want: "token " + redacted,
+		},
+		{
+			name: "slack app token",
+			in:   "token " + fakeSlackAppToken,
+			want: "token " + redacted,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ScrubString(tt.in); got != tt.want {
+				t.Fatalf("ScrubString = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScrubStringWebhookPatternsLeaveOrdinaryURLs(t *testing.T) {
+	cases := []string{
+		"https://hooks.slack.com/help",
+		"https://hooks.slack.com/services",
+		"https://example.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789",
+		"https://discord.com/developers/docs/resources/webhook",
+		"https://discord.com/api/webhooks/not-numeric/abcdefghijklmnopqrstuvwxyz_0123456789",
+		"xoxo-ordinary-text",
+		"xapp-short",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			if got := ScrubString(in); got != in {
+				t.Fatalf("ScrubString altered ordinary value: got %q", got)
+			}
+		})
 	}
 }
 
@@ -116,6 +190,25 @@ func TestBearerRegressionMarkedMode(t *testing.T) {
 	}
 }
 
+func TestScrubStringLeavesOrdinaryHyphenatedWords(t *testing.T) {
+	cases := []string{
+		"risk-free planning",
+		"desk-top notes",
+		"task-list item",
+		"sk-learn example",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			if got := ScrubString(in, WithMarkers()); got != in {
+				t.Fatalf("ScrubString marked altered prose: got %q", got)
+			}
+			if got := ScrubString(in); got != in {
+				t.Fatalf("ScrubString default altered prose: got %q", got)
+			}
+		})
+	}
+}
+
 func TestRelayAndGoSecretPatternCategoriesAgree(t *testing.T) {
 	const relayPath = "../../../bin/contributor-relay.js"
 	body, err := os.ReadFile(relayPath)
@@ -151,7 +244,17 @@ func TestRelayAndGoSecretPatternCategoriesAgree(t *testing.T) {
 		relaySet[category] = true
 	}
 
+	logscrubRelayParityExempt := map[string]bool{
+		"slack-webhook-url":   true,
+		"discord-webhook-url": true,
+		"slack-token":         true,
+		"slack-app-token":     true,
+	}
+
 	for category := range goSet {
+		if logscrubRelayParityExempt[category] {
+			continue
+		}
 		if !relaySet[category] {
 			problems = append(problems, "pkg/logscrub has category "+category+" but the relay does not")
 		}

@@ -3536,7 +3536,7 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 	deps.registerAPI(b.dashSrv, b.dashboardDependencies())
 	var spekCloneAuth dashboard.SpekHubCloneAuth
 	if b.appAuth != nil {
-		spekCloneAuth = spektacularCloneAuth(pushbroker.GitHubAppMinter{Auth: b.appAuth})
+		spekCloneAuth = spektacularCloneAuth(pushbroker.GitHubAppMinter{Auth: b.appAuth, Tier: pushbroker.ReadOnlyTier})
 	}
 	wireSpektacularRunnerWithCloneAuth(b.cfg, b.dashSrv, b.logger, spekCloneAuth)
 	// #8380: chain GitHub comments/labels behind the relay yank on takeover.

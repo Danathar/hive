@@ -1,12 +1,15 @@
 package notify
 
 import (
+	"bytes"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/logscrub"
 )
 
 func TestSendNtfyErrorStatus(t *testing.T) {
@@ -129,6 +132,48 @@ func TestSendDiscordNetworkError(t *testing.T) {
 	n.sendDiscordWebhook("Test", "message")
 }
 
+func TestWebhookSendErrorOmitsRequestPath(t *testing.T) {
+	const hookPath = "/services/T00000000/B00000000/abcdefghijklmnopqrstuvwx"
+	cases := []struct {
+		name    string
+		handler func(*bytes.Buffer) slog.Handler
+	}{
+		{
+			name: "plain",
+			handler: func(buf *bytes.Buffer) slog.Handler {
+				return slog.NewJSONHandler(buf, nil)
+			},
+		},
+		{
+			name: "wrapped",
+			handler: func(buf *bytes.Buffer) slog.Handler {
+				return logscrub.NewHandler(slog.NewJSONHandler(buf, nil))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			n := New(config.NotificationsConfig{
+				Slack: &config.SlackConfig{Webhook: "http://127.0.0.1:1" + hookPath},
+			}, slog.New(tc.handler(&buf)))
+
+			n.sendSlack("Test", "message")
+
+			logged := buf.String()
+			if logged == "" {
+				t.Fatal("expected a send error log line")
+			}
+			if strings.Contains(logged, hookPath) || strings.Contains(logged, "abcdefghijklmnopqrstuvwx") {
+				t.Fatalf("send error log included request path: %s", logged)
+			}
+			if !strings.Contains(logged, `"webhook_host"`) {
+				t.Fatalf("send error log missing redacted host field: %s", logged)
+			}
+		})
+	}
+}
+
 func TestSendNtfyNetworkError(t *testing.T) {
 	n := New(config.NotificationsConfig{
 		Ntfy: &config.NtfyConfig{Server: "http://127.0.0.1:1", Topic: "test"},
@@ -148,3 +193,53 @@ func TestSendWithHiveID(t *testing.T) {
 	n.SetHiveID("my-hive")
 	n.Send("Alert", "body", PriorityDefault)
 }
+
+func TestWebhookNonSuccessStatusLogsHostOnly(t *testing.T) {
+	const hookPath = "/hooks/abcdefghijklmnop"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	n := New(config.NotificationsConfig{
+		Slack:   &config.SlackConfig{Webhook: server.URL + hookPath},
+		Discord: &config.DiscordConfig{Webhook: server.URL + hookPath},
+	}, slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	n.sendSlack("Test", "message")
+	n.sendDiscordWebhook("Test", "message")
+
+	logged := buf.String()
+	for _, want := range []string{"slack send returned status", "discord webhook send returned status", `"status":403`} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("log missing %q: %s", want, logged)
+		}
+	}
+	if strings.Contains(logged, hookPath) {
+		t.Fatalf("log included request path: %s", logged)
+	}
+}
+
+func TestWebhookLogHelpers(t *testing.T) {
+	attrs := webhookLogAttrs("https://hooks.example.test/x/y", errPlain("boom"))
+	if len(attrs) != 4 || attrs[3] != "hooks.example.test" {
+		t.Fatalf("webhookLogAttrs = %v", attrs)
+	}
+	if got := webhookHost("://bad"); got != "[redacted]" {
+		t.Fatalf("webhookHost(invalid) = %q", got)
+	}
+	if got := webhookHost("/relative/only"); got != "[redacted]" {
+		t.Fatalf("webhookHost(no host) = %q", got)
+	}
+	if got := firstNonEmpty("", ""); got != "" {
+		t.Fatalf("firstNonEmpty(empty) = %q", got)
+	}
+	if got := firstNonEmpty("", "b"); got != "b" {
+		t.Fatalf("firstNonEmpty = %q", got)
+	}
+}
+
+type errPlain string
+
+func (e errPlain) Error() string { return string(e) }

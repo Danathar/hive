@@ -304,6 +304,13 @@ func (a *AppAuth) ScopedTokenForRepos(ctx context.Context, tier string, repos []
 			PullRequests: gh.Ptr("write"),
 			Metadata:     gh.Ptr("read"),
 		}
+	case "spektacular-read":
+		perms = &gh.InstallationPermissions{
+			Issues:       gh.Ptr("read"),
+			Contents:     gh.Ptr("read"),
+			PullRequests: gh.Ptr("read"),
+			Metadata:     gh.Ptr("read"),
+		}
 	case "trusted", "merger":
 		perms = &gh.InstallationPermissions{
 			Issues:       gh.Ptr("write"),

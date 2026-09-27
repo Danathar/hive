@@ -412,6 +412,38 @@ func TestGitHubAppMinterScopesTokenToTheSingleRepo(t *testing.T) {
 	}
 }
 
+func TestGitHubAppMinterReadOnlyTierScopesRepoAndPermissions(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"ghs_readonly","expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	auth, err := ghpkg.NewAppAuthFromPEM(1234, 5678, testRSAKeyPEM(t), slog.New(slog.DiscardHandler), srv.URL)
+	if err != nil {
+		t.Fatalf("NewAppAuthFromPEM: %v", err)
+	}
+	token, err := (GitHubAppMinter{Auth: auth, Tier: ReadOnlyTier}).MintPushToken(context.Background(), "hivecommons/hive")
+	if err != nil {
+		t.Fatalf("MintPushToken: %v", err)
+	}
+	if token != "ghs_readonly" {
+		t.Fatalf("token = %q, want the minted token", token)
+	}
+	repos, _ := body["repositories"].([]any)
+	if len(repos) != 1 || repos[0] != "hive" {
+		t.Fatalf("repositories = %v, want exactly [hive]", body["repositories"])
+	}
+	perms, _ := body["permissions"].(map[string]any)
+	for _, key := range []string{"contents", "issues", "metadata", "pull_requests"} {
+		if perms[key] != "read" {
+			t.Fatalf("permissions = %v, want read for %s", perms, key)
+		}
+	}
+}
+
 // A repo string with no owner cannot be narrowed to a single repository, so the
 // minter must leave the scope unrestricted rather than send a bogus name that
 // GitHub would reject.

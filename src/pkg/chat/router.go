@@ -10,6 +10,19 @@ import (
 
 type commandAuthorContextKey struct{}
 
+var ownerOnlyCommands = map[string]struct{}{
+	"kick":          {},
+	"pause":         {},
+	"resume":        {},
+	"standby":       {},
+	"standby-clear": {},
+}
+
+func isOwnerOnlyCommand(cmd string) bool {
+	_, ok := ownerOnlyCommands[cmd]
+	return ok
+}
+
 func (s *Service) registerBuiltinCommands() {
 	s.RegisterCommand("status", func(ctx context.Context, _ string) (string, error) {
 		return s.cmdStatus(ctx)
@@ -101,6 +114,13 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 
 	cmd = resolveAlias(cmd)
 
+	if isOwnerOnlyCommand(cmd) {
+		if err := requireCommandOwner(ctx); err != nil {
+			s.enqueue(err.Error())
+			return
+		}
+	}
+
 	s.mu.RLock()
 	handler, hasCmd := s.commands[cmd]
 	s.mu.RUnlock()
@@ -117,6 +137,11 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 	}
 
 	if s.isValidAgent(cmd) {
+		if err := requireCommandOwner(ctx); err != nil {
+			s.enqueue(err.Error())
+			return
+		}
+
 		subParts := strings.SplitN(args, " ", 2)
 		action := strings.ToLower(subParts[0])
 		action = resolveAlias(action)

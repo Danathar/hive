@@ -926,6 +926,58 @@ func TestHandleChat_RoutesFreeTextToConfiguredResponder(t *testing.T) {
 	}
 }
 
+func TestHandleChat_ScrubsConfiguredResponderAnswer(t *testing.T) {
+	s, deps := apiServer(t)
+	ghToken := "ghp_" + strings.Repeat("a", 36)
+	jwtValue := "eyJ" + strings.Repeat("b", 21) + "." + strings.Repeat("c", 21) + "." + strings.Repeat("d", 21)
+	bearerValue := "Bearer " + strings.Repeat("e", 24)
+	rawValues := []string{ghToken, jwtValue, bearerValue}
+	deps.ChatResponder = func(ctx context.Context, query string, history []any) (string, error) {
+		return strings.Join(rawValues, " "), nil
+	}
+
+	rec := doPost(s, "/api/chat", map[string]interface{}{"query": "what changed?"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	result := decodeJSON(t, rec)
+	answer, _ := result["answer"].(string)
+	for _, raw := range rawValues {
+		if strings.Contains(answer, raw) {
+			t.Fatalf("answer kept raw value: %q", answer)
+		}
+	}
+	if !strings.Contains(answer, "[REDACTED]") {
+		t.Fatalf("answer = %q, want redaction marker", answer)
+	}
+}
+
+func TestHandleChat_ScrubsKickFailureAnswer(t *testing.T) {
+	s, _ := apiServer(t)
+	raw := "Bearer " + strings.Repeat("f", 24)
+	s.statusMu.Lock()
+	s.status = &StatusPayload{
+		Agents: []FrontendAgent{{
+			Name:      "scanner",
+			LastError: "push failed with " + raw,
+		}},
+	}
+	s.statusMu.Unlock()
+
+	rec := doPost(s, "/api/chat", map[string]interface{}{"query": "Show recent kick failures"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	result := decodeJSON(t, rec)
+	answer, _ := result["answer"].(string)
+	if strings.Contains(answer, raw) {
+		t.Fatalf("answer kept raw value: %q", answer)
+	}
+	if !strings.Contains(answer, "[REDACTED]") {
+		t.Fatalf("answer = %q, want redaction marker", answer)
+	}
+}
+
 func TestHandleChat_ConfiguredResponderErrorIsVisible(t *testing.T) {
 	s, deps := apiServer(t)
 	deps.ChatResponder = func(ctx context.Context, query string, history []any) (string, error) {

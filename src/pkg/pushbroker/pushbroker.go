@@ -22,6 +22,7 @@ import (
 const (
 	DefaultRemote = "origin"
 	DefaultTier   = "contributor"
+	ReadOnlyTier  = "spektacular-read"
 )
 
 var DefaultProtectedPaths = []string{

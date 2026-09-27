@@ -3,9 +3,11 @@ package notify
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -141,10 +143,13 @@ func (n *Notifier) sendSlack(title, message string) {
 	}
 	resp, err := n.client.Post(n.cfg.Slack.Webhook, "application/json", bytes.NewReader(body))
 	if err != nil {
-		n.logger.Warn("slack send failed", "error", err)
+		n.logger.Warn("slack send failed", webhookLogAttrs(n.cfg.Slack.Webhook, err)...)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		n.logger.Warn("slack send returned status", "status", resp.StatusCode, "webhook_host", webhookHost(n.cfg.Slack.Webhook))
+	}
 }
 
 // DiscordSuppressEmbeds is the Discord message flag (1<<2, SUPPRESS_EMBEDS)
@@ -168,8 +173,40 @@ func (n *Notifier) sendDiscordWebhook(title, message string) {
 	}
 	resp, err := n.client.Post(n.cfg.Discord.Webhook, "application/json", bytes.NewReader(body))
 	if err != nil {
-		n.logger.Warn("discord webhook send failed", "error", err)
+		n.logger.Warn("discord webhook send failed", webhookLogAttrs(n.cfg.Discord.Webhook, err)...)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		n.logger.Warn("discord webhook send returned status", "status", resp.StatusCode, "webhook_host", webhookHost(n.cfg.Discord.Webhook))
+	}
+}
+
+func webhookLogAttrs(raw string, err error) []any {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return []any{
+			"op", urlErr.Op,
+			"error", urlErr.Err,
+			"webhook_host", webhookHost(firstNonEmpty(urlErr.URL, raw)),
+		}
+	}
+	return []any{"error", err, "webhook_host", webhookHost(raw)}
+}
+
+func webhookHost(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "[redacted]"
+	}
+	return parsed.Host
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

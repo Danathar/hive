@@ -5829,6 +5829,7 @@ test('#5478 redactTokens matches the Go scrubber credential categories', () => {
   const jwt = `eyJ${'a'.repeat(20)}.${'b'.repeat(20)}.${'c'.repeat(20)}`;
   const cases = [
     ['JWT', jwt],
+    ['API key', 'sk-live-ABCDEFGHIJKLMNOPQRSTUVWXYZ'],
     ['AKIA access key', 'AKIA1234567890ABCDEF'],
     ['ASIA access key', 'ASIA1234567890ABCDEF'],
     ['Bearer value', 'Bearer abcdefghijklmnop'],
@@ -5874,7 +5875,7 @@ test('#4267 redactTokens scrubs multiple tokens in one string', () => {
 test('#4267 redactTokens leaves token-free text untouched', () => {
   const relay = loadRelay({});
   try {
-    for (const s of ['plain output', 'ghost_stories are fine', 'ghp_short', 'git push origin main', '']) {
+    for (const s of ['plain output', 'ghost_stories are fine', 'ghp_short', 'git push origin main', 'risk-free planning', 'desk-top notes', 'task-list item', 'sk-learn example', '']) {
       assert.strictEqual(relay.redactTokens(s), s, `must pass through unchanged: ${s}`);
     }
   } finally { teardown(relay); }

@@ -4821,6 +4821,8 @@ type SlackConfig struct {
 	// can inject prompts into the agents. When empty, command handling is
 	// DISABLED (fail closed) — the bot still posts status but accepts no
 	// commands — so an operator must opt in by listing the trusted user IDs.
+	// Entries may be "id" or "id:role"; the first bare entry is treated as
+	// owner and later bare entries are treated as read.
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
@@ -4834,6 +4836,8 @@ type TelegramConfig struct {
 	// can inject prompts into the agents. When empty, command handling is
 	// DISABLED (fail closed) — the bot still posts status but accepts no
 	// commands — so an operator must opt in by listing the trusted user IDs.
+	// Entries may be "id" or "id:role"; the first bare entry is treated as
+	// owner and later bare entries are treated as read.
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
@@ -4848,6 +4852,8 @@ type MatrixConfig struct {
 	// inject prompts into the agents. When empty, command handling is DISABLED
 	// (fail closed) by the chat spine, so an operator must opt in by listing the
 	// trusted MXIDs.
+	// Entries may be "id" or "id:role"; the first bare entry is treated as
+	// owner and later bare entries are treated as read.
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
@@ -4865,6 +4871,8 @@ type MSTeamsConfig struct {
 	// can inject prompts into the agents. When empty, command handling is
 	// DISABLED (fail closed) — the bot still posts status but accepts no commands
 	// — so an operator must opt in by listing the trusted AAD object IDs.
+	// Entries may be "id" or "id:role"; the first bare entry is treated as
+	// owner and later bare entries are treated as read.
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
@@ -4879,6 +4887,8 @@ type DiscordConfig struct {
 	// can inject prompts into the agents. When empty, command handling is
 	// DISABLED (fail closed) — the bot still posts status but accepts no
 	// commands — so an operator must opt in by listing the trusted user IDs.
+	// Entries may be "id" or "id:role"; the first bare entry is treated as
+	// owner and later bare entries are treated as read.
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 

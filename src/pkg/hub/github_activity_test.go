@@ -1,17 +1,26 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+type githubActivityRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn githubActivityRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
+}
 
 func TestReloadGitHubActivityAcceptsHubOnlyConfig(t *testing.T) {
 	t.Setenv("HIVE_HUB_SECRET", "test-secret-not-a-real-credential")
@@ -262,6 +271,88 @@ func TestGitHubActivityPersistsSuccessfulSendBeforeLaterFailure(t *testing.T) {
 	}
 	if firstPosts != 1 {
 		t.Fatalf("first successful event posted %d times, want 1; posted=%#v", firstPosts, posted)
+	}
+}
+
+func TestGitHubActivityFactoryPostOmitsWebhookPath(t *testing.T) {
+	var phase int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/orgs/hivecommons/repos":
+			_, _ = w.Write([]byte(`[{"name":"hive"}]`))
+		case "/repos/hivecommons/hive/issues":
+			labels := `[]`
+			if phase == 1 {
+				labels = `[{"name":"hive/help"}]`
+			}
+			_, _ = w.Write([]byte(`[
+				{"number":10,"title":"factory floor","state":"open","html_url":"https://github.test/hive/10","updated_at":"2026-09-23T02:00:00Z","user":{"login":"alice"},"labels":` + labels + `,"assignees":[]}
+			]`))
+		case "/repos/hivecommons/hive/pulls":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Fatalf("unexpected GitHub API path %s", r.URL.String())
+		}
+	}))
+	defer api.Close()
+
+	webhookURL := "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789"
+	webhookPath := "/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789"
+	var logBuf bytes.Buffer
+	feed := NewGitHubActivityFeed(GitHubActivityOptions{
+		Org:        "hivecommons",
+		APIURL:     api.URL,
+		Token:      "fake-token",
+		WebhookURL: webhookURL,
+		DataDir:    t.TempDir(),
+	}, slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	if _, err := feed.PollOnce(context.Background()); err != nil {
+		t.Fatalf("seed PollOnce: %v", err)
+	}
+
+	phase = 1
+	feed.client = &http.Client{Transport: githubActivityRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "discord.com" {
+			return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: errors.New("dial failed")}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+
+	if _, err := feed.PollOnce(context.Background()); err == nil {
+		t.Fatal("PollOnce succeeded; want factory post failure")
+	} else if strings.Contains(err.Error(), webhookPath) || strings.Contains(err.Error(), "abcdefghijklmnopqrstuvwxyz_0123456789") {
+		t.Fatalf("factory post error included webhook path: %v", err)
+	}
+
+	feed.pollAndLog(context.Background())
+	logged := logBuf.String()
+	if logged == "" {
+		t.Fatal("expected pollAndLog to write a line")
+	}
+	if strings.Contains(logged, webhookPath) || strings.Contains(logged, "abcdefghijklmnopqrstuvwxyz_0123456789") {
+		t.Fatalf("factory post log included webhook path: %s", logged)
+	}
+	if !strings.Contains(logged, "discord.com") {
+		t.Fatalf("factory post log missing host context: %s", logged)
+	}
+}
+
+func TestGitHubActivityFactoryStatusBodyIsScrubbed(t *testing.T) {
+	webhookURL := "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz_0123456789"
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("failed for " + webhookURL))
+	}))
+	defer discord.Close()
+
+	feed := NewGitHubActivityFeed(GitHubActivityOptions{WebhookURL: discord.URL, DataDir: t.TempDir()}, slog.Default())
+	err := feed.postDiscord(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("postDiscord succeeded; want status error")
+	}
+	if strings.Contains(err.Error(), webhookURL) || strings.Contains(err.Error(), "abcdefghijklmnopqrstuvwxyz_0123456789") {
+		t.Fatalf("status error included webhook path: %v", err)
 	}
 }
 

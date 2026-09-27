@@ -356,7 +356,7 @@ func TestCmdAgentAction_Kick(t *testing.T) {
 	b.client = ts.Client()
 	b.SetAgentNames([]string{"scanner"})
 
-	result, err := b.cmdAgentAction(context.Background(), "kick", "scanner fix the build")
+	result, err := b.cmdAgentAction(ownerCommandContext(), "kick", "scanner fix the build")
 	if err != nil {
 		t.Fatalf("cmdAgentAction error: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestCmdAgentAction_KickNoPrompt(t *testing.T) {
 	b.client = ts.Client()
 	b.SetAgentNames([]string{"scanner"})
 
-	result, _ := b.cmdAgentAction(context.Background(), "kick", "scanner")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "kick", "scanner")
 	if !strings.Contains(result, "Kicked scanner") {
 		t.Errorf("expected kick confirmation, got: %q", result)
 	}
@@ -391,7 +391,7 @@ func TestCmdAgentAction_Pause(t *testing.T) {
 	b.client = ts.Client()
 	b.SetAgentNames([]string{"scanner"})
 
-	result, _ := b.cmdAgentAction(context.Background(), "pause", "scanner")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "pause", "scanner")
 	if !strings.Contains(result, "Paused scanner") {
 		t.Errorf("expected pause confirmation, got: %q", result)
 	}
@@ -407,7 +407,7 @@ func TestCmdAgentAction_Resume(t *testing.T) {
 	b.client = ts.Client()
 	b.SetAgentNames([]string{"scanner"})
 
-	result, _ := b.cmdAgentAction(context.Background(), "resume", "scanner")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "resume", "scanner")
 	if !strings.Contains(result, "Resumed scanner") {
 		t.Errorf("expected resume confirmation, got: %q", result)
 	}
@@ -417,7 +417,7 @@ func TestCmdAgentAction_UnknownAgent(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{}, discardLogger())
 	b.SetAgentNames([]string{"scanner"})
 
-	result, _ := b.cmdAgentAction(context.Background(), "kick", "nonexistent")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "kick", "nonexistent")
 	if !strings.Contains(result, "Unknown agent") {
 		t.Errorf("expected unknown agent error, got: %q", result)
 	}
@@ -427,7 +427,7 @@ func TestCmdAgentAction_UnknownAction(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{}, discardLogger())
 	b.SetAgentNames([]string{"scanner"})
 
-	result, _ := b.cmdAgentAction(context.Background(), "badaction", "scanner")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "badaction", "scanner")
 	if !strings.Contains(result, "Unknown action") {
 		t.Errorf("expected unknown action error, got: %q", result)
 	}
@@ -444,7 +444,7 @@ func TestCmdAgentAction_AliasResolution(t *testing.T) {
 	b.SetAgentNames([]string{"scanner"})
 
 	// "sc" is an alias for "scanner"
-	result, _ := b.cmdAgentAction(context.Background(), "kick", "sc")
+	result, _ := b.cmdAgentAction(ownerCommandContext(), "kick", "sc")
 	if !strings.Contains(result, "Kicked scanner") {
 		t.Errorf("expected alias resolution to scanner, got: %q", result)
 	}
@@ -564,7 +564,7 @@ func TestDashboardKick_WithPrompt(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
 	b.client = ts.Client()
 
-	result, err := b.dashboardKick(context.Background(), "scanner", "fix the build")
+	result, err := b.dashboardKick(ownerCommandContext(), "scanner", "fix the build")
 	if err != nil {
 		t.Fatalf("dashboardKick error: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestDashboardKick_WithoutPrompt(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
 	b.client = ts.Client()
 
-	result, _ := b.dashboardKick(context.Background(), "scanner", "")
+	result, _ := b.dashboardKick(ownerCommandContext(), "scanner", "")
 	if !strings.Contains(result, "Kicked scanner") {
 		t.Errorf("expected kick confirmation, got: %q", result)
 	}
@@ -601,7 +601,7 @@ func TestDashboardKick_Error(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
 	b.client = ts.Client()
 
-	result, _ := b.dashboardKick(context.Background(), "scanner", "")
+	result, _ := b.dashboardKick(ownerCommandContext(), "scanner", "")
 	if !strings.Contains(result, "Failed to kick") {
 		t.Errorf("expected failure message, got: %q", result)
 	}
@@ -616,7 +616,7 @@ func TestDashboardPause_Error(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
 	b.client = ts.Client()
 
-	result, _ := b.dashboardPause(context.Background(), "scanner")
+	result, _ := b.dashboardPause(ownerCommandContext(), "scanner")
 	if !strings.Contains(result, "Failed to pause") {
 		t.Errorf("expected failure message, got: %q", result)
 	}
@@ -631,7 +631,7 @@ func TestDashboardResume_Error(t *testing.T) {
 	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
 	b.client = ts.Client()
 
-	result, _ := b.dashboardResume(context.Background(), "scanner")
+	result, _ := b.dashboardResume(ownerCommandContext(), "scanner")
 	if !strings.Contains(result, "Failed to resume") {
 		t.Errorf("expected failure message, got: %q", result)
 	}

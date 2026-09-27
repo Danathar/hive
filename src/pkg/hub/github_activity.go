@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/logscrub"
 )
 
 const (
@@ -687,14 +690,42 @@ func (f *GitHubActivityFeed) postDiscord(ctx context.Context, content string) er
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return err
+		return discordFactoryWebhookError(f.opts.WebhookURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("discord factory webhook returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("discord factory webhook returned status %d: %s", resp.StatusCode, logscrub.ScrubString(strings.TrimSpace(string(body))))
 	}
 	return nil
+}
+
+func discordFactoryWebhookError(raw string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		inner := urlErr.Err
+		for {
+			var nested *url.Error
+			if !errors.As(inner, &nested) {
+				break
+			}
+			inner = nested.Err
+		}
+		errURL := urlErr.URL
+		if errURL == "" {
+			errURL = raw
+		}
+		return fmt.Errorf("discord factory webhook %s to %s: %w", urlErr.Op, activityWebhookHost(errURL), inner)
+	}
+	return fmt.Errorf("discord factory webhook to %s: %w", activityWebhookHost(raw), err)
+}
+
+func activityWebhookHost(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "[redacted]"
+	}
+	return parsed.Host
 }
 
 func activityKey(repo string, number int, event, sha string) string {

@@ -6585,7 +6585,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	if answer, ok := s.chatLocalIntentAnswerFor(r, safeQuery); ok {
 		jsonResponse(w, map[string]interface{}{
-			"answer": answer,
+			"answer": scrubDashboardChatAnswer(answer),
 			"status": "ok",
 		})
 		return
@@ -6594,7 +6594,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if s.deps != nil && s.deps.ChatResponder != nil {
 		answer, err := s.deps.ChatResponder(r.Context(), safeQuery, body.History)
 		if err != nil {
-			msg := "The configured chat responder is unavailable: " + strings.TrimSpace(err.Error())
+			msg := scrubDashboardChatAnswer("The configured chat responder is unavailable: " + strings.TrimSpace(err.Error()))
 			jsonResponse(w, map[string]interface{}{
 				"answer": msg,
 				"error":  msg,
@@ -6604,7 +6604,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.TrimSpace(answer) != "" {
 			jsonResponse(w, map[string]interface{}{
-				"answer": answer,
+				"answer": scrubDashboardChatAnswer(answer),
 				"status": "ok",
 			})
 			return
@@ -6613,7 +6613,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	if !strings.HasPrefix(strings.TrimSpace(safeQuery), "!") {
 		jsonResponse(w, map[string]interface{}{
-			"answer": chatUnhandledIntentAnswer(safeQuery),
+			"answer": scrubDashboardChatAnswer(chatUnhandledIntentAnswer(safeQuery)),
 			"status": "fallback",
 		})
 		return
@@ -6639,6 +6639,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"seq":      seq,
 	})
 	s.auditFromRequest(r, "chat.dashboard.message", auditDetail("seq", strconv.FormatUint(seq, 10)), "")
+}
+
+func scrubDashboardChatAnswer(answer string) string {
+	return redactTokens(answer)
 }
 
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {

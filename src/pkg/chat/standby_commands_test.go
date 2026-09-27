@@ -58,7 +58,7 @@ func TestCmdStandbyDispatch(t *testing.T) {
 
 			s := newTestBot(ts, "ch")
 			s.client = ts.Client()
-			got, err := s.cmdStandbyDispatch(context.Background(), tt.args)
+			got, err := s.cmdStandbyDispatch(ownerCommandContext(), tt.args)
 			if err != nil {
 				t.Fatalf("cmdStandbyDispatch returned error: %v", err)
 			}
@@ -79,7 +79,7 @@ func TestCmdStandbyDispatch(t *testing.T) {
 
 func TestCmdStandbyDispatchUsage(t *testing.T) {
 	s := NewService(&recordingBackend{}, Config{}, discardLogger())
-	got, err := s.cmdStandbyDispatch(context.Background(), "  ")
+	got, err := s.cmdStandbyDispatch(ownerCommandContext(), "  ")
 	if err != nil {
 		t.Fatalf("cmdStandbyDispatch returned error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestCmdStandbyClear(t *testing.T) {
 
 			s := newTestBot(ts, "ch")
 			s.client = ts.Client()
-			got, err := s.cmdStandbyClear(context.Background(), tt.args)
+			got, err := s.cmdStandbyClear(ownerCommandContext(), tt.args)
 			if err != nil {
 				t.Fatalf("cmdStandbyClear returned error: %v", err)
 			}
@@ -167,7 +167,7 @@ func TestCmdStandbyClear(t *testing.T) {
 
 func TestCmdStandbyClearUsage(t *testing.T) {
 	s := NewService(&recordingBackend{}, Config{}, discardLogger())
-	got, err := s.cmdStandbyClear(context.Background(), "alice claude")
+	got, err := s.cmdStandbyClear(ownerCommandContext(), "alice claude")
 	if err != nil {
 		t.Fatalf("cmdStandbyClear returned error: %v", err)
 	}

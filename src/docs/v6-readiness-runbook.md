@@ -17,6 +17,9 @@ Common setup for chat surfaces:
 - Pick an allowlisted human ID for the target surface. The shared command router
   fails closed when `allowed_users` is empty and logs ignored commands from
   non-allowlisted users (`src/pkg/chat/router.go:44-60`).
+- `allowed_users` entries may be `id` or `id:role`; roles are `read`,
+  `read-write`, `merger`, and `owner`. The first bare entry is treated as
+  `owner`, and later bare entries are treated as `read`.
 - For the notification half, create a harmless visible state transition after
   the bot has started, such as pausing and resuming a non-critical agent from
   the dashboard. Valid notifications are the rendered `Working`, `Completed`,

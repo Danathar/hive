@@ -493,9 +493,9 @@ func buildRunDetailStages(run Run, events []timeline.Event, receipts []RunDetail
 			st.Gen = cap.Generation
 		}
 		st.StartedAt, st.EndedAt = firstRunNonEmpty(cap.StartedAt, st.StartedAt), firstRunNonEmpty(cap.EndedAt, st.EndedAt)
-		st.Prompt = cap.Prompt
-		st.AgentTranscript = firstRunTextBlock(cap.AgentTranscript, cap.AgentStdoutStderr)
-		st.AgentOutput = firstRunTextBlock(cap.AgentStdoutStderr, cap.AgentTranscript)
+		st.Prompt = scrubRunDetailTextBlock(cap.Prompt)
+		st.AgentTranscript = firstRunTextBlock(scrubRunDetailTextBlock(cap.AgentTranscript), scrubRunDetailTextBlock(cap.AgentStdoutStderr))
+		st.AgentOutput = firstRunTextBlock(scrubRunDetailTextBlock(cap.AgentStdoutStderr), scrubRunDetailTextBlock(cap.AgentTranscript))
 		st.StatusHistory = append(st.StatusHistory, cap.StatusHistory...)
 		st.Interview = append(st.Interview, cap.Interview...)
 		st.Documents = append(st.Documents, cap.Documents...)
@@ -538,6 +538,15 @@ func (s RunDetailStage) AgentTranscriptText() string {
 	}
 
 	return s.AgentTranscript.Text
+}
+
+func scrubRunDetailTextBlock(block *RunDetailTextBlock) *RunDetailTextBlock {
+	if block == nil {
+		return nil
+	}
+	out := *block
+	out.Text = scrubSpekHubOutput(out.Text)
+	return &out
 }
 
 func firstRunTextBlock(blocks ...*RunDetailTextBlock) *RunDetailTextBlock {
@@ -693,7 +702,7 @@ func transcriptFromPersisted(ev runDetailPersistedEvent) RunDetailTranscript {
 			fields[k] = v
 		}
 	}
-	return RunDetailTranscript{At: ev.TS, Kind: ev.Kind, Label: firstRunNonEmpty(ev.Summary, ev.Kind), Text: ev.Summary, Fields: fields}
+	return RunDetailTranscript{At: ev.TS, Kind: ev.Kind, Label: scrubSpekHubOutput(firstRunNonEmpty(ev.Summary, ev.Kind)), Text: scrubSpekHubOutput(ev.Summary), Fields: fields}
 }
 
 func transcriptFromTaskRun(rec TaskRunRecord) RunDetailTranscript {
@@ -701,7 +710,7 @@ func transcriptFromTaskRun(rec TaskRunRecord) RunDetailTranscript {
 	if text == "" {
 		text = firstRunNonEmpty(rec.VerdictReason, rec.Reason, rec.Scenario)
 	}
-	return RunDetailTranscript{At: rec.TS, Kind: "task_run", Label: rec.Outcome, Text: text, Fields: map[string]any{"task_id": rec.TaskID, "backend": rec.Backend, "model": rec.Model, "outcome": rec.Outcome, "verdict": rec.Verdict, "completion_signal": rec.CompletionSignal, "pr_url": firstRunNonEmpty(rec.ReportedPRURL, rec.PRURL), "pr_verified": rec.PRVerified, "pr_verify_reason": rec.PRVerifyReason}}
+	return RunDetailTranscript{At: rec.TS, Kind: "task_run", Label: scrubSpekHubOutput(rec.Outcome), Text: scrubSpekHubOutput(text), Fields: map[string]any{"task_id": rec.TaskID, "backend": rec.Backend, "model": rec.Model, "outcome": rec.Outcome, "verdict": rec.Verdict, "completion_signal": rec.CompletionSignal, "pr_url": firstRunNonEmpty(rec.ReportedPRURL, rec.PRURL), "pr_verified": rec.PRVerified, "pr_verify_reason": rec.PRVerifyReason}}
 }
 
 func buildRunDetailEvents(events []timeline.Event, persisted []runDetailPersistedEvent, taskRuns []TaskRunRecord) []RunDetailEvent {
@@ -710,10 +719,10 @@ func buildRunDetailEvents(events []timeline.Event, persisted []runDetailPersiste
 		out = append(out, RunDetailEvent{At: formatRunTime(time.UnixMilli(ev.At)), Kind: string(ev.Kind), Stage: eventStage(ev), Gen: eventGen(ev), Actor: ev.Agent, Attrs: ev.Attrs, Source: "timeline"})
 	}
 	for _, ev := range persisted {
-		out = append(out, RunDetailEvent{At: ev.TS, Kind: ev.Kind, Stage: ev.Stage, Gen: ev.Gen, Actor: ev.Actor, Text: ev.Summary, Source: "receipt_event"})
+		out = append(out, RunDetailEvent{At: ev.TS, Kind: ev.Kind, Stage: ev.Stage, Gen: ev.Gen, Actor: ev.Actor, Text: scrubSpekHubOutput(ev.Summary), Source: "receipt_event"})
 	}
 	for _, rec := range taskRuns {
-		out = append(out, RunDetailEvent{At: rec.TS, Kind: "task_run", Stage: StageImplement, Gen: rec.TaskGen, Actor: rec.Username, Text: firstRunNonEmpty(rec.VerdictReason, rec.Reason, rec.Scenario), Source: "task_run_log"})
+		out = append(out, RunDetailEvent{At: rec.TS, Kind: "task_run", Stage: StageImplement, Gen: rec.TaskGen, Actor: rec.Username, Text: scrubSpekHubOutput(firstRunNonEmpty(rec.VerdictReason, rec.Reason, rec.Scenario)), Source: "task_run_log"})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At < out[j].At })
 	return out

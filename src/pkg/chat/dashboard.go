@@ -109,6 +109,9 @@ func (s *Service) cmdStandbyDispatch(ctx context.Context, args string) (string, 
 	if len(fields) == 0 {
 		return "❌ Usage: `!standby <lane> [owner/repo#number]`", nil
 	}
+	if err := requireCommandOwner(ctx); err != nil {
+		return err.Error(), nil
+	}
 	body, err := json.Marshal(map[string]string{"lane": fields[0], "key": func() string {
 		if len(fields) > 1 {
 			return fields[1]
@@ -128,6 +131,9 @@ func (s *Service) cmdStandbyClear(ctx context.Context, args string) (string, err
 	fields := strings.Fields(strings.TrimSpace(args))
 	if len(fields) < 3 {
 		return "❌ Usage: `!standby-clear <contributor> <backend> <model> [effort]`", nil
+	}
+	if err := requireCommandOwner(ctx); err != nil {
+		return err.Error(), nil
 	}
 	payload := map[string]string{
 		"contributor": fields[0],
@@ -173,6 +179,9 @@ func (s *Service) cmdAgentAction(ctx context.Context, action, args string) (stri
 }
 
 func (s *Service) dashboardKick(ctx context.Context, agent, prompt string) (string, error) {
+	if err := requireCommandOwner(ctx); err != nil {
+		return err.Error(), nil
+	}
 	var body []byte
 	if prompt != "" {
 		var err error
@@ -192,6 +201,9 @@ func (s *Service) dashboardKick(ctx context.Context, agent, prompt string) (stri
 }
 
 func (s *Service) dashboardPause(ctx context.Context, agent string) (string, error) {
+	if err := requireCommandOwner(ctx); err != nil {
+		return err.Error(), nil
+	}
 	err := s.dashboardPost(ctx, fmt.Sprintf("/api/pause/%s", agent), nil)
 	if err != nil {
 		return fmt.Sprintf("❌ Failed to pause %s: %s", agent, err), nil
@@ -200,6 +212,9 @@ func (s *Service) dashboardPause(ctx context.Context, agent string) (string, err
 }
 
 func (s *Service) dashboardResume(ctx context.Context, agent string) (string, error) {
+	if err := requireCommandOwner(ctx); err != nil {
+		return err.Error(), nil
+	}
 	err := s.dashboardPost(ctx, fmt.Sprintf("/api/resume/%s", agent), nil)
 	if err != nil {
 		return fmt.Sprintf("❌ Failed to resume %s: %s", agent, err), nil

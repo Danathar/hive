@@ -112,6 +112,12 @@ slack:
   allowed_users: []         # Slack user IDs; EMPTY = commands disabled (fail closed)
 ```
 
+`allowed_users` entries may be `id` or `id:role`; roles match dashboard roles
+(`read`, `read-write`, `merger`, `owner`). For backwards compatibility, the
+first bare entry is treated as `owner` and later bare entries are treated as
+`read`; use explicit `:owner` for every operator who should run owner-only
+commands.
+
 Validation mirrors `DiscordConfig`: enabling without both tokens or the
 channel is a config error; `allowed_users` keeps the F8 contract — an empty
 allowlist means *no one* may command, not everyone. Tokens come from env

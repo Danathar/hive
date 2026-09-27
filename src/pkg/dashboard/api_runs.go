@@ -373,7 +373,7 @@ func (s *Server) handleRunLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(tailTextLines(string(data), tailLines)))
+	_, _ = w.Write([]byte(scrubSpekHubOutput(tailTextLines(string(data), tailLines))))
 }
 
 func (s *Server) runLogPath(key, stage string, gen uint64) (string, error) {

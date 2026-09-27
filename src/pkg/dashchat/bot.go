@@ -96,7 +96,7 @@ func (b *Bot) SendMessage(content string) error              { return b.Send(con
 func (b *backend) Name() string { return "dashboard" }
 
 func (b *backend) Send(content string) error {
-	b.appendOutbox("bot", "", logscrub.ScrubString(content))
+	b.appendOutbox("bot", "", content)
 	return nil
 }
 
@@ -152,7 +152,7 @@ func (b *backend) appendOutbox(role, author, text string) uint64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.next++
-	entry := Outbound{Seq: b.next, Text: text, Role: role, AuthorID: author}
+	entry := Outbound{Seq: b.next, Text: logscrub.ScrubString(text), Role: role, AuthorID: author}
 	if len(b.outbox) == outboxCap {
 		copy(b.outbox, b.outbox[1:])
 		b.outbox[len(b.outbox)-1] = entry

@@ -97,6 +97,10 @@ func makeMsg(id, content string, isBot bool) Message {
 	}
 }
 
+func ownerCommandContext() context.Context {
+	return context.WithValue(context.Background(), commandRoleContextKey{}, "owner")
+}
+
 func TestStart_NilBackendReturnsError(t *testing.T) {
 	s := NewService(nil, Config{}, discardLogger())
 	if err := s.Start(context.Background()); err == nil {

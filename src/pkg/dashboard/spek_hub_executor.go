@@ -16,21 +16,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/logscrub"
 	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
 const (
-	spekHubExecutorTaskPrefix = "run-hub-"
-	spekHubPromptRelPath      = ".hive/spek-stage-prompt.txt"
-	spekHubOutputTailBytes    = 64 * 1024
-	spekHubExecutorTier       = "trusted"
-	spekHubFailureReason      = "hub_executor_failed"
-	spekHubNonFinalReason     = "hub_executor_cli_exited_nonfinal"
-	spekHubLeaseRenewInterval = 5 * time.Minute
+	spekHubExecutorTaskPrefix     = "run-hub-"
+	spekHubPromptRelPath          = ".hive/spek-stage-prompt.txt"
+	spekHubOutputTailBytes        = 64 * 1024
+	spekHubLastErrorMaxBytes      = 2 * 1024
+	spekHubLogPartialLineMaxBytes = 64 * 1024
+	spekHubExecutorTier           = "trusted"
+	spekHubFailureReason          = "hub_executor_failed"
+	spekHubNonFinalReason         = "hub_executor_cli_exited_nonfinal"
+	spekHubLeaseRenewInterval     = 5 * time.Minute
 )
 
 type SpekHubCloneAuth func(ctx context.Context, repo, dir string) (authArgs []string, token string, cleanup func(), err error)
@@ -135,7 +139,7 @@ func (e *SpekHubExecutor) Status() FrontendSpektacularHubExecutor {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return FrontendSpektacularHubExecutor{Running: e.runningLocked(), LastError: e.lastError}
+	return FrontendSpektacularHubExecutor{Running: e.runningLocked(), LastError: spekHubLastErrorSummary(e.lastError)}
 }
 
 func (e *SpekHubExecutor) IsExecuting(runKey, stage string) bool {
@@ -396,6 +400,11 @@ func (e *SpekHubExecutor) runStageCommand(ctx context.Context, worktree string, 
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, 0, err
 	}
+	writeLog := func(out []byte) {
+		if writeErr := os.WriteFile(logPath, out, 0o600); writeErr != nil {
+			e.log().Warn("[spektacular] writing hub executor cli log failed", "path", logPath, "error", writeErr)
+		}
+	}
 	if e.Exec == nil {
 		var buf bytes.Buffer
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -403,6 +412,7 @@ func (e *SpekHubExecutor) runStageCommand(ctx context.Context, worktree string, 
 			return nil, 0, err
 		}
 		defer f.Close()
+		logWriter := newSpekHubScrubWriter(f)
 		c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 		c.Dir = worktree
 		c.Env = env
@@ -411,23 +421,97 @@ func (e *SpekHubExecutor) runStageCommand(ctx context.Context, worktree string, 
 		// the inherited output pipe cannot pin the executor slot forever.
 		spekHubConfigureProcessGroup(c)
 		c.WaitDelay = spekHubWaitDelay
-		w := io.MultiWriter(&buf, f)
+		w := io.MultiWriter(&buf, logWriter)
 		c.Stdout = w
 		c.Stderr = w
 		if err := c.Start(); err != nil {
-			return buf.Bytes(), 0, err
+			closeErr := logWriter.Close()
+			out := []byte(scrubSpekHubOutput(buf.String()))
+			if closeErr != nil {
+				e.log().Warn("[spektacular] flushing hub executor cli log failed", "path", logPath, "error", closeErr)
+			}
+			return out, 0, err
 		}
 		pid := c.Process.Pid
 		e.log().Info("[spektacular] hub executor process started", "run", st.runKey, "stage", st.stage, "gen", st.gen, "worktree", worktree, "pid", pid)
 		e.recordStageProgress(st, "cli_launched", map[string]string{"backend": e.backend(), "pid": strconv.Itoa(pid), "worktree": worktree})
 		err = c.Wait()
-		return buf.Bytes(), pid, err
+		if closeErr := logWriter.Close(); closeErr != nil {
+			e.log().Warn("[spektacular] flushing hub executor cli log failed", "path", logPath, "error", closeErr)
+		}
+		out := []byte(scrubSpekHubOutput(buf.String()))
+		return out, pid, err
 	}
 	out, err := e.runner()(ctx, worktree, env, cmd[0], cmd[1:]...)
-	if writeErr := os.WriteFile(logPath, out, 0o600); writeErr != nil {
-		e.log().Warn("[spektacular] writing hub executor cli log failed", "path", logPath, "error", writeErr)
-	}
+	out = []byte(scrubSpekHubOutput(string(out)))
+	writeLog(out)
 	return out, 0, err
+}
+
+type spekHubScrubWriter struct {
+	dst     io.Writer
+	partial []byte
+}
+
+func newSpekHubScrubWriter(dst io.Writer) *spekHubScrubWriter {
+	return &spekHubScrubWriter{dst: dst}
+}
+
+func (w *spekHubScrubWriter) Write(p []byte) (int, error) {
+	if w == nil || w.dst == nil {
+		return len(p), nil
+	}
+	written := len(p)
+	for len(p) > 0 {
+		if i := bytes.IndexByte(p, '\n'); i >= 0 {
+			w.appendPartial(p[:i+1])
+			if err := w.flushPartial(); err != nil {
+				return written, err
+			}
+			p = p[i+1:]
+			continue
+		}
+		for len(p) > 0 {
+			space := spekHubLogPartialLineMaxBytes - len(w.partial)
+			if space <= 0 {
+				if err := w.flushPartial(); err != nil {
+					return written, err
+				}
+				space = spekHubLogPartialLineMaxBytes
+			}
+			if len(p) <= space {
+				w.appendPartial(p)
+				p = nil
+				break
+			}
+			w.appendPartial(p[:space])
+			p = p[space:]
+			if err := w.flushPartial(); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
+}
+
+func (w *spekHubScrubWriter) Close() error {
+	if w == nil || len(w.partial) == 0 {
+		return nil
+	}
+	return w.flushPartial()
+}
+
+func (w *spekHubScrubWriter) appendPartial(p []byte) {
+	w.partial = append(w.partial, p...)
+}
+
+func (w *spekHubScrubWriter) flushPartial() error {
+	if len(w.partial) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.dst, scrubSpekHubOutput(string(w.partial)))
+	w.partial = w.partial[:0]
+	return err
 }
 
 func (e *SpekHubExecutor) afterCLIExit(ctx context.Context, st spekHubStage, taskID, worktree string, env []string, artifact string, cliOut []byte, started time.Time, history []RunDetailStageStatus, receiptDir string) error {
@@ -575,7 +659,7 @@ func (e *SpekHubExecutor) captureCompletedStage(st spekHubStage, worktree, artif
 	if prompt.Text != "" {
 		capture.Prompt = &prompt
 	}
-	out := textBlock(cliOut, spekStageTranscriptMaxTextBytes)
+	out := textBlock([]byte(scrubSpekHubOutput(string(cliOut))), spekStageTranscriptMaxTextBytes)
 	if out.Text != "" {
 		capture.AgentTranscript = &out
 		capture.AgentStdoutStderr = &out
@@ -791,7 +875,7 @@ func nestedStatusString(raw map[string]any, key, nested string) string {
 func (e *SpekHubExecutor) spekStatus(ctx context.Context, worktree string, env []string, kind, artifact string) (spekHubArtifactStatus, error) {
 	out, err := e.runner()(ctx, worktree, env, "spektacular", kind, "status", artifact)
 	if err != nil {
-		return spekHubArtifactStatus{}, fmt.Errorf("spektacular %s status %s: %w: %s", kind, artifact, err, tailString(string(out), spekHubOutputTailBytes))
+		return spekHubArtifactStatus{}, fmt.Errorf("spektacular %s status %s: %w: %s", kind, artifact, err, tailString(scrubSpekHubOutput(string(out)), spekHubOutputTailBytes))
 	}
 	var st spekHubArtifactStatus
 	if err := json.Unmarshal(bytes.TrimSpace(out), &st); err != nil {
@@ -1041,7 +1125,7 @@ func (e *SpekHubExecutor) executorEnv(appToken string) ([]string, error) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, err
 	}
-	env := filteredSpekEnv(os.Environ(), "HOME", "npm_config_cache", "GH_TOKEN", "GITHUB_TOKEN")
+	env := allowedSpekHubExecutorEnv(os.Environ())
 	env = spekGitEnv(env)
 	env = append(env, "HOME="+home, "npm_config_cache="+filepath.Join(home, ".npm-cache"))
 	creds, err := agent.HeadlessCredentialEnv(e.backend())
@@ -1054,6 +1138,28 @@ func (e *SpekHubExecutor) executorEnv(appToken string) ([]string, error) {
 		env = append(env, "GH_TOKEN="+tok, "GITHUB_TOKEN="+tok)
 	}
 	return env, nil
+}
+
+func allowedSpekHubExecutorEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if spekHubExecutorEnvAllowed(key) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func spekHubExecutorEnvAllowed(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	switch upper {
+	case "PATH", "LANG", "LANGUAGE", "TERM", "TZ", "NPM_CONFIG_CACHE":
+		return true
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+		return true
+	}
+	return strings.HasPrefix(upper, "LC_")
 }
 
 // spekGitEnv marks the executor's own workspace root as a safe git directory.
@@ -1081,13 +1187,14 @@ func filteredSpekEnv(env []string, keys ...string) []string {
 }
 
 func (e *SpekHubExecutor) recordFailure(st spekHubStage, key string, err error) {
+	msg := spekHubLastErrorSummary(err.Error())
 	e.mu.Lock()
 	if e.failures == nil {
 		e.failures = map[string]int{}
 	}
 	e.failures[key]++
 	attempts := e.failures[key]
-	e.lastError = err.Error()
+	e.lastError = msg
 	e.mu.Unlock()
 	attrs := map[string]string{
 		stageAttrRunKey:   st.runKey,
@@ -1097,9 +1204,9 @@ func (e *SpekHubExecutor) recordFailure(st spekHubStage, key string, err error) 
 		stageAttrAttempts: strconv.Itoa(attempts),
 		"waiting_on":      worksource.RunWaitingOnHuman,
 	}
-	e.Server.AgentAuditSink().Record("system", agent.AuditLeaseStageRefused, st.taskID, agent.Fields("run", st.runKey, "stage", st.stage, "gen", st.gen, "reason", spekHubFailureReason, "error", tailString(err.Error(), spekHubOutputTailBytes), "attempts", attempts))
+	e.Server.AgentAuditSink().Record("system", agent.AuditLeaseStageRefused, st.taskID, agent.Fields("run", st.runKey, "stage", st.stage, "gen", st.gen, "reason", spekHubFailureReason, "error", msg, "attempts", attempts))
 	e.Server.LifecycleTimeline().Record(timeline.Event{IssueRef: st.runKey, Kind: timeline.KindBlocked, At: time.Now().UnixMilli(), Attrs: attrs})
-	e.log().Warn("[spektacular] hub executor failed", "run", st.runKey, "stage", st.stage, "attempts", attempts, "error", err)
+	e.log().Warn("[spektacular] hub executor failed", "run", st.runKey, "stage", st.stage, "attempts", attempts, "error", msg)
 }
 
 func (e *SpekHubExecutor) unclaimedStages() ([]spekHubStage, error) {
@@ -1175,7 +1282,24 @@ func (e *SpekHubExecutor) runningLocked() int {
 func (e *SpekHubExecutor) setLastError(msg string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.lastError = msg
+	e.lastError = spekHubLastErrorSummary(msg)
+}
+
+func scrubSpekHubOutput(text string) string {
+	return redactTokens(logscrub.ScrubString(text, logscrub.WithMarkers()))
+}
+
+func spekHubLastErrorSummary(msg string) string {
+	msg = scrubSpekHubOutput(msg)
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) <= spekHubLastErrorMaxBytes {
+		return msg
+	}
+	out := msg[:spekHubLastErrorMaxBytes]
+	for len(out) > 0 && !utf8.ValidString(out) {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 func (e *SpekHubExecutor) runner() func(context.Context, string, []string, string, ...string) ([]byte, error) {
