@@ -11,8 +11,8 @@ Common setup for chat surfaces:
 
 - Use a maintainer-controlled v6 hive with dashboard auth available to the chat
   spine. Chat commands call dashboard endpoints such as `/api/status` and
-  `/api/kick/<agent>` (`src/pkg/chat/dashboard.go:14-18`,
-  `src/pkg/chat/dashboard.go:126-142`), and notification delivery comes from the
+  `/api/kick/<agent>` (`src/pkg/chat/dashboard.go:15-19`,
+  `src/pkg/chat/dashboard.go:127-143`), and notification delivery comes from the
   `/api/events` SSE stream (`src/pkg/chat/notify.go:85-124`).
 - Pick an allowlisted human ID for the target surface. The shared command router
   fails closed when `allowed_users` is empty and logs ignored commands from
@@ -26,7 +26,7 @@ Common setup for chat surfaces:
   `Paused`, `Resumed`, `Off (cadence rule)`, or governor-mode-change messages
   emitted from SSE snapshots (`src/pkg/chat/notify.go:150-212`).
 - The command round-trip can be `!status` because it reads `/api/status` and
-  returns a status message (`src/pkg/chat/dashboard.go:14-57`); `!kick <agent>
+  returns a status message (`src/pkg/chat/dashboard.go:15-58`); `!kick <agent>
   readiness smoke` is also acceptable when the agent can safely be kicked.
 
 ## Evidence template
@@ -117,7 +117,7 @@ Run:
 
 1. Restart or confirm the hive log contains `slack bot starting` and
    `chat service starting` (`src/pkg/slack/bot.go:124-130`,
-   `src/pkg/chat/chat.go:174-189`).
+   `src/pkg/chat/chat.go:271-288`).
 2. In the configured Slack channel, send `!status`. Save the Slack message link
    or screenshot and the bot reply.
 3. Trigger one notification delivery by pausing/resuming an agent or inducing a
@@ -150,7 +150,7 @@ Prerequisites:
 Run:
 
 1. Confirm the hive log has `discord bot starting` and `chat service starting`
-   (`Start`, `src/pkg/discord/bot.go:101-108`, `src/pkg/chat/chat.go:174-189`).
+   (`Start`, `src/pkg/discord/bot.go:101-108`, `Start`, `src/pkg/chat/chat.go:271-288`).
 2. In the configured channel, send `!status`; save the Discord message link or
    screenshot and the bot reply.
 3. Trigger one notification delivery by pausing/resuming an agent or waiting for

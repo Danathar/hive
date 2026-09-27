@@ -85,7 +85,7 @@ func (s *Service) sseLoop(ctx context.Context) {
 
 		connected, err := s.consumeSSE(ctx)
 		if err != nil {
-			s.logger.Warn("discord SSE disconnected", "error", err)
+			s.logger.Warn("chat: dashboard SSE disconnected", "error", err)
 		}
 		if connected {
 			delay = s.sseReconnectBase

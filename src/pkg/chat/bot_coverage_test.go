@@ -551,6 +551,57 @@ func TestDashboardPost_Error(t *testing.T) {
 	}
 }
 
+// A dashboard error body — an HTML error page, a stack trace, a runaway
+// response — must not be echoed verbatim into the channel. The reply carries
+// the status and one bounded line (hivecommons/hive#9129).
+func TestDashboardPost_ErrorBodyIsBoundedToOneLine(t *testing.T) {
+	huge := "<html>\n<body>\n  boom \x1b[31mred\x1b[0m " + strings.Repeat("x", 1000) + "\ntrace line 2\n" + strings.Repeat("y", 100000)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(huge))
+	}))
+	defer ts.Close()
+
+	b := NewService(&recordingBackend{}, Config{DashboardURL: ts.URL}, discardLogger())
+	b.client = ts.Client()
+
+	err := b.dashboardPost(context.Background(), "/api/kick/scanner", nil)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "HTTP 500: <html>") {
+		t.Fatalf("error = %q, want status plus first body line", msg)
+	}
+	if strings.ContainsAny(msg, "\n\x1b") {
+		t.Fatalf("error carries newline or control bytes: %q", msg)
+	}
+	if len(msg) > len("HTTP 500: ")+maxErrorBodySummaryBytes+len(errorBodySummaryEllipsis) {
+		t.Fatalf("error not bounded: %d bytes", len(msg))
+	}
+}
+
+func TestSummarizeErrorBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "empty", body: "", want: ""},
+		{name: "whitespace-only", body: " \n\t\n", want: ""},
+		{name: "skips-leading-blank-lines", body: "\n\n  not found  \nmore", want: "not found"},
+		{name: "drops-control-chars", body: "a\x00b\x07c\r", want: "abc"},
+		{name: "cuts-on-rune-boundary", body: strings.Repeat("é", 150), want: strings.Repeat("é", 100) + "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := summarizeErrorBody([]byte(tt.body)); got != tt.want {
+				t.Fatalf("summarizeErrorBody(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // dashboardKick / dashboardPause / dashboardResume
 // ---------------------------------------------------------------------------

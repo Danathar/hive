@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -131,8 +132,37 @@ func TestStart_WithBackendRegistersAndQueuesOnlineMessage(t *testing.T) {
 		return len(backend.sentSnapshot()) >= 1
 	}, "online message never reached the backend")
 	sent := backend.sentSnapshot()
-	if len(sent) != 1 || !strings.Contains(sent[0], "Discord bot online") {
+	if len(sent) != 1 || !strings.Contains(sent[0], "bot online") || !strings.Contains(sent[0], "(test)") {
 		t.Fatalf("online message = %v", sent)
+	}
+	if strings.Contains(sent[0], "Discord") {
+		t.Fatalf("online banner names a transport the backend is not: %q", sent[0])
+	}
+}
+
+// The spine runs under Slack, Teams, Matrix, Telegram and the dashboard as
+// well as Discord, so nothing it emits — banner, help header, log lines — may
+// hard-code one transport (hivecommons/hive#9129).
+func TestSpineIsBackendNeutral(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	s := NewService(&recordingBackend{}, Config{}, logger)
+
+	help := s.cmdHelp()
+	header := strings.SplitN(help, "\n", 2)[0]
+	if !strings.Contains(header, "(test)") || strings.Contains(header, "Discord") {
+		t.Fatalf("help header = %q, want backend name and no transport branding", header)
+	}
+
+	// Empty allowlist → the command is refused and logged; the log line must
+	// name the actual backend, not Discord.
+	s.Deliver(context.Background(), makeMsg("m1", "!status", false))
+	got := logs.String()
+	if !strings.Contains(got, "backend=test") {
+		t.Fatalf("log line lacks backend attribute: %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "discord") {
+		t.Fatalf("log line is Discord-branded: %q", got)
 	}
 }
 
