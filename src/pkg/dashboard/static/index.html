@@ -13048,19 +13048,38 @@ function burnAreaChart() {
       const days = Number.isFinite(Number(dto.nextReviewInDays)) ? Number(dto.nextReviewInDays) : 0;
       const mode = escapeHtml(epoch.mode || 'IDLE');
       const until = epoch.end ? new Date(epoch.end).toLocaleDateString() : '';
-      const review = `Frozen for ${mode}; next review in ${days} day${days === 1 ? '' : 's'}${until ? ' (' + escapeHtml(until) + ')' : ''}.`;
+      const review = `Frozen for ${mode}; next review in ${days} day${days === 1 ? '' : 's'}${until ? ' (' + escapeHtml(until) + ')' : ''}. Numbers refresh every cycle.`;
+      const counts = dto.counts || {};
+      const countsHtml = `<div class="crit-cmp">Counts: governor actionable queue ${escapeHtml(String(counts.governorPRs ?? 0))} PRs / ${escapeHtml(String(counts.governorIssues ?? 0))} issues (mode &amp; cadence); Overview chart ${escapeHtml(String(counts.overviewPRs ?? 0))} open PRs / ${escapeHtml(String(counts.overviewIssues ?? 0))} issues (every open or held item; queue-health advice counts these).</div>`;
       const items = recs.map((r, i) => {
         r = r || {};
+        if (r.cleared) {
+          return `<li class="reco-crit met">
+          <span class="mark">✓</span>
+          <div class="crit-body"><div class="crit-name"><s>${escapeHtml(r.title || r.id || 'Recommendation')}</s></div>
+          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div></div>
+        </li>`;
+        }
         const sigs = Array.isArray(r.signals) ? r.signals : [];
         const sigHtml = sigs.length ? `<div class="crit-cmp">signals: ${sigs.map((s) => `${escapeHtml(s.name || '')}=${escapeHtml(s.value || '')}`).join(', ')}</div>` : '';
+        const its = Array.isArray(r.items) ? r.items : [];
+        const itemHtml = its.length ? `<div class="crit-cmp">First: ${its.map((it) => {
+          const ref = `${escapeHtml(it.repo || '')}#${escapeHtml(String(it.number || ''))}`;
+          const link = it.url ? `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${ref}</a>` : ref;
+          return it.note ? `${link} (${escapeHtml(it.note)})` : link;
+        }).join(', ')}</div>` : '';
+        const links = Array.isArray(r.links) ? r.links : [];
+        const linkHtml = links.length ? `<div class="crit-cmp">Full list: ${links.map((l) => `<a href="${escapeHtml(l.url || '')}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label || l.url || '')}</a>`).join(', ')}</div>` : '';
         return `<li class="reco-crit met">
           <span class="mark">${i + 1}</span>
           <div class="crit-body"><div class="crit-name">${escapeHtml(r.title || r.id || 'Recommendation')}</div>
-          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div>${sigHtml}</div>
+          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div>${itemHtml}${linkHtml}${sigHtml}</div>
         </li>`;
       }).join('');
+      const bands = Array.isArray(dto.bands) ? dto.bands : [];
+      const bandHtml = bands.length ? `<div class="crit-cmp">Bands named above (same rules as the Overview chart): ${bands.map((b) => `<b>${escapeHtml(b.label || b.key || '')}</b> (${b.kind === 'issue' ? 'issues' : 'PRs'}): ${escapeHtml(b.rule || '')}`).join('; ')}</div>` : '';
       section.style.display = '';
-      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge raise">owner advice</span><span class="reco-rationale" style="margin-top:var(--sp-0)">${review}</span></div><ul class="reco-checklist">${items}</ul>`;
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge raise">owner advice</span><span class="reco-rationale" style="margin-top:var(--sp-0)">${review}</span></div>${countsHtml}<ul class="reco-checklist">${items}</ul>${bandHtml}`;
       applySectionCollapse('hive-advice-section');
     }
 

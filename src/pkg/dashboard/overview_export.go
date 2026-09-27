@@ -172,12 +172,11 @@ type overviewIssueItem struct {
 	info  IssueBandInfo
 }
 
-func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) ([]any, []BandSpec) {
-	byBand := make(map[string][]overviewIssueItem, len(issueBandOrder))
-	counts := make(map[string]int, len(issueBandOrder))
-	for _, key := range issueBandOrder {
-		byBand[key] = nil
-	}
+// overviewIssueItems classifies every open and held issue across the repo
+// cards that pass filters. It is the one walk the CSV/JSON export and the
+// owner-advice queue breakdown both read, so they cannot disagree.
+func overviewIssueItems(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) []overviewIssueItem {
+	var out []overviewIssueItem
 	for _, repo := range status.Repos {
 		repoName := overviewRepoName(repo)
 		if !filters.matchRepo(repoName) {
@@ -189,8 +188,7 @@ func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIs
 				continue
 			}
 			issue.Repo = nonEmpty(issue.Repo, repoName)
-			counts[info.Band]++
-			byBand[info.Band] = append(byBand[info.Band], overviewIssueItem{issue: issue, info: info})
+			out = append(out, overviewIssueItem{issue: issue, info: info})
 		}
 		for _, issue := range frontendRepoIssues(repo, true) {
 			issue.Repo = nonEmpty(issue.Repo, repoName)
@@ -199,9 +197,21 @@ func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIs
 			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, true) {
 				continue
 			}
-			counts[info.Band]++
-			byBand[info.Band] = append(byBand[info.Band], overviewIssueItem{issue: issue, held: true, info: info})
+			out = append(out, overviewIssueItem{issue: issue, held: true, info: info})
 		}
+	}
+	return out
+}
+
+func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) ([]any, []BandSpec) {
+	byBand := make(map[string][]overviewIssueItem, len(issueBandOrder))
+	counts := make(map[string]int, len(issueBandOrder))
+	for _, key := range issueBandOrder {
+		byBand[key] = nil
+	}
+	for _, item := range overviewIssueItems(status, cfg, filters, now) {
+		counts[item.info.Band]++
+		byBand[item.info.Band] = append(byBand[item.info.Band], item)
 	}
 	rows := make([]any, 0)
 	for _, band := range issueBandOrder {
@@ -232,9 +242,10 @@ type overviewPRItem struct {
 	info    PRBandInfo
 }
 
-func (s *Server) overviewPRRows(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) ([]any, []BandSpec) {
-	byBand := make(map[string][]overviewPRItem, len(prBandOrder))
-	counts := make(map[string]int, len(prBandOrder))
+// overviewPRItems classifies every open and held PR across the repo cards
+// that pass filters; see overviewIssueItems.
+func (s *Server) overviewPRItems(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) []overviewPRItem {
+	var out []overviewPRItem
 	autoMergeLabel := s.autoMergeLabel()
 	for _, repo := range status.Repos {
 		repoName := overviewRepoName(repo)
@@ -247,8 +258,7 @@ func (s *Server) overviewPRRows(status *StatusPayload, cfg config.DashboardIssue
 			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, false) {
 				continue
 			}
-			counts[info.Band]++
-			byBand[info.Band] = append(byBand[info.Band], overviewPRItem{pr: entry.pr, verdict: entry.verdict, info: info})
+			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, info: info})
 		}
 		for _, entry := range frontendRepoPRs(repo, true) {
 			entry.pr.Repo = nonEmpty(entry.pr.Repo, repoName)
@@ -256,9 +266,18 @@ func (s *Server) overviewPRRows(status *StatusPayload, cfg config.DashboardIssue
 			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, true) {
 				continue
 			}
-			counts[info.Band]++
-			byBand[info.Band] = append(byBand[info.Band], overviewPRItem{pr: entry.pr, verdict: entry.verdict, held: true, info: info})
+			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, held: true, info: info})
 		}
+	}
+	return out
+}
+
+func (s *Server) overviewPRRows(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) ([]any, []BandSpec) {
+	byBand := make(map[string][]overviewPRItem, len(prBandOrder))
+	counts := make(map[string]int, len(prBandOrder))
+	for _, item := range s.overviewPRItems(status, cfg, filters, now) {
+		counts[item.info.Band]++
+		byBand[item.info.Band] = append(byBand[item.info.Band], item)
 	}
 	rows := make([]any, 0)
 	for _, band := range prBandOrder {

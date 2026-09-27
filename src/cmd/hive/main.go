@@ -6946,12 +6946,13 @@ func runEvalCycle(
 			}
 
 			md := advisory.FormatDigestMarkdown(digest, advisory.DigestOptions{
-				MaxFindings: digestOpts.MaxFindings,
-				ShowAll:     digestOpts.ShowAll,
-				Org:         org,
-				ShowEmpty:   digest.TotalCount == 0 && len(digest.RecentlyResolved) == 0,
-				PrimaryRepo: repoName,
-				Advice:      hiveAdvice,
+				MaxFindings:  digestOpts.MaxFindings,
+				ShowAll:      digestOpts.ShowAll,
+				Org:          org,
+				ShowEmpty:    digest.TotalCount == 0 && len(digest.RecentlyResolved) == 0,
+				PrimaryRepo:  repoName,
+				Advice:       hiveAdvice,
+				DashboardURL: advisoryDashboardOrigin(cfg),
 			})
 			// The routing/classification decisions live in
 			// publishAdvisoryDigest (#7232); only the effects are wired here.
