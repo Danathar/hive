@@ -1,1 +1,0 @@
-- dashboard: redesign the Repositories pill legend as a colour key plus three captioned columns (#9096)
