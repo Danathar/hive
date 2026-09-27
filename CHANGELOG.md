@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.69.1)
+
+### Fixed
+
+- The merge-request watcher now reads base-branch protection from GitHub's branch metadata endpoint, so Hive App installs without Administration:read no longer deny every protected-base agent merge when branch protection or rulesets are enabled.
+
 ## 2026-09-27 (v5.69.0)
 
 ### Added
