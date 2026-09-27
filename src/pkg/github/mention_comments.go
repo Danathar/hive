@@ -243,3 +243,27 @@ func (c *Client) EditIssueComment(ctx context.Context, repo string, id int64, bo
 	_, _, err := c.client.Issues.EditComment(ctx, owner, repoName, id, &gh.IssueComment{Body: gh.Ptr(body)})
 	return err
 }
+
+func (c *Client) GetActionRun(ctx context.Context, repo, runID string) (mention.ActionRun, error) {
+	if c == nil || c.client == nil {
+		return mention.ActionRun{}, ErrNoGitHubClient
+	}
+	owner, repoName := c.splitRepo(repo)
+	id, err := strconv.ParseInt(strings.TrimSpace(runID), 10, 64)
+	if err != nil || id <= 0 {
+		return mention.ActionRun{}, fmt.Errorf("invalid actions run id")
+	}
+	run, _, err := c.client.Actions.GetWorkflowRunByID(ctx, owner, repoName, id)
+	if err != nil {
+		return mention.ActionRun{}, fmt.Errorf("getting actions run %s for %s/%s: %w", runID, owner, repoName, err)
+	}
+	if run == nil {
+		return mention.ActionRun{}, fmt.Errorf("actions run %s for %s/%s was empty", runID, owner, repoName)
+	}
+	return mention.ActionRun{
+		Repository:      run.GetRepository().GetFullName(),
+		HeadRepository:  run.GetHeadRepository().GetFullName(),
+		Actor:           safeGetLogin(run.GetActor()),
+		TriggeringActor: safeGetLogin(run.GetTriggeringActor()),
+	}, nil
+}

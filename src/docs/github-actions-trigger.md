@@ -17,6 +17,7 @@ github:
     source_label: action
     allowed_commands: [status, review]
     allow_apply: false
+    trusted_comment_authors: [github-actions[bot]]
     identity_map:
       octo-ci-bot: alice
     oidc:
@@ -24,7 +25,7 @@ github:
       audience: hive-prod
 ```
 
-`identity_map` maps `github.actor` from the comment marker or the OIDC `actor` claim to an existing Hive dashboard identity. If omitted, the actor login itself must already have the required Hive role. Bot actors, including `github-actions[bot]`, are refused unless the repository is already governed by the hive and the command is in `allowed_commands`. OIDC dispatch is off by default; when `oidc.enabled` is true, `oidc.audience` is required and must match the workflow input exactly.
+`trusted_comment_authors` lists comment authors whose hidden Action marker may select the Actions path; it defaults to `github-actions[bot]`. For that path, Hive reads the marker `run_id` from GitHub before using the marker actor. `identity_map` maps `github.actor` from the checked comment marker or the OIDC `actor` claim to an existing Hive dashboard identity. If omitted, the actor login itself must already have the required Hive role. Bot actors, including `github-actions[bot]`, are refused unless the repository is already governed by the hive and the command is in `allowed_commands`. OIDC dispatch is off by default; when `oidc.enabled` is true, `oidc.audience` is required and must match the workflow input exactly.
 
 ## Review on a PR
 
@@ -117,4 +118,4 @@ jobs:
         run: echo '${{ steps.hive.outputs.receipt }}' | jq .stage_receipt
 ```
 
-The hub verifies the JWT issuer, signature, audience, expiry, not-before, and issued-at claims against GitHub's Actions JWKS. Refusals are audited without echoing prompt text. Reruns are deduped by repository, `run_id`, and `run_attempt` in the same store used by the comment transport. For `transport: oidc`, the composite action exposes `steps.<id>.outputs.receipt`, a JSON `stage_receipt` report that callers can archive or assert in workflow steps.
+The hub verifies the JWT issuer, signature, audience, expiry, not-before, issued-at, `run_id`, `run_attempt`, and `jti` claims against GitHub's Actions JWKS. Refusals are audited without echoing prompt text. Reruns are deduped by repository, claim `run_id`, and claim `run_attempt` in the same store used by the comment transport; body run fields are accepted only when they match the token claims. Hive also records the claim `jti` in that store when available. For `transport: oidc`, the composite action exposes `steps.<id>.outputs.receipt`, a JSON `stage_receipt` report that callers can archive or assert in workflow steps.

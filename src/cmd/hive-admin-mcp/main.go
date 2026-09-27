@@ -114,13 +114,13 @@ func (p readProvider) handler(name string) mcp.ToolHandler {
 				return textResult(adminmcp.DataEnvelope{Data: adminmcp.Scrub(refusal)}, true)
 			}
 			if err != nil {
-				return textResult(map[string]any{"error": err.Error()}, true)
+				return textResult(map[string]any{"error": adminmcp.Scrub(err.Error())}, true)
 			}
 			return textResult(adminmcp.DataEnvelope{Data: adminmcp.Scrub(data)}, false)
 		}
 		data, err := p.Read(ctx, name, args)
 		if err != nil {
-			return textResult(map[string]any{"error": err.Error()}, true)
+			return textResult(map[string]any{"error": adminmcp.Scrub(err.Error())}, true)
 		}
 		return textResult(adminmcp.DataEnvelope{Data: adminmcp.Scrub(data)}, false)
 	}
@@ -212,7 +212,7 @@ func (p readProvider) selectHive(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 	selected, err := p.roster.selectHive(ctx, args.Name)
 	if err != nil {
-		return textResult(map[string]any{"selected": false, "diagnosis": err.Error()}, true)
+		return textResult(map[string]any{"selected": false, "diagnosis": adminmcp.Scrub(err.Error())}, true)
 	}
 	return textResult(adminmcp.DataEnvelope{Data: map[string]any{"selected": true, "active_hive": selected.Name, "address": selected.Address}}, false)
 }

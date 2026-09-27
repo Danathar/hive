@@ -3,7 +3,10 @@ package dashboard
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/hivecommons/hive/pkg/config"
 )
 
 func acfgServer(t *testing.T) *Server {
@@ -143,6 +146,7 @@ func TestCovACfg_Export(t *testing.T) {
 	cfg.Emoji = "🔍"
 	cfg.Color = "#abc"
 	cfg.Mode = "ISSUES_ONLY"
+	cfg.Connections = []config.ConnectionConfig{{Name: "hive-task", Type: "mcp", URI: "http://hub/api/contribute/mcp?repo=org%2Frepo&token=launch-token"}}
 	s.deps.Config.Agents["scanner"] = cfg
 
 	// JSON response.
@@ -157,6 +161,12 @@ func TestCovACfg_Export(t *testing.T) {
 	s.mux.ServeHTTP(yrec, yreq)
 	if yrec.Code != http.StatusOK {
 		t.Fatalf("export yaml: %d", yrec.Code)
+	}
+	if strings.Contains(yrec.Body.String(), "launch-token") || strings.Contains(yrec.Body.String(), "token=") {
+		t.Fatalf("export yaml included token query: %s", yrec.Body.String())
+	}
+	if !strings.Contains(yrec.Body.String(), "repo=org%2Frepo") {
+		t.Fatalf("export yaml removed non-token query: %s", yrec.Body.String())
 	}
 	// Unknown agent → 404.
 	if rec := doGet(s, "/api/config/agent/ghost/export"); rec.Code != http.StatusNotFound {

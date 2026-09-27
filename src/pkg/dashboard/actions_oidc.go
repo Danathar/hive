@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	githubActionsOIDCIssuer = "https://token.actions.githubusercontent.com"
-	actionsJWKSCacheTTL     = 10 * time.Minute
-	actionsDispatchMaxBody  = 32 << 10
+	githubActionsOIDCIssuer         = "https://token.actions.githubusercontent.com"
+	actionsJWKSCacheTTL             = 10 * time.Minute
+	actionsJWKSUnknownKidRefetchGap = time.Minute
+	actionsJWKSMaxResponseBytes     = 1 << 20
+	actionsDispatchMaxBody          = 32 << 10
 )
 
 type actionsOIDCClaims struct {
@@ -32,6 +34,9 @@ type actionsOIDCClaims struct {
 	Actor           string `json:"actor"`
 	Workflow        string `json:"workflow"`
 	Ref             string `json:"ref"`
+	RunID           string `json:"run_id"`
+	RunAttempt      string `json:"run_attempt"`
+	JTI             string `json:"jti"`
 	jwt.RegisteredClaims
 }
 
@@ -80,26 +85,33 @@ func (s *Server) handleActionsDispatch(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid dispatch body", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(body.RunID) == "" || strings.TrimSpace(body.RunAttempt) == "" {
+	if bodyRun := strings.TrimSpace(body.RunID); bodyRun != "" && bodyRun != strings.TrimSpace(claims.RunID) {
 		s.auditActionDispatch("refused", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "guard", "run")
-		jsonError(w, "run_id and run_attempt are required", http.StatusBadRequest)
+		jsonError(w, "run_id does not match token", http.StatusBadRequest)
+		return
+	}
+	if bodyAttempt := strings.TrimSpace(body.RunAttempt); bodyAttempt != "" && bodyAttempt != strings.TrimSpace(claims.RunAttempt) {
+		s.auditActionDispatch("refused", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "guard", "run")
+		jsonError(w, "run_attempt does not match token", http.StatusBadRequest)
 		return
 	}
 
 	store := s.actionsMentionStore()
 	now := s.actionsNow()
-	kickID := "action:" + strings.ToLower(strings.TrimSpace(claims.Repository)) + ":" + strings.TrimSpace(body.RunID) + ":" + strings.TrimSpace(body.RunAttempt)
-	replay := store != nil && store.Seen(strings.TrimPrefix(kickID, "action:"))
+	runKey := actionsRunDedupeKey(claims)
+	kickID := "action:" + runKey
+	jtiKey := actionsJTIKey(claims)
+	replay := store != nil && (store.Seen(runKey) || (jtiKey != "" && store.Seen(jtiKey)))
 	event := mention.Event{
 		Repo:      strings.TrimSpace(claims.Repository),
 		Kind:      "issue",
 		Number:    body.Issue,
-		NodeID:    "actions-oidc:" + strings.ToLower(strings.TrimSpace(claims.Repository)) + ":" + strings.TrimSpace(body.RunID) + ":" + strings.TrimSpace(body.RunAttempt),
+		NodeID:    "actions-oidc:" + runKey,
 		Author:    "github-actions[bot]",
 		Body:      "@hive " + strings.TrimSpace(body.Command) + " " + strings.TrimSpace(body.Prompt),
 		CreatedAt: now,
 		UpdatedAt: now,
-		Action:    mention.ActionMarker{Source: mention.SourceAction, RunID: body.RunID, RunAttempt: body.RunAttempt, Actor: claims.Actor, Workflow: claims.Workflow, Ref: claims.Ref, Transport: "oidc"},
+		Action:    mention.ActionMarker{Source: mention.SourceAction, RunID: strings.TrimSpace(claims.RunID), RunAttempt: strings.TrimSpace(claims.RunAttempt), Actor: claims.Actor, Workflow: claims.Workflow, Ref: claims.Ref, Transport: "oidc"},
 	}
 
 	kicked := false
@@ -128,15 +140,33 @@ func (s *Server) handleActionsDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !kicked && !replay {
-		s.auditActionDispatch("refused", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "workflow", claims.Workflow, "ref", claims.Ref, "run_id", body.RunID, "run_attempt", body.RunAttempt, "guard", "action")
+		s.auditActionDispatch("refused", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "workflow", claims.Workflow, "ref", claims.Ref, "run_id", claims.RunID, "run_attempt", claims.RunAttempt, "guard", "action")
 		jsonError(w, "actions dispatch refused", http.StatusForbidden)
 		return
 	}
-	s.auditActionDispatch("accepted", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "workflow", claims.Workflow, "ref", claims.Ref, "run_id", body.RunID, "run_attempt", body.RunAttempt)
+	if store != nil && jtiKey != "" {
+		_ = store.Mark(strings.TrimSpace(claims.Repository), jtiKey, now)
+	}
+	s.auditActionDispatch("accepted", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "workflow", claims.Workflow, "ref", claims.Ref, "run_id", claims.RunID, "run_attempt", claims.RunAttempt)
 	receipt := actionsStageReceiptJSON(claims, body, kickID, now)
-	s.auditActionDispatch("receipt", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "run_id", body.RunID, "run_attempt", body.RunAttempt)
+	s.auditActionDispatch("receipt", "transport", "oidc", "repo", claims.Repository, "actor", claims.Actor, "run_id", claims.RunID, "run_attempt", claims.RunAttempt)
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true, "kick_id": kickID, "receipt": receipt})
+}
+
+func actionsRunDedupeKey(claims actionsOIDCClaims) string {
+	repo := strings.ToLower(strings.TrimSpace(claims.Repository))
+	if repo == "" {
+		repo = "unknown"
+	}
+	return repo + ":" + strings.TrimSpace(claims.RunID) + ":" + strings.TrimSpace(claims.RunAttempt)
+}
+
+func actionsJTIKey(claims actionsOIDCClaims) string {
+	if strings.TrimSpace(claims.JTI) == "" {
+		return ""
+	}
+	return "actions-oidc-jti:" + strings.TrimSpace(claims.JTI)
 }
 
 func actionsStageReceiptJSON(claims actionsOIDCClaims, body actionsDispatchRequest, kickID string, at time.Time) string {
@@ -159,14 +189,14 @@ func actionsStageReceiptJSON(claims actionsOIDCClaims, body actionsDispatchReque
 			"contract_revision":  "runs-action/v1",
 			"execution_key":      kickID + "|dispatch",
 			"engine":             map[string]string{"name": "github-actions", "version": "oidc"},
-			"remote_run_id":      strings.TrimSpace(body.RunID),
-			"remote_incarnation": strings.TrimSpace(body.RunAttempt),
+			"remote_run_id":      strings.TrimSpace(claims.RunID),
+			"remote_incarnation": strings.TrimSpace(claims.RunAttempt),
 			"input_revision":     "0000000000000000000000000000000000000000",
 			"output_digest":      emptyArtifactDigest,
 			"result_class":       string(outputschema.ReceiptResultNoChange),
 			"started_at":         at.UTC().Format(time.RFC3339Nano),
 			"ended_at":           at.UTC().Format(time.RFC3339Nano),
-			"provenance":         map[string]any{"query": "actions_oidc_dispatch@" + strings.TrimSpace(body.RunID)},
+			"provenance":         map[string]any{"query": "actions_oidc_dispatch@" + strings.TrimSpace(claims.RunID)},
 			"artifacts":          []any{},
 		},
 	}
@@ -291,32 +321,50 @@ func (s *Server) verifyActionsOIDC(ctx context.Context, token string, cfg config
 		if kid == "" {
 			return nil, errors.New("missing kid")
 		}
-		keys, err := s.actionsJWKS(ctx, cfg.JWKSURLEffective())
+		keys, err := s.actionsJWKS(ctx, cfg.JWKSURLEffective(), false)
 		if err != nil {
 			return nil, err
 		}
 		key, ok := keys[kid]
 		if !ok {
-			return nil, errors.New("unknown kid")
+			keys, err = s.actionsJWKS(ctx, cfg.JWKSURLEffective(), true)
+			if err != nil {
+				return nil, err
+			}
+			key, ok = keys[kid]
+			if !ok {
+				return nil, errors.New("unknown kid")
+			}
 		}
 		return key, nil
 	}, jwt.WithIssuer(githubActionsOIDCIssuer), jwt.WithAudience(strings.TrimSpace(cfg.Audience)), jwt.WithLeeway(cfg.MaxSkewEffective()), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(s.actionsNow))
 	if err != nil {
 		return actionsOIDCClaims{}, err
 	}
-	if strings.TrimSpace(claims.Repository) == "" || strings.TrimSpace(claims.Actor) == "" {
+	if strings.TrimSpace(claims.Repository) == "" || strings.TrimSpace(claims.Actor) == "" || strings.TrimSpace(claims.RunID) == "" || strings.TrimSpace(claims.RunAttempt) == "" || strings.TrimSpace(claims.JTI) == "" {
 		return actionsOIDCClaims{}, errors.New("missing required actions claims")
 	}
 	return claims, nil
 }
 
-func (s *Server) actionsJWKS(ctx context.Context, url string) (map[string]interface{}, error) {
+func (s *Server) actionsJWKS(ctx context.Context, url string, force bool) (map[string]interface{}, error) {
 	now := s.actionsNow()
 	s.actionsJWKSMu.Lock()
-	if s.actionsJWKSKeys != nil && now.Before(s.actionsJWKSUntil) {
+	if force && !s.actionsJWKSLastRefetch.IsZero() && now.Sub(s.actionsJWKSLastRefetch) < actionsJWKSUnknownKidRefetchGap {
+		keys := s.actionsJWKSKeys
+		s.actionsJWKSMu.Unlock()
+		if keys == nil {
+			return nil, errors.New("jwks refetch rate limited")
+		}
+		return keys, nil
+	}
+	if !force && s.actionsJWKSKeys != nil && now.Before(s.actionsJWKSUntil) {
 		keys := s.actionsJWKSKeys
 		s.actionsJWKSMu.Unlock()
 		return keys, nil
+	}
+	if force {
+		s.actionsJWKSLastRefetch = now
 	}
 	s.actionsJWKSMu.Unlock()
 	fetch := fetchJWKSHTTP
@@ -351,7 +399,15 @@ func fetchJWKSHTTP(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("jwks fetch status %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	limited := io.LimitReader(resp.Body, actionsJWKSMaxResponseBytes+1)
+	b, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > actionsJWKSMaxResponseBytes {
+		return nil, errors.New("jwks response too large")
+	}
+	return b, nil
 }
 
 func parseJWKS(b []byte) (map[string]interface{}, error) {

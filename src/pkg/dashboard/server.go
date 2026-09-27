@@ -85,20 +85,21 @@ func isOwnerRole(role string) bool {
 var proxyProofRequired = true
 
 type Server struct {
-	port             int
-	authToken        string
-	statusMu         sync.RWMutex
-	status           *StatusPayload
-	sseClients       map[chan []byte]struct{}
-	sseMu            sync.Mutex
-	logger           *slog.Logger
-	mux              *http.ServeMux
-	deps             *Dependencies
-	sidebar          interface{}
-	sidebarMu        sync.RWMutex
-	actionsJWKSMu    sync.Mutex
-	actionsJWKSUntil time.Time
-	actionsJWKSKeys  map[string]interface{}
+	port                   int
+	authToken              string
+	statusMu               sync.RWMutex
+	status                 *StatusPayload
+	sseClients             map[chan []byte]struct{}
+	sseMu                  sync.Mutex
+	logger                 *slog.Logger
+	mux                    *http.ServeMux
+	deps                   *Dependencies
+	sidebar                interface{}
+	sidebarMu              sync.RWMutex
+	actionsJWKSMu          sync.Mutex
+	actionsJWKSUntil       time.Time
+	actionsJWKSLastRefetch time.Time
+	actionsJWKSKeys        map[string]interface{}
 
 	// startedAt marks process start, used by /api/livez to bound the
 	// startup-grace window before the first heartbeat has to have succeeded.

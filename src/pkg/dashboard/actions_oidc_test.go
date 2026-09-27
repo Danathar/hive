@@ -118,6 +118,94 @@ func TestActionsDispatchEndpointDedupeReplay(t *testing.T) {
 	}
 }
 
+func TestActionsDispatchEndpointBodyRunFields(t *testing.T) {
+	key := actionsTestKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	deps := actionsTestDeps(t, key, now)
+	var kicks int
+	deps.ActionDispatchKick = func(agent, message, source string) error { kicks++; return nil }
+	s := NewServer(0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.RegisterAPI(deps)
+
+	code, body := postActionsDispatch(t, s, key, actionsTestClaims(now), actionsDispatchRequest{Command: "review", Prompt: "missing run fields", Issue: 42})
+	if code != http.StatusAccepted {
+		t.Fatalf("missing run fields status=%d body=%s", code, body)
+	}
+	code, body = postActionsDispatch(t, s, key, actionsTestClaims(now), actionsDispatchRequest{Command: "review", Prompt: "different run", Issue: 42, RunID: "101", RunAttempt: "1"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("run mismatch status=%d body=%s", code, body)
+	}
+	code, body = postActionsDispatch(t, s, key, actionsTestClaims(now), actionsDispatchRequest{Command: "review", Prompt: "different attempt", Issue: 42, RunID: "100", RunAttempt: "2"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("attempt mismatch status=%d body=%s", code, body)
+	}
+	if kicks != 1 {
+		t.Fatalf("kicks=%d want 1", kicks)
+	}
+}
+
+func TestActionsDispatchEndpointBodyRunChangesDoNotCreateMoreKicks(t *testing.T) {
+	key := actionsTestKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	deps := actionsTestDeps(t, key, now)
+	var kicks int
+	deps.ActionDispatchKick = func(agent, message, source string) error { kicks++; return nil }
+	s := NewServer(0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.RegisterAPI(deps)
+	claims := actionsTestClaims(now)
+	for _, body := range []actionsDispatchRequest{
+		{Command: "review", Prompt: "first", Issue: 42, RunID: "100", RunAttempt: "1"},
+		{Command: "review", Prompt: "second", Issue: 42, RunID: "101", RunAttempt: "1"},
+		{Command: "review", Prompt: "third", Issue: 42, RunID: "102", RunAttempt: "1"},
+	} {
+		postActionsDispatch(t, s, key, claims, body)
+	}
+	if kicks != 1 {
+		t.Fatalf("body run changes kicked %d times", kicks)
+	}
+}
+
+func TestActionsOIDCUnknownKidRefetchesOnce(t *testing.T) {
+	oldKey := actionsTestKey(t)
+	newKey := actionsTestKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	s := actionsTestServer(t, oldKey, now)
+	calls := 0
+	s.deps.ActionsJWKSFetcher = func(context.Context, string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return actionsJWKSJSON(t, &oldKey.PublicKey), nil
+		}
+		return actionsJWKSJSONWithKid(t, "new-kid", &newKey.PublicKey), nil
+	}
+	cfg := config.GitHubActionsOIDCConfig{Enabled: true, Audience: "hive"}
+	if _, err := s.verifyActionsOIDC(context.Background(), signActionsToken(t, oldKey, actionsTestKid, actionsTestClaims(now)), cfg); err != nil {
+		t.Fatalf("initial verify: %v", err)
+	}
+	if _, err := s.verifyActionsOIDC(context.Background(), signActionsToken(t, newKey, "new-kid", actionsTestClaims(now)), cfg); err != nil {
+		t.Fatalf("verify after refetch: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("jwks fetch calls=%d want 2", calls)
+	}
+	if _, err := s.verifyActionsOIDC(context.Background(), signActionsToken(t, newKey, "other-kid", actionsTestClaims(now)), cfg); err == nil {
+		t.Fatal("unknown kid accepted")
+	}
+	if calls != 2 {
+		t.Fatalf("rate-limited refetch calls=%d want 2", calls)
+	}
+}
+
+func TestFetchJWKSHTTPRefusesLargeResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(w, strings.NewReader(strings.Repeat("x", actionsJWKSMaxResponseBytes+1)))
+	}))
+	defer srv.Close()
+	if _, err := fetchJWKSHTTP(context.Background(), srv.URL); err == nil {
+		t.Fatal("large jwks response accepted")
+	}
+}
+
 func actionsTestDeps(t *testing.T, key *rsa.PrivateKey, now time.Time) *Dependencies {
 	t.Helper()
 	store, err := mention.NewStore("")
@@ -168,7 +256,7 @@ func postActionsDispatch(t *testing.T, s *Server, key *rsa.PrivateKey, claims ac
 }
 
 func actionsTestClaims(now time.Time) actionsOIDCClaims {
-	return actionsOIDCClaims{Repository: "org/repo", RepositoryOwner: "org", Actor: "ci-bot", Workflow: "Smoke", Ref: "refs/heads/v6", RegisteredClaims: jwt.RegisteredClaims{Issuer: githubActionsOIDCIssuer, Audience: []string{"hive"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)), IssuedAt: jwt.NewNumericDate(now)}}
+	return actionsOIDCClaims{Repository: "org/repo", RepositoryOwner: "org", Actor: "ci-bot", Workflow: "Smoke", Ref: "refs/heads/v6", RunID: "100", RunAttempt: "1", JTI: "jti-100-1", RegisteredClaims: jwt.RegisteredClaims{Issuer: githubActionsOIDCIssuer, Audience: []string{"hive"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)), IssuedAt: jwt.NewNumericDate(now)}}
 }
 func withAud(c actionsOIDCClaims, aud string) actionsOIDCClaims { c.Audience = []string{aud}; return c }
 func withIss(c actionsOIDCClaims, iss string) actionsOIDCClaims { c.Issuer = iss; return c }
@@ -203,8 +291,13 @@ func signActionsToken(t *testing.T, key *rsa.PrivateKey, kid string, claims acti
 }
 func actionsJWKSJSON(t *testing.T, pub *rsa.PublicKey) []byte {
 	t.Helper()
+	return actionsJWKSJSONWithKid(t, actionsTestKid, pub)
+}
+
+func actionsJWKSJSONWithKid(t *testing.T, kid string, pub *rsa.PublicKey) []byte {
+	t.Helper()
 	e := big.NewInt(int64(pub.E)).Bytes()
-	jwks := jwksDocument{Keys: []jwkKey{{Kty: "RSA", Use: "sig", Kid: actionsTestKid, Alg: "RS256", N: base64.RawURLEncoding.EncodeToString(pub.N.Bytes()), E: base64.RawURLEncoding.EncodeToString(e)}}}
+	jwks := jwksDocument{Keys: []jwkKey{{Kty: "RSA", Use: "sig", Kid: kid, Alg: "RS256", N: base64.RawURLEncoding.EncodeToString(pub.N.Bytes()), E: base64.RawURLEncoding.EncodeToString(e)}}}
 	b, err := json.Marshal(jwks)
 	if err != nil {
 		t.Fatal(err)

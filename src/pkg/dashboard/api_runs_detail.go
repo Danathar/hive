@@ -18,7 +18,10 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-const runDetailEventsFile = "events.jsonl"
+const (
+	runDetailEventsFile     = "events.jsonl"
+	runDetailEventsFileMode = 0o600
+)
 
 var errRunDetailNotFound = errors.New("run not found")
 
@@ -177,6 +180,10 @@ func (s *Server) buildRunDetail(r *http.Request, key string) (RunDetail, error) 
 	captures := readRunDetailStageCaptures(storageKeys...)
 	persisted := readRunDetailPersistedEvents(storageKeys...)
 	taskRuns := readTaskRunsForIssueForDetail(s.taskRunLogPathForDetail(), run.Repo, runIssueNumber(run.Key))
+	if r == nil || !s.paneTailViewer(r) {
+		persisted = runDetailEventsWithoutPaneTail(persisted)
+		taskRuns = taskRunsWithoutPaneTail(taskRuns)
+	}
 	issue := s.runDetailIssue(run)
 	if issue.Title == "" {
 		issue.Title = firstRunNonEmpty(run.Title, issue.Key)
@@ -409,11 +416,38 @@ func readRunDetailPersistedEvents(runKeys ...string) []runDetailPersistedEvent {
 			}
 			var ev runDetailPersistedEvent
 			if json.Unmarshal([]byte(line), &ev) == nil {
-				out = append(out, ev)
+				out = append(out, sanitizeRunDetailPersistedEvent(ev))
 			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TS < out[j].TS })
+	return out
+}
+
+func runDetailEventsWithoutPaneTail(in []runDetailPersistedEvent) []runDetailPersistedEvent {
+	out := make([]runDetailPersistedEvent, len(in))
+	for i, ev := range in {
+		out[i] = ev
+		if ev.Fields == nil {
+			continue
+		}
+		fields := make(map[string]any, len(ev.Fields))
+		for k, v := range ev.Fields {
+			if k != "pane_tail" {
+				fields[k] = v
+			}
+		}
+		out[i].Fields = fields
+	}
+	return out
+}
+
+func taskRunsWithoutPaneTail(in []TaskRunRecord) []TaskRunRecord {
+	out := make([]TaskRunRecord, len(in))
+	for i, rec := range in {
+		out[i] = rec
+		out[i].PaneTail = nil
+	}
 	return out
 }
 
@@ -770,6 +804,7 @@ func appendRunDetailEvent(runKey string, ev runDetailPersistedEvent) {
 	if runKey = strings.TrimSpace(runKey); runKey == "" {
 		return
 	}
+	ev = sanitizeRunDetailPersistedEvent(ev)
 	if ev.TS == "" {
 		ev.TS = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -785,12 +820,41 @@ func appendRunDetailEvent(runKey string, ev runDetailPersistedEvent) {
 		if err != nil {
 			return
 		}
-		f, err := os.OpenFile(runDetailEventsPath(key), os.O_CREATE|os.O_WRONLY|os.O_APPEND, receiptFileMode)
+		path := runDetailEventsPath(key)
+		rotateRunDetailEventsFile(path)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, runDetailEventsFileMode)
 		if err != nil {
 			continue
 		}
 		_, _ = f.Write(append(data, '\n'))
 		_ = f.Close()
+		_ = os.Chmod(path, runDetailEventsFileMode)
+	}
+}
+
+func sanitizeRunDetailPersistedEvent(ev runDetailPersistedEvent) runDetailPersistedEvent {
+	ev.Summary = truncateFailureReason(redactTokens(ev.Summary))
+	if ev.Fields != nil {
+		fields := make(map[string]any, len(ev.Fields))
+		for k, v := range ev.Fields {
+			switch k {
+			case "state", "verdict_reason":
+				if s, ok := v.(string); ok {
+					fields[k] = truncateFailureReason(redactTokens(s))
+					continue
+				}
+			}
+			fields[k] = v
+		}
+		ev.Fields = fields
+	}
+	return ev
+}
+
+func rotateRunDetailEventsFile(path string) {
+	if st, err := os.Stat(path); err == nil && st.Size() >= taskRunLogMaxBytes {
+		_ = os.Rename(path, path+".1")
+		_ = os.Chmod(path+".1", runDetailEventsFileMode)
 	}
 }
 

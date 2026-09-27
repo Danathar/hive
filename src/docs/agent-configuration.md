@@ -880,7 +880,7 @@ Both polarities are enforced at **enumeration** — the point where GitHub issue
 
 ## Standby contributors (`standby`)
 
-> **Nothing dispatches yet.** Hive parses, defaults and validates this block, and matching reads it to render a count — a paused lane's tile can say how many standby contributors *would* qualify (steps S2, S4 and S7 of [RFC #7629](https://github.com/hivecommons/hive/issues/7629)). **No work is offered to anybody**: dispatch, the donated-task marker and the hold gate are S5, and automatic dispatch is S8. The full plan, and the reasoning behind every rule below, is in [the standby design record](design/standby-contributors.md). Writing the block is safe; a hive that writes nothing is unaffected byte for byte.
+Hive parses, defaults and validates this block, uses it for manual standby dispatch, and reads it to render the qualified count on a paused lane's tile. Automatic dispatch is still separately opt-in with `auto_dispatch`. The full plan, and the reasoning behind every rule below, is in [the standby design record](design/standby-contributors.md). Writing the block with `enabled: false` is inert; a hive that writes nothing is unaffected byte for byte.
 
 The idea: when a lane pauses because the hive is **out of budget**, its queue can be offered to contributors who volunteered ahead of time and whom you approved — running their own agent, on their own machine, with their own model, handing the result back as an ordinary hold-gated PR. No credential moves. The risk the design is built around is that donating a frontier model costs real money and donating a cheap one costs nearly nothing, so the pool tends toward cheap models and an owner staring at a stuck queue gets tempted to lower the bar until something qualifies. Hence a **floor**, per lane.
 
@@ -889,6 +889,7 @@ agents:
   quality:
     standby:
       enabled: false                 # default
+      auto_dispatch: false           # default; automatic attempts while paused
       min_model_capability: T1       # default T1 — the STRONGEST floor
       daily_cap_per_contributor: 0   # default 0 — nothing is dispatched
 
@@ -906,6 +907,7 @@ hub:
 | Field | Meaning |
 |---|---|
 | `standby.enabled` | Offer this lane's queue when it is paused for budget. Default off. **`true` with an empty `hub.standby_contributors` fails the load** — a lane that is on with nobody approved is a misconfiguration you should see at boot, not a setting that sits inert. |
+| `standby.auto_dispatch` | Whether Hive may automatically offer this lane's queue while the governor has paused it for budget. Default off. Manual dispatch still requires `standby.enabled`, the lane's caps and floors, and the same paused-lane state. |
 | `standby.min_model_capability` | The lane's floor: the weakest capability tier a donated configuration may have and still be offered this lane's work. `T1`, `T2` or `T3` — the [RFC #6825](../../docs/rfc-6825-capability-aware-contributor-task-assignment.md) vocabulary — defaulting to **T1**, the strongest. `unknown` is **rejected at load**: it is the absence of a tier, not a weak one, and a lane floored at unknown is a lane anything clears. |
 | `standby.daily_cap_per_contributor` | How many donated tasks one approved contributor may be dispatched on this lane per rolling day. Default **0**, and 0 means *nothing is dispatched* — which is what makes the block safe to adopt before the dispatch path exists. Negative fails the load; a value above 50 is clamped with a logged warning. |
 | `hub.standby_contributors` | The approved GitHub logins. Approval is durable and lives in config; a relay declaring standby is *volunteering*, which grants nothing. A login here grants nothing else either: not a trust tier, not a role, not a credential. |

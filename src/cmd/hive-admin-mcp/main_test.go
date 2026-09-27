@@ -42,6 +42,45 @@ func TestSameToolAnswerMatchesHTTPAndStdioWrapper(t *testing.T) {
 	}
 }
 
+func TestStdioToolResultAndErrorTextAreScrubbed(t *testing.T) {
+	githubToken := "gh" + "u_" + strings.Repeat("a", 24)
+	bearer := "Bearer " + strings.Repeat("b", 20)
+	aws := "AKIA" + strings.Repeat("C", 16)
+	jwt := strings.Join([]string{"eyJ" + strings.Repeat("d", 22), strings.Repeat("e", 24), strings.Repeat("f", 24)}, ".")
+	privateKey := strings.Join([]string{"-----BEGIN PRIVATE KEY-----", strings.Repeat("A", 64), "-----END PRIVATE KEY-----"}, "\n")
+	var fail bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail {
+			http.Error(w, "failed "+githubToken+" "+bearer, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"title": strings.Join([]string{githubToken, bearer, aws, jwt, privateKey}, " ")})
+	}))
+	defer server.Close()
+	r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+	provider := readProvider{roster: r}
+	result, err := provider.handler(adminmcp.ToolHiveStatus)(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustMarshalContentText(t, result.Content[0])
+	for _, forbidden := range []string{githubToken, bearer, aws, jwt, privateKey} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("stdio result retained %q in %s", forbidden, text)
+		}
+	}
+	fail = true
+	result, err = provider.handler(adminmcp.ToolHiveStatus)(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = mustMarshalContentText(t, result.Content[0])
+	if strings.Contains(text, githubToken) || strings.Contains(text, bearer) || !strings.Contains(text, "redacted:github-token") || !strings.Contains(text, "redacted:bearer-token") {
+		t.Fatalf("stdio error text = %s", text)
+	}
+}
+
 func mustMarshalContentText(t *testing.T, c mcp.Content) string {
 	t.Helper()
 	text, ok := c.(*mcp.TextContent)

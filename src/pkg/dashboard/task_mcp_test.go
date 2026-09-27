@@ -24,14 +24,15 @@ func TestContributeMCPContextBundleUsesActiveAssignment(t *testing.T) {
 	s.deps = &Dependencies{Config: &config.Config{Agents: map[string]config.AgentConfig{"lane": {Standby: &config.StandbyConfig{Enabled: true, DailyCapPerContributor: 2}}}}}
 	s.contributeHub = NewContributeWSHub(s.logger, s)
 	s.contributeHub.connections["alice"] = &ContributorConnection{
-		currentTask:    &WSTaskAssign{TaskID: "task-1", Kind: "issue", Repo: "owner/repo", Number: 42, Title: "do work", Key: "owner/repo#42"},
+		currentTask:    &WSTaskAssign{TaskID: "task-1", Kind: "issue", Repo: "owner/repo", Number: 42, Title: "do work", Key: "owner/repo#42", FromFork: true, HeadRepo: "alice/repo", Held: true, HoldReason: "waiting on review"},
 		currentTaskGen: 9,
 		currentLabels:  []string{"kind/feature"},
 		taskAssignedAt: time.Now().Add(-time.Minute),
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"context_bundle","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"context_bundle","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	text := mcpResultText(t, rec.Body.Bytes())
 	var env struct {
@@ -42,6 +43,12 @@ func TestContributeMCPContextBundleUsesActiveAssignment(t *testing.T) {
 	}
 	if env.Data.TaskContext == nil || env.Data.TaskContext.Assignment.TaskID != "task-1" || env.Data.TaskContext.Assignment.Repo != "owner/repo" {
 		t.Fatalf("assignment = %#v", env.Data.TaskContext)
+	}
+	if !env.Data.TaskContext.Assignment.FromFork || env.Data.TaskContext.Assignment.HeadRepo != "alice/repo" {
+		t.Fatalf("fork assignment fields = %#v", env.Data.TaskContext.Assignment)
+	}
+	if !env.Data.TaskContext.Assignment.Held || env.Data.TaskContext.Assignment.HoldReason != "waiting on review" {
+		t.Fatalf("hold assignment fields = %#v", env.Data.TaskContext.Assignment)
 	}
 	if got := env.Data.TaskContext.Policies.Standby; len(got) != 1 || got[0].Lane != "lane" || got[0].DailyCap != 2 {
 		t.Fatalf("standby policy = %#v", got)
@@ -56,7 +63,8 @@ func TestContributeMCPRejectsMissingTaskScope(t *testing.T) {
 		currentTask: &WSTaskAssign{TaskID: "task-1", Repo: "owner/repo", Number: 42, Title: "do work"},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_context","arguments":{}}}`))
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_context","arguments":{}}}`))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	var resp struct {
 		Error *struct {
@@ -82,7 +90,8 @@ func TestContributeMCPRequiresDashboardTokenWhenConfigured(t *testing.T) {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req = httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status with token = %d, want 200", rec.Code)
@@ -103,7 +112,8 @@ func TestContributeMCPRelatedWorkFromStatusCache(t *testing.T) {
 		OpenPrs:          []any{map[string]any{"repo": "owner/repo", "number": 43, "title": "Fixes #42", "author": "bob", "files": []string{"a.go"}}},
 	}}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"related_work","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"related_work","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	text := mcpResultText(t, rec.Body.Bytes())
 	var env struct {
@@ -131,7 +141,8 @@ func TestContributeMCPCIHealthFromStatusCache(t *testing.T) {
 		}},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ci_health","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ci_health","arguments":{"task_id":"task-1","repo":"owner/repo"}}}`))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	text := mcpResultText(t, rec.Body.Bytes())
 	var env struct {
@@ -463,7 +474,8 @@ func callMCP(t *testing.T, s *Server, tool, args string) *httptest.ResponseRecor
 	t.Helper()
 	rec := httptest.NewRecorder()
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":` + args + `}}`
-	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?token=secret", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
 	s.handleContributeMCP(rec, req)
 	return rec
 }

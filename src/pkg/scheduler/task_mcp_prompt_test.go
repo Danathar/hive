@@ -84,7 +84,7 @@ func TestTaskMCPDropStuffedContextGatesRefsOnlyAndIssueRefs(t *testing.T) {
 		"Stuffed work lists in this prompt were elided to `repo#N` refs only",
 		"`context_bundle` and `related_work` are the source of truth",
 		"  hivecommons/hive#8261\n",
-		"  hivecommons/hive#8262\n",
+		"  hivecommons/hive#8262 [",
 	} {
 		if !strings.Contains(elided.Message, want) {
 			t.Fatalf("elided prompt missing %q:\n%s", want, elided.Message)

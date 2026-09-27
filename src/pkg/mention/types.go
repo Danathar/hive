@@ -40,6 +40,17 @@ type GitHub interface {
 	CreateIssueComment(ctx context.Context, repo string, number int, body string) error
 }
 
+type ActionRun struct {
+	Repository      string
+	HeadRepository  string
+	Actor           string
+	TriggeringActor string
+}
+
+type ActionRunVerifier interface {
+	GetActionRun(ctx context.Context, repo, runID string) (ActionRun, error)
+}
+
 type KickFunc func(agent, message, source string) error
 type AuditFunc func(action, detail, agent string)
 type RoleFunc func(login string) (role string, ok bool)
@@ -94,9 +105,14 @@ func (h *Handler) Handle(ctx context.Context, ev Event) error {
 	p := Parse(ev.Body, app)
 	cleanBody, marker := ExtractActionMarker(ev.Body)
 	if marker.Source != "" {
-		ev.Body = cleanBody
-		ev.Action = marker
 		p = Parse(cleanBody, app)
+		if trustedActionCommentAuthor(ev.Author, h.opts.Actions) {
+			ev.Body = cleanBody
+			ev.Action = marker
+		} else {
+			ev.Body = cleanBody
+			ev.Action = ActionMarker{}
+		}
 	}
 	if !p.Mentioned {
 		return nil
@@ -109,11 +125,11 @@ func (h *Handler) Handle(ctx context.Context, ev Event) error {
 		return h.opts.Store.Mark(ev.Repo, ev.NodeID, ev.UpdatedAt)
 	}
 	if ev.Action.Source != "" {
-		if !trustedActionCommentAuthor(ev.Author) {
+		if !trustedActionCommentAuthor(ev.Author, h.opts.Actions) {
 			h.decline(ev, "action-author", "")
 			return h.mark(ev)
 		}
-		mapped, ok := h.authorizeAction(ev, p)
+		mapped, ok := h.authorizeAction(ctx, ev, p)
 		if !ok {
 			return h.mark(ev)
 		}
@@ -226,7 +242,7 @@ func (h *Handler) authorized(login string, cfg config.GitHubMentionsConfig) bool
 	return ok && config.RoleAtLeast(role, cfg.MinRoleEffective())
 }
 
-func (h *Handler) authorizeAction(ev Event, p Parsed) (string, bool) {
+func (h *Handler) authorizeAction(ctx context.Context, ev Event, p Parsed) (string, bool) {
 	cfg := h.opts.Actions
 	if !cfg.Enabled {
 		h.decline(ev, "action-disabled", "")
@@ -246,9 +262,13 @@ func (h *Handler) authorizeAction(ev Event, p Parsed) (string, bool) {
 		h.decline(ev, "identity", "missing-actor")
 		return "", false
 	}
+	if !strings.EqualFold(strings.TrimSpace(ev.Action.Transport), "oidc") && !h.verifyActionRun(ctx, ev, actor) {
+		h.decline(ev, "action-run", "")
+		return "", false
+	}
 	mapped := actor
 	if cfg.IdentityMap != nil {
-		if m := strings.TrimSpace(cfg.IdentityMap[actor]); m != "" {
+		if m := strings.TrimSpace(identityMapLookup(cfg.IdentityMap, actor)); m != "" {
 			mapped = m
 		}
 	}
@@ -300,8 +320,51 @@ func actionRequiresApply(command string) bool {
 	return strings.EqualFold(command, "kick")
 }
 
-func trustedActionCommentAuthor(author string) bool {
-	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(author)), "[bot]")
+func trustedActionCommentAuthor(author string, cfg config.GitHubActionsConfig) bool {
+	for _, trusted := range cfg.TrustedCommentAuthorsEffective() {
+		if strings.EqualFold(strings.TrimSpace(author), strings.TrimSpace(trusted)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) verifyActionRun(ctx context.Context, ev Event, actor string) bool {
+	runID := strings.TrimSpace(ev.Action.RunID)
+	if runID == "" {
+		return false
+	}
+	gh, ok := h.github().(ActionRunVerifier)
+	if !ok || gh == nil {
+		return false
+	}
+	run, err := gh.GetActionRun(ctx, ev.Repo, runID)
+	if err != nil {
+		return false
+	}
+	if !sameIdentity(run.Repository, ev.Repo) {
+		return false
+	}
+	return sameIdentity(run.Actor, actor) || sameIdentity(run.TriggeringActor, actor)
+}
+
+func identityMapLookup(m map[string]string, actor string) string {
+	want := identityMatchKey(actor)
+	for key, value := range m {
+		if identityMatchKey(key) == want {
+			return value
+		}
+	}
+	return ""
+}
+
+func identityMatchKey(id string) string {
+	key := strings.ToLower(strings.TrimSpace(id))
+	return strings.TrimPrefix(key, "github:")
+}
+
+func sameIdentity(a, b string) bool {
+	return identityMatchKey(a) == identityMatchKey(b) && identityMatchKey(a) != ""
 }
 
 func (h *Handler) loopAuthor(login, app string) bool {

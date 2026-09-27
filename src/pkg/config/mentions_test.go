@@ -57,9 +57,15 @@ func TestGitHubActionsConfigDefaultsAndValidation(t *testing.T) {
 	if got := strings.Join(a.AllowedCommandsEffective(), ","); got != "status,review" {
 		t.Fatalf("allowed command defaults = %q", got)
 	}
-	custom := GitHubActionsConfig{SourceLabel: "ci", AllowedCommands: []string{"status", "kick"}}
+	if got := strings.Join(a.TrustedCommentAuthorsEffective(), ","); got != "github-actions[bot]" {
+		t.Fatalf("trusted comment author defaults = %q", got)
+	}
+	custom := GitHubActionsConfig{SourceLabel: "ci", AllowedCommands: []string{"status", "kick"}, TrustedCommentAuthors: []string{"relay[bot]"}}
 	if got := strings.Join(custom.AllowedCommandsEffective(), ","); got != "status,kick" {
 		t.Fatalf("custom allowed commands = %q", got)
+	}
+	if got := strings.Join(custom.TrustedCommentAuthorsEffective(), ","); got != "relay[bot]" {
+		t.Fatalf("custom trusted comment authors = %q", got)
 	}
 	if err := custom.Validate(); err != nil {
 		t.Fatalf("valid custom actions config rejected: %v", err)

@@ -502,16 +502,19 @@ func (s *Scheduler) formatIssueListWithPolicyForAgent(issues []github.Issue, ref
 	}
 	var b strings.Builder
 	b.WriteString(notice)
-	if refsOnly {
-		shown := fairShareByRepo(issues, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
-		for _, issue := range shown {
-			b.WriteString(fmt.Sprintf("  %s\n", issueDisplayRef(issue)))
-		}
-		return b.String(), false
-	}
-	b.WriteString(issuePriorityNote)
 	failClosed := false
 	shown := fairShareByRepo(issues, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
+	if refsOnly {
+		for _, issue := range shown {
+			_, verdict := s.enforceIssueTextVerdict(issue.Title)
+			failClosed = failClosed || (s.ioscanFailClosed() && verdict.HasCriticalInjection())
+			_, labelsFailClosed := s.enforceLabelsWithPolicy(issue.Labels)
+			failClosed = failClosed || labelsFailClosed
+			b.WriteString(fmt.Sprintf("  %s\n", issueDisplayRef(issue)))
+		}
+		return b.String(), failClosed
+	}
+	b.WriteString(issuePriorityNote)
 	for _, issue := range shown {
 		// The issue title AND labels are untrusted external text about to be
 		// injected into an agent kick, and labels additionally drive classification
@@ -1680,6 +1683,8 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 	if elideStuffed {
 		shown := fairShareByRepo(scannerIssues, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
 		for _, issue := range shown {
+			s.enforceIssueTextVerdict(issue.Title)
+			s.enforceLabelsWithPolicy(issue.Labels)
 			b.WriteString(fmt.Sprintf("  %s\n", issueDisplayRef(issue)))
 		}
 	} else if len(scannerIssues) > 0 {
@@ -2708,14 +2713,25 @@ func (s *Scheduler) formatPRListWithPolicyForAgent(actionable *github.Actionable
 	failClosed := false
 	limit := s.prCap()
 	shown := fairShareByRepo(actionable.PRs.Items, limit, func(pr github.PullRequest) string { return pr.Repo })
-	if len(refsOnly) > 0 && refsOnly[0] {
-		for _, pr := range shown {
-			b.WriteString(fmt.Sprintf("  %s#%d\n", pr.Repo, pr.Number))
-		}
-		return b.String(), false
-	}
 	verdicts := s.loadReviewVerdicts()
 	links := loadReviewLinks()
+	if len(refsOnly) > 0 && refsOnly[0] {
+		for _, pr := range shown {
+			_, titleVerdict := s.enforceIssueTextVerdict(pr.Title)
+			failClosed = failClosed || (s.ioscanFailClosed() && titleVerdict.HasCriticalInjection())
+			_, authorVerdict := s.enforceIssueTextVerdict(pr.Author)
+			failClosed = failClosed || (s.ioscanFailClosed() && authorVerdict.HasCriticalInjection())
+			annotationText, skip := s.prReviewAnnotation(pr, agentName)
+			if skip {
+				continue
+			}
+			annotationText = prKickAnnotation(pr, agentName) + reviewedAnnotation(verdicts, links, pr, s.cfg.Project.Org) + annotationText
+			annotation, annotationVerdict := s.enforceIssueTextVerdict(annotationText)
+			failClosed = failClosed || (s.ioscanFailClosed() && annotationVerdict.HasCriticalInjection())
+			b.WriteString(fmt.Sprintf("  %s#%d%s %s\n", pr.Repo, pr.Number, forkAnnotation(pr), annotation))
+		}
+		return b.String(), failClosed
+	}
 	for _, pr := range shown {
 		// The PR title and author login are untrusted external text about to be
 		// injected into an agent kick (F11). PR titles in particular drive

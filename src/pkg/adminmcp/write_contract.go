@@ -138,6 +138,7 @@ func NewMemoryPendingStore() *MemoryPendingStore {
 func (s *MemoryPendingStore) Put(_ context.Context, pending PendingConfirmation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
 	s.pending[pending.ID] = pending
 	return nil
 }
@@ -145,6 +146,7 @@ func (s *MemoryPendingStore) Put(_ context.Context, pending PendingConfirmation)
 func (s *MemoryPendingStore) Take(_ context.Context, id string) (PendingConfirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
 	pending, ok := s.pending[id]
 	if !ok {
 		return PendingConfirmation{}, ErrConfirmationMissing
@@ -156,11 +158,20 @@ func (s *MemoryPendingStore) Take(_ context.Context, id string) (PendingConfirma
 func (s *MemoryPendingStore) List(_ context.Context) ([]PendingConfirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneLocked(time.Now().UTC())
 	out := make([]PendingConfirmation, 0, len(s.pending))
 	for _, pending := range s.pending {
 		out = append(out, pending)
 	}
 	return out, nil
+}
+
+func (s *MemoryPendingStore) pruneLocked(now time.Time) {
+	for id, pending := range s.pending {
+		if !pending.ExpiresAt.IsZero() && !now.Before(pending.ExpiresAt) {
+			delete(s.pending, id)
+		}
+	}
 }
 
 type FilePendingStore struct {
@@ -174,7 +185,7 @@ func NewFilePendingStore(path string) *FilePendingStore { return &FilePendingSto
 func (s *FilePendingStore) Put(ctx context.Context, pending PendingConfirmation) error {
 	unlock := s.lockPath()
 	defer unlock()
-	items, err := s.loadLocked(ctx)
+	items, _, err := s.loadLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -185,12 +196,15 @@ func (s *FilePendingStore) Put(ctx context.Context, pending PendingConfirmation)
 func (s *FilePendingStore) Take(ctx context.Context, id string) (PendingConfirmation, error) {
 	unlock := s.lockPath()
 	defer unlock()
-	items, err := s.loadLocked(ctx)
+	items, pruned, err := s.loadLocked(ctx)
 	if err != nil {
 		return PendingConfirmation{}, err
 	}
 	pending, ok := items[id]
 	if !ok {
+		if pruned {
+			_ = s.saveLocked(items)
+		}
 		return PendingConfirmation{}, ErrConfirmationMissing
 	}
 	delete(items, id)
@@ -203,9 +217,14 @@ func (s *FilePendingStore) Take(ctx context.Context, id string) (PendingConfirma
 func (s *FilePendingStore) List(ctx context.Context) ([]PendingConfirmation, error) {
 	unlock := s.lockPath()
 	defer unlock()
-	items, err := s.loadLocked(ctx)
+	items, pruned, err := s.loadLocked(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if pruned {
+		if err := s.saveLocked(items); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]PendingConfirmation, 0, len(items))
 	for _, pending := range items {
@@ -225,33 +244,34 @@ func (s *FilePendingStore) lockPath() func() {
 	return mu.Unlock
 }
 
-func (s *FilePendingStore) loadLocked(ctx context.Context) (map[string]PendingConfirmation, error) {
+func (s *FilePendingStore) loadLocked(ctx context.Context) (map[string]PendingConfirmation, bool, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	default:
 	}
 	items := map[string]PendingConfirmation{}
 	if strings.TrimSpace(s.path) == "" {
-		return items, fmt.Errorf("pending confirmation store path is empty")
+		return items, false, fmt.Errorf("pending confirmation store path is empty")
 	}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return items, nil
+		return items, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return items, nil
+		return items, false, nil
 	}
 	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return items, nil
+	return items, prunePendingConfirmations(items, time.Now().UTC()), nil
 }
 
 func (s *FilePendingStore) saveLocked(items map[string]PendingConfirmation) error {
+	prunePendingConfirmations(items, time.Now().UTC())
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
@@ -260,6 +280,17 @@ func (s *FilePendingStore) saveLocked(items map[string]PendingConfirmation) erro
 		return err
 	}
 	return os.WriteFile(s.path, append(data, '\n'), 0o600)
+}
+
+func prunePendingConfirmations(items map[string]PendingConfirmation, now time.Time) bool {
+	pruned := false
+	for id, pending := range items {
+		if !pending.ExpiresAt.IsZero() && !now.Before(pending.ExpiresAt) {
+			delete(items, id)
+			pruned = true
+		}
+	}
+	return pruned
 }
 
 func newConfirmationID() (string, error) {

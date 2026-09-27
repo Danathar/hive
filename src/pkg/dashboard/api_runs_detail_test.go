@@ -128,6 +128,78 @@ func TestRunDetailReadRoleAllowed(t *testing.T) {
 	}
 }
 
+func TestRunDetailEventsScrubModeRotateAndPaneTailGate(t *testing.T) {
+	s, _ := runsTestServer(t)
+	oldReceipts, oldRunLog := runReceiptsDir, taskRunLogPath
+	runReceiptsDir = filepath.Join(t.TempDir(), "receipts")
+	taskRunLogPath = filepath.Join(t.TempDir(), "task-runs.jsonl")
+	t.Cleanup(func() {
+		runReceiptsDir = oldReceipts
+		taskRunLogPath = oldRunLog
+	})
+
+	const (
+		repo = "myorg/repo1"
+		key  = "myorg/repo1#23726"
+	)
+	if err := s.contributeHub.recordLeaseForKeyStage("agent", "task-23726", repo, 23726, key, "trusted", StageImplement, 1, time.Now()); err != nil {
+		t.Fatalf("record lease: %v", err)
+	}
+	token := "gh" + "s_" + strings.Repeat("a", 24)
+	appendRunDetailEvent(key, runDetailPersistedEvent{
+		Kind:    "task_progress",
+		Summary: "progress detail " + token,
+		Fields: map[string]any{
+			"state":          "state has " + token,
+			"verdict_reason": "reason has " + token,
+			"pane_tail":      []string{"pane output"},
+		},
+	})
+	path := runDetailEventsPath(key)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read event file: %v", err)
+	}
+	if strings.Contains(string(data), token) {
+		t.Fatalf("event file retained token-shaped text: %s", data)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat event file: %v", err)
+	} else if info.Mode().Perm() != runDetailEventsFileMode {
+		t.Fatalf("event file mode = %03o, want %03o", info.Mode().Perm(), os.FileMode(runDetailEventsFileMode))
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+url.PathEscape(key)+"/detail", nil)
+	req.Header.Set("X-Hive-Role", config.RoleRead)
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET run detail = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, token) || strings.Contains(body, "pane output") || strings.Contains(body, "pane_tail") {
+		t.Fatalf("detail response included gated or unsanitized text: %s", body)
+	}
+
+	if err := os.WriteFile(path, []byte("old\n"), runDetailEventsFileMode); err != nil {
+		t.Fatalf("seed event file: %v", err)
+	}
+	if err := os.Truncate(path, taskRunLogMaxBytes); err != nil {
+		t.Fatalf("grow event file: %v", err)
+	}
+	appendRunDetailEvent(key, runDetailPersistedEvent{Kind: "task_progress", Summary: "new"})
+	if oldInfo, err := os.Stat(path + ".1"); err != nil || oldInfo.Size() != int64(taskRunLogMaxBytes) {
+		t.Fatalf("rotated file info = %v, %v", oldInfo, err)
+	}
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read live event file: %v", err)
+	}
+	if !strings.Contains(string(live), `"summary":"new"`) || len(live) >= taskRunLogMaxBytes {
+		t.Fatalf("live event file after rotate = len %d body prefix %.80q", len(live), string(live))
+	}
+}
+
 // The lease generation advances past the generation a stage's capture was
 // written under (spec gen1 finishes, the same lease becomes plan gen2 and the
 // spec stage reports gen2). The capture must still attach.

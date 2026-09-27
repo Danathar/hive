@@ -1,11 +1,16 @@
 package dashboard
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hivecommons/hive/pkg/config"
+	ghpkg "github.com/hivecommons/hive/pkg/github"
 	standbypkg "github.com/hivecommons/hive/pkg/standby"
 )
 
@@ -75,7 +80,7 @@ func seedStandbyAutoQueue(s *Server) {
 }
 
 func standbyAutoStatus(number int, held bool) *StatusPayload {
-	return &StatusPayload{Repos: []FrontendRepo{{
+	return &StatusPayload{Governor: FrontendGovernor{SuppressedLanes: []string{"quality"}}, Repos: []FrontendRepo{{
 		Name: "repo",
 		Full: "alice/repo",
 		ActionableIssues: []any{map[string]any{
@@ -96,6 +101,7 @@ func standbyAutoDispatchHarness(t *testing.T, cfg *config.Config) (*Server, *web
 		s.deps = &Dependencies{}
 	}
 	s.deps.Config = cfg
+	s.deps.GHClient = standbyRepoVisibilityClient(t, false, false)
 	s.contributeHub.persistTaskLedgers = false
 	seedStandbyAutoQueue(s)
 	return s, connectStandbyRelay(t, s, wsURL(ts))
@@ -199,6 +205,83 @@ func TestStandbyAutoDispatchNoDispatchWhenZeroQualify(t *testing.T) {
 	if _, _, err := conn.ReadMessage(); err == nil {
 		t.Fatal("unmapped configuration with 0 qualifying contributors was assigned")
 	}
+}
+
+func TestStandbyDispatchRefusesDisabledLane(t *testing.T) {
+	cfg := standbyAutoDispatchConfig(true, "T2", 1)
+	cfg.Agents["quality"].Standby.Enabled = false
+	s, _ := standbyAutoDispatchHarness(t, cfg)
+
+	_, err := s.contributeHub.DispatchStandby("quality", "")
+	if err == nil || !strings.Contains(err.Error(), string(standbypkg.ReasonStandbyDisabled)) {
+		t.Fatalf("DispatchStandby disabled lane error = %v, want %s", err, standbypkg.ReasonStandbyDisabled)
+	}
+}
+
+func TestStandbyDispatchPrivateRepoGate(t *testing.T) {
+	t.Run("default off", func(t *testing.T) {
+		cfg := standbyAutoDispatchConfig(true, "T2", 1)
+		s, _ := standbyAutoDispatchHarness(t, cfg)
+		s.deps.GHClient = standbyRepoVisibilityClient(t, true, false)
+
+		_, err := s.contributeHub.DispatchStandby("quality", "")
+		if err == nil || !strings.Contains(err.Error(), taskUnavailablePrivateRepo) {
+			t.Fatalf("DispatchStandby private repo error = %v, want %s", err, taskUnavailablePrivateRepo)
+		}
+	})
+	t.Run("allowed by config", func(t *testing.T) {
+		cfg := standbyAutoDispatchConfig(true, "T2", 1)
+		cfg.Hub.StandbyAllowPrivateRepos = true
+		s, _ := standbyAutoDispatchHarness(t, cfg)
+
+		msg, err := s.contributeHub.DispatchStandby("quality", "")
+		if err != nil {
+			t.Fatalf("DispatchStandby allowed private repo: %v", err)
+		}
+		if msg == nil || msg.Type != "task_assign" {
+			t.Fatalf("DispatchStandby msg = %#v, want task_assign", msg)
+		}
+	})
+	t.Run("visibility error", func(t *testing.T) {
+		cfg := standbyAutoDispatchConfig(true, "T2", 1)
+		s, _ := standbyAutoDispatchHarness(t, cfg)
+		s.deps.GHClient = standbyRepoVisibilityClient(t, false, true)
+
+		_, err := s.contributeHub.DispatchStandby("quality", "")
+		if err == nil || !strings.Contains(err.Error(), taskUnavailablePrivateRepo) {
+			t.Fatalf("DispatchStandby visibility error = %v, want %s", err, taskUnavailablePrivateRepo)
+		}
+	})
+	t.Run("public repo", func(t *testing.T) {
+		cfg := standbyAutoDispatchConfig(true, "T2", 1)
+		s, _ := standbyAutoDispatchHarness(t, cfg)
+		s.deps.GHClient = standbyRepoVisibilityClient(t, false, false)
+
+		msg, err := s.contributeHub.DispatchStandby("quality", "")
+		if err != nil {
+			t.Fatalf("DispatchStandby public repo: %v", err)
+		}
+		if msg == nil || msg.Repo != "alice/repo" || msg.Number != 1 {
+			t.Fatalf("DispatchStandby msg = %#v, want alice/repo#1", msg)
+		}
+	})
+}
+
+func standbyRepoVisibilityClient(t *testing.T, private bool, fail bool) *ghpkg.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/alice/repo" {
+			http.NotFound(w, r)
+			return
+		}
+		if fail {
+			http.Error(w, "try later", http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"full_name":"alice/repo","private":%t}`, private)
+	}))
+	t.Cleanup(srv.Close)
+	return ghpkg.NewClientForTest(srv.URL, "alice", []string{"repo"}, nil)
 }
 
 func testNow() time.Time { return time.Now() }

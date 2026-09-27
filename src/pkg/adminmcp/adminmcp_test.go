@@ -3,11 +3,14 @@ package adminmcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type staticProvider struct{ seenTool string }
@@ -15,6 +18,12 @@ type staticProvider struct{ seenTool string }
 func (p *staticProvider) Read(_ context.Context, tool string, _ map[string]any) (any, error) {
 	p.seenTool = tool
 	return map[string]any{"status": "ok", "dashboard_token": "secret-value"}, nil
+}
+
+type errorProvider struct{ err error }
+
+func (p errorProvider) Read(context.Context, string, map[string]any) (any, error) {
+	return nil, p.err
 }
 
 func TestCapResultBoundsKnownListFields(t *testing.T) {
@@ -81,12 +90,66 @@ func TestHandlerReadToolScrubsAndWraps(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
+
 	text := resultText(t, rec.Body.Bytes())
 	if provider.seenTool != ToolHiveStatus {
 		t.Fatalf("tool = %q", provider.seenTool)
 	}
 	if strings.Contains(text, "secret-value") || !strings.Contains(text, "[masked:token]") {
 		t.Fatalf("scrubbed text = %s", text)
+	}
+}
+
+func TestScrubCoversOutboundTextPatternsAndCounters(t *testing.T) {
+	githubSession := "gh" + "s_" + strings.Repeat("a", 24)
+	githubOAuth := "gh" + "o_" + strings.Repeat("b", 24)
+	githubUser := "gh" + "u_" + strings.Repeat("c", 24)
+	jwt := strings.Join([]string{"eyJ" + strings.Repeat("a", 22), strings.Repeat("b", 24), strings.Repeat("c", 24)}, ".")
+	aws := "AKIA" + strings.Repeat("A", 16)
+	bearer := "Bearer " + strings.Repeat("d", 20)
+	privateKey := strings.Join([]string{"-----BEGIN PRIVATE KEY-----", strings.Repeat("A", 64), "-----END PRIVATE KEY-----"}, "\n")
+	input := map[string]any{
+		"audit_line":  "rotate " + githubSession + " " + githubOAuth + " " + githubUser + " " + jwt + " " + aws,
+		"run_title":   "mid " + bearer + " value",
+		"private_key": privateKey,
+		"totalTokens": float64(1234),
+		"tokens":      float64(5678),
+	}
+	out := Scrub(input).(map[string]any)
+	data, _ := json.Marshal(out)
+	text := string(data)
+	for _, forbidden := range []string{githubSession, githubOAuth, githubUser, jwt, aws, bearer, privateKey} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("scrubbed output retained %q in %s", forbidden, text)
+		}
+	}
+	for _, marker := range []string{"redacted:github-token", "redacted:jwt", "redacted:aws-access-key", "redacted:bearer-token", "redacted:private-key"} {
+		if !strings.Contains(text, marker) {
+			t.Fatalf("scrubbed output missing %q in %s", marker, text)
+		}
+	}
+	if out["totalTokens"] != float64(1234) || out["tokens"] != float64(5678) {
+		t.Fatalf("token counters changed: %#v", out)
+	}
+}
+
+func TestHTTPErrorMessageIsScrubbed(t *testing.T) {
+	githubToken := "gh" + "s_" + strings.Repeat("e", 24)
+	bearer := "Bearer " + strings.Repeat("f", 20)
+	aws := "AKIA" + strings.Repeat("G", 16)
+	jwt := strings.Join([]string{"eyJ" + strings.Repeat("h", 22), strings.Repeat("i", 24), strings.Repeat("j", 24)}, ".")
+	privateKey := strings.Join([]string{"-----BEGIN PRIVATE KEY-----", strings.Repeat("A", 64), "-----END PRIVATE KEY-----"}, "\n")
+	h := NewHandler(errorProvider{err: fmt.Errorf("read failed for %s %s %s %s %s", githubToken, bearer, aws, jwt, privateKey)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hive_status","arguments":{}}}`))
+	h.ServeHTTP(rec, req)
+	for _, forbidden := range []string{githubToken, bearer, aws, jwt, privateKey} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("rpc error body retained %q: %s", forbidden, rec.Body.String())
+		}
+	}
+	if !strings.Contains(rec.Body.String(), "redacted:github-token") || !strings.Contains(rec.Body.String(), "redacted:bearer-token") {
+		t.Fatalf("rpc error body = %s", rec.Body.String())
 	}
 }
 
@@ -190,6 +253,7 @@ func TestWriteConfirmationPersistsAndExecutesAfterRestart(t *testing.T) {
 			} `json:"preview"`
 		} `json:"data"`
 	}
+
 	if err := json.Unmarshal([]byte(text), &env); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +274,51 @@ func TestWriteConfirmationPersistsAndExecutesAfterRestart(t *testing.T) {
 	restarted.ServeHTTP(reuse, httptest.NewRequest(http.MethodPost, EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write_confirm","arguments":{"confirmation_id":"`+env.Data.ConfirmationID+`"}}}`)))
 	if !strings.Contains(reuse.Body.String(), ErrConfirmationMissing.Error()) {
 		t.Fatalf("reuse body = %s", reuse.Body.String())
+	}
+}
+
+func TestWritePreviewRefusesStoredCredentialFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pending.json")
+	token := "Bearer " + strings.Repeat("f", 20)
+	h := NewHandler(&writeProvider{}, WithWritesEnabled(true), WithPendingStore(NewFilePendingStore(path)), WithHiveID("hive-a"))
+	rec := httptest.NewRecorder()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_preview","arguments":{"operation":"governor.feature_settings","args":{"otelHeaders":{"Authorization":"` + token + `"}}}}}`
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, EndpointPath, strings.NewReader(body)))
+	if strings.Contains(rec.Body.String(), token) {
+		t.Fatalf("preview response retained header value: %s", rec.Body.String())
+	}
+	if data, err := os.ReadFile(path); err == nil && strings.Contains(string(data), token) {
+		t.Fatalf("pending file retained header value: %s", data)
+	}
+}
+
+func TestFilePendingStorePrunesExpiredEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pending.json")
+	now := time.Now().UTC()
+	items := map[string]PendingConfirmation{
+		"expired": {ID: "expired", Operation: WriteOpAgentPause, Args: map[string]any{"agent": "old"}, Hive: "hive-a", CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)},
+		"active":  {ID: "active", Operation: WriteOpAgentPause, Args: map[string]any{"agent": "new"}, Hive: "hive-a", CreatedAt: now, ExpiresAt: now.Add(time.Hour)},
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	list, err := NewFilePendingStore(path).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != "active" {
+		t.Fatalf("list = %#v", list)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(saved), "expired") || !strings.Contains(string(saved), "active") {
+		t.Fatalf("saved pending file = %s", saved)
 	}
 }
 

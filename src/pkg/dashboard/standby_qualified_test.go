@@ -13,7 +13,7 @@ import (
 
 func standbyTestConfig() *config.Config {
 	return &config.Config{
-		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{MinModelCapability: "T2", DailyCapPerContributor: 1}}},
+		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T2", DailyCapPerContributor: 1}}},
 		Hub: config.HubConfig{
 			StandbyContributors: []string{"alice"},
 			StandbyModelTiers:   []config.StandbyModelTier{{Backend: "claude", Model: "opus", ReasoningEffort: "high", Tier: "T2"}},
@@ -67,12 +67,25 @@ func TestQualifiedStandbyCountsPausedLane(t *testing.T) {
 	}
 }
 
+func TestQualifiedStandbyCountsSkipsDisabledLane(t *testing.T) {
+	cfg := standbyTestConfig()
+	cfg.Agents["quality"].Standby.Enabled = false
+	s := &Server{deps: &Dependencies{Config: cfg}, logger: slog.Default()}
+	h := NewContributeWSHub(slog.Default(), s)
+	addStandbyConnection(h, "alice", true)
+
+	counts := h.QualifiedStandbyCounts([]string{"quality"}, nil)
+	if _, ok := counts["quality"]; ok {
+		t.Fatalf("disabled lane count present: %#v", counts)
+	}
+}
+
 // TestQualifiedStandbyCountsHonourItemTiers is the tile's half of S7: once the
 // owner writes an item-tier list, "M qualify" counts contributors who could be
 // offered at least one item actually queued on the lane.
 func TestQualifiedStandbyCountsHonourItemTiers(t *testing.T) {
 	cfg := &config.Config{
-		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{MinModelCapability: "T3", DailyCapPerContributor: 1}}},
+		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T3", DailyCapPerContributor: 1}}},
 		Hub: config.HubConfig{
 			StandbyContributors: []string{"alice"},
 			StandbyModelTiers:   []config.StandbyModelTier{{Backend: "claude", Model: "haiku", ReasoningEffort: "low", Tier: "T3"}},

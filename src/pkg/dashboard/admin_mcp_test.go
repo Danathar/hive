@@ -63,6 +63,24 @@ func TestAdminMCPEndpointDoesNotExposeHiveSelector(t *testing.T) {
 	}
 }
 
+func TestDashboardAdminMCPOutboundTextIsScrubbed(t *testing.T) {
+	s := &Server{mux: http.NewServeMux()}
+	githubToken := "gh" + "o_" + strings.Repeat("a", 24)
+	bearer := "Bearer " + strings.Repeat("b", 20)
+	s.mux.HandleFunc("GET /api/status/summary", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"title": githubToken + " " + bearer})
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, adminmcp.EndpointPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hive_status","arguments":{}}}`))
+	adminmcp.NewHandler(dashboardAdminMCPProvider{server: s}).ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), githubToken) || strings.Contains(rec.Body.String(), bearer) {
+		t.Fatalf("dashboard MCP body retained raw text: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "redacted:github-token") || !strings.Contains(rec.Body.String(), "redacted:bearer-token") {
+		t.Fatalf("dashboard MCP body missing markers: %s", rec.Body.String())
+	}
+}
+
 func TestAdminMCPExecuteWriteForwardsJSONBodyAndAuth(t *testing.T) {
 	s := NewServerWithAuth(0, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	var gotBody map[string]any

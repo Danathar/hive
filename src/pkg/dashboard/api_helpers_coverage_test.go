@@ -3,6 +3,7 @@ package dashboard
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -50,7 +51,7 @@ func TestCovJ_MaskConnectionAuth(t *testing.T) {
 	}
 	conns := []config.ConnectionConfig{
 		{Name: "db", Type: "postgres", Auth: &config.ConnectionAuth{Type: "env", EnvVar: "DB_PASS"}},
-		{Name: "cache", Type: "redis"}, // no auth
+		{Name: "cache", Type: "redis", URI: "http://hub/api/contribute/mcp?repo=org%2Frepo&token=launch-token"}, // no auth
 	}
 	got := maskConnectionAuth(conns)
 	if len(got) != 2 {
@@ -59,9 +60,15 @@ func TestCovJ_MaskConnectionAuth(t *testing.T) {
 	if got[0].Auth == nil || got[0].Auth.EnvVar == "DB_PASS" {
 		t.Fatalf("expected EnvVar to be masked, got %+v", got[0].Auth)
 	}
+	if strings.Contains(got[1].URI, "launch-token") || strings.Contains(got[1].URI, "token=") || !strings.Contains(got[1].URI, "repo=org%2Frepo") {
+		t.Fatalf("URI token query was not removed: %q", got[1].URI)
+	}
 	// Original must be untouched (deep copy of Auth).
 	if conns[0].Auth.EnvVar != "DB_PASS" {
 		t.Fatalf("maskConnectionAuth mutated the original")
+	}
+	if !strings.Contains(conns[1].URI, "launch-token") {
+		t.Fatalf("maskConnectionAuth mutated the original URI")
 	}
 }
 

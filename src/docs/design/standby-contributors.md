@@ -687,6 +687,9 @@ the assignment; apply `hold` after `verifyReportedPR`) ·
 existing trailer) · `src/pkg/chat/` (the dispatch control on a non-dashboard
 surface). RFC rollout step 2 begins here.
 
+Manual dispatch is available only while the governor reports the lane as paused:
+standby offers paused budget work, not an alternate path around normal cadence.
+
 ### S6 — Outcome tracking, suspend-after-N, owner clear
 
 `src/pkg/standby/suspend.go` (the pure ledger function) ·

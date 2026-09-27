@@ -34,6 +34,7 @@ import (
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/policies"
 	"github.com/hivecommons/hive/pkg/resolve"
+	"github.com/hivecommons/hive/pkg/taskmcp"
 	"github.com/hivecommons/hive/pkg/timeline"
 )
 
@@ -5007,6 +5008,7 @@ func maskConnectionAuth(conns []config.ConnectionConfig) []config.ConnectionConf
 	result := make([]config.ConnectionConfig, len(conns))
 	copy(result, conns)
 	for i, c := range result {
+		result[i].URI = uriWithoutTokenQuery(c.URI)
 		if c.Auth != nil {
 			masked := *c.Auth
 			if masked.EnvVar != "" {
@@ -5016,6 +5018,20 @@ func maskConnectionAuth(conns []config.ConnectionConfig) []config.ConnectionConf
 		}
 	}
 	return result
+}
+
+func uriWithoutTokenQuery(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	if !q.Has(taskmcp.TokenQueryParam) {
+		return raw
+	}
+	q.Del(taskmcp.TokenQueryParam)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func (s *Server) handleAgentPrompt(w http.ResponseWriter, r *http.Request) {
@@ -5365,7 +5381,7 @@ func (s *Server) buildExportYAML(name string, cfg config.AgentConfig, cadences m
 			b.WriteString(fmt.Sprintf("    - name: %s\n", c.Name))
 			b.WriteString(fmt.Sprintf("      type: %s\n", c.Type))
 			if c.URI != "" {
-				b.WriteString(fmt.Sprintf("      uri: %q\n", c.URI))
+				b.WriteString(fmt.Sprintf("      uri: %q\n", uriWithoutTokenQuery(c.URI)))
 			}
 			if c.EnvName != "" {
 				b.WriteString(fmt.Sprintf("      env_name: %s\n", c.EnvName))

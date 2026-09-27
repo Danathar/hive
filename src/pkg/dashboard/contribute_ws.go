@@ -752,6 +752,13 @@ type WSTaskAssign struct {
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
 	Title  string `json:"title"`
+	// FromFork and HeadRepo describe PR assignments whose head branch is not in
+	// the base repository. Hold fields mirror the operator hold state at
+	// assignment time for task MCP consumers.
+	FromFork   bool   `json:"from_fork,omitempty"`
+	HeadRepo   string `json:"head_repo,omitempty"`
+	Held       bool   `json:"held,omitempty"`
+	HoldReason string `json:"hold_reason,omitempty"`
 	// StandbyLane and StandbyTier mark a manually dispatched donated standby
 	// task. Empty on ordinary contributor assignments, so older relays and all
 	// non-standby work keep the existing envelope byte-for-byte.
@@ -3028,6 +3035,9 @@ func (h *ContributeWSHub) QualifiedStandbyCounts(lanes []string, laneItems map[s
 	for _, lane := range lanes {
 		agentCfg := cfg.Agents[lane]
 		standbyCfg := agentCfg.Standby
+		if standbyCfg == nil || !standbyCfg.IsStandbyEnabled() {
+			continue
+		}
 		policy := standbypkg.LanePolicy{
 			Floor:    standbypkg.NormalizeTier(standbyCfg.StandbyFloor()),
 			DailyCap: standbyCfg.StandbyDailyCap(),

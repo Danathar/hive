@@ -192,9 +192,20 @@ func taskMCPLeaseFromRequest(r *http.Request) (taskMCPLeaseContext, bool) {
 }
 
 func bearerToken(r *http.Request) string {
-	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	token := bearerHeaderToken(r)
 	if token == "" {
 		token = strings.TrimSpace(r.URL.Query().Get(taskmcp.TokenQueryParam))
 	}
 	return token
+}
+
+func bearerHeaderToken(r *http.Request) string {
+	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+}
+
+func (s *Server) isQueryDashboardToken(r *http.Request) bool {
+	if s == nil || strings.TrimSpace(s.authToken) == "" {
+		return false
+	}
+	return secureCompare(strings.TrimSpace(r.URL.Query().Get(taskmcp.TokenQueryParam)), s.authToken)
 }

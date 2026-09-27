@@ -82,6 +82,10 @@ type LaunchScope struct {
 	Number     int
 	Agent      string
 	Labels     []string
+	FromFork   bool
+	HeadRepo   string
+	Held       bool
+	HoldReason string
 	Generation uint64
 	StartedAt  time.Time
 }
@@ -140,6 +144,10 @@ type AssignmentData struct {
 	Role       string `json:"role,omitempty"`
 	Repo       string `json:"repo"`
 	Number     int    `json:"number"`
+	FromFork   bool   `json:"from_fork,omitempty"`
+	HeadRepo   string `json:"head_repo,omitempty"`
+	Held       bool   `json:"held,omitempty"`
+	HoldReason string `json:"hold_reason,omitempty"`
 	Key        string `json:"key,omitempty"`
 	SourceType string `json:"source_type,omitempty"`
 	ExternalID string `json:"external_id,omitempty"`

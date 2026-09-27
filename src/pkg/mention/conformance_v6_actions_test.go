@@ -2,6 +2,7 @@ package mention
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func actionHandler(t *testing.T, actions config.GitHubActionsConfig, roles RoleF
 		Agents: func() []AgentInfo {
 			return []AgentInfo{{Name: "scanner", Enabled: true, Converse: true, Mention: true, GovernorKick: true}}
 		},
-		GitHub: &fakeGH{app: "hive[bot]"},
+		GitHub: &fakeGH{app: "hive[bot]", actionRun: ActionRun{Repository: "org/repo", Actor: "ci-bot"}},
 		Store:  store,
 		Kick: func(agent, msg, source string) error {
 			*kick = append(*kick, agent+":"+source+":"+msg)
@@ -71,13 +72,13 @@ func TestV6ConformanceAction_UsesMappedIdentityRoleFloorAndActionSource(t *testi
 	}
 }
 
-func TestV6ConformanceAction_ForgedHumanMarkerDenied(t *testing.T) {
+func TestV6ConformanceAction_HumanMarkerUsesMentionGuards(t *testing.T) {
 	var audit, kick []string
 	h := actionHandler(t, config.GitHubActionsConfig{
 		Enabled:     true,
 		IdentityMap: map[string]string{"ci-bot": "alice"},
 	}, func(login string) (string, bool) {
-		if login == "alice" {
+		if login == "mallory" {
 			return config.RoleReadWrite, true
 		}
 		return "", false
@@ -88,8 +89,8 @@ func TestV6ConformanceAction_ForgedHumanMarkerDenied(t *testing.T) {
 	if err := h.Handle(context.Background(), ev); err != nil {
 		t.Fatal(err)
 	}
-	if len(kick) != 0 || !containsAudit(audit, "guard=action-author") {
-		t.Fatalf("human-forged action marker was not denied: kicks=%v audit=%v", kick, audit)
+	if len(kick) != 1 || !strings.Contains(kick[0], ":mention:action-node:") || containsAudit(audit, "source=action") {
+		t.Fatalf("human marker did not use mention path: kicks=%v audit=%v", kick, audit)
 	}
 }
 
@@ -195,5 +196,70 @@ func TestV6ConformanceAction_AllowApplyGatesKickCommand(t *testing.T) {
 				t.Fatalf("allow_apply denial was not audited: %v", audit)
 			}
 		})
+	}
+}
+
+func TestV6ConformanceAction_TrustedCommentAuthorListAndRunCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		author    string
+		trusted   []string
+		run       ActionRun
+		runErr    error
+		wantKick  bool
+		wantGuard string
+	}{
+		{name: "default author", author: "github-actions[bot]", run: ActionRun{Repository: "org/repo", Actor: "ci-bot"}, wantKick: true},
+		{name: "custom author", author: "relay[bot]", trusted: []string{"relay[bot]"}, run: ActionRun{Repository: "org/repo", TriggeringActor: "ci-bot"}, wantKick: true},
+		{name: "unlisted author", author: "relay[bot]", run: ActionRun{Repository: "org/repo", Actor: "ci-bot"}, wantGuard: "guard=loop"},
+		{name: "actor differs", author: "github-actions[bot]", run: ActionRun{Repository: "org/repo", Actor: "other"}, wantGuard: "guard=action-run"},
+		{name: "repo differs", author: "github-actions[bot]", run: ActionRun{Repository: "org/other", Actor: "ci-bot"}, wantGuard: "guard=action-run"},
+		{name: "run lookup error", author: "github-actions[bot]", runErr: errors.New("unavailable"), wantGuard: "guard=action-run"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var audit, kick []string
+			h := actionHandler(t, config.GitHubActionsConfig{
+				Enabled:               true,
+				TrustedCommentAuthors: tc.trusted,
+				IdentityMap:           map[string]string{"ci-bot": "alice"},
+			}, func(login string) (string, bool) {
+				if login == "alice" {
+					return config.RoleReadWrite, true
+				}
+				return "", false
+			}, &audit, &kick)
+			h.opts.GitHub = &fakeGH{app: "hive[bot]", actionRun: tc.run, actionRunErr: tc.runErr}
+			ev := actionEvent("@hive ask scanner review")
+			ev.Author = tc.author
+			if err := h.Handle(context.Background(), ev); err != nil {
+				t.Fatal(err)
+			}
+			if (len(kick) == 1) != tc.wantKick {
+				t.Fatalf("kicks=%v audit=%v wantKick=%v", kick, audit, tc.wantKick)
+			}
+			if tc.wantGuard != "" && !containsAudit(audit, tc.wantGuard) {
+				t.Fatalf("audit=%v missing %q", audit, tc.wantGuard)
+			}
+		})
+	}
+}
+
+func TestV6ConformanceAction_IdentityMapNormalizesGitHubPrefix(t *testing.T) {
+	var audit, kick []string
+	h := actionHandler(t, config.GitHubActionsConfig{
+		Enabled:     true,
+		IdentityMap: map[string]string{"github:CI-BOT": "alice"},
+	}, func(login string) (string, bool) {
+		if login == "alice" {
+			return config.RoleReadWrite, true
+		}
+		return "", false
+	}, &audit, &kick)
+
+	if err := h.Handle(context.Background(), actionEvent("@hive ask scanner review")); err != nil {
+		t.Fatal(err)
+	}
+	if len(kick) != 1 || !containsAudit(audit, "author=alice") {
+		t.Fatalf("identity map did not normalize actor: kicks=%v audit=%v", kick, audit)
 	}
 }

@@ -2316,12 +2316,13 @@ const (
 )
 
 type GitHubActionsConfig struct {
-	Enabled         bool                    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	SourceLabel     string                  `yaml:"source_label,omitempty" json:"source_label,omitempty"`
-	AllowedCommands []string                `yaml:"allowed_commands,omitempty" json:"allowed_commands,omitempty"`
-	AllowApply      bool                    `yaml:"allow_apply,omitempty" json:"allow_apply,omitempty"`
-	IdentityMap     map[string]string       `yaml:"identity_map,omitempty" json:"identity_map,omitempty"`
-	OIDC            GitHubActionsOIDCConfig `yaml:"oidc,omitempty" json:"oidc,omitempty"`
+	Enabled               bool                    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	SourceLabel           string                  `yaml:"source_label,omitempty" json:"source_label,omitempty"`
+	AllowedCommands       []string                `yaml:"allowed_commands,omitempty" json:"allowed_commands,omitempty"`
+	AllowApply            bool                    `yaml:"allow_apply,omitempty" json:"allow_apply,omitempty"`
+	TrustedCommentAuthors []string                `yaml:"trusted_comment_authors,omitempty" json:"trusted_comment_authors,omitempty"`
+	IdentityMap           map[string]string       `yaml:"identity_map,omitempty" json:"identity_map,omitempty"`
+	OIDC                  GitHubActionsOIDCConfig `yaml:"oidc,omitempty" json:"oidc,omitempty"`
 }
 
 type GitHubActionsOIDCConfig struct {
@@ -2332,9 +2333,10 @@ type GitHubActionsOIDCConfig struct {
 }
 
 const (
-	DefaultGitHubActionSourceLabel  = "action"
-	DefaultGitHubActionsOIDCJWKSURL = "https://token.actions.githubusercontent.com/.well-known/jwks"
-	DefaultGitHubActionsOIDCMaxSkew = 2 * time.Minute
+	DefaultGitHubActionSourceLabel          = "action"
+	DefaultGitHubActionTrustedCommentAuthor = "github-actions[bot]"
+	DefaultGitHubActionsOIDCJWKSURL         = "https://token.actions.githubusercontent.com/.well-known/jwks"
+	DefaultGitHubActionsOIDCMaxSkew         = 2 * time.Minute
 )
 
 var DefaultGitHubActionAllowedCommands = []string{"status", "review"}
@@ -2353,6 +2355,19 @@ func (a GitHubActionsConfig) AllowedCommandsEffective() []string {
 	out := make([]string, 0, len(a.AllowedCommands))
 	for _, cmd := range a.AllowedCommands {
 		if trimmed := strings.ToLower(strings.TrimSpace(cmd)); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func (a GitHubActionsConfig) TrustedCommentAuthorsEffective() []string {
+	if len(a.TrustedCommentAuthors) == 0 {
+		return []string{DefaultGitHubActionTrustedCommentAuthor}
+	}
+	out := make([]string, 0, len(a.TrustedCommentAuthors))
+	for _, login := range a.TrustedCommentAuthors {
+		if trimmed := strings.TrimSpace(login); trimmed != "" {
 			out = append(out, trimmed)
 		}
 	}

@@ -205,8 +205,9 @@ agents:
     sort_order: 35
     # Standby contributors (RFC #7629): when this lane is paused for BUDGET,
     # offer its queue to approved standby contributors whose model
-    # configuration clears the lane's floor. PARSED AND VALIDATED ONLY — as of
-    # S2 nothing reads the block. See src/docs/design/standby-contributors.md.
+    # configuration clears the lane's floor. Manual dispatch uses this block;
+    # auto_dispatch additionally opts the lane into automatic attempts while
+    # it is paused. See src/docs/design/standby-contributors.md.
     #
     #   min_model_capability  T1 | T2 | T3, defaulting to T1 — the STRONGEST
     #                         floor, so adopting the block without thinking
@@ -225,8 +226,12 @@ agents:
     #                         list below, or the hive fails to load: a lane
     #                         that is on with nobody approved is a
     #                         misconfiguration, not a silently inert setting.
+    #   auto_dispatch: false  default off; when true, Hive may dispatch from
+    #                         this lane automatically while the governor has
+    #                         paused it for budget.
     # standby:
     #   enabled: false
+    #   auto_dispatch: false
     #   min_model_capability: T1
     #   daily_cap_per_contributor: 0
   architect:

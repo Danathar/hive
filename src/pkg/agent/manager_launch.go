@@ -1184,12 +1184,14 @@ func withTaskMCPConnection(cfg config.AgentConfig, uri string, scope taskmcp.Lau
 		return cfg
 	}
 	scopedURI := taskMCPURIWithScope(uri, scope, token)
-	for _, conn := range cfg.Connections {
+	conns := append([]config.ConnectionConfig(nil), cfg.Connections...)
+	cfg.Connections = conns
+	for _, conn := range conns {
 		if conn.Type == "mcp" && conn.Name == "hive-task" {
 			if sameTaskMCPEndpoint(conn.URI, uri) {
-				for i := range cfg.Connections {
-					if cfg.Connections[i].Type == "mcp" && cfg.Connections[i].Name == "hive-task" {
-						cfg.Connections[i].URI = scopedURI
+				for i := range conns {
+					if conns[i].Type == "mcp" && conns[i].Name == "hive-task" {
+						conns[i].URI = scopedURI
 						break
 					}
 				}
@@ -1197,7 +1199,7 @@ func withTaskMCPConnection(cfg config.AgentConfig, uri string, scope taskmcp.Lau
 			return cfg
 		}
 	}
-	cfg.Connections = append(cfg.Connections, config.ConnectionConfig{
+	cfg.Connections = append(conns, config.ConnectionConfig{
 		Name: "hive-task",
 		Type: "mcp",
 		URI:  scopedURI,

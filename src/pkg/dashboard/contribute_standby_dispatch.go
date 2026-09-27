@@ -15,7 +15,11 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-const taskUnavailableModeCeiling = "mode_ceiling"
+const (
+	taskUnavailableModeCeiling = "mode_ceiling"
+	taskUnavailableLanePaused  = "standby_lane_not_paused"
+	taskUnavailablePrivateRepo = "private_repo"
+)
 
 type standbyDispatchCandidate struct {
 	conn  *ContributorConnection
@@ -81,8 +85,21 @@ func (h *ContributeWSHub) DispatchStandby(lane, key string) (*WSMessage, error) 
 	if lane == "" {
 		return nil, fmt.Errorf("standby lane required")
 	}
+	agentCfg, ok := cfg.Agents[lane]
+	if !ok {
+		return nil, fmt.Errorf("%s", standbypkg.ReasonLaneUnknown)
+	}
+	if agentCfg.Standby == nil || !agentCfg.Standby.IsStandbyEnabled() {
+		return nil, fmt.Errorf("%s", standbypkg.ReasonStandbyDisabled)
+	}
+	if !h.standbyLaneCurrentlyPaused(lane) {
+		return nil, fmt.Errorf("%s: lane %q is not paused by the governor", taskUnavailableLanePaused, lane)
+	}
 	if reason := standbyModeCeilingReason(cfg, lane); reason != "" {
 		return nil, fmt.Errorf("%s: %s", taskUnavailableModeCeiling, reason)
+	}
+	if err := h.requireStandbyRepoVisibility(cfg, item.Repo); err != nil {
+		return nil, err
 	}
 	itemTiers := standbyItemTiersFromConfig(cfg.Hub.StandbyItemTiers)
 	standbyItem := standbypkg.Item{Repo: item.Repo, Labels: item.Labels}
@@ -92,6 +109,49 @@ func (h *ContributeWSHub) DispatchStandby(lane, key string) (*WSMessage, error) 
 		return nil, err
 	}
 	return h.assignStandbyTask(cand.conn, item, lane, cand.tier, cand.state)
+}
+
+func (h *ContributeWSHub) standbyLaneCurrentlyPaused(lane string) bool {
+	lane = strings.ToLower(strings.TrimSpace(lane))
+	if lane == "" || h == nil || h.server == nil {
+		return false
+	}
+	h.server.statusMu.RLock()
+	defer h.server.statusMu.RUnlock()
+	if h.server.status == nil {
+		return false
+	}
+	for _, paused := range h.server.status.Governor.SuppressedLanes {
+		if strings.EqualFold(strings.TrimSpace(paused), lane) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *ContributeWSHub) requireStandbyRepoVisibility(cfg *config.Config, repoFull string) error {
+	if cfg != nil && cfg.Hub.IsStandbyPrivateReposAllowed() {
+		return nil
+	}
+	owner, repo, ok := strings.Cut(strings.TrimSpace(repoFull), "/")
+	if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
+		return fmt.Errorf("%s: repository visibility unavailable", taskUnavailablePrivateRepo)
+	}
+	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.GHClient == nil {
+		return fmt.Errorf("%s: repository visibility unavailable", taskUnavailablePrivateRepo)
+	}
+	ctx := h.server.deps.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	repoInfo, _, err := h.server.deps.GHClient.GetRepo(ctx, owner, repo)
+	if err != nil || repoInfo == nil {
+		return fmt.Errorf("%s: repository visibility unavailable", taskUnavailablePrivateRepo)
+	}
+	if repoInfo.GetPrivate() {
+		return fmt.Errorf("%s: standby private repositories are not enabled", taskUnavailablePrivateRepo)
+	}
+	return nil
 }
 
 // AutoDispatchStandby runs S8's opt-in automatic path for lanes currently

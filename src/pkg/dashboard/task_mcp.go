@@ -38,6 +38,10 @@ func (s *Server) handleContributeMCP(w http.ResponseWriter, r *http.Request) {
 		r, leaseOK = s.authenticateTaskMCPLaunch(r)
 	}
 	if !leaseOK && !s.authorizeTaskMCP(r) {
+		if s.isQueryDashboardToken(r) {
+			writeQueryTokenRejected(w, r)
+			return
+		}
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -48,7 +52,7 @@ func (s *Server) authorizeTaskMCP(r *http.Request) bool {
 	if s == nil || strings.TrimSpace(s.authToken) == "" {
 		return false
 	}
-	token := bearerToken(r)
+	token := bearerHeaderToken(r)
 	return secureCompare(token, s.authToken)
 }
 
@@ -120,6 +124,12 @@ func (p dashboardTaskMCPProvider) TaskContext(_ context.Context, scope taskmcp.S
 	if err != nil {
 		return taskmcp.TaskContextData{}, err
 	}
+	policies := p.policyData(snap)
+	held := snap.assign.Held || policies.Hold.Held
+	holdReason := snap.assign.HoldReason
+	if holdReason == "" {
+		holdReason = policies.Hold.Reason
+	}
 	return taskmcp.TaskContextData{
 		Assignment: taskmcp.AssignmentData{
 			TaskID:     snap.assign.TaskID,
@@ -128,6 +138,10 @@ func (p dashboardTaskMCPProvider) TaskContext(_ context.Context, scope taskmcp.S
 			Role:       snap.assign.Role,
 			Repo:       snap.assign.Repo,
 			Number:     snap.assign.Number,
+			FromFork:   snap.assign.FromFork,
+			HeadRepo:   snap.assign.HeadRepo,
+			Held:       held,
+			HoldReason: holdReason,
 			Key:        snap.assign.Key,
 			SourceType: snap.assign.SourceType,
 			ExternalID: snap.assign.ExternalID,
@@ -141,7 +155,7 @@ func (p dashboardTaskMCPProvider) TaskContext(_ context.Context, scope taskmcp.S
 			AgeSeconds: leaseAgeSeconds(snap.assignedAt),
 			Stage:      snap.assign.Stage,
 		},
-		Policies: p.policyData(snap),
+		Policies: policies,
 	}, nil
 }
 
@@ -224,12 +238,16 @@ func (p dashboardTaskMCPProvider) snapshotMatching(taskID, repo string, number i
 		for _, launch := range lookup.ActiveLaunches() {
 			if launchMatches(launch, taskID, repo, number) {
 				assign := WSTaskAssign{
-					TaskID: launch.TaskID,
-					Kind:   "issue",
-					Repo:   launch.Repo,
-					Number: launch.Number,
-					Role:   launch.Agent,
-					Key:    taskKey(launch.Repo, launch.Number),
+					TaskID:     launch.TaskID,
+					Kind:       "issue",
+					Repo:       launch.Repo,
+					Number:     launch.Number,
+					Role:       launch.Agent,
+					FromFork:   launch.FromFork,
+					HeadRepo:   launch.HeadRepo,
+					Held:       launch.Held,
+					HoldReason: launch.HoldReason,
+					Key:        taskKey(launch.Repo, launch.Number),
 				}
 				return taskMCPSnapshot{
 					assign:     assign,

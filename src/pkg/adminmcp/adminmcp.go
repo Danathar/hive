@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/logscrub"
 )
 
 const (
@@ -406,12 +408,15 @@ func (h *Handler) PreviewWrite(ctx context.Context, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnpersistablePreview(op.Name(), opArgs, preview); err != nil {
+		return nil, err
+	}
 	now := h.now()
 	id, err := newConfirmationID()
 	if err != nil {
 		return nil, err
 	}
-	pending := PendingConfirmation{ID: id, Operation: op.Name(), Args: opArgs, Preview: preview, Hive: h.HiveID, CreatedAt: now, ExpiresAt: now.Add(h.ConfirmationTTL)}
+	pending := PendingConfirmation{ID: id, Operation: op.Name(), Args: scrubPendingMap(opArgs).(map[string]any), Preview: scrubPendingPreview(preview), Hive: h.HiveID, CreatedAt: now, ExpiresAt: now.Add(h.ConfirmationTTL)}
 	if err := h.PendingStore.Put(ctx, pending); err != nil {
 		return nil, err
 	}
@@ -462,6 +467,100 @@ func (h *Handler) now() time.Time {
 		return h.Now()
 	}
 	return time.Now().UTC()
+}
+
+func rejectUnpersistablePreview(op string, args map[string]any, preview WritePreview) error {
+	if pendingValueNeedsFreshConfirm(args) || pendingValueNeedsFreshConfirm(preview.Request) || pendingValueNeedsFreshConfirm(preview.Details) {
+		return fmt.Errorf("write preview for %s contains a confirmation value that cannot be stored; update that field outside admin MCP", op)
+	}
+	return nil
+}
+
+func pendingValueNeedsFreshConfirm(v any) bool {
+	scrubbed := scrubPendingValue(v, "")
+	orig, origErr := json.Marshal(v)
+	next, nextErr := json.Marshal(scrubbed)
+	return origErr == nil && nextErr == nil && !bytes.Equal(orig, next)
+}
+
+func scrubPendingPreview(preview WritePreview) WritePreview {
+	out := preview
+	out.Summary = scrubOutboundString(out.Summary)
+	out.Target = scrubOutboundString(out.Target)
+	out.Request = scrubPendingValue(out.Request, "request").(WriteRequest)
+	if out.Effects != nil {
+		out.Effects = scrubPendingValue(out.Effects, "effects").([]string)
+	}
+	out.WideningDisclosure = scrubOutboundString(out.WideningDisclosure)
+	out.ConfirmationMessage = scrubOutboundString(out.ConfirmationMessage)
+	if out.Details != nil {
+		out.Details = scrubPendingMap(out.Details).(map[string]any)
+	}
+	return out
+}
+
+func scrubPendingMap(m map[string]any) any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return scrubPendingValue(m, "")
+}
+
+func scrubPendingValue(v any, key string) any {
+	switch x := v.(type) {
+	case WriteRequest:
+		out := x
+		out.Path = scrubOutboundString(out.Path)
+		out.Body = scrubPendingValue(out.Body, "body")
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			if credentialBearingKey(k) && !numericTokenCounter(k, val) {
+				out[k] = "[masked:" + maskLabel(k) + "]"
+				continue
+			}
+			out[k] = scrubPendingValue(val, k)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = scrubPendingValue(val, key)
+		}
+		return out
+	case []string:
+		out := make([]string, len(x))
+		for i, val := range x {
+			out[i] = scrubOutboundString(val)
+		}
+		return out
+	case string:
+		if credentialBearingKey(key) {
+			return "[masked:" + maskLabel(key) + "]"
+		}
+		return scrubOutboundString(x)
+	default:
+		return v
+	}
+}
+
+func credentialBearingKey(k string) bool {
+	key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(k), "_", ""), "-", ""))
+	if key == "" || key == "tokens" || key == "totaltokens" {
+		return false
+	}
+	if key == "otelheaders" {
+		return true
+	}
+	return strings.Contains(key, "secret") ||
+		strings.Contains(key, "password") ||
+		strings.Contains(key, "credential") ||
+		strings.Contains(key, "authorization") ||
+		strings.Contains(key, "token") ||
+		strings.Contains(key, "apikey") ||
+		strings.Contains(key, "header") ||
+		strings.HasSuffix(key, "key")
 }
 
 func LimitFromArgs(args map[string]any) int {
@@ -597,7 +696,7 @@ func maskSensitive(b []byte) []byte {
 		case map[string]any:
 			out := map[string]any{}
 			for k, val := range x {
-				if sensitiveKey(k) {
+				if sensitiveKey(k) && !numericTokenCounter(k, val) {
 					out[k] = "[masked:" + maskLabel(k) + "]"
 				} else {
 					out[k] = walk(val)
@@ -610,8 +709,9 @@ func maskSensitive(b []byte) []byte {
 			}
 			return x
 		case string:
-			if looksSecret(x) {
-				return "[masked:secret-like]"
+			scrubbed := scrubOutboundString(x)
+			if scrubbed != x {
+				return scrubbed
 			}
 		}
 		return v
@@ -628,6 +728,18 @@ func sensitiveKey(k string) bool {
 	k = strings.ToLower(k)
 	return strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "credential") || strings.Contains(k, "authorization")
 }
+func numericTokenCounter(k string, v any) bool {
+	key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, "_", ""), "-", ""))
+	if key != "tokens" && key != "totaltokens" {
+		return false
+	}
+	switch v.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
 func maskLabel(k string) string {
 	k = strings.ToLower(k)
 	if strings.Contains(k, "token") {
@@ -641,15 +753,25 @@ func maskLabel(k string) string {
 func looksSecret(s string) bool {
 	return strings.HasPrefix(s, "Bearer ") || strings.HasPrefix(s, "ghp_") || strings.HasPrefix(s, "github_pat_") || strings.HasPrefix(s, "hive_")
 }
+func scrubOutboundString(s string) string {
+	out := logscrub.ScrubString(s, logscrub.WithMarkers())
+	if out != s {
+		return out
+	}
+	if looksSecret(s) {
+		return "[masked:secret-like]"
+	}
+	return s
+}
 func stringArg(args map[string]any, key string) string {
 	v, _ := args[key].(string)
 	return strings.TrimSpace(v)
 }
 func toolErr(err error) *rpcError {
 	if errors.Is(err, ErrForbidden) {
-		return &rpcError{Code: -32003, Message: err.Error()}
+		return &rpcError{Code: -32003, Message: scrubOutboundString(err.Error())}
 	}
-	return &rpcError{Code: -32000, Message: err.Error()}
+	return &rpcError{Code: -32000, Message: scrubOutboundString(err.Error())}
 }
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	w.Header().Set("Content-Type", "application/json")

@@ -21,6 +21,8 @@ type fakeGH struct {
 	comment       string
 	commentErr    error
 	commentNumber int
+	actionRun     ActionRun
+	actionRunErr  error
 	events        []Event
 	listed        bool
 }
@@ -72,6 +74,15 @@ func (f *fakeGH) CreateIssueComment(ctx context.Context, repo string, number int
 	f.comment = body
 	f.commentNumber = number
 	return nil
+}
+func (f *fakeGH) GetActionRun(ctx context.Context, repo, runID string) (ActionRun, error) {
+	if f.actionRunErr != nil {
+		return ActionRun{}, f.actionRunErr
+	}
+	if f.actionRun == (ActionRun{}) {
+		return ActionRun{Repository: repo, Actor: "ci-bot"}, nil
+	}
+	return f.actionRun, nil
 }
 
 func TestParseGrammar(t *testing.T) {

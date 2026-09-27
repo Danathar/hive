@@ -50,6 +50,46 @@ func TestTaskMCPConnectionUpdatesOwnScopedURIIdempotently(t *testing.T) {
 	}
 }
 
+func TestTaskMCPConnectionLeavesCallerExistingConnectionUntouched(t *testing.T) {
+	originalURI := "http://hub/api/contribute/mcp"
+	cfg := config.AgentConfig{Connections: []config.ConnectionConfig{{
+		Name: "hive-task",
+		Type: "mcp",
+		URI:  originalURI,
+	}}}
+
+	got := withTaskMCPConnection(cfg, originalURI, taskmcp.LaunchScope{TaskID: "t2", Repo: "org/repo", Number: 2}, "tok2")
+	if cfg.Connections[0].URI != originalURI {
+		t.Fatalf("caller connection URI = %q, want %q", cfg.Connections[0].URI, originalURI)
+	}
+	if got.Connections[0].URI == originalURI {
+		t.Fatalf("returned connection was not scoped: %#v", got.Connections)
+	}
+	if &got.Connections[0] == &cfg.Connections[0] {
+		t.Fatalf("returned connections share the caller's backing array")
+	}
+}
+
+func TestTaskMCPConnectionLeavesCallerAppendCapacityUntouched(t *testing.T) {
+	backing := make([]config.ConnectionConfig, 1, 2)
+	backing[0] = config.ConnectionConfig{Name: "db", Type: "postgres", URI: "postgres://db"}
+	cfg := config.AgentConfig{Connections: backing[:1]}
+
+	got := withTaskMCPConnection(cfg, "http://hub/api/contribute/mcp", taskmcp.LaunchScope{TaskID: "t", Repo: "org/repo"}, "tok")
+	if len(cfg.Connections) != 1 || cfg.Connections[0].Name != "db" || cfg.Connections[0].Type != "postgres" || cfg.Connections[0].URI != "postgres://db" {
+		t.Fatalf("caller connections changed: %#v", cfg.Connections)
+	}
+	if spare := backing[:cap(backing)][1]; spare.Name != "" || spare.Type != "" || spare.URI != "" || len(spare.Options) != 0 || spare.Auth != nil {
+		t.Fatalf("caller spare capacity changed: %#v", spare)
+	}
+	if len(got.Connections) != 2 || got.Connections[1].Name != "hive-task" {
+		t.Fatalf("returned connections = %#v, want appended hive-task connection", got.Connections)
+	}
+	if &got.Connections[0] == &cfg.Connections[0] {
+		t.Fatalf("returned connections share the caller's backing array")
+	}
+}
+
 func TestTaskMCPURIWithScopeIncludesZeroNumber(t *testing.T) {
 	got := taskMCPURIWithScope("http://hub/api/contribute/mcp", taskmcp.LaunchScope{TaskID: "t0", Repo: "org/repo"}, "tok")
 	u, err := url.Parse(got)

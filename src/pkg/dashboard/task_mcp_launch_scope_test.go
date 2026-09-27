@@ -43,6 +43,40 @@ func mintLaunchToken(t *testing.T, launch taskmcp.LaunchScope, expiresAt time.Ti
 	return token
 }
 
+func TestContributeMCPHandlerDashboardTokenHeaderOnly(t *testing.T) {
+	launch := taskmcp.LaunchScope{TaskID: "scanner:owner/repo#0:3", Repo: "owner/repo", Agent: "scanner", Generation: 3, StartedAt: time.Now()}
+	s := newLaunchScopeTestServer(t, func() []taskmcp.LaunchScope { return []taskmcp.LaunchScope{launch} })
+	s.registerContributeRoutes()
+	handler := s.Handler()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?"+taskmcp.TokenQueryParam+"="+launchScopeTestSecret, strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("query dashboard token status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "query-string dashboard token authentication is no longer supported") {
+		t.Fatalf("query dashboard token body = %q", rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+launchScopeTestSecret)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("header dashboard token status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	leaseToken := mintLaunchToken(t, launch, time.Now().Add(config.DefaultTaskMCPLaunchTokenTTL))
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, taskmcp.EndpointPath+"?"+taskmcp.TokenQueryParam+"="+leaseToken, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"task_context","arguments":{}}}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query launch token status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestContributeMCPLaunchTokenScopesAndRefusesCrossTask(t *testing.T) {
 	launch := taskmcp.LaunchScope{TaskID: "scanner:owner/repo#0:3", Repo: "owner/repo", Agent: "scanner", Generation: 3, StartedAt: time.Now().Add(-time.Minute)}
 	active := []taskmcp.LaunchScope{launch}
