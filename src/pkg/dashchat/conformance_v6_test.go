@@ -1,9 +1,13 @@
 package dashchat
 
-// v6 guard-invariant conformance for the dashboard chat transport. Dashboard
-// chat is the browser surface on the shared chat spine; this test fails if it
-// bypasses inbound ioscan, outbound scrubbing, fail-closed command allowlists,
-// or reaches dashboard/hub state directly instead of staying behind Deps.
+// v6 guard-invariant conformance for the dashboard chat transport — the
+// adapter-level checks. Dashboard chat is the browser surface on the shared
+// chat spine; this test fails if the adapter bypasses inbound ioscan, outbound
+// scrubbing, fail-closed command allowlists, or reaches dashboard/hub state
+// directly instead of staying behind Deps. The surface-level checks (local
+// intents in pkg/dashboard/chat_*.go never answering `!` commands, and the
+// started-bot allowlist gate observed through /api/chat) live in
+// pkg/dashboard/chat_conformance_v6_test.go (hivecommons/hive#9136).
 
 import (
 	"context"
@@ -53,12 +57,16 @@ func TestV6ConformanceDashboardChat_InboundTextIsIOSCannedBeforeRouting(t *testi
 	}
 }
 
-func TestV6ConformanceDashboardChat_AllowlistFailsClosed(t *testing.T) {
+func TestV6ConformanceDashboardChat_AllowlistFailsClosedAndRefusesVisibly(t *testing.T) {
 	b := NewBot(Config{}, nil)
 	b.RegisterCommand("ping", func(_ context.Context, _ string) (string, error) { return "pong", nil })
 	b.Deliver(context.Background(), chat.Message{ID: "1", Text: "!ping", AuthorID: "alice"})
-	if got := b.Drain(0); len(got) != 0 {
-		t.Fatalf("v6 conformance (role floor/fail closed): empty allowlist replied: %+v", got)
+	got := b.Drain(0)
+	if len(got) != 1 || got[0].Role != "bot" || strings.Contains(got[0].Text, "pong") || !strings.Contains(got[0].Text, "refused") {
+		t.Fatalf("v6 conformance (role floor/fail closed): empty allowlist must refuse visibly and never run the command, got %+v", got)
+	}
+	if !strings.Contains(got[0].Text, "`!ping`") || !strings.Contains(got[0].Text, "`alice`") {
+		t.Fatalf("v6 conformance (role floor/fail closed): refusal must name the command and author, got %q", got[0].Text)
 	}
 }
 
