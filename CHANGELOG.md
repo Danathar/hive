@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.68.3)
+
+### Fixed
+
+- The contributor relay now delivers task prompts through tmux bracketed paste and requires turn-start evidence before treating Codex submission as confirmed, avoiding blank-widget stalls for long prompts ([#9078](https://github.com/hivecommons/hive/issues/9078)).
+
 ## 2026-09-26 (v5.68.2)
 
 ### Security
