@@ -486,13 +486,30 @@ func TestListenContextCancelDoesNotWarn(t *testing.T) {
 	var logs bytes.Buffer
 	b := NewBot(Config{AppToken: "xapp-test", BotToken: "xoxb-test", ChannelID: "C1"}, slog.New(slog.NewTextHandler(&logs, nil)))
 	b.apiBase = ts.URL
+	// Signal only once the client handshake has completed: cancelling while
+	// Dial is still in flight would surface as context.Canceled, which the
+	// old guard also swallowed, and the test would pass without the fix.
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	realDial := b.dial
+	b.dial = func(ctx context.Context, url string, h http.Header) (*websocket.Conn, *http.Response, error) {
+		conn, resp, err := realDial(ctx, url, h)
+		if err == nil {
+			connectedOnce.Do(func() { close(connected) })
+		}
+		return conn, resp, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		b.Listen(ctx, func(chat.Message) {})
 		close(done)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Listen never opened the socket")
+	}
 	cancel()
 	select {
 	case <-done:
