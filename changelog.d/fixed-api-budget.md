@@ -1,1 +1,0 @@
-- Reduce GitHub REST budget burn with per-caller accounting in `/api/gh-rate-limits`, MTTR issue lookup caching, and low-budget shedding for dashboard-only MTTR fetches.

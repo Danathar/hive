@@ -1,1 +1,0 @@
-- ACMM L6 Fully Autonomous hives now default the #5117 self-authorization hold off unless an explicit hive, repo, or environment override keeps it enabled, allowing eligible Hive-authored PRs to auto-merge under L6 policy.
