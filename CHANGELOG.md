@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.72.1)
+
+### Changed
+
+- Changed merge-request handling to allow merges into any branch the GitHub App can write while surfacing actionable operator alerts for merge failures that need configuration fixes.
+
+### Fixed
+
+- Stop repeatedly refetching missing GitHub PR and `.claude/settings.json` resources after 404s, preserving REST budget for merge and hold-release work.
+
 ## 2026-09-27 (v5.72.0)
 
 ### Added

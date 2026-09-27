@@ -1,1 +1,0 @@
-- Changed merge-request handling to allow merges into any branch the GitHub App can write while surfacing actionable operator alerts for merge failures that need configuration fixes.
