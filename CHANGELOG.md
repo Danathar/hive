@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.71.0)
+
+### Added
+
+- The weekly owner advice now explains the queue: mode-independent queue-health rules read the Overview band breakdown and say why PRs are blocked, what to do first, and where the list is — with the first items, the CSV export link and each named band's rule text — and a frozen epoch keeps which advice shows while recomputing its numbers every digest ([#9103](https://github.com/hivecommons/hive/issues/9103)).
+
 ## 2026-09-27 (v5.70.0)
 
 ### Added
