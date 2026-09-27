@@ -2335,6 +2335,37 @@ type AdvisoryConfig struct {
 	// post — the digest is never redirected to GitHub without being asked.
 	// Authentication reuses governor.work_source.linear.api_key.
 	LinearIssue string `yaml:"linear_issue,omitempty" json:"linear_issue,omitempty"`
+	// QueueHealth tunes the owner-advice queue-health rules (#9103): the
+	// thresholds at which the weekly advice tells the owner to reduce the
+	// blocked PR queue, clear the human gate, and so on. Every field is a
+	// whole number and zero/absent means the shipped default (see
+	// hiveadvisor.DefaultThresholds), so hive.yaml round-trips without the
+	// key until an operator tunes one.
+	QueueHealth AdvisoryQueueHealthConfig `yaml:"queue_health,omitempty" json:"queue_health,omitempty"`
+}
+
+// AdvisoryQueueHealthConfig holds the queue-health rule thresholds. The
+// *_pct keys are percentages of the relevant Overview total; the defaults are
+// starting points to calibrate against real hives, not settled policy.
+type AdvisoryQueueHealthConfig struct {
+	// BlockedPRPct: Blocked PRs at or above this share of open PRs fire
+	// "Reduce the blocked PR queue". Default 50.
+	BlockedPRPct int `yaml:"blocked_pr_pct,omitempty" json:"blocked_pr_pct,omitempty"`
+	// NeedsHumanPRPct: Needs-human PRs at or above this share of open PRs
+	// fire "Clear the human gate on PRs". Default 25.
+	NeedsHumanPRPct int `yaml:"needs_human_pr_pct,omitempty" json:"needs_human_pr_pct,omitempty"`
+	// NeedsHumanIssuePct: Needs-human issues at or above this share of open
+	// issues fire "Unblock the human queue". Default 30.
+	NeedsHumanIssuePct int `yaml:"needs_human_issue_pct,omitempty" json:"needs_human_issue_pct,omitempty"`
+	// StaleBlockedPRs: this many Blocked PRs past dashboard.issue_bands.stale_days
+	// fire "Review stale PRs". Default 10.
+	StaleBlockedPRs int `yaml:"stale_blocked_prs,omitempty" json:"stale_blocked_prs,omitempty"`
+	// LaneSharePct: one agent lane producing at least this share of Blocked
+	// PRs fires "Throttle lane X". Default 50.
+	LaneSharePct int `yaml:"lane_share_pct,omitempty" json:"lane_share_pct,omitempty"`
+	// CheckSharePct: one check failing on at least this share of CI-blocked
+	// PRs fires "Fix check X first". Default 50.
+	CheckSharePct int `yaml:"check_share_pct,omitempty" json:"check_share_pct,omitempty"`
 }
 
 // Advisory digest targets accepted by AdvisoryConfig.Target.
