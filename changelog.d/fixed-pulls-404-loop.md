@@ -1,1 +1,0 @@
-- Stop repeatedly refetching missing GitHub PR and `.claude/settings.json` resources after 404s, preserving REST budget for merge and hold-release work.
