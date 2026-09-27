@@ -63,9 +63,11 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 	}
 
 	content := strings.TrimSpace(msg.Text)
+	// Transports pre-enforce inbound text and deliver the redaction marker, so
+	// the marker itself must be treated as a block, not as user content.
 	safeContent, verdict := ioscan.EnforceInput(content)
-	if verdict.Blocked {
-		s.logger.Warn("discord: ignoring message rejected by safety scanner",
+	if verdict.Blocked || ioscan.IsRedacted(content) {
+		s.logger.Warn("chat: ignoring message rejected by safety scanner",
 			"user_id", msg.AuthorID)
 		return
 	}

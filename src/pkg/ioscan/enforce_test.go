@@ -94,3 +94,18 @@ func TestAnnotate_EmbedsSummary(t *testing.T) {
 		t.Fatalf("annotate did not embed rule summary: %q", got)
 	}
 }
+
+func TestIsRedacted(t *testing.T) {
+	marker, _ := EnforceInput(blockingInjection)
+	if !IsRedacted(marker) || !IsRedacted("  "+marker+"\n") {
+		t.Fatalf("IsRedacted(%q) = false, want true", marker)
+	}
+	if !IsRedacted(SemanticRedactionMarker(InjectionScore{Score: 0.9, Category: "instruction_override"})) {
+		t.Fatal("semantic redaction marker not recognised")
+	}
+	for _, text := range []string{benignText, "", "quoting [ioscan: content withheld — x] inline"} {
+		if IsRedacted(text) {
+			t.Fatalf("IsRedacted(%q) = true, want false", text)
+		}
+	}
+}

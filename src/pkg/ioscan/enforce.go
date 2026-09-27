@@ -56,6 +56,14 @@ func EnforceOutput(text string) (sanitized string, v Verdict) {
 	return annotate(v), v
 }
 
+// IsRedacted reports whether text is a redaction marker produced by this
+// package, i.e. content that was already withheld upstream. Consumers that
+// receive pre-enforced text use it to drop the message instead of treating the
+// marker as user content (rescanning the marker itself never blocks).
+func IsRedacted(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), redactionMarker[:strings.Index(redactionMarker, "%s")])
+}
+
 // annotate renders the redaction marker for a blocked verdict, embedding a
 // compact, secret-safe rule summary (never the offending text itself).
 func annotate(v Verdict) string {

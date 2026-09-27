@@ -147,6 +147,8 @@ type Service struct {
 	heartbeatInterval time.Duration
 	sseReconnectBase  time.Duration
 	sseReconnectMax   time.Duration
+	sseIdleTimeout    time.Duration
+	topicDebounce     time.Duration
 	personaStore      PersonaStore
 	personaLearning   func() persona.LearningConfig
 	audit             agentaudit.AuditSink
@@ -156,6 +158,8 @@ type Service struct {
 	lastState          *statusSnapshot
 	lastRuns           map[string]runSnapshot
 	lastTopic          string
+	pendingTopic       string
+	topicTimer         *time.Timer
 	pendingInterviews  map[pendingInterviewKey]*pendingInterview
 	pendingPersonas    map[pendingPersonaKey]*pendingPersonaSetup
 	pendingCheckpoints map[pendingCheckpointKey]*pendingCheckpoint
@@ -208,6 +212,8 @@ func NewService(backend Backend, cfg Config, logger *slog.Logger) *Service {
 		heartbeatInterval:  heartbeatInterval,
 		sseReconnectBase:   sseReconnectBase,
 		sseReconnectMax:    sseReconnectMax,
+		sseIdleTimeout:     sseIdleTimeout,
+		topicDebounce:      time.Duration(topicDebounceMS) * time.Millisecond,
 		personaStore:       personaStore,
 		personaLearning:    cfg.PersonaLearning,
 		audit:              cfg.AuditSink,
@@ -269,6 +275,7 @@ func (s *Service) Start(ctx context.Context) error {
 	go s.backend.Listen(ctx, func(msg Message) { s.Deliver(ctx, msg) })
 	go s.sseLoop(ctx)
 	go s.heartbeatLoop(ctx)
+	context.AfterFunc(ctx, s.stopTopicTimer)
 
 	s.enqueue("⚙️ **[pipeline]** Hive v2 Discord bot online")
 	return nil
