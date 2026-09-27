@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.68.4)
+
+### Fixed
+
+- Contributor relay: the codex pane classifier now reads the non-blank tail of the pane (`paneTail`) instead of the last 15 raw rows, so an in-flight turn whose "esc to interrupt" status row sits above tmux's blank padding on a tall pane is no longer misread as idle; task prompts are loaded into the tmux paste buffer from stdin (`load-buffer`) rather than argv. Extracted from #9082 by @Danathar.
+
 ## 2026-09-27 (v5.68.3)
 
 ### Fixed
