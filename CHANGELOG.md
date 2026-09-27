@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.70.0)
+
+### Added
+
+- Add authenticated Overview issue and PR band export endpoints for CSV and JSON consumers.
+
+### Fixed
+
+- Reduce GitHub REST budget burn with per-caller accounting in `/api/gh-rate-limits`, MTTR issue lookup caching, and low-budget shedding for dashboard-only MTTR fetches.
+- ACMM L6 Fully Autonomous hives now default the #5117 self-authorization hold off unless an explicit hive, repo, or environment override keeps it enabled, allowing eligible Hive-authored PRs to auto-merge under L6 policy.
+
 ## 2026-09-27 (v5.69.1)
 
 ### Fixed
