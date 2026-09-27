@@ -356,14 +356,17 @@ func (b *slackBackend) callSlack(ctx context.Context, path string, body io.Reade
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusTooManyRequests {
-		if retry := retryAfter(resp.Header.Get("Retry-After")); retry > 0 {
-			b.sleep(retry)
-		}
-		return apiResponse{}, fmt.Errorf("slack API 429: rate limited")
+		// Do not sleep here: this runs on the spine's drain goroutine. The
+		// spine waits out Retry-After (capped, context-aware) and resends.
+		return apiResponse{}, chat.Retryable(fmt.Errorf("slack API 429: rate limited"), retryAfter(resp.Header.Get("Retry-After")))
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return apiResponse{}, fmt.Errorf("slack API %d: %s", resp.StatusCode, string(respBody))
+		err := fmt.Errorf("slack API %d: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode >= 500 {
+			return apiResponse{}, chat.Retryable(err, 0)
+		}
+		return apiResponse{}, err
 	}
 	var parsed apiResponse
 	if len(respBody) > 0 {
