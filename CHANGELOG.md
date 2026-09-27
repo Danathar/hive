@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-27 (v5.72.0)
+
+### Added
+
+- Added dashboard owner controls for per-repo auto-merge exceptions: unprotected base branches and no-CI repositories.
+
 ## 2026-09-27 (v5.71.0)
 
 ### Added
