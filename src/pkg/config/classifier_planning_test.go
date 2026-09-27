@@ -143,7 +143,7 @@ func TestJevClassifierEffectiveDefaults(t *testing.T) {
 	}
 }
 
-func TestAPIKeySHA256(t *testing.T) {
+func TestAPIKeySHA256Classifier(t *testing.T) {
 	if got := APIKeySHA256(""); got != "" {
 		t.Fatalf("empty key hash = %q, want empty", got)
 	}
