@@ -90,16 +90,16 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 	// authorized", not "everyone is authorized". This matches the documented
 	// contract on Config.AllowedUsers ("Empty = commands disabled (fail closed)").
 	// An empty allowlist rejects every command; operators enable command control
-	// by populating allowed_users with the specific Discord user IDs they trust.
+	// by populating allowed_users with the specific transport user IDs they trust.
 	if len(s.allowedUsers) == 0 {
-		s.logger.Warn("discord: ignoring command — allowlist is empty (commands disabled; set allowed_users to enable)",
+		s.logger.Warn("chat: ignoring command — allowlist is empty (commands disabled; set allowed_users to enable)",
 			"user_id", msg.AuthorID, "content", content)
 		s.refuseCommand(msg, "commands are disabled because the chat allowlist is empty")
 		return
 	}
 	role, ok := s.allowedUsers[msg.AuthorID]
 	if !ok {
-		s.logger.Warn("discord: ignoring command from non-allowlisted user",
+		s.logger.Warn("chat: ignoring command from non-allowlisted user",
 			"user_id", msg.AuthorID, "content", content)
 		s.refuseCommand(msg, "author is not in the chat allowlist")
 		return

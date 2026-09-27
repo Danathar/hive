@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -84,7 +85,7 @@ func (s *Service) cmdHelp() string {
 	s.mu.RUnlock()
 
 	lines := []string{
-		"**Hive v2 Discord Bot Commands**",
+		fmt.Sprintf("**Hive Bot Commands** (%s)", s.backend.Name()),
 		"`!status` (`!s`) — show system status",
 		"`!governor` (`!g`, `!gov`) — show governor mode and budget",
 		"`!kick <agent> [prompt]` (`!k`) — kick an agent with optional prompt",
@@ -238,8 +239,8 @@ func (s *Service) dashboardGet(ctx context.Context, path string) ([]byte, error)
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	const maxDiscordResponseBytes = 10 << 20 // 10 MiB
-	return io.ReadAll(io.LimitReader(resp.Body, maxDiscordResponseBytes))
+	const maxDashboardResponseBytes = 10 << 20 // 10 MiB
+	return io.ReadAll(io.LimitReader(resp.Body, maxDashboardResponseBytes))
 }
 
 func (s *Service) dashboardPost(ctx context.Context, path string, body []byte) error {
@@ -263,8 +264,49 @@ func (s *Service) dashboardPost(ctx context.Context, path string, body []byte) e
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyReadBytes))
+		if summary := summarizeErrorBody(respBody); summary != "" {
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, summary)
+		}
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+const (
+	// maxErrorBodyReadBytes bounds how much of a dashboard error body is read
+	// before summarising it; the reply that reaches the channel is bounded
+	// further by maxErrorBodySummaryBytes (hivecommons/hive#9129).
+	maxErrorBodyReadBytes    = 4 << 10
+	maxErrorBodySummaryBytes = 200
+	errorBodySummaryEllipsis = "…"
+)
+
+// summarizeErrorBody reduces a dashboard error body to something safe to echo
+// into a chat channel: the first non-empty line, control characters dropped,
+// and never more than maxErrorBodySummaryBytes including the ellipsis, cut on
+// a rune boundary. HTML error pages and multi-line stack traces collapse to
+// one short line instead of being posted verbatim.
+func summarizeErrorBody(body []byte) string {
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.Map(func(r rune) rune {
+			if r == utf8.RuneError || unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, line)
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > maxErrorBodySummaryBytes {
+			cut := maxErrorBodySummaryBytes - len(errorBodySummaryEllipsis)
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = strings.TrimSpace(line[:cut]) + errorBodySummaryEllipsis
+		}
+		return line
+	}
+	return ""
 }

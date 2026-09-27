@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -458,6 +459,65 @@ func TestListenContextCancelClosesIdleSocket(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Listen did not exit after context cancellation")
+	}
+}
+
+// Cancelling ctx closes the socket from under ReadMessage; that is a clean
+// shutdown, not a "disconnected" WARN (hivecommons/hive#9129).
+func TestListenContextCancelDoesNotWarn(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	apiBase := ""
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apps.connections.open":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": strings.Replace(apiBase+"/socket", "http", "ws", 1)})
+		case "/socket":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			<-r.Context().Done()
+		}
+	}))
+	defer ts.Close()
+	apiBase = ts.URL
+
+	var logs bytes.Buffer
+	b := NewBot(Config{AppToken: "xapp-test", BotToken: "xoxb-test", ChannelID: "C1"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	b.apiBase = ts.URL
+	// Signal only once the client handshake has completed: cancelling while
+	// Dial is still in flight would surface as context.Canceled, which the
+	// old guard also swallowed, and the test would pass without the fix.
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	realDial := b.dial
+	b.dial = func(ctx context.Context, url string, h http.Header) (*websocket.Conn, *http.Response, error) {
+		conn, resp, err := realDial(ctx, url, h)
+		if err == nil {
+			connectedOnce.Do(func() { close(connected) })
+		}
+		return conn, resp, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		b.Listen(ctx, func(chat.Message) {})
+		close(done)
+	}()
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Listen never opened the socket")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Listen did not exit after context cancellation")
+	}
+	if strings.Contains(logs.String(), "slack socket disconnected") {
+		t.Fatalf("clean shutdown logged as a disconnect:\n%s", logs.String())
 	}
 }
 

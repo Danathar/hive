@@ -51,8 +51,10 @@ func (l *runSnapshotList) UnmarshalJSON(data []byte) error {
 		*l = runs
 		return nil
 	}
-	// /api/status currently exposes runs as a summary object. Keep SSE parsing
-	// compatible while allowing event payloads that carry the full run array.
+	// /api/status publishes runs as a []RunSummary array
+	// (dashboard.StatusPayload.Runs), which the branch above handles. Any other
+	// shape — older dashboards published a summary object here — decodes as
+	// "no runs" so one unexpected field never fails the whole status payload.
 	*l = nil
 	return nil
 }

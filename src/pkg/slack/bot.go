@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -177,7 +178,10 @@ func (b *slackBackend) Listen(ctx context.Context, deliver func(chat.Message)) {
 		default:
 		}
 		connected, err := b.consumeSocket(ctx, deliver)
-		if err != nil && !errors.Is(err, context.Canceled) {
+		// A canceled ctx closes the socket from under ReadMessage, which then
+		// reports net.ErrClosed; that is the clean shutdown path, not a
+		// disconnect worth a WARN (hivecommons/hive#9129).
+		if err != nil && ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
 			b.logger.Warn("slack socket disconnected", "error", err)
 		}
 		if connected {

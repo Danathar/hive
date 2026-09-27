@@ -174,6 +174,12 @@ type msgItem struct {
 }
 
 func NewService(backend Backend, cfg Config, logger *slog.Logger) *Service {
+	// Every spine log line carries the transport it runs on; the spine itself
+	// is transport-agnostic, so message text never names one
+	// (hivecommons/hive#9129).
+	if backend != nil && logger != nil {
+		logger = logger.With("backend", backend.Name())
+	}
 	allowed := make(map[string]string, len(cfg.AllowedUsers))
 	for i, entry := range cfg.AllowedUsers {
 		id, role := parseAllowedUser(entry, i)
@@ -267,7 +273,7 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("chat backend not configured")
 	}
 
-	s.logger.Info("chat service starting", "backend", s.backend.Name())
+	s.logger.Info("chat service starting")
 
 	s.registerBuiltinCommands()
 
@@ -277,7 +283,7 @@ func (s *Service) Start(ctx context.Context) error {
 	go s.heartbeatLoop(ctx)
 	context.AfterFunc(ctx, s.stopTopicTimer)
 
-	s.enqueue("⚙️ **[pipeline]** Hive v2 Discord bot online")
+	s.enqueue(fmt.Sprintf("⚙️ **[pipeline]** Hive chat bot online (%s)", s.backend.Name()))
 	return nil
 }
 
@@ -286,7 +292,7 @@ func (s *Service) enqueue(content string) {
 	select {
 	case s.msgQueue <- msgItem{content: content}:
 	default:
-		s.logger.Warn("discord message queue full, dropping message")
+		s.logger.Warn("chat: message queue full, dropping message")
 	}
 }
 
@@ -301,7 +307,7 @@ func (s *Service) drainLoop(ctx context.Context) {
 			return
 		case item := <-s.msgQueue:
 			if err := s.backend.Send(item.content); err != nil {
-				s.logger.Warn("discord send failed", "error", err)
+				s.logger.Warn("chat: send failed", "error", err)
 			}
 			time.Sleep(s.sendInterval)
 		}
