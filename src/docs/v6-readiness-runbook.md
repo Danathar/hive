@@ -145,7 +145,7 @@ Prerequisites:
 - Configure the Discord bot token, channel ID, and the maintainer's Discord user
   ID in `allowed_users`; the Discord config structure uses `bot_token`,
   `channel_id`, and `allowed_users` (`src/pkg/config/config.go:4144-4154`).
-  The backend refuses to start without the bot token (`Bot.Start`, `src/pkg/discord/bot.go:101-108`).
+  The backend refuses to start without the bot token (`Bot.Start`, `src/pkg/discord/bot.go:104-111`).
 
 Run:
 
@@ -160,7 +160,7 @@ Run:
    `discord SSE disconnected` and backs off before reconnecting
    (`src/pkg/chat/notify.go:46-81`). If you instead interrupt Discord REST,
    save the `discord poll failed` log line and the later successful command or
-   notification proving recovery (`discordBackend.Listen`, `src/pkg/discord/bot.go:199-213`).
+   notification proving recovery (`discordBackend.Listen`, `src/pkg/discord/bot.go:206-220`).
 
 Evidence checklist:
 

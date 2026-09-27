@@ -44,14 +44,20 @@ func newDrainService(backend Backend, limit int) *Service {
 	return NewService(backend, Config{MessageLimit: limit, SendInterval: time.Millisecond}, discardLogger())
 }
 
-func waitForSends(t *testing.T, backend *flakyBackend, n int) []string {
+// drainSettled enqueues a sentinel behind the messages under test and waits
+// for it. msgQueue is FIFO and drainLoop sends in order, so once the sentinel
+// lands every earlier send (retries included) is final; no timing margin is
+// needed to prove that no extra send follows. Returns the sends before it.
+func drainSettled(t *testing.T, s *Service, backend *flakyBackend) []string {
 	t.Helper()
+	const sentinel = "drain-settled-sentinel"
+	s.enqueue(sentinel)
 	testutil.Eventually(t, 2*time.Second, func() bool {
-		return len(backend.sentSnapshot()) >= n
-	}, "backend never saw %d sends", n)
-	// Give the loop a beat to prove no extra send follows.
-	time.Sleep(20 * time.Millisecond)
-	return backend.sentSnapshot()
+		sent := backend.sentSnapshot()
+		return len(sent) > 0 && sent[len(sent)-1] == sentinel
+	}, "drain loop never reached the sentinel")
+	sent := backend.sentSnapshot()
+	return sent[:len(sent)-1]
 }
 
 func TestDrainLoop_RetriesRetryableSendWithoutReordering(t *testing.T) {
@@ -64,7 +70,7 @@ func TestDrainLoop_RetriesRetryableSendWithoutReordering(t *testing.T) {
 	s.enqueue("pong")
 	s.enqueue("after")
 
-	got := waitForSends(t, backend, 3)
+	got := drainSettled(t, s, backend)
 	want := []string{"pong", "pong", "after"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("sends = %q, want %q", got, want)
@@ -81,7 +87,7 @@ func TestDrainLoop_NonRetryableErrorDropsOnce(t *testing.T) {
 	s.enqueue("bad")
 	s.enqueue("next")
 
-	got := waitForSends(t, backend, 2)
+	got := drainSettled(t, s, backend)
 	if len(got) != 2 || got[0] != "bad" || got[1] != "next" {
 		t.Fatalf("sends = %q, want one attempt then the next message", got)
 	}
@@ -101,7 +107,7 @@ func TestDrainLoop_BoundsRetryAttempts(t *testing.T) {
 	s.enqueue("stuck")
 	s.enqueue("next")
 
-	got := waitForSends(t, backend, maxSendAttempts+1)
+	got := drainSettled(t, s, backend)
 	if len(got) != maxSendAttempts+1 {
 		t.Fatalf("sends = %d, want %d attempts then the next message: %q", len(got), maxSendAttempts+1, got)
 	}
@@ -126,7 +132,9 @@ func TestDrainLoop_RetryWaitStopsOnCancel(t *testing.T) {
 	}()
 
 	s.enqueue("pong")
-	waitForSends(t, backend, 1)
+	testutil.Eventually(t, 2*time.Second, func() bool {
+		return len(backend.sentSnapshot()) >= 1
+	}, "backend never saw the first attempt")
 	cancel()
 	select {
 	case <-done:
