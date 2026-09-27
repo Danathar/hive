@@ -284,9 +284,9 @@ const (
 
 // summarizeErrorBody reduces a dashboard error body to something safe to echo
 // into a chat channel: the first non-empty line, control characters dropped,
-// cut to maxErrorBodySummaryBytes on a rune boundary. HTML error pages and
-// multi-line stack traces collapse to one short line instead of being posted
-// verbatim.
+// and never more than maxErrorBodySummaryBytes including the ellipsis, cut on
+// a rune boundary. HTML error pages and multi-line stack traces collapse to
+// one short line instead of being posted verbatim.
 func summarizeErrorBody(body []byte) string {
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.Map(func(r rune) rune {
@@ -300,7 +300,7 @@ func summarizeErrorBody(body []byte) string {
 			continue
 		}
 		if len(line) > maxErrorBodySummaryBytes {
-			cut := maxErrorBodySummaryBytes
+			cut := maxErrorBodySummaryBytes - len(errorBodySummaryEllipsis)
 			for cut > 0 && !utf8.RuneStart(line[cut]) {
 				cut--
 			}

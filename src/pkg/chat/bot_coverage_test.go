@@ -576,7 +576,7 @@ func TestDashboardPost_ErrorBodyIsBoundedToOneLine(t *testing.T) {
 	if strings.ContainsAny(msg, "\n\x1b") {
 		t.Fatalf("error carries newline or control bytes: %q", msg)
 	}
-	if len(msg) > len("HTTP 500: ")+maxErrorBodySummaryBytes+len(errorBodySummaryEllipsis) {
+	if summary := strings.TrimPrefix(msg, "HTTP 500: "); len(summary) > maxErrorBodySummaryBytes {
 		t.Fatalf("error not bounded: %d bytes", len(msg))
 	}
 }
@@ -591,7 +591,9 @@ func TestSummarizeErrorBody(t *testing.T) {
 		{name: "whitespace-only", body: " \n\t\n", want: ""},
 		{name: "skips-leading-blank-lines", body: "\n\n  not found  \nmore", want: "not found"},
 		{name: "drops-control-chars", body: "a\x00b\x07c\r", want: "abc"},
-		{name: "cuts-on-rune-boundary", body: strings.Repeat("é", 150), want: strings.Repeat("é", 100) + "…"},
+		{name: "exactly-at-cap-untouched", body: strings.Repeat("x", 200), want: strings.Repeat("x", 200)},
+		{name: "ascii-cut-including-ellipsis", body: strings.Repeat("x", 201), want: strings.Repeat("x", 197) + "…"},
+		{name: "cuts-on-rune-boundary", body: strings.Repeat("é", 150), want: strings.Repeat("é", 98) + "…"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
