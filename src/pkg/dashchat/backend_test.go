@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -76,6 +77,9 @@ func TestBackendPollReportsEpochNextAndGap(t *testing.T) {
 	}
 	if current := b.Poll(outboxCap + 10); current.Gap || len(current.Messages) != 0 {
 		t.Fatalf("Poll(next) = %+v, want empty and no gap", current)
+	}
+	if hostile := b.Poll(math.MaxUint64); hostile.Gap || len(hostile.Messages) != 0 {
+		t.Fatalf("Poll(MaxUint64) = gap=%v len=%d; a wrapped since+1 must not report a phantom gap", hostile.Gap, len(hostile.Messages))
 	}
 }
 

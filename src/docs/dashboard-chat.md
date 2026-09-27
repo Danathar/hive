@@ -19,8 +19,10 @@ The dashboard panel is a **shared channel**, not a private conversation: every
 dashboard reader (`RoleRead` and up) polls the same in-memory outbox, exactly as
 every member of a Slack or Discord channel sees the same bot. Bot replies carry
 no target user, so a per-viewer feed is not expressible on the spine. Each
-outbox entry names its author (`author_id`); the browser renders another
-operator's input as a labelled peer line and keeps it out of the viewer's own
+outbox entry names its author (`author_id`) and each poll names the caller
+(`viewer`, from the authenticated request). Only a line whose `author_id`
+equals `viewer` is rendered as the viewer's own; anyone else's — or an
+unattributed line — is a labelled peer line kept out of the viewer's own
 conversational context (the `history` posted back with `POST /api/chat`), so one
 operator's `!runs reject …` never shows up in another's panel as their own words
 ([#9135](https://github.com/hivecommons/hive/issues/9135)).

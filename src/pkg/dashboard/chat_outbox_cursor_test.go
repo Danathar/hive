@@ -115,37 +115,47 @@ respond({ messages: [
 }
 
 // Alice's input used to land in Bob's panel as Bob's own bubble and in Bob's
-// chatContext (posted back as history). The channel is shared, so peers are
-// rendered under their name and kept out of the viewer's context.
+// chatContext (posted back as history). The channel is shared, so only a line
+// whose author is the viewer is "mine"; peers and unattributed lines are
+// rendered separately and kept out of the viewer's context.
 func TestHiveChatPollAttributesPeerInputToItsAuthor(t *testing.T) {
 	runNodeScript(t, chatPollHarness(t, `
 respond({ messages: [
   { seq: 1, role: 'user', author_id: 'alice', text: '!runs reject acme/widgets#7 wrong scope' },
   { seq: 2, role: 'bot', text: 'Run acme/widgets#7 rejected.' },
   { seq: 3, role: 'user', author_id: 'bob', text: '!status' },
-  { seq: 4, role: 'user', text: 'legacy line without author' },
-], next: 4, epoch: 'gen-A', gap: false, viewer: 'bob' });
+  { seq: 4, role: 'user', text: 'unattributed line' },
+  { seq: 5, role: 'bot', text: '' },
+], next: 5, epoch: 'gen-A', gap: false, viewer: 'bob' });
 `, `
   await flush();
   assert.deepEqual(rendered.map(m => [m.cls, m.author, m.text]), [
     ['peer', 'alice', '!runs reject acme/widgets#7 wrong scope'],
     ['system', '', 'Run acme/widgets#7 rejected.'],
     ['user', '', '!status'],
-    ['user', '', 'legacy line without author'],
+    ['peer', 'unknown', 'unattributed line'],
   ]);
-  assert.deepEqual(chatContext.map(c => c.text), ['Run acme/widgets#7 rejected.', '!status', 'legacy line without author'], "alice's line leaked into bob's history");
+  assert.deepEqual(chatContext.map(c => c.text), ['Run acme/widgets#7 rejected.', '!status'], "a non-self line leaked into bob's history");
+  assert.equal(chatLastSeq, 5, 'an empty-text entry must still advance the cursor');
   assert.equal(unread, true, 'a peer line while the panel is closed must light the unread badge');
 
   // Bob's own pending echo is still de-duplicated; alice's identical text is not his echo.
   rendered.length = 0;
   chatTrackPendingUserEcho('!help', 1);
   respond({ messages: [
-    { seq: 5, role: 'user', author_id: 'alice', text: '!help' },
-    { seq: 6, role: 'user', author_id: 'bob', text: '!help' },
-  ], next: 6, epoch: 'gen-A', gap: false, viewer: 'bob' });
+    { seq: 6, role: 'user', author_id: 'alice', text: '!help' },
+    { seq: 7, role: 'user', author_id: 'bob', text: '!help' },
+  ], next: 7, epoch: 'gen-A', gap: false, viewer: 'bob' });
   await chatPollMessages();
   assert.deepEqual(rendered.map(m => [m.cls, m.author]), [['peer', 'alice']]);
   assert.equal(chatPendingUserEchoes.size, 0);
+
+  // Overlapping callers (timer, FAB open, visibilitychange, /api/chat) share
+  // one in-flight poll: the second call must not issue a second fetch.
+  urls.length = 0;
+  respond({ messages: [], next: 7, epoch: 'gen-A', gap: false, viewer: 'bob' });
+  await Promise.all([chatPollMessages(), chatPollMessages(), chatPollMessages()]);
+  assert.equal(urls.length, 1, 'overlapping polls must collapse to one request');
 `))
 }
 

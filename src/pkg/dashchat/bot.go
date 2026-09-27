@@ -178,7 +178,9 @@ func (b *backend) Poll(since uint64) Poll {
 		}
 	}
 	res := Poll{Messages: out, Next: b.next, Epoch: b.epoch}
-	if len(b.outbox) > 0 && since+1 < b.outbox[0].Seq {
+	// Seqs start at 1, so oldest-1 cannot underflow; since+1 could wrap for a
+	// hostile MaxUint64 cursor and report a phantom gap.
+	if len(b.outbox) > 0 && since < b.outbox[0].Seq-1 {
 		res.Gap = true
 	}
 	return res

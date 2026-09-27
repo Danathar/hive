@@ -31015,17 +31015,21 @@ function burnAreaChart() {
     }
 
     function chatRenderOutbound(msg, viewer) {
-      if (!msg || !msg.text) return;
+      if (!msg) return;
       const seq = Number(msg.seq || 0);
       if (seq && seq <= chatLastSeq) return;
+      // Advance past every retained entry, even one with empty text, so the
+      // cursor never sticks on an entry this panel will never render.
       if (seq) chatLastSeq = Math.max(chatLastSeq, seq);
+      if (!msg.text) return;
       if (msg.role === 'user') {
         const author = String(msg.author_id || '');
-        // The outbox is one shared channel: another operator's input is shown
-        // under their name and stays out of this viewer's conversational
+        // The outbox is one shared channel: only a line whose author is this
+        // viewer is "mine". Anyone else's — or an unattributed one — is shown
+        // as a peer line and stays out of this viewer's conversational
         // context, which is posted back as `history` (hivecommons/hive#9135).
-        if (author && viewer && author !== viewer) {
-          chatAddMsg(msg.text, 'peer', { author: author });
+        if (author !== String(viewer || '')) {
+          chatAddMsg(msg.text, 'peer', { author: author || 'unknown' });
           if (!chatPanel.classList.contains('open')) chatFab.classList.add('has-unread');
           return;
         }
@@ -31087,7 +31091,13 @@ function burnAreaChart() {
     // while it is closed (so the unread badge still works), never while the
     // tab is hidden, and with exponential backoff up to 60 s after any
     // non-2xx or network failure (hivecommons/hive#9135).
+    let chatPollInFlight = false;
     async function chatPollMessages(retried) {
+      // The timer, FAB open, visibilitychange and a /api/chat completion can
+      // all call this; overlapping polls could resolve out of order across a
+      // restart and flip the epoch back and forth. One poll at a time.
+      if (chatPollInFlight) return;
+      chatPollInFlight = true;
       clearTimeout(chatPollTimer);
       chatPollTimer = null;
       let again = false;
@@ -31102,6 +31112,7 @@ function burnAreaChart() {
       } catch (_) {
         chatNotePollFailure();
       } finally {
+        chatPollInFlight = false;
         if (again) await chatPollMessages(true);
         else chatSchedulePoll();
       }
