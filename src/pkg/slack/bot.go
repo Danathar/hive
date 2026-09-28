@@ -215,7 +215,14 @@ func (b *slackBackend) Listen(ctx context.Context, deliver func(chat.Message)) {
 				delay = socketReconnectBase
 			}
 		}
-		if !sleepWithContext(ctx, b.sleep, delay) {
+		wait := delay
+		// callSlack no longer sleeps out a 429 itself, so a rate-limited
+		// apps.connections.open must not be redialed before Slack's Retry-After.
+		var retryable *chat.RetryableError
+		if !connected && errors.As(err, &retryable) && retryable.RetryAfter > wait {
+			wait = retryable.RetryAfter
+		}
+		if !sleepWithContext(ctx, b.sleep, wait) {
 			return
 		}
 		if !connected {
