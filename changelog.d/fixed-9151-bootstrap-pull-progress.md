@@ -1,1 +1,0 @@
-- Contributor commands announce release-image downloads before pulling and show Podman progress, so the first `just contribute-tui` no longer appears hung ([#9151](https://github.com/hivecommons/hive/issues/9151)).

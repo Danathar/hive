@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.73.1)
+
+### Fixed
+
+- Contributor commands announce release-image downloads before pulling and show Podman progress, so the first `just contribute-tui` no longer appears hung ([#9151](https://github.com/hivecommons/hive/issues/9151)).
+
 ## 2026-09-28 (v5.73.0)
 
 ### Added
