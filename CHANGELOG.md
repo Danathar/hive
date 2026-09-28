@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.74.0)
+
+### Added
+
+- Added a daily `hive-gocache-prune` CronJob manifest (`src/deploy/ci-runners/`) that bounds the shared self-hosted runner Go cache volume, after it filled 200Gi and broke every Go CI step with `disk quota exceeded`.
+
+### Fixed
+
+- Dashboard legend pills (`triage`, `STRATEGIST`, `FIX`) are now horizontally centered like the rest of the legend pills, fixing their left-alignment in the Overview → Pill Legend section ([#9222](https://github.com/hivecommons/hive/issues/9222)).
+
 ## 2026-09-28 (v5.73.5)
 
 ### Fixed
