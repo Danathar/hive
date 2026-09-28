@@ -361,8 +361,12 @@ func TestConsumeSocketIgnoresMalformedAndFiltersThenMarksBot(t *testing.T) {
 	apiBase = ts.URL
 
 	b := newTestBot(ts.URL)
+	queue := make(chan chat.Message, 10)
+	_, err := b.consumeSocket(context.Background(), queue)
 	var delivered []chat.Message
-	_, err := b.consumeSocket(context.Background(), func(msg chat.Message) { delivered = append(delivered, msg) })
+	for len(queue) > 0 {
+		delivered = append(delivered, <-queue)
+	}
 	if err == nil {
 		t.Fatal("expected close error")
 	}
@@ -636,9 +640,9 @@ func TestConsumeSocketAckFailureSkipsDelivery(t *testing.T) {
 	apiBase = ts.URL
 
 	b := newTestBot(ts.URL)
-	var delivered atomic.Int64
-	_, _ = b.consumeSocket(context.Background(), func(chat.Message) { delivered.Add(1) })
-	if delivered.Load() != 0 {
-		t.Fatalf("delivered = %d, want 0 when ack fails", delivered.Load())
+	queue := make(chan chat.Message, 10)
+	_, _ = b.consumeSocket(context.Background(), queue)
+	if len(queue) != 0 {
+		t.Fatalf("delivered = %d, want 0 when ack fails", len(queue))
 	}
 }

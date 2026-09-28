@@ -87,6 +87,8 @@ var ErrTopicUnsupported = errors.New("chat topic updates unsupported")
 
 // Message is a transport-agnostic inbound chat message.
 type Message struct {
+	// ID must be stable across redeliveries and unique within this service.
+	// Empty IDs are delivered without deduplication.
 	ID       string
 	Text     string
 	AuthorID string
@@ -133,6 +135,7 @@ type Config struct {
 }
 
 type Service struct {
+	inbound           recentMessages
 	backend           Backend
 	dashboardURL      string
 	dashboardToken    string

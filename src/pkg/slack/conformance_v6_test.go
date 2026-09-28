@@ -92,7 +92,7 @@ func TestV6ConformanceSlack_InboundSocketTextPassesIOSCANBeforeRouting(t *testin
 
 	b := newTestBot(ts.URL)
 	delivered := make(chan chat.Message, 1)
-	_, _ = b.consumeSocket(context.Background(), func(msg chat.Message) { delivered <- msg })
+	_, _ = b.consumeSocket(context.Background(), delivered)
 
 	select {
 	case msg := <-delivered:

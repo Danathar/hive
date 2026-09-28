@@ -26,7 +26,9 @@ const (
 	httpTimeoutS           = 10
 	socketReconnectBase    = 5 * time.Second
 	socketReconnectMax     = 60 * time.Second
+	socketAckTimeout       = 2 * time.Second
 	slackMessageLimit      = 4000
+	socketQueueSize        = 256
 	slackDefaultSendPacing = 1200 * time.Millisecond
 )
 
@@ -163,6 +165,25 @@ func (b *slackBackend) SetTopic(topic string) error {
 }
 
 func (b *slackBackend) Listen(ctx context.Context, deliver func(chat.Message)) {
+	// One worker preserves command order across socket reconnects. The reader
+	// never waits for a command handler, so it can keep acknowledging and ponging.
+	queue := make(chan chat.Message, socketQueueSize)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-queue:
+				if ctx.Err() != nil {
+					return
+				}
+				deliver(msg)
+			}
+		}
+	}()
+	defer func() { <-workerDone }()
 	delay := b.reconnectBase
 	if delay == 0 {
 		delay = socketReconnectBase
@@ -177,7 +198,7 @@ func (b *slackBackend) Listen(ctx context.Context, deliver func(chat.Message)) {
 			return
 		default:
 		}
-		connected, err := b.consumeSocket(ctx, deliver)
+		connected, err := b.consumeSocket(ctx, queue)
 		// A canceled ctx closes the socket from under ReadMessage, which then
 		// reports net.ErrClosed; that is the clean shutdown path, not a
 		// disconnect worth a WARN (hivecommons/hive#9129).
@@ -227,7 +248,7 @@ func sleepWithContext(ctx context.Context, sleep func(time.Duration), d time.Dur
 	}
 }
 
-func (b *slackBackend) consumeSocket(ctx context.Context, deliver func(chat.Message)) (bool, error) {
+func (b *slackBackend) consumeSocket(ctx context.Context, queue chan<- chat.Message) (bool, error) {
 	url, err := b.openSocketURL(ctx)
 	if err != nil {
 		return false, err
@@ -261,32 +282,41 @@ func (b *slackBackend) consumeSocket(ctx context.Context, deliver func(chat.Mess
 		if err := json.Unmarshal(data, &env); err != nil {
 			continue
 		}
+		var msg *chat.Message
+		if env.Type == "events_api" {
+			var payload eventPayload
+			if json.Unmarshal(env.Payload, &payload) == nil {
+				e := payload.Event
+				if e.Type == "message" && e.Channel == b.channelID {
+					id := e.ClientMsgID
+					if id == "" {
+						id = e.TS
+					}
+					text, _ := ioscan.EnforceInput(e.Text)
+					msg = &chat.Message{ID: id, Text: text, AuthorID: e.User, FromBot: e.BotID != "" || e.Subtype == "bot_message"}
+				}
+			}
+		}
+		// This loop is the sole producer. Reserve capacity before acknowledging:
+		// reconnect without an ack on overload so Slack can retry the message.
+		if msg != nil && len(queue) == cap(queue) {
+			return true, fmt.Errorf("slack inbound queue full")
+		}
 		if env.EnvelopeID != "" {
+			if err := conn.SetWriteDeadline(time.Now().Add(socketAckTimeout)); err != nil {
+				return true, err
+			}
 			if err := conn.WriteJSON(map[string]string{"envelope_id": env.EnvelopeID}); err != nil {
 				b.logger.Warn("slack socket ack failed", "error", err, "envelope_id", env.EnvelopeID)
-				continue
+				return true, err
 			}
 		}
 		if env.Type == "disconnect" || env.Type == "refresh_requested" || env.Reason == "refresh_requested" {
 			return true, fmt.Errorf("slack socket refresh requested")
 		}
-		if env.Type != "events_api" {
-			continue
+		if msg != nil {
+			queue <- *msg
 		}
-		var payload eventPayload
-		if err := json.Unmarshal(env.Payload, &payload); err != nil {
-			continue
-		}
-		e := payload.Event
-		if e.Type != "message" || e.Channel != b.channelID {
-			continue
-		}
-		id := e.ClientMsgID
-		if id == "" {
-			id = e.TS
-		}
-		text, _ := ioscan.EnforceInput(e.Text)
-		deliver(chat.Message{ID: id, Text: text, AuthorID: e.User, FromBot: e.BotID != "" || e.Subtype == "bot_message"})
 	}
 }
 

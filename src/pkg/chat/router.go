@@ -58,7 +58,7 @@ func (s *Service) Deliver(ctx context.Context, msg Message) {
 }
 
 func (s *Service) routeMessage(ctx context.Context, msg Message) {
-	if msg.FromBot {
+	if msg.FromBot || !s.inbound.remember(msg.ID) {
 		return
 	}
 

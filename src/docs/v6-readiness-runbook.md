@@ -16,7 +16,7 @@ Common setup for chat surfaces:
   `/api/events` SSE stream (`src/pkg/chat/notify.go:85-124`).
 - Pick an allowlisted human ID for the target surface. The shared command router
   fails closed when `allowed_users` is empty and logs ignored commands from
-  non-allowlisted users (`src/pkg/chat/router.go:44-60`).
+  non-allowlisted users (`Service.routeMessage` in `src/pkg/chat/router.go`).
 - `allowed_users` entries may be `id` or `id:role`; roles are `read`,
   `read-write`, `merger`, and `owner`. The first bare entry is treated as
   `owner`, and later bare entries are treated as `read`.
@@ -108,7 +108,7 @@ Prerequisites:
   `channel_id`, and `allowed_users` containing the maintainer's Slack user ID
   (`src/docs/design/slack-integration.md:104-117`). The backend refuses to
   start without app token, bot token, and channel ID
-  (`src/pkg/slack/bot.go:124-130`).
+  (`Bot.Start` in `src/pkg/slack/bot.go`).
 - Slack app scopes/events must cover Socket Mode and messages as documented:
   `chat:write`, channel history/manage as needed, `connections:write`, and
   `message.channels` (`src/docs/design/slack-integration.md:116-119`).
@@ -116,8 +116,8 @@ Prerequisites:
 Run:
 
 1. Restart or confirm the hive log contains `slack bot starting` and
-   `chat service starting` (`src/pkg/slack/bot.go:124-130`,
-   `src/pkg/chat/chat.go:271-288`).
+   `chat service starting` (`Bot.Start` in `src/pkg/slack/bot.go`,
+   `Service.Start` in `src/pkg/chat/chat.go`).
 2. In the configured Slack channel, send `!status`. Save the Slack message link
    or screenshot and the bot reply.
 3. Trigger one notification delivery by pausing/resuming an agent or inducing a
@@ -125,8 +125,8 @@ Run:
    notification link or screenshot.
 4. Save any relevant Socket Mode lines. Valid reconnect evidence includes
    `slack socket disconnected`, `slack socket ack failed`, or Slack
-   `disconnect` / `refresh_requested` handling (`src/pkg/slack/bot.go:158-190`,
-   `src/pkg/slack/bot.go:228-235`).
+   `disconnect` / `refresh_requested` handling (`slackBackend.Listen` and `slackBackend.consumeSocket` in
+   `src/pkg/slack/bot.go`).
 
 Evidence checklist:
 
@@ -150,7 +150,7 @@ Prerequisites:
 Run:
 
 1. Confirm the hive log has `discord bot starting` and `chat service starting`
-   (`Start`, `src/pkg/discord/bot.go:101-108`, `Start`, `src/pkg/chat/chat.go:271-288`).
+   (`Start` in `src/pkg/discord/bot.go`, `Service.Start` in `src/pkg/chat/chat.go`).
 2. In the configured channel, send `!status`; save the Discord message link or
    screenshot and the bot reply.
 3. Trigger one notification delivery by pausing/resuming an agent or waiting for
