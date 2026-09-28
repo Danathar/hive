@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.77.1)
+
+### Fixed
+
+- Copilot CLI agents whose session never starts after a kick, or whose turn hangs with no events, are now detected via `events.jsonl` and restarted with the kick re-delivered.
+
 ## 2026-09-28 (v5.77.0)
 
 ### Added
