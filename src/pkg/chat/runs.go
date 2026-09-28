@@ -381,6 +381,14 @@ func (s *Service) handlePendingCheckpointReply(ctx context.Context, msg Message,
 	}
 	matches := s.pendingCheckpointsForAuthor(msg.AuthorID)
 	if len(matches) == 0 {
+		// A run reaching the human gate while the bot was down (or before this
+		// author was ever prompted) leaves no pendingCheckpoints entry. Without
+		// this, a bare "approve"/"reject" from an owner falls through to the
+		// persona/interview handlers with no reply at all (issue #9124).
+		if config.RoleAtLeast(role, config.RoleOwner) {
+			s.enqueue("❌ No pending run checkpoint for you right now. Use `!runs list` to see active runs, then `!runs approve <key>` or `!runs reject <key> <reason>`.")
+			return true
+		}
 		return false
 	}
 	if !config.RoleAtLeast(role, config.RoleOwner) {
@@ -586,9 +594,9 @@ func (s *Service) syncRunsFromSSE(ctx context.Context) {
 	curMap := runSliceMap(runs)
 	s.lastRuns = curMap
 	s.mu.Unlock()
-	if prevMap == nil {
-		return
-	}
+	// Diff even when prevMap is nil (first fetch): runMapSlice(nil) yields an
+	// empty slice, so diffRuns treats every waiting_on=human run here as a
+	// transition and announces it instead of silently adopting it as baseline.
 	s.diffRuns(runMapSlice(prevMap), runs)
 }
 

@@ -225,31 +225,31 @@ func (s *Service) onSSEEvent(snap *statusSnapshot) {
 	s.mu.Unlock()
 
 	if prev == nil {
-		if len(snap.Runs) > 0 {
-			s.mu.Lock()
-			s.lastRuns = runSliceMap(snap.Runs)
-			s.mu.Unlock()
-		} else {
-			s.syncRunsFromSSE(context.Background())
-		}
+		s.refreshRunsFromSnapshot(snap)
 		return
 	}
 
 	s.diffAgents(prev, snap)
 	s.diffGovernor(prev, snap)
 	s.diffInception(prev, snap)
-	if len(snap.Runs) > 0 {
-		s.mu.Lock()
-		prevRuns := s.lastRuns
-		s.lastRuns = runSliceMap(snap.Runs)
-		s.mu.Unlock()
-		if prevRuns != nil {
-			s.diffRuns(runMapSlice(prevRuns), snap.Runs)
-		}
-	} else {
-		s.syncRunsFromSSE(context.Background())
-	}
+	s.refreshRunsFromSnapshot(snap)
 	s.updateTopic(snap)
+}
+
+// refreshRunsFromSnapshot diffs snap.Runs against the last known run state,
+// including on the very first snapshot: a run already at waiting_on=human
+// when the bot (re)connects must still be announced, not just recorded as a
+// baseline for future transitions.
+func (s *Service) refreshRunsFromSnapshot(snap *statusSnapshot) {
+	if len(snap.Runs) == 0 {
+		s.syncRunsFromSSE(context.Background())
+		return
+	}
+	s.mu.Lock()
+	prevRuns := s.lastRuns
+	s.lastRuns = runSliceMap(snap.Runs)
+	s.mu.Unlock()
+	s.diffRuns(runMapSlice(prevRuns), snap.Runs)
 }
 
 func (s *Service) diffAgents(prev, cur *statusSnapshot) {
