@@ -11,6 +11,15 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.72.3)
+
+### Fixed
+
+- Bead synthesis now remembers dead PR enrichment misses across cycles, skips low-quality unenrichable beads for the retry window, and caps GitHub enrichment calls so issue-like `gh-N` refs cannot exhaust the REST budget.
+- The merge CI gate now ignores superseded check and workflow runs on the same head SHA, so cancelled concurrency predecessors no longer block a merge after the latest run succeeds.
+- The merge-request watcher now reports fork PR workflow runs awaiting maintainer approval accurately and raises an actionable alert that links owners to the repository Actions setting.
+- Required-status-check discovery now negative-caches forbidden branch-protection lookups for a bounded TTL, avoiding repeated GitHub REST calls when the App lacks administration permission.
+
 ## 2026-09-28 (v5.72.2)
 
 ### Fixed
