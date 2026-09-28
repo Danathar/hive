@@ -62,6 +62,9 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 		return
 	}
 
+	// Carry identity through commands and conversational checkpoint replies.
+	ctx = context.WithValue(ctx, commandAuthorContextKey{}, msg.AuthorID)
+
 	content := strings.TrimSpace(msg.Text)
 	// Transports pre-enforce inbound text and deliver the redaction marker, so
 	// the marker itself must be treated as a block, not as user content.
@@ -105,7 +108,6 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 		return
 	}
 	ctx = context.WithValue(ctx, commandRoleContextKey{}, role)
-	ctx = context.WithValue(ctx, commandAuthorContextKey{}, msg.AuthorID)
 
 	content = content[1:]
 

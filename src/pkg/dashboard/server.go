@@ -1600,6 +1600,12 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			expected := "Bearer " + s.authToken
 			if secureCompare(token, expected) || secureCompare(token, s.authToken) {
 				trusted = true
+				// The chat spine delegates audit attribution with its operator token.
+				// Only this authenticated path may consume the claimed actor;
+				// session/proxy identities and authorization remain authoritative.
+				if actor := r.Header.Get("X-Hive-Chat-Actor"); actor != "" {
+					r.Header.Set("X-Hive-User", actor)
+				}
 				// Same reasoning as the X-Hive-Internal path above: the shared
 				// dashboard token is the operator credential, and the dashboard
 				// UI itself authenticates with it (Authorization: Bearer from
