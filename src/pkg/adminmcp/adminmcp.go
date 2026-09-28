@@ -439,7 +439,7 @@ func (h *Handler) PreviewWrite(ctx context.Context, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	pending := PendingConfirmation{ID: id, Operation: op.Name(), Args: scrubPendingMap(opArgs).(map[string]any), Preview: scrubPendingPreview(preview), Hive: h.HiveID, CreatedAt: now, ExpiresAt: now.Add(h.ConfirmationTTL)}
+	pending := PendingConfirmation{ID: id, Operation: op.Name(), Args: scrubPendingMap(opArgs).(map[string]any), Preview: persistedPendingPreview(preview), Hive: h.HiveID, CreatedAt: now, ExpiresAt: now.Add(h.ConfirmationTTL)}
 	if err := h.PendingStore.Put(ctx, pending); err != nil {
 		return nil, err
 	}
@@ -504,6 +504,14 @@ func pendingValueNeedsFreshConfirm(v any) bool {
 	orig, origErr := json.Marshal(v)
 	next, nextErr := json.Marshal(scrubbed)
 	return origErr == nil && nextErr == nil && !bytes.Equal(orig, next)
+}
+
+// persistedPendingPreview keeps only what ConfirmWrite reads back — the
+// request it executes. Summary, effects, disclosure and details are for the
+// caller of write_preview and would otherwise duplicate the args (up to a
+// 10 000-char nudge prompt) in every stored entry (#9162).
+func persistedPendingPreview(preview WritePreview) WritePreview {
+	return WritePreview{Operation: preview.Operation, Target: scrubOutboundString(preview.Target), Request: scrubPendingPreview(preview).Request}
 }
 
 func scrubPendingPreview(preview WritePreview) WritePreview {
