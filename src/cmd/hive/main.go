@@ -5513,12 +5513,16 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// The hub delivered its authoritative access list. Reconcile our
 				// login allowlist so Manage Access grants take effect on this
 				// heartbeat-only spoke without any kubectl push. The dashboard reads
-				// cfg.Dashboard.AuthorizedUsers live on each login, so updating it in
-				// place is enough. Only log when it actually changes to avoid noise.
+				// cfg.Dashboard.AuthorizedUsers is read live by the dashboard, while
+				// dashboard chat has its own running authorization map. Update both so
+				// grants and revocations take effect without a restart.
 				if !sameStringSlice(b.cfg.Dashboard.AuthorizedUsers, users) {
 					b.logger.Info("authorized users updated from hub heartbeat",
 						"was", len(b.cfg.Dashboard.AuthorizedUsers), "now", len(users))
 					b.cfg.Dashboard.AuthorizedUsers = users
+				}
+				if b.dashChat != nil {
+					b.dashChat.SetAllowedUsers(users)
 				}
 				// AuthorizedUserNames is purely cosmetic (see its doc) — it never
 				// gates sign-in, so it's fine to just take whatever the hub sent

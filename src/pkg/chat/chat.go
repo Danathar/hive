@@ -140,6 +140,7 @@ type Service struct {
 	dashboardURL      string
 	dashboardToken    string
 	allowedUsers      map[string]string
+	allowedUsersMu    sync.RWMutex
 	commands          map[string]CommandHandler
 	agentNames        []string
 	mu                sync.RWMutex
@@ -183,13 +184,7 @@ func NewService(backend Backend, cfg Config, logger *slog.Logger) *Service {
 	if backend != nil && logger != nil {
 		logger = logger.With("backend", backend.Name())
 	}
-	allowed := make(map[string]string, len(cfg.AllowedUsers))
-	for i, entry := range cfg.AllowedUsers {
-		id, role := parseAllowedUser(entry, i)
-		if id != "" {
-			allowed[id] = role
-		}
-	}
+	allowed := parseAllowedUsers(cfg.AllowedUsers)
 	messageLimit := cfg.MessageLimit
 	if messageLimit == 0 {
 		messageLimit = defaultMessageLimit
@@ -234,6 +229,51 @@ func NewService(backend Backend, cfg Config, logger *slog.Logger) *Service {
 		expandedRuns:       make(map[personaRunKey]struct{}),
 		shownSummaries:     make(map[personaRunKey]struct{}),
 	}
+}
+
+func parseAllowedUsers(entries []string) map[string]string {
+	allowed := make(map[string]string, len(entries))
+	for i, entry := range entries {
+		id, role := parseAllowedUser(entry, i)
+		if id != "" {
+			allowed[id] = role
+		}
+	}
+	return allowed
+}
+
+// SetAllowedUsers replaces the live allowlist used by all inbound chat gates.
+// The heartbeat is authoritative for dashboard access on a spoke, so this must
+// update the running service rather than only the boot configuration snapshot.
+func (s *Service) SetAllowedUsers(entries []string) {
+	allowed := parseAllowedUsers(entries)
+	s.allowedUsersMu.Lock()
+	s.allowedUsers = allowed
+	s.allowedUsersMu.Unlock()
+}
+
+func (s *Service) allowedUserRole(author string) (string, bool) {
+	s.allowedUsersMu.RLock()
+	role, ok := s.allowedUsers[author]
+	s.allowedUsersMu.RUnlock()
+	return role, ok
+}
+
+func (s *Service) allowedUserCount() int {
+	s.allowedUsersMu.RLock()
+	count := len(s.allowedUsers)
+	s.allowedUsersMu.RUnlock()
+	return count
+}
+
+func (s *Service) allowedUsersSnapshot() map[string]string {
+	s.allowedUsersMu.RLock()
+	users := make(map[string]string, len(s.allowedUsers))
+	for author, role := range s.allowedUsers {
+		users[author] = role
+	}
+	s.allowedUsersMu.RUnlock()
+	return users
 }
 
 func parseAllowedUser(entry string, index int) (string, string) {

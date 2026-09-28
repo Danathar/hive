@@ -99,7 +99,8 @@ func NewBot(cfg Config, logger *slog.Logger) *Bot {
 	return &Bot{backend: b, service: service}
 }
 
-func (b *Bot) SetAgentNames(names []string) { b.service.SetAgentNames(names) }
+func (b *Bot) SetAgentNames(names []string)   { b.service.SetAgentNames(names) }
+func (b *Bot) SetAllowedUsers(users []string) { b.service.SetAllowedUsers(users) }
 func (b *Bot) RegisterCommand(name string, handler chat.CommandHandler) {
 	b.service.RegisterCommand(name, handler)
 }

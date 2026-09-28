@@ -94,13 +94,13 @@ func (s *Service) routeMessage(ctx context.Context, msg Message) {
 	// contract on Config.AllowedUsers ("Empty = commands disabled (fail closed)").
 	// An empty allowlist rejects every command; operators enable command control
 	// by populating allowed_users with the specific transport user IDs they trust.
-	if len(s.allowedUsers) == 0 {
+	if s.allowedUserCount() == 0 {
 		s.logger.Warn("chat: ignoring command — allowlist is empty (commands disabled; set allowed_users to enable)",
 			"user_id", msg.AuthorID, "content", content)
 		s.refuseCommand(msg, "commands are disabled because the chat allowlist is empty")
 		return
 	}
-	role, ok := s.allowedUsers[msg.AuthorID]
+	role, ok := s.allowedUserRole(msg.AuthorID)
 	if !ok {
 		s.logger.Warn("chat: ignoring command from non-allowlisted user",
 			"user_id", msg.AuthorID, "content", content)

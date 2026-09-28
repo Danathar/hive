@@ -372,10 +372,10 @@ func (s *Service) handlePendingCheckpointReply(ctx context.Context, msg Message,
 	if verb != "approve" && verb != "reject" {
 		return false
 	}
-	if len(s.allowedUsers) == 0 {
+	if s.allowedUserCount() == 0 {
 		return false
 	}
-	role, ok := s.allowedUsers[msg.AuthorID]
+	role, ok := s.allowedUserRole(msg.AuthorID)
 	if !ok {
 		return false
 	}
@@ -542,7 +542,7 @@ func (s *Service) formatRunCheckpointForAuthor(ctx context.Context, author strin
 		}
 	}
 	prefix := ""
-	if author != "" && len(s.allowedUsers) > 1 {
+	if author != "" && s.allowedUserCount() > 1 {
 		prefix = "For " + author + ": "
 	}
 	return fmt.Sprintf("%sRun %s stage %s gen %d needs a decision: %s. Reply approve or reject <reason>. Full artifact: %s",
@@ -561,7 +561,7 @@ func checkpointTechnicalSummary(payload runCheckpointPayload) string {
 
 func (s *Service) ownerAuthors() map[string]struct{} {
 	authors := map[string]struct{}{}
-	for author, role := range s.allowedUsers {
+	for author, role := range s.allowedUsersSnapshot() {
 		if config.RoleAtLeast(role, config.RoleOwner) {
 			authors[author] = struct{}{}
 		}
