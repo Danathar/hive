@@ -114,10 +114,88 @@ func (s *Server) SpektacularStatus() *FrontendSpektacular {
 	return &copy
 }
 
+// ClearSpektacularStatus drops the binary probe, e.g. when the operator
+// turns Spektacular off from the dashboard (#9172).
+func (s *Server) ClearSpektacularStatus() {
+	if s == nil {
+		return
+	}
+	s.spektacularMu.Lock()
+	defer s.spektacularMu.Unlock()
+	s.spektacularStatus = nil
+}
+
+// SetSpektacularReconfigureFn installs the callback that re-reads
+// runs.spektacular from the live config and rewires the stage runner,
+// hub executor and binary probe (#9172). cmd/hive owns it because only it may
+// import pkg/spektacular. The callback reports whether the new config is
+// fully in effect; false means part of it had to wait (a busy hub executor)
+// and the cleanup loop retries it on every tick until it applies.
+func (s *Server) SetSpektacularReconfigureFn(fn func() bool) {
+	if s == nil {
+		return
+	}
+	s.spektacularReconfMu.Lock()
+	defer s.spektacularReconfMu.Unlock()
+	s.spektacularReconfigureFn = fn
+}
+
+// ReconfigureSpektacular applies the current runs.spektacular config to the
+// running hub. It returns false when no callback is wired (the change takes
+// effect on the next boot) or when the callback deferred part of the change;
+// in the latter case the retry stays pending for tickStageRunner.
+func (s *Server) ReconfigureSpektacular() bool {
+	if s == nil {
+		return false
+	}
+	s.spektacularReconfMu.Lock()
+	fn := s.spektacularReconfigureFn
+	s.spektacularReconfMu.Unlock()
+	if fn == nil {
+		return false
+	}
+	applied := fn()
+	s.spektacularReconfMu.Lock()
+	s.spektacularReconfPending = !applied
+	s.spektacularReconfMu.Unlock()
+	return applied
+}
+
+// SpektacularReconfigurePending reports whether a dashboard change to
+// runs.spektacular is still waiting to be applied.
+func (s *Server) SpektacularReconfigurePending() bool {
+	if s == nil {
+		return false
+	}
+	s.spektacularReconfMu.Lock()
+	defer s.spektacularReconfMu.Unlock()
+	return s.spektacularReconfPending
+}
+
+// StageRunner returns the installed stage runner, or nil.
+func (s *Server) StageRunner() StageRunner {
+	if s == nil {
+		return nil
+	}
+	s.stageRunnerMu.Lock()
+	defer s.stageRunnerMu.Unlock()
+	return s.stageRunner
+}
+
+// StageExecutor returns the installed hub stage executor, or nil.
+func (s *Server) StageExecutor() StageExecutor {
+	if s == nil {
+		return nil
+	}
+	s.stageExecutorMu.Lock()
+	defer s.stageExecutorMu.Unlock()
+	return s.stageExecutor
+}
+
 // SetStageRunner installs the runner the hub's cleanup loop ticks. nil
-// removes it. Called once at boot when runs.spektacular.enabled is set; the
-// Features toggle therefore takes effect on the next boot, like the other
-// feature switches.
+// removes it. Installed at boot when runs.spektacular.enabled is set and
+// rewired by ReconfigureSpektacular when the Features/Extensions dialog
+// changes runs.spektacular (#9172).
 func (s *Server) SetStageRunner(r StageRunner) {
 	if s == nil {
 		return
@@ -164,6 +242,9 @@ func (s *Server) IsPendingStageIdentity(identity string) bool {
 func (s *Server) tickStageRunner(now time.Time) bool {
 	if s == nil {
 		return false
+	}
+	if s.SpektacularReconfigurePending() {
+		s.ReconfigureSpektacular()
 	}
 	s.stageRunnerMu.Lock()
 	r := s.stageRunner

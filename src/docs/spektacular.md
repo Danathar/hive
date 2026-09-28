@@ -100,9 +100,16 @@ source flag. When Spektacular is enabled from the dashboard, Hive also sets
 the work-source loop. The same backward-compatible keys remain accepted by
 `PUT /api/config/governor/features` (`spektacularEnabled`,
 `spektacularBinary`, plus the newer poll/retry/triage/checkpoint fields). The
-runner is installed at boot (`cmd/hive`, `wireSpektacularRunner`), so runner
-process changes take effect on the next boot; dashboard-visible config is
-persisted immediately.
+runner is installed at boot (`cmd/hive`, `wireSpektacularRunner`) and rewired
+when a dashboard save changes `runs` config (`rewireSpektacular`, #9172): the
+binary is re-probed, the stage runner and hub executor are rebuilt from the new
+settings, and turning Spektacular off removes them. A hub executor that is
+running a stage is never swapped out from under it; the change is deferred and
+retried on every hub cleanup tick until the executor is idle. The save
+response's `spektacularApply` field reports `live`, `deferred`, or `restart`
+(nothing wired to rewire; the change takes effect on the next boot), and the
+dashboard warns on the last two. A save the config volume refuses returns 500
+rather than reporting success.
 
 Spek-enabled hives also enable the hub-resident executor by default:
 

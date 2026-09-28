@@ -28393,6 +28393,15 @@ function burnAreaChart() {
       </div>`;
     }
 
+    // Maps the features save response's spektacularApply field (#9172) to an
+    // operator-facing toast; null when the save did not touch runs config or
+    // the change is already live.
+    function spektacularApplyMessage(apply) {
+      if (apply === 'deferred') return { level: 'warning', msg: 'Spektacular settings saved — they apply once the hub executor finishes its running stage.' };
+      if (apply === 'restart') return { level: 'warning', msg: 'Spektacular settings saved — restart the hive for the runner to pick them up.' };
+      return null;
+    }
+
     function renderGovExtensions(f) {
       const status = window._lastStatus || {};
       const spek = status.spektacular || status.spektacular_status || (((status.health || {}).spektacular) || {});
@@ -28411,7 +28420,7 @@ function burnAreaChart() {
         <span><strong>${esc(ext.name)}</strong><small>${esc(ext.meta)}</small></span>${extensionStatusBadge(ext.enabled)}
       </a>`).join('');
       return `<div class="extensions-tab">
-        <p class="extensions-intro">Configure built-in and relay-backed extensions from the dashboard. Runner-process settings take effect on next boot where the existing runner reads config; relay lists update live when peers connect.</p>
+        <p class="extensions-intro">Configure built-in and relay-backed extensions from the dashboard. Spektacular runner and hub-executor settings apply on Save (a hub executor mid-stage picks them up once that stage finishes); relay lists update live when peers connect.</p>
         <nav class="extension-summary" aria-label="Extension summary">${summary}</nav>
         ${extensionCard('ext-spektacular', 'Spektacular', 'Built-in long-running spec → plan → implement runner', {
           enabled: !!f.spektacularEnabled,
@@ -30262,6 +30271,13 @@ function burnAreaChart() {
               const cadenceAck = await res.json().catch(() => ({}));
               noteStatusMutation(cadenceAck.minStatusSeq);
               savedCadences = true;
+            }
+            if (_configState.type === 'governor' && section === 'features') {
+              // Spektacular runner/executor settings are rewired live; say so
+              // when they could not be, instead of implying they are (#9172).
+              const ack = await res.json().catch(() => ({}));
+              const spekMsg = spektacularApplyMessage(ack.spektacularApply);
+              if (spekMsg) showToast(spekMsg.msg, spekMsg.level);
             }
             if (_configState.type === 'governor' && section === 'litellm') {
               // Saving the LiteLLM tab auto-runs the live connection test

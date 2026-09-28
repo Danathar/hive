@@ -307,8 +307,9 @@ type Server struct {
 	hubPushedDashboardURL string
 
 	contributeHub *ContributeWSHub
-	// stageRunner is the Spektacular stage runner installed at boot
-	// (hivecommons/hive#8303); nil when runs.spektacular.enabled is off.
+	// stageRunner is the Spektacular stage runner (hivecommons/hive#8303),
+	// installed at boot and rewired on config change (#9172); nil when
+	// runs.spektacular.enabled is off.
 	stageRunner     StageRunner
 	stageRunnerMu   sync.Mutex
 	stageExecutor   StageExecutor
@@ -316,6 +317,13 @@ type Server struct {
 
 	spektacularMu     sync.RWMutex
 	spektacularStatus *FrontendSpektacular
+
+	// spektacularReconfigureFn rewires runner/executor/probe from the live
+	// config (#9172); spektacularReconfPending marks a deferred apply the
+	// cleanup loop retries. Guarded by spektacularReconfMu.
+	spektacularReconfMu      sync.Mutex
+	spektacularReconfigureFn func() bool
+	spektacularReconfPending bool
 
 	// contributeMetrics holds the persistent hourly time-series behind the
 	// Operations + Leaderboard sparklines (queue depth, tasks/hour, fleet size,

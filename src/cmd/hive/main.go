@@ -3539,6 +3539,10 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 		spekCloneAuth = spektacularCloneAuth(pushbroker.GitHubAppMinter{Auth: b.appAuth, Tier: pushbroker.ReadOnlyTier})
 	}
 	wireSpektacularRunnerWithCloneAuth(b.cfg, b.dashSrv, b.logger, spekCloneAuth)
+	// #9172: Extensions/Features edits to runs.spektacular apply live.
+	b.dashSrv.SetSpektacularReconfigureFn(func() bool {
+		return rewireSpektacular(b.cfg, b.dashSrv, b.logger, spekCloneAuth)
+	})
 	// #8380: chain GitHub comments/labels behind the relay yank on takeover.
 	b.dashSrv.InstallClaimHooks(githubClaimHooks(b.ctx, b.cfg, func() *github.Client { return b.ghClient }, b.logger))
 	// Forge App tab inventory: the resolved active key path and the per-app-id
