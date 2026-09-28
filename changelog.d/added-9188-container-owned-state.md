@@ -1,0 +1,1 @@
+- Added a published-image contributor Compose example with container-owned accounts and persistent state, device-login and registration instructions, resource limits, and configurable CPU niceness ([#9188](https://github.com/hivecommons/hive/issues/9188)).

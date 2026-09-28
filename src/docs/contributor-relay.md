@@ -28,6 +28,11 @@ sequenceDiagram
 
 ## Basic setup
 
+For a homelab service with accounts independent of the host, use the
+[published-image Compose example](../examples/contributor-isolated/README.md).
+It keeps GitHub, Codex, Hive configuration and work in a named volume and
+requires no host GitHub or provider CLI installation.
+
 From a checkout of this repository:
 
 ```bash

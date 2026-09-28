@@ -869,6 +869,13 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_attach_hint_runtime.sh
 
+      - name: Isolated contributor Compose contract (#9188)
+        working-directory: .
+        run: |
+          python3 -m venv "$RUNNER_TEMP/isolated-contributor-tests"
+          "$RUNNER_TEMP/isolated-contributor-tests/bin/pip" install PyYAML==6.0.2
+          "$RUNNER_TEMP/isolated-contributor-tests/bin/python" src/deploy/test_isolated_contributor_compose.py
+
       # #6485: the default contributor container had no resource ceiling, so a
       # healthy coding task could consume enough RAM and zram for systemd-oomd
       # to kill it (or another process in the contributor's desktop session).
