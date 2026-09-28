@@ -970,6 +970,17 @@ A quota refusal now parks the loop:
 - **The operator is told once, clearly.** The banner previously lived only inside the agy pane while the relay log said `[environment]`; nobody reading the log could learn their quota was gone for four hours, or that switching model or backend was the remedy.
 - **The failure says what happened.** `[environment] … the agent CLI is not visibly working` reads as a broken contributor host. The CLI was working perfectly and the provider said no, so the reason now says so.
 
+Codex's `■ You’ve hit your usage limit` banner also enters this hold, including
+when it is followed by the optional model-switch menu ([#9247](https://github.com/hivecommons/hive/issues/9247)).
+The relay preserves the displayed reset information in its failure reason and
+operator log. A clock time such as `10:21 PM` has no established timezone, so
+this hold does **not** expire on a guessed deadline or the generic fallback.
+It survives CLI relaunches and hub reconnects, even if the new pane looks idle.
+A fresh quota reading captured after the refusal, with every window above its
+reserve, releases it. Without a quota reader, verify that the configured model
+can run again, then restart the contributor relay explicitly. The relay never
+selects the suggested model or purchases credits.
+
 Only quota takes this path. An authorization refusal is not time-bounded, an operator has to change something, and parking the relay would hide it — a 403 still fails fast and stays available.
 
 The `failure_kind` on the wire is still `environment`: the hub's kinds are `environment` / `task` / `unspecified`, and the field is advisory — the hub records and displays it and does not route or change a work item's failure cooldown on it. A dedicated quota kind, and the cooldown exemption [#6541](https://github.com/hivecommons/hive/issues/6541) asks for, are a hub-side protocol change and are not part of this.

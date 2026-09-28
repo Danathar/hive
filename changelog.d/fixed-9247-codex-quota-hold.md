@@ -1,0 +1,1 @@
+- Codex contributors recognize usage-limit refusals and hold new assignments across CLI relaunches and reconnects until quota recovery is confirmed, instead of repeatedly failing tasks as idle ([#9247](https://github.com/hivecommons/hive/issues/9247)).
