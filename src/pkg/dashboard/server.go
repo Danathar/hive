@@ -384,8 +384,9 @@ type Server struct {
 
 // StatusPayload matches the JSON contract the dashboard frontend render() expects.
 type StatusPayload struct {
-	Timestamp string `json:"timestamp"`
-	TimeZone  string `json:"timeZone,omitempty"`
+	OverviewBands *OverviewBands `json:"overview_bands,omitempty"`
+	Timestamp     string         `json:"timestamp"`
+	TimeZone      string         `json:"timeZone,omitempty"`
 	// StatusSeq is a monotonic publish sequence (#4348): the frontend drops
 	// any status payload whose seq is older than the last one it rendered,
 	// so a stale in-flight poll/SSE response can never repaint over a newer
@@ -2073,7 +2074,7 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	// consumption survives the reset that erases the live number.
 	s.ObserveBudgetWindow(status)
 
-	data, err := json.Marshal(status)
+	data, err := json.Marshal(s.statusWithOverviewBands(status, time.Now().UTC()))
 	if err != nil {
 		s.logger.Warn("failed to marshal status for SSE", "error", err)
 		return true
@@ -2858,7 +2859,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		statusJSONResponse(w, r, map[string]string{"status": "initializing"})
 		return
 	}
-	statusJSONResponse(w, r, filterStatusPayload(status, r.URL.Query().Get("fields"), r.URL.Query().Get("omit")))
+	statusJSONResponse(w, r, filterStatusPayload(s.statusWithOverviewBands(status, time.Now().UTC()), r.URL.Query().Get("fields"), r.URL.Query().Get("omit")))
 }
 
 func (s *Server) handleStatusSummary(w http.ResponseWriter, r *http.Request) {
@@ -3015,7 +3016,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	s.statusMu.RLock()
 	if s.status != nil {
-		data, _ := json.Marshal(s.status)
+		data, _ := json.Marshal(s.statusWithOverviewBands(s.status, time.Now().UTC()))
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 			s.statusMu.RUnlock()
 			return

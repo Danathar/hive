@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -18,7 +19,11 @@ func TestOverviewServerClassifierAndCSVParity9102(t *testing.T) {
 	if err != nil {
 		t.Skip("node unavailable: Overview classifier parity was not executed")
 	}
-	html := indexHTML(t)
+	oracle, err := os.ReadFile("testdata/overview_legacy_9102.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(oracle)
 	funcs := []string{
 		"normalizeIssueBandConfig", "repoIssueBandConfig", "canonicalHiveHoldLabel", "holdLabels", "heldReason",
 		"issueLabelSet", "issueHasAnyLabel", "issueAgentRole", "issueClaimed", "issueAcknowledged", "issueLinkedPRState", "issueUpdatedAt", "issueIsStale", "issueBandInfo", "issueBandSpec", "issueBandLabel", "issueBandRule", "issueBandTip", "issueBandRank", "groupedRepoIssues", "overviewRepoName", "overviewIssueBandSlices",

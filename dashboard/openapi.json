@@ -1270,30 +1270,166 @@
                           "actionableIssues": {
                             "type": "array",
                             "items": {
-                              "type": "object"
+                              "type": "object",
+                              "properties": {
+                                "band": {
+                                  "type": "string"
+                                },
+                                "signals": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "glyph": {
+                                        "type": "string"
+                                      },
+                                      "role": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                },
+                                "stale": {
+                                  "type": "boolean"
+                                },
+                                "held": {
+                                  "type": "boolean"
+                                },
+                                "hold_reason": {
+                                  "type": "string"
+                                },
+                                "role": {
+                                  "type": "string"
+                                }
+                              }
                             },
-                            "description": "Untyped in the Go source ([]any) \u2014 populated from forge issue records whose shape is not fixed by a Go struct."
+                            "description": "Cached forge records enriched with the same Go classification used by /api/overview exports."
                           },
                           "openPrs": {
                             "type": "array",
                             "items": {
-                              "type": "object"
+                              "type": "object",
+                              "properties": {
+                                "band": {
+                                  "type": "string"
+                                },
+                                "signals": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "glyph": {
+                                        "type": "string"
+                                      },
+                                      "role": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                },
+                                "stale": {
+                                  "type": "boolean"
+                                },
+                                "held": {
+                                  "type": "boolean"
+                                },
+                                "hold_reason": {
+                                  "type": "string"
+                                },
+                                "role": {
+                                  "type": "string"
+                                }
+                              }
                             },
-                            "description": "Untyped in the Go source ([]any) \u2014 populated from forge PR records whose shape is not fixed by a Go struct."
+                            "description": "Cached forge records enriched with the same Go classification used by /api/overview exports."
                           },
                           "heldIssues": {
                             "type": "array",
                             "items": {
-                              "type": "object"
+                              "type": "object",
+                              "properties": {
+                                "band": {
+                                  "type": "string"
+                                },
+                                "signals": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "glyph": {
+                                        "type": "string"
+                                      },
+                                      "role": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                },
+                                "stale": {
+                                  "type": "boolean"
+                                },
+                                "held": {
+                                  "type": "boolean"
+                                },
+                                "hold_reason": {
+                                  "type": "string"
+                                },
+                                "role": {
+                                  "type": "string"
+                                }
+                              }
                             },
-                            "description": "Issues parked behind a hold label, display-only (#7896). Untyped in the Go source ([]any) \u2014 populated from the hold list's items (number, title, url, labels, created_at)."
+                            "description": "Cached forge records enriched with the same Go classification used by /api/overview exports."
                           },
                           "heldPrs": {
                             "type": "array",
                             "items": {
-                              "type": "object"
+                              "type": "object",
+                              "properties": {
+                                "band": {
+                                  "type": "string"
+                                },
+                                "signals": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "glyph": {
+                                        "type": "string"
+                                      },
+                                      "role": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                },
+                                "stale": {
+                                  "type": "boolean"
+                                },
+                                "held": {
+                                  "type": "boolean"
+                                },
+                                "hold_reason": {
+                                  "type": "string"
+                                },
+                                "role": {
+                                  "type": "string"
+                                }
+                              }
                             },
-                            "description": "Non-draft PRs parked behind a hold label, display-only (#7896) \u2014 kept apart from openPrs so the hold gate is untouched. Untyped in the Go source ([]any) \u2014 the same PR record shape as openPrs."
+                            "description": "Cached forge records enriched with the same Go classification used by /api/overview exports."
                           }
                         },
                         "required": [
@@ -1433,6 +1569,58 @@
                         "initializing"
                       ],
                       "description": "Present ONLY in the pre-first-build response, which is the bare object {\"status\": \"initializing\"} with no other field set."
+                    },
+                    "overview_bands": {
+                      "type": "object",
+                      "description": "Ordered Go band specs and counts shared with Overview exports, repo cards and legends. Also included in full status SSE events.",
+                      "properties": {
+                        "issues": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "label": {
+                                "type": "string"
+                              },
+                              "short": {
+                                "type": "string"
+                              },
+                              "rule": {
+                                "type": "string"
+                              },
+                              "count": {
+                                "type": "integer"
+                              }
+                            }
+                          }
+                        },
+                        "prs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "label": {
+                                "type": "string"
+                              },
+                              "short": {
+                                "type": "string"
+                              },
+                              "rule": {
+                                "type": "string"
+                              },
+                              "count": {
+                                "type": "integer"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
