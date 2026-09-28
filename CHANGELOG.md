@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.78.1)
+
+### Changed
+
+- Dashboard shows agents in the post-restart boot stagger as a pulsing "starting" dot instead of down-red "stopped"; `/api/status` agents carry a new `starting` flag ([#9411](https://github.com/hivecommons/hive/pull/9411)).
+
 ## 2026-09-28 (v5.78.0)
 
 ### Added
