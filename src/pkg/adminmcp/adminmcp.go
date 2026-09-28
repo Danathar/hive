@@ -516,7 +516,7 @@ func scrubPendingValue(v any, key string) any {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			if credentialBearingKey(k) && !numericTokenCounter(k, val) {
+			if credentialBearingKey(k) && !maskExempt(k, val) {
 				out[k] = "[masked:" + maskLabel(k) + "]"
 				continue
 			}
@@ -547,7 +547,7 @@ func scrubPendingValue(v any, key string) any {
 
 func credentialBearingKey(k string) bool {
 	key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(k), "_", ""), "-", ""))
-	if key == "" || key == "tokens" || key == "totaltokens" {
+	if key == "" {
 		return false
 	}
 	if key == "otelheaders" {
@@ -696,7 +696,7 @@ func maskSensitive(b []byte) []byte {
 		case map[string]any:
 			out := map[string]any{}
 			for k, val := range x {
-				if sensitiveKey(k) && !numericTokenCounter(k, val) {
+				if sensitiveKey(k) && !maskExempt(k, val) {
 					out[k] = "[masked:" + maskLabel(k) + "]"
 				} else {
 					out[k] = walk(val)
@@ -728,14 +728,40 @@ func sensitiveKey(k string) bool {
 	k = strings.ToLower(k)
 	return strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "credential") || strings.Contains(k, "authorization")
 }
-func numericTokenCounter(k string, v any) bool {
+
+// credentialTokenQualifiers mark a plural "*tokens" key as a collection of
+// credentials (refresh_tokens, access_tokens) rather than a usage count.
+var credentialTokenQualifiers = []string{
+	"access", "refresh", "id", "bearer", "auth", "api", "registration",
+	"session", "lease", "oauth", "bot", "webhook", "github", "csrf", "jwt", "device",
+}
+
+// tokenCountKey reports whether k names a token count or usage block
+// (tokens, totalTokens, input_tokens, max_tokens) rather than a credential.
+func tokenCountKey(k string) bool {
 	key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, "_", ""), "-", ""))
-	if key != "tokens" && key != "totaltokens" {
+	stem, ok := strings.CutSuffix(key, "tokens")
+	if !ok {
 		return false
 	}
+	for _, q := range credentialTokenQualifiers {
+		if strings.HasSuffix(stem, q) {
+			return false
+		}
+	}
+	return true
+}
+
+// maskExempt reports whether a value under a sensitive-looking key cannot be
+// a credential and must stay visible (#9161). Booleans carry no secret; a
+// token count is numeric, and a token usage block is an object that the
+// caller keeps walking, so its fields are still scrubbed by key and shape.
+func maskExempt(k string, v any) bool {
 	switch v.(type) {
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+	case bool:
 		return true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number, map[string]any:
+		return tokenCountKey(k)
 	default:
 		return false
 	}
@@ -750,8 +776,12 @@ func maskLabel(k string) string {
 	}
 	return "secret"
 }
+
+// looksSecret matches credential prefixes. The only hive-issued prefixed
+// token is the task MCP lease (taskmcp.LeaseTokenPrefix); a bare "hive_"
+// prefix would also mask identifiers such as hive_id or tool names.
 func looksSecret(s string) bool {
-	return strings.HasPrefix(s, "Bearer ") || strings.HasPrefix(s, "ghp_") || strings.HasPrefix(s, "github_pat_") || strings.HasPrefix(s, "hive_")
+	return strings.HasPrefix(s, "Bearer ") || strings.HasPrefix(s, "ghp_") || strings.HasPrefix(s, "github_pat_") || strings.HasPrefix(s, "hive_mcp_v1.")
 }
 func scrubOutboundString(s string) string {
 	out := logscrub.ScrubString(s, logscrub.WithMarkers())
