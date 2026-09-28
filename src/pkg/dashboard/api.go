@@ -6661,12 +6661,17 @@ func scrubDashboardChatAnswer(answer string) string {
 	return redactTokens(answer)
 }
 
+// handleChatMessages serves the shared dashboard chat channel. Every reader
+// with RoleRead sees the same outbox — the spine's bot replies carry no target
+// user, exactly as on a Slack or Discord channel — so the response names the
+// viewer: the browser uses it to tell its own lines from other operators'
+// (hivecommons/hive#9135).
 func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 	if !config.RoleAtLeast(r.Header.Get("X-Hive-Role"), config.RoleRead) {
 		jsonError(w, "read access required", http.StatusForbidden)
 		return
 	}
-	if s.deps == nil || s.deps.DashboardChatDrain == nil {
+	if s.deps == nil || s.deps.DashboardChatPoll == nil {
 		jsonError(w, "dashboard chat is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -6675,8 +6680,16 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "since must be a sequence number", http.StatusBadRequest)
 		return
 	}
+	poll := s.deps.DashboardChatPoll(since)
+	if poll.Messages == nil {
+		poll.Messages = []ChatOutbound{}
+	}
 	jsonResponse(w, map[string]interface{}{
-		"messages": s.deps.DashboardChatDrain(since),
+		"messages": poll.Messages,
+		"next":     poll.Next,
+		"epoch":    poll.Epoch,
+		"gap":      poll.Gap,
+		"viewer":   requestUser(r),
 	})
 }
 

@@ -2606,6 +2606,9 @@
     .chat-command-table code { white-space: nowrap; }
     .chat-msg.user { align-self: flex-end; background: var(--purple); color: var(--bg); border-bottom-right-radius: 2px; }
     .chat-msg.system { align-self: flex-start; background: var(--surface); color: var(--text); border-bottom-left-radius: 2px; border: 1px solid var(--border); }
+    .chat-msg.peer { align-self: flex-start; background: var(--panel-strong); color: var(--text); border-bottom-left-radius: 2px; border: 1px solid var(--border); }
+    .chat-msg.peer .chat-author { display:block; margin-bottom: var(--sp-1); color: var(--cyan); font-size: var(--fs-2xs); font-weight: 600; }
+    .chat-msg.system.chat-gap { align-self: center; color: var(--muted); font-style: italic; font-size: var(--fs-xs); border-style: dashed; }
     .chat-msg.system a { color: var(--cyan); }
     .chat-msg.thinking { align-self: flex-start; background: var(--surface); color: var(--muted); font-style: italic; border: 1px dashed var(--border); }
     .hive-chat-input-row {
@@ -30452,6 +30455,10 @@ function burnAreaChart() {
     const CHAT_COMMAND_HISTORY_KEY = 'hive-chat-command-history-v1';
     const CHAT_SETTINGS_KEY = 'hive-chat-settings-v2';
     const CHAT_DRAFT_KEY = 'hive-chat-draft-v1';
+    const CHAT_CURSOR_KEY = 'hive-chat-cursor-v1';
+    const CHAT_POLL_OPEN_MS = 2000;
+    const CHAT_POLL_IDLE_MS = 10000;
+    const CHAT_POLL_MAX_BACKOFF_MS = 60000;
     const CHAT_WELCOME = 'Welcome to **Hive Chat**. Type `/help` for commands, press `Tab` to complete slash commands, `↑/↓` for command history, and `⌘/Ctrl+K` to focus this terminal-grade dialog.';
 
     const chatFab = document.getElementById('hiveChatFab');
@@ -30472,6 +30479,9 @@ function burnAreaChart() {
     const CHAT_RESPONSE_TIMEOUT_MS = 30000;
     let chatContext = [];
     let chatLastSeq = 0;
+    let chatEpoch = '';
+    let chatPollTimer = null;
+    let chatPollFailures = 0;
     let chatTranscript = [];
     let chatCommandHistory = [];
     let chatHistoryIndex = -1;
@@ -30524,6 +30534,12 @@ function burnAreaChart() {
     }
     function chatNow() { return new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }); }
     function chatPersistTranscript() { localStorage.setItem(CHAT_TRANSCRIPT_KEY, JSON.stringify(chatTranscript.slice(-CHAT_MAX_TRANSCRIPT))); }
+    function chatLoadCursor() {
+      const saved = safeJsonParse(localStorage.getItem(CHAT_CURSOR_KEY) || '{}', {});
+      chatEpoch = saved && typeof saved.epoch === 'string' ? saved.epoch : '';
+      chatLastSeq = saved && Number.isFinite(Number(saved.seq)) ? Math.max(0, Math.floor(Number(saved.seq))) : 0;
+    }
+    function chatPersistCursor() { localStorage.setItem(CHAT_CURSOR_KEY, JSON.stringify({ epoch: chatEpoch, seq: chatLastSeq })); }
     function chatPersistCommandHistory() { localStorage.setItem(CHAT_COMMAND_HISTORY_KEY, JSON.stringify(chatCommandHistory.slice(-CHAT_MAX_COMMAND_HISTORY))); }
     function chatPersistDraft() { localStorage.setItem(CHAT_DRAFT_KEY, chatInput.value.slice(0, 4000)); }
     function chatSetDraft(text) {
@@ -30571,14 +30587,19 @@ function burnAreaChart() {
       }
       const el = document.createElement('div');
       el.className = 'chat-msg ' + cls;
-      el.innerHTML = opts.html ? String(content || '') : (cls === 'user' ? escapeHtml(text) : formatChatHtml(text));
+      if (opts.gap) el.classList.add('chat-gap');
+      const author = cls === 'peer' ? String(opts.author || '') : '';
+      el.innerHTML = opts.html ? String(content || '') : (cls === 'user' ? escapeHtml(text) : cls === 'peer' ? '<span class="chat-author">' + escapeHtml(author) + '</span>' + escapeHtml(text) : formatChatHtml(text));
       if (cls !== 'thinking') el.innerHTML += '<span class="chat-time">' + chatNow() + '</span>';
       chatMessages.appendChild(el);
       enhanceChatMessage(el, text);
       while (chatMessages.children.length > CHAT_MAX_DOM) chatMessages.removeChild(chatMessages.firstChild);
       chatMessages.scrollTop = chatMessages.scrollHeight;
       if (cls !== 'thinking') {
-        chatTranscript.push({ cls: cls === 'user' ? 'user' : 'system', text: text, ts: Date.now() });
+        const entry = { cls: cls === 'user' ? 'user' : cls === 'peer' ? 'peer' : 'system', text: text, ts: Date.now() };
+        if (author) entry.author = author;
+        if (opts.gap) entry.gap = true;
+        chatTranscript.push(entry);
         chatTranscript = chatTranscript.slice(-CHAT_MAX_TRANSCRIPT);
         chatPersistTranscript();
       }
@@ -30593,7 +30614,7 @@ function burnAreaChart() {
       if (!chatTranscript.length) { chatAddMsg(CHAT_WELCOME, 'system'); return; }
       const keep = chatTranscript.slice();
       chatTranscript = [];
-      keep.forEach(m => chatAddMsg(m.text || '', m.cls === 'user' ? 'user' : 'system'));
+      keep.forEach(m => chatAddMsg(m.text || '', m.cls === 'user' ? 'user' : m.cls === 'peer' ? 'peer' : 'system', { author: m.author, gap: !!m.gap }));
     }
 
     function restoreCommandHistory() {
@@ -30841,6 +30862,7 @@ function burnAreaChart() {
 
     restoreCommandHistory();
     applyChatSettings();
+    chatLoadCursor();
     restoreChatHistory();
     chatInput.value = localStorage.getItem(CHAT_DRAFT_KEY) || '';
     renderChatCheatsheet();
@@ -30992,12 +31014,25 @@ function burnAreaChart() {
       return next;
     }
 
-    function chatRenderOutbound(msg) {
-      if (!msg || !msg.text) return;
+    function chatRenderOutbound(msg, viewer) {
+      if (!msg) return;
       const seq = Number(msg.seq || 0);
       if (seq && seq <= chatLastSeq) return;
+      // Advance past every retained entry, even one with empty text, so the
+      // cursor never sticks on an entry this panel will never render.
       if (seq) chatLastSeq = Math.max(chatLastSeq, seq);
+      if (!msg.text) return;
       if (msg.role === 'user') {
+        const author = String(msg.author_id || '');
+        // The outbox is one shared channel: only a line whose author is this
+        // viewer is "mine". Anyone else's — or an unattributed one — is shown
+        // as a peer line and stays out of this viewer's conversational
+        // context, which is posted back as `history` (hivecommons/hive#9135).
+        if (author !== String(viewer || '')) {
+          chatAddMsg(msg.text, 'peer', { author: author || 'unknown' });
+          if (!chatPanel.classList.contains('open')) chatFab.classList.add('has-unread');
+          return;
+        }
         if ((chatPendingUserEchoes.get(msg.text) || 0) > 0) {
           chatTrackPendingUserEcho(msg.text, -1);
           return;
@@ -31012,17 +31047,82 @@ function burnAreaChart() {
       if (chatContext.length > CHAT_CONTEXT_LIMIT) chatContext = chatContext.slice(-CHAT_CONTEXT_LIMIT);
     }
 
-    async function chatPollMessages() {
+    // Applies one /api/chat/messages envelope. Seq is a per-process counter,
+    // so the cursor is only valid inside the epoch that minted it: a new epoch
+    // (hive restart) or a `next` below the cursor means this batch was filtered
+    // against a stale cursor and must be discarded. Returns true when the
+    // cursor was reset and the caller should poll again right away.
+    function chatApplyPoll(data) {
+      data = data || {};
+      const epoch = String(data.epoch || '');
+      const next = Number(data.next);
+      const hadCursor = chatLastSeq > 0;
+      if ((epoch && chatEpoch && epoch !== chatEpoch) || (Number.isFinite(next) && next < chatLastSeq)) {
+        chatEpoch = epoch;
+        chatLastSeq = 0;
+        chatPersistCursor();
+        if (hadCursor) chatAddMsg('Hive restarted — the chat channel was reset. Replies sent before the restart may be missing here.', 'system', { gap: true });
+        return true;
+      }
+      if (epoch && !chatEpoch) chatEpoch = epoch;
+      const viewer = String(data.viewer || '');
+      (data.messages || []).forEach(m => chatRenderOutbound(m, viewer));
+      // A gap always arrives with the full retained ring behind it, which is
+      // more than CHAT_MAX_DOM rows: a marker placed before the batch would be
+      // trimmed unseen, so it goes after the batch as the newest line.
+      if (data.gap && hadCursor) chatAddMsg('Some earlier chat messages were dropped from the channel before this panel could fetch them.', 'system', { gap: true });
+      chatPersistCursor();
+      return false;
+    }
+
+    function chatPollDelay() {
+      const base = chatPanel.classList.contains('open') ? CHAT_POLL_OPEN_MS : CHAT_POLL_IDLE_MS;
+      return Math.min(CHAT_POLL_MAX_BACKOFF_MS, base * Math.pow(2, chatPollFailures));
+    }
+    function chatSchedulePoll() {
+      clearTimeout(chatPollTimer);
+      chatPollTimer = null;
+      if (document.hidden) return;
+      chatPollTimer = setTimeout(chatPollMessages, chatPollDelay());
+    }
+    function chatNotePollFailure() { chatPollFailures = Math.min(chatPollFailures + 1, 8); }
+
+    // Polls the shared channel: every 2 s while the panel is open, every 10 s
+    // while it is closed (so the unread badge still works), never while the
+    // tab is hidden, and with exponential backoff up to 60 s after any
+    // non-2xx or network failure (hivecommons/hive#9135).
+    let chatPollInFlight = false;
+    async function chatPollMessages(retried) {
+      // The timer, FAB open, visibilitychange and a /api/chat completion can
+      // all call this; overlapping polls could resolve out of order across a
+      // restart and flip the epoch back and forth. One poll at a time.
+      if (chatPollInFlight) return;
+      chatPollInFlight = true;
+      clearTimeout(chatPollTimer);
+      chatPollTimer = null;
+      let again = false;
       try {
         const resp = await fetch('/api/chat/messages?since=' + encodeURIComponent(chatLastSeq), {
           headers: _inceptionAuthHeaders(),
         });
-        if (!resp.ok) return;
+        if (!resp.ok) { chatNotePollFailure(); return; }
         const data = await resp.json();
-        (data.messages || []).forEach(chatRenderOutbound);
-      } catch (_) {}
+        chatPollFailures = 0;
+        again = chatApplyPoll(data) && retried !== true;
+      } catch (_) {
+        chatNotePollFailure();
+      } finally {
+        chatPollInFlight = false;
+        if (again) await chatPollMessages(true);
+        else chatSchedulePoll();
+      }
     }
-    setInterval(chatPollMessages, 2000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { clearTimeout(chatPollTimer); chatPollTimer = null; return; }
+      chatPollFailures = 0;
+      chatPollMessages();
+    });
+    chatPollMessages();
 
     // GitHub Device Flow Auth
     let ghPollTimer = null;

@@ -44,6 +44,19 @@ type Outbound struct {
 	AuthorID string `json:"author_id,omitempty"`
 }
 
+// Poll is one outbox read. Seq is a per-process counter, so the client cursor
+// only means something together with Epoch: a new Epoch tells the browser the
+// hive restarted and every retained seq belongs to a fresh numbering
+// (hivecommons/hive#9135). Next is the last seq assigned; Gap reports that
+// entries newer than the caller's cursor were already evicted from the ring,
+// so Messages does not start where the caller left off.
+type Poll struct {
+	Messages []Outbound `json:"messages"`
+	Next     uint64     `json:"next"`
+	Epoch    string     `json:"epoch"`
+	Gap      bool       `json:"gap,omitempty"`
+}
+
 type Bot struct {
 	*backend
 	service *chat.Service
@@ -56,6 +69,7 @@ type inbound struct {
 type backend struct {
 	logger *slog.Logger
 	inbox  chan inbound
+	epoch  string
 
 	mu     sync.Mutex
 	next   uint64
@@ -71,7 +85,7 @@ func NewBot(cfg Config, logger *slog.Logger) *Bot {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	b := &backend{logger: logger, inbox: make(chan inbound, inboxCap)}
+	b := &backend{logger: logger, inbox: make(chan inbound, inboxCap), epoch: uuid.NewString()}
 	service := chat.NewService(b, chat.Config{
 		DashboardURL:      cfg.DashboardURL,
 		DashboardToken:    cfg.DashboardToken,
@@ -149,7 +163,12 @@ func (b *backend) Submit(user, text string) (uint64, error) {
 	}
 }
 
-func (b *backend) Drain(since uint64) []Outbound {
+// Drain returns the retained outbox entries newer than since.
+func (b *backend) Drain(since uint64) []Outbound { return b.Poll(since).Messages }
+
+// Poll returns the retained outbox entries newer than since together with the
+// cursor metadata the browser needs to resume without replay or silent loss.
+func (b *backend) Poll(since uint64) Poll {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]Outbound, 0, len(b.outbox))
@@ -158,7 +177,13 @@ func (b *backend) Drain(since uint64) []Outbound {
 			out = append(out, msg)
 		}
 	}
-	return out
+	res := Poll{Messages: out, Next: b.next, Epoch: b.epoch}
+	// Seqs start at 1, so oldest-1 cannot underflow; since+1 could wrap for a
+	// hostile MaxUint64 cursor and report a phantom gap.
+	if len(b.outbox) > 0 && since < b.outbox[0].Seq-1 {
+		res.Gap = true
+	}
+	return res
 }
 
 func (b *backend) appendOutbox(role, author, text string) uint64 {

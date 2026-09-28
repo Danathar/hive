@@ -1420,11 +1420,11 @@ func (b *boot) wireBootClosures() {
 				}
 				return b.dashChat.Submit(user, text)
 			},
-			DashboardChatDrain: func(since uint64) []dashboard.ChatOutbound {
+			DashboardChatPoll: func(since uint64) dashboard.ChatPoll {
 				if b.dashChat == nil {
-					return nil
+					return dashboard.ChatPoll{}
 				}
-				return dashboardChatDrain(b.dashChat, since)
+				return dashboardChatPoll(b.dashChat, since)
 			},
 			Governor:          b.gov,
 			GHClient:          b.ghClient,
@@ -4373,14 +4373,19 @@ func dashboardChatAllowedUsers(cfg *config.Config) []string {
 	return allowed
 }
 
-func dashboardChatDrain(bot *dashchat.Bot, since uint64) []dashboard.ChatOutbound {
+func dashboardChatPoll(bot *dashchat.Bot, since uint64) dashboard.ChatPoll {
 	if bot == nil {
-		return nil
+		return dashboard.ChatPoll{}
 	}
-	msgs := bot.Drain(since)
-	out := make([]dashboard.ChatOutbound, 0, len(msgs))
-	for _, msg := range msgs {
-		out = append(out, dashboard.ChatOutbound{
+	poll := bot.Poll(since)
+	out := dashboard.ChatPoll{
+		Messages: make([]dashboard.ChatOutbound, 0, len(poll.Messages)),
+		Next:     poll.Next,
+		Epoch:    poll.Epoch,
+		Gap:      poll.Gap,
+	}
+	for _, msg := range poll.Messages {
+		out.Messages = append(out.Messages, dashboard.ChatOutbound{
 			Seq:      msg.Seq,
 			Text:     msg.Text,
 			Role:     msg.Role,
