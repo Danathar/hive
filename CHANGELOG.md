@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.79.0)
+
+### Added
+
+- Added a repo-root `AGENTS.md` (and `CLAUDE.md` alias) telling agents that CI runs the tests: no local `go test`/build/lint, and never run this repo's suite inside an agent pane (#9416).
+
+### Changed
+
+- Scanner policies now forbid running tests, builds or linters locally in any language (`go test`, `npm run build`, `pytest`, …), not just the npm/tsc commands; CI validates and agents read `gh pr checks` (#9416).
+
 ## 2026-09-28 (v5.78.2)
 
 ### Changed
