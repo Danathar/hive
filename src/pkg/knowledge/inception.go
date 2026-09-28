@@ -365,7 +365,9 @@ func (e *InceptionEngine) RecordFacts(ctx context.Context, facts []IdeationFact)
 	e.state.Phase = PhaseScaffold
 	now := time.Now()
 	e.state.PhaseChangedAt = &now
-	e.state.ProposedFacts = nil
+	// Keep proposals nobody has confirmed yet: wiping them here silently
+	// discarded transcript-derived candidates before a human saw them (#9171).
+	e.state.ProposedFacts = dropRecordedProposals(e.state.ProposedFacts, accepted)
 
 	e.writeFactsToVault(accepted)
 
@@ -556,10 +558,30 @@ func scrubIdeationFact(f IdeationFact) IdeationFact {
 	return f
 }
 
+// dropRecordedProposals returns the pending proposals that were not just
+// recorded as confirmed facts. It never mutates the input slice.
+func dropRecordedProposals(pending, recorded []IdeationFact) []IdeationFact {
+	done := make(map[string]bool, len(recorded))
+	for _, f := range recorded {
+		done[proposalKey(f)] = true
+	}
+	kept := make([]IdeationFact, 0, len(pending))
+	for _, p := range pending {
+		if !done[proposalKey(p)] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+func proposalKey(f IdeationFact) string {
+	return strings.ToLower(f.Title + "\x00" + f.SourceRef)
+}
+
 func appendProposedFact(existing []IdeationFact, fact IdeationFact) []IdeationFact {
-	key := strings.ToLower(fact.Title + "\x00" + fact.SourceRef)
+	key := proposalKey(fact)
 	for i, current := range existing {
-		if strings.ToLower(current.Title+"\x00"+current.SourceRef) == key {
+		if proposalKey(current) == key {
 			existing[i] = fact
 			return existing
 		}
