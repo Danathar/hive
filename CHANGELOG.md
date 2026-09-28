@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.77.0)
+
+### Added
+
+- Dashboard: URLs in system-alert banners are now rendered as clickable links (#9390).
+
 ## 2026-09-28 (v5.76.4)
 
 ### Changed
