@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.73.0)
+
+### Added
+
+- Added a published-image contributor Compose example with container-owned accounts and persistent state, device-login and registration instructions, resource limits, and configurable CPU niceness ([#9188](https://github.com/hivecommons/hive/issues/9188)).
+
 ## 2026-09-28 (v5.72.5)
 
 ### Fixed
