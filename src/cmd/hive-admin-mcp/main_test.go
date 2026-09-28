@@ -133,6 +133,39 @@ func TestReadProviderCapsActiveHiveList(t *testing.T) {
 	}
 }
 
+// TestReadProviderSendsLimitAsQuery pins #9160: the capped list tools must put
+// limit in the query string, not in the path where hivectl would escape the
+// "?" into "/api/agents%3Flimit=1" and the hive would answer 404.
+func TestReadProviderSendsLimitAsQuery(t *testing.T) {
+	for _, tc := range []struct {
+		tool string
+		path string
+	}{
+		{adminmcp.ToolAgentsList, "/api/agents"},
+		{adminmcp.ToolRunsList, "/api/runs"},
+		{adminmcp.ToolLeasesList, "/api/runs"},
+		{adminmcp.ToolClaimsList, "/api/claims"},
+		{adminmcp.ToolPlansList, "/api/plans"},
+		{adminmcp.ToolContributorsList, "/api/contributors"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path || r.URL.Query().Get("limit") != "1" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+			r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+			if _, err := (readProvider{roster: r}).Read(context.Background(), tc.tool, map[string]any{"limit": float64(1)}); err != nil {
+				t.Fatalf("Read(%s) err = %v", tc.tool, err)
+			}
+		})
+	}
+}
+
 func TestRosterActiveHiveOnly(t *testing.T) {
 	var hitsA, hitsB int
 	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

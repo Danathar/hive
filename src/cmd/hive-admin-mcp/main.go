@@ -194,7 +194,14 @@ func (p readProvider) Read(ctx context.Context, tool string, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	data, err := client.Do(ctx, http.MethodGet, path, nil, nil)
+	// ReadPath carries the limit as a "?limit=" suffix; hivectl.Client takes the
+	// query separately and would percent-encode a "?" left in the path (#9160).
+	apiPath, rawQuery, _ := strings.Cut(path, "?")
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	data, err := client.Do(ctx, http.MethodGet, apiPath, query, nil)
 	if err != nil {
 		return nil, err
 	}
