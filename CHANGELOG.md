@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.78.0)
+
+### Added
+
+- A crash-restarted agent that the resume-kick gate leaves idle now raises a per-agent dashboard alert (with an OOM hint when the container's cgroup `oom_kill` counter rose) that clears once any kick reaches it, instead of silently waiting for its next slot.
+
+### Changed
+
+- OMP image bumped from 18.3.4 to 18.4.1.
+
 ## 2026-09-28 (v5.77.1)
 
 ### Fixed
