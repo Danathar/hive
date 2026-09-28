@@ -8705,7 +8705,7 @@
         return `<div class="spek-question" data-interview-question="${id}" data-interview-input="${escapeHtml(inputName)}"><span class="spek-question-num" aria-hidden="true">${i + 1}</span><p class="spek-question-text">${escapeHtml(q.text || q.id)}</p>${q.context ? `<div class="spek-question-context">${escapeHtml(q.context)}</div>` : ''}${control}</div>`;
       }).join('');
       const n = cached.pending;
-      return `<div id="interview" class="spek-interview-card" aria-live="polite"><div class="spek-interview-head"><h4>Spek has ${escapeHtml(String(n))} question${n === 1 ? '' : 's'} for you</h4><span class="spek-interview-step">Stage: ${escapeHtml(cached.stage || run.stage || 'spec')} · step: ${escapeHtml(cached.step || 'clarification')}</span></div>${questions}<div class="spek-interview-actions"><span class="spek-interview-hint">Answers resume the paused Spek session and are recorded in the run transcript.</span><button class="hv-btn btn-secondary btn-sm" data-action="loadRunInterview" data-arg0="${escapeHtml(key)}">Refresh questions</button><button class="hv-btn btn-primary btn-sm" data-action="submitRunInterview" data-arg0="${escapeHtml(key)}" data-arg-types="s,t">Submit answers</button></div></div>`;
+      return `<div id="interview" data-request-id="${escapeHtml(cached.request_id || '')}" class="spek-interview-card" aria-live="polite"><div class="spek-interview-head"><h4>Spek has ${escapeHtml(String(n))} question${n === 1 ? '' : 's'} for you</h4><span class="spek-interview-step">Stage: ${escapeHtml(cached.stage || run.stage || 'spec')} · step: ${escapeHtml(cached.step || 'clarification')}</span></div>${questions}<div class="spek-interview-actions"><span class="spek-interview-hint">Answers resume the paused Spek session and are recorded in the run transcript.</span><button class="hv-btn btn-secondary btn-sm" data-action="loadRunInterview" data-arg0="${escapeHtml(key)}">Refresh questions</button><button class="hv-btn btn-primary btn-sm" data-action="submitRunInterview" data-arg0="${escapeHtml(key)}" data-arg-types="s,t">Submit answers</button></div></div>`;
     }
 
     async function loadRunInterview(key) {
@@ -8750,7 +8750,7 @@
       try {
         const res = await fetch('/api/runs/' + encodeURIComponent(key) + '/interview', {
           method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, _inceptionAuthHeaders()),
-          body: JSON.stringify({ answers })
+          body: JSON.stringify({ request_id: card.dataset.requestId, answers })
         });
         if (!res.ok) throw new Error(await res.text());
         _runInterviewCache.set(key, { ok: true, pending: 0, questions: [] });

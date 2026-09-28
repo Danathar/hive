@@ -255,10 +255,19 @@ Hive then keeps the same stage generation leased but marks the run
 `waiting_on=human`, `waiting_reason=interview_questions`. `GET
 /api/runs/{key}/interview` returns pending questions plus answered history, and
 owner-only `POST /api/runs/{key}/interview` accepts
-`{"answers":[{"id":"scope","answer":"..."}]}`. The dashboard Runs and Campaigns
+`{"request_id":"<from GET>","answers":[{"id":"scope","answer":"..."}]}`.
+The request ID is optional for older clients; supplying it rejects stale forms
+with HTTP 409. Identical retries for the current round return HTTP 200 without
+rewriting attribution or waking the executor again. The dashboard Runs and Campaigns
 cards show "Spek has N questions for you" with an in-app form; after submit Hive
 writes `.hive/spek-interview-answers.json`, wakes the executor, and the
-relaunched agent receives the answer JSON verbatim in its prompt. Operators who
+relaunched agent receives the answer JSON in its prompt. Answers pass through
+`ioscan.EnforceInput` under the configured input policy before storage, with
+secret-safe block auditing and fail-closed rejection where configured. Answers
+are bound to the request content and modification time, so reused question IDs
+cannot inherit previous answers. Legacy unstamped answers require resubmission.
+After the CLI returns, Hive removes the consumed request and answers, preserving
+any new round written during that launch. Operators who
 prefer the old fully headless behavior can set `runs.spektacular.interview:
 auto`.
 
