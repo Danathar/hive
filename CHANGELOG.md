@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.73.2)
+
+### Changed
+
+- Dashboard Overview charts, repo cards, and legends now use server-provided bands and signals; CSV downloads link to the shared Overview API ([#9149](https://github.com/hivecommons/hive/issues/9149)).
+
 ## 2026-09-28 (v5.73.1)
 
 ### Fixed
