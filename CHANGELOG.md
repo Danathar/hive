@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.72.4)
+
+### Fixed
+
+- `contribute-setup` now joins any hive at the registry entry's `dashboardUrl` when one is published, including `hosted-*` (e.g. LKE slot) ids — previously those ids always derived `wss://<id>.hive.hivecommons.dev/contribute`, which serves an HTML error page on the contributor API/WS paths for several hives ([#9232](https://github.com/hivecommons/hive/issues/9232)).
+- `contributor-agent.sh` now exports `HIVE_COMMONS_STRATEGY` / `HIVE_CONTRIBUTOR_STRATEGY` from `contributor.env` alongside `HIVE_HUB`, so a relay started with a `neediest` (or other) strategy already on disk uses it from its first solicitation instead of only after a `SIGUSR1` reload ([#9239](https://github.com/hivecommons/hive/issues/9239)).
+- Raised golangci-lint run timeout from 5m to 10m so clean cold-cache runs (~4m50s) no longer flake at the ceiling (#9263)
+
 ## 2026-09-28 (v5.72.3)
 
 ### Fixed
