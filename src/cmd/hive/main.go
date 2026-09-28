@@ -9445,12 +9445,14 @@ func dispatchSubcommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	}
 }
 
-// chatDashboardToken is the bearer token the chat services use to call the
-// local dashboard API. It must be the same token the dashboard middleware
-// accepts (config.Dashboard.AuthToken, resolved from DASHBOARD_AUTH_TOKEN,
-// HIVE_DASHBOARD_TOKEN or the token file). Reading only HIVE_DASHBOARD_TOKEN
-// left hosted spokes — which mount a token file — sending no Authorization
-// at all, so every `!runs`, heartbeat and spec-start call answered 401.
+// chatDashboardToken is the shared token the chat services present to the
+// local dashboard API (as X-Hive-Internal, the server-to-server credential the
+// middleware honors on direct-route spokes too — #9134). It must be the same
+// token the dashboard middleware accepts (config.Dashboard.AuthToken, resolved
+// from DASHBOARD_AUTH_TOKEN, HIVE_DASHBOARD_TOKEN or the token file). Reading
+// only HIVE_DASHBOARD_TOKEN left hosted spokes — which mount a token file —
+// sending no credential at all, so every `!runs`, heartbeat and spec-start
+// call answered 401.
 func (b *boot) chatDashboardToken() string {
 	if b != nil && b.cfg != nil && b.cfg.Dashboard.AuthToken != "" {
 		return b.cfg.Dashboard.AuthToken
