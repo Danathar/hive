@@ -6607,7 +6607,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.deps != nil && s.deps.ChatResponder != nil {
+	if !strings.HasPrefix(safeQuery, "!") && s.deps != nil && s.deps.ChatResponder != nil {
 		answer, err := s.deps.ChatResponder(r.Context(), safeQuery, body.History)
 		if err != nil {
 			msg := scrubDashboardChatAnswer("The configured chat responder is unavailable: " + strings.TrimSpace(err.Error()))

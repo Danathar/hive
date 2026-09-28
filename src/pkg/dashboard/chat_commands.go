@@ -15,6 +15,9 @@ func (s *Server) chatCommandHintAnswer(query string) (string, bool) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	q = strings.TrimSuffix(q, "?")
 	q = strings.Join(strings.Fields(q), " ")
+	if strings.HasPrefix(q, "!") {
+		return "", false
+	}
 	switch {
 	case q == "/help":
 		return "Try `/agents`, `/beads`, `/prs`, `/governor`, `/knowledge work sources`, `/spek active campaigns`, `/spek spec runs`, `/who`, or `!help`.", true
