@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.73.4)
+
+### Fixed
+
+- The post-merge DCO trailer check no longer pages on `@onkar717`'s commits ([#9250](https://github.com/hivecommons/hive/issues/9250)). GitHub's squash merges of #9168 and #9176 recorded the author as the privacy address `144542684+onkar717@users.noreply.github.com` while the sign-off used `shelkeonka@gmail.com` — the same person, mismatched identities, which the checker cannot resolve on its own. `shelkeonka@gmail.com` is now accepted as `@onkar717`'s standing sign-off identity in `DCO_ALLOWLIST_EMAILS` (same disposition as `raul.mturrubiates@gmail.com` in #6554).
+- A config reload no longer crashes the hive. The config watcher applied reloads on its own timer goroutine while the governor loop's fast agent-status tick read the same `cfg.Agents` map, so a reload landing mid-tick killed the process with `fatal error: concurrent map read and map write` (seen on a hosted spoke in `buildConfiguredAgents`). Reloads and governor-loop ticks are now serialized.
+
 ## 2026-09-28 (v5.73.3)
 
 ### Fixed
