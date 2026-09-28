@@ -11,6 +11,15 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.76.3)
+
+### Fixed
+
+- The review swarm now reads the unresolved threads left by the configured `classification.review_bots` (Codex, Copilot, …) and answers each one in its review — agree, disagree with `file:line`, or cannot verify. A confirmed in-scope P0/P1 bot finding blocks a clean verdict, so a reviewer can no longer call a PR safe while a correct bot finding on the same commit goes unmentioned ([#9360](https://github.com/hivecommons/hive/issues/9360)).
+- Agents no longer open a separate issue (and later a separate, conflicting PR) for every finding in the same file or every site of the same mechanical change ([#9376](https://github.com/hivecommons/hive/issues/9376)). The issue-request watcher now folds a new agent finding whose file references exactly match an open App-bot-filed issue into that issue as a comment, reporting `consolidated: true` in the result file, instead of creating a second issue; it reuses the open-issue scan it already runs, so it costs no extra API calls. The agent policy templates also stop telling agents to file "N workflows" as N issues: the same edit applied at N sites, and findings that edit the same file, are one issue and one PR, and agents are told to comment on an open issue or PR in their work list that already covers the change. See `src/docs/hive-open-issue.md`.
+- Kick-refusal detection no longer fires on echoed kick content. Security-review and scan kicks legitimately list issues titled "prompt injection …"; when the CLI echoed those bullets, the agent was marked as having refused the kick (scanner and reviewer on one spoke), hiding the turn's real output. Structured markdown lines — bullets, table rows, headings, numbered items, bold spans, `#123` references — are now skipped; first-person refusal prose still registers.
+- Dashboard "Merge blocked" alerts now clear on their own once the blocked PR closes or its fork workflow runs are approved / the approval setting is relaxed, instead of waiting for an unrelated App merge or a restart (#9391).
+
 ## 2026-09-28 (v5.76.2)
 
 ### Fixed
