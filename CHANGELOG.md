@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.72.5)
+
+### Fixed
+
+- Codex contributors recognize usage-limit refusals and hold new assignments across CLI relaunches and reconnects until quota recovery is confirmed, instead of repeatedly failing tasks as idle ([#9247](https://github.com/hivecommons/hive/issues/9247)).
+
 ## 2026-09-28 (v5.72.4)
 
 ### Fixed
