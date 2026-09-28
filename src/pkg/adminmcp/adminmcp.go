@@ -127,9 +127,10 @@ func RefusalFor(operation string) (RefusalData, bool) {
 	if operation == "" {
 		operation = "unspecified operation"
 	}
-	needle := strings.ToLower(operation)
+	// Exact, case-folded match only: a partial name ("knowledge", "api") must
+	// not borrow the recorded refusal of a different operation.
 	for _, ex := range exclusions {
-		if strings.ToLower(ex.Operation) == needle || strings.Contains(strings.ToLower(ex.Operation), needle) || strings.Contains(needle, strings.ToLower(ex.Operation)) {
+		if strings.EqualFold(ex.Operation, operation) {
 			return refusalData(ex), true
 		}
 	}
@@ -149,6 +150,11 @@ type Handler struct {
 	ConfirmationTTL time.Duration
 	HiveID          string
 	Now             func() time.Time
+	// WritesUnavailableReason, when set, reports writes as disabled for this
+	// caller even if the operator enabled them, because a confirmed write could
+	// not authenticate. Preview fails fast instead of minting a confirmation
+	// that can never be executed.
+	WritesUnavailableReason string
 }
 
 type HandlerOption func(*Handler)
@@ -172,6 +178,20 @@ func WithConfirmationTTL(ttl time.Duration) HandlerOption {
 	return func(h *Handler) { h.ConfirmationTTL = ttl }
 }
 func WithClock(now func() time.Time) HandlerOption { return func(h *Handler) { h.Now = now } }
+func WithWritesUnavailable(reason string) HandlerOption {
+	return func(h *Handler) { h.WritesUnavailableReason = strings.TrimSpace(reason) }
+}
+
+func (h *Handler) writesUsable() bool {
+	return h.WritesEnabled && h.WritesUnavailableReason == ""
+}
+
+func (h *Handler) writesDisabledErr() error {
+	if h.WritesEnabled && h.WritesUnavailableReason != "" {
+		return fmt.Errorf("%w for this caller: %s", ErrWritesDisabled, h.WritesUnavailableReason)
+	}
+	return ErrWritesDisabled
+}
 
 func NewHandler(provider Provider, opts ...HandlerOption) *Handler {
 	h := &Handler{Provider: provider, WriteRegistry: DefaultWriteRegistry(), ConfirmationTTL: DefaultConfirmationTTL, HiveID: "local"}
@@ -244,7 +264,7 @@ func (h *Handler) dispatch(r *http.Request, req rpcRequest) (any, *rpcError) {
 	case "notifications/initialized":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": ToolsWithWritesEnabled(h.WritesEnabled)}, nil
+		return map[string]any{"tools": toolDefs(h.writesUsable(), h.WritesUnavailableReason)}, nil
 	case "tools/call":
 		return h.callTool(r.Context(), req.Params)
 	default:
@@ -272,7 +292,7 @@ func (h *Handler) callTool(ctx context.Context, raw json.RawMessage) (any, *rpcE
 	var data any
 	switch p.Name {
 	case ToolExclusionCatalogue:
-		data = Catalogue(h.WritesEnabled, h.WriteRegistry)
+		data = catalogue(h.writesUsable(), h.WritesUnavailableReason, h.WriteRegistry)
 	case ToolRefuseOperation:
 		data, _ = RefusalFor(stringArg(p.Arguments, "operation"))
 	case ToolWritePreview:
@@ -301,12 +321,9 @@ func (h *Handler) callTool(ctx context.Context, raw json.RawMessage) (any, *rpcE
 		}
 		data = result
 	}
-	b, err := json.Marshal(DataEnvelope{Data: Scrub(data)})
+	b, err := EncodeResult(data)
 	if err != nil {
 		return nil, toolErr(err)
-	}
-	if len(b) > MaxTextBytes {
-		return nil, &rpcError{Code: -32000, Message: "admin MCP result exceeds text cap"}
 	}
 	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(b)}}}, nil
 }
@@ -314,6 +331,10 @@ func (h *Handler) callTool(ctx context.Context, raw json.RawMessage) (any, *rpcE
 func Tools() []map[string]any { return ToolsWithWritesEnabled(false) }
 
 func ToolsWithWritesEnabled(writesEnabled bool) []map[string]any {
+	return toolDefs(writesEnabled, "")
+}
+
+func toolDefs(writesEnabled bool, unavailableReason string) []map[string]any {
 	defs := []struct{ name, desc string }{
 		{ToolHiveStatus, "Read this hive's dashboard status summary."},
 		{ToolFleetStatus, "Read this hive's fleet status, including repo and agent health rollups."},
@@ -340,7 +361,7 @@ func ToolsWithWritesEnabled(writesEnabled bool) []map[string]any {
 		metadata := phaseOneMetadata()
 		readOnly := true
 		if d.name == ToolWritePreview || d.name == ToolWriteConfirm {
-			metadata = writeMetadata(writesEnabled)
+			metadata = writeMetadata(writesEnabled, unavailableReason)
 			readOnly = false
 		}
 		out = append(out, map[string]any{"name": d.name, "description": d.desc, "inputSchema": inputSchema(d.name), "annotations": map[string]any{"readOnlyHint": readOnly}, "metadata": metadata})
@@ -363,10 +384,12 @@ func phaseOneMetadata() ToolMetadata {
 	return ToolMetadata{Preview: PreviewContract{Mode: "phase_3_write_contract", Enabled: false, Note: "Read tools require no confirmation; write tools use the phase 3 preview-and-confirm contract when explicitly enabled."}, Confirm: ConfirmContract{Required: false, Note: "Reads require no confirmation; write confirmations are handled by write_confirm."}, Writes: false}
 }
 
-func writeMetadata(enabled bool) ToolMetadata {
+func writeMetadata(enabled bool, unavailableReason string) ToolMetadata {
 	note := "Writes are registered but disabled until the operator explicitly enables admin MCP writes."
 	if enabled {
 		note = "Writes require preview followed by durable confirmation."
+	} else if unavailableReason != "" {
+		note = "Writes are enabled on this hive but unavailable to this caller: " + unavailableReason
 	}
 	return ToolMetadata{Preview: PreviewContract{Mode: "preview_confirm", Enabled: enabled, Note: note}, Confirm: ConfirmContract{Required: true, Note: "Confirmations are one-use, hive-bound, action-bound, and expire."}, Writes: true}
 }
@@ -392,8 +415,8 @@ func inputSchema(name string) map[string]any {
 }
 
 func (h *Handler) PreviewWrite(ctx context.Context, args map[string]any) (any, error) {
-	if !h.WritesEnabled {
-		return nil, ErrWritesDisabled
+	if !h.writesUsable() {
+		return nil, h.writesDisabledErr()
 	}
 	opName := cleanOperationName(stringArg(args, "operation"))
 	op, ok := h.WriteRegistry.Get(opName)
@@ -424,8 +447,8 @@ func (h *Handler) PreviewWrite(ctx context.Context, args map[string]any) (any, e
 }
 
 func (h *Handler) ConfirmWrite(ctx context.Context, args map[string]any) (any, error) {
-	if !h.WritesEnabled {
-		return nil, ErrWritesDisabled
+	if !h.writesUsable() {
+		return nil, h.writesDisabledErr()
 	}
 	if h.WriteClient == nil {
 		return nil, fmt.Errorf("write client unavailable")
@@ -819,7 +842,16 @@ func SortKeys(m map[string]any) []string {
 func Errorf(format string, args ...any) error { return fmt.Errorf(format, args...) }
 
 func Catalogue(writesEnabled bool, registry *WriteRegistry) map[string]any {
-	return map[string]any{"exclusions": Exclusions(), "writes_enabled": writesEnabled, "write_operations": WriteOperationDescriptions(registry), "preview": writeMetadata(writesEnabled).Preview, "confirm": writeMetadata(writesEnabled).Confirm}
+	return catalogue(writesEnabled, "", registry)
+}
+
+func catalogue(writesEnabled bool, unavailableReason string, registry *WriteRegistry) map[string]any {
+	meta := writeMetadata(writesEnabled, unavailableReason)
+	out := map[string]any{"exclusions": Exclusions(), "writes_enabled": writesEnabled, "write_operations": WriteOperationDescriptions(registry), "preview": meta.Preview, "confirm": meta.Confirm}
+	if unavailableReason != "" {
+		out["writes_unavailable_reason"] = unavailableReason
+	}
+	return out
 }
 
 func WriteOperationDescriptions(registry *WriteRegistry) []map[string]any {

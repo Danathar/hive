@@ -343,3 +343,45 @@ func TestReadPathAgentNudgeStatus(t *testing.T) {
 		t.Fatalf("path = %q ok=%v", path, ok)
 	}
 }
+
+func TestStdioHandlerTruncatesOversizedResult(t *testing.T) {
+	repos := make([]map[string]any, 4000)
+	for i := range repos {
+		repos[i] = map[string]any{"name": "repo", "health": strings.Repeat("x", 120)}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "repos": repos})
+	}))
+	defer server.Close()
+	r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+
+	result, err := (readProvider{roster: r}).handler(adminmcp.ToolFleetStatus)(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustMarshalContentText(t, result.Content[0])
+	if len(text) > adminmcp.MaxTextBytes {
+		t.Fatalf("stdio text is %d bytes, cap is %d", len(text), adminmcp.MaxTextBytes)
+	}
+	if !strings.Contains(text, `"truncated":true`) || !strings.Contains(text, `"repos_truncated":true`) {
+		t.Fatalf("stdio result missing truncation disclosure: %.300s", text)
+	}
+}
+
+func TestRosterReusesClientPerHive(t *testing.T) {
+	r := &roster{hives: []hiveConfig{{Name: "a", Address: "http://127.0.0.1:1", Token: "t"}, {Name: "b", Address: "http://127.0.0.1:2", Token: "t"}}, timeout: time.Second}
+	first, _, err := r.activeClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, _ := r.activeClient()
+	if first != second {
+		t.Fatal("activeClient built a new client for the same hive")
+	}
+	r.active = 1
+	other, _, _ := r.activeClient()
+	if other == first {
+		t.Fatal("different hives share one client")
+	}
+}
