@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-28 (v5.72.2)
+
+### Fixed
+
+- Fixed the GitHub enumerator's closed-PR attribution scan so it is bounded by recent updates, capped at five pages, cached across ticks, and no longer fails repo enumeration when the closed-PR scan encounters a transient GitHub error.
+
 ## 2026-09-27 (v5.72.1)
 
 ### Changed
