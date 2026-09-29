@@ -88,31 +88,43 @@ func TestSpekHubExecutorClaimPreservesTriageAndSkipsRelayLease(t *testing.T) {
 }
 
 func TestSpekHubExecutorPrepareWorkspaceCreatesCloneAndWorktree(t *testing.T) {
-	_, s, _, _ := spekHub(t)
-	remote := makeBareRepo(t)
-	e := NewSpekHubExecutor(s, config.RunsConfig{Spektacular: config.SpektacularConfig{Enabled: true}}, "copilot", "", nil, nil)
-	e.CloneURL = func(string) string { return remote }
-	e.Exec = func(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
-		if name == "git" {
-			cmd := exec.CommandContext(ctx, name, args...)
-			cmd.Dir = dir
-			cmd.Env = env
-			return cmd.CombinedOutput()
-		}
-		if name == "spektacular" {
-			return nil, os.MkdirAll(filepath.Join(dir, ".spektacular"), 0o755)
-		}
-		return []byte("ok"), nil
-	}
-	st := spekHubStage{runKey: "myorg/repo1#57", stage: StageSpec, repo: spekRepo, gen: 1}
-	if _, err := e.prepareWorkspace(context.Background(), st); err != nil {
-		t.Fatalf("prepareWorkspace: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git")); err != nil {
-		t.Fatalf("shared clone missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(spekHubRunWorktreePath(e.Identity, st.runKey), ".spektacular")); err != nil {
-		t.Fatalf("worktree/project missing: %v", err)
+	for _, tc := range []struct{ name, binary, want string }{
+		{"default", "", "spektacular"},
+		{"custom", "/opt/custom/spek", "/opt/custom/spek"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, s, _, _ := spekHub(t)
+			remote := makeBareRepo(t)
+			e := NewSpekHubExecutor(s, config.RunsConfig{Spektacular: config.SpektacularConfig{Enabled: true, Binary: tc.binary}}, "copilot", "", nil, nil)
+			e.CloneURL = func(string) string { return remote }
+			var initArgs []string
+			e.Exec = func(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
+				if name == "git" {
+					cmd := exec.CommandContext(ctx, name, args...)
+					cmd.Dir = dir
+					cmd.Env = env
+					return cmd.CombinedOutput()
+				}
+				if name == tc.want {
+					initArgs = append([]string{}, args...)
+					return nil, os.MkdirAll(filepath.Join(dir, ".spektacular"), 0o755)
+				}
+				return nil, fmt.Errorf("unexpected executable %q", name)
+			}
+			st := spekHubStage{runKey: "myorg/repo1#57", stage: StageSpec, repo: spekRepo, gen: 1}
+			if _, err := e.prepareWorkspace(context.Background(), st); err != nil {
+				t.Fatalf("prepareWorkspace: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git")); err != nil {
+				t.Fatalf("shared clone missing: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(spekHubRunWorktreePath(e.Identity, st.runKey), ".spektacular")); err != nil {
+				t.Fatalf("worktree/project missing: %v", err)
+			}
+			if got := strings.Join(initArgs, " "); got != "init codex --name repo1" {
+				t.Fatalf("init args = %q", got)
+			}
+		})
 	}
 }
 
@@ -774,5 +786,56 @@ func TestSpekHubExecutorSkipsHeldSpecCheckpoint(t *testing.T) {
 	}
 	if len(stages) != 0 {
 		t.Fatalf("held spec checkpoint offered to hub executor: %+v", stages)
+	}
+}
+
+func TestSpekHubExecutorStatusUsesConfiguredBinary(t *testing.T) {
+	for _, binary := range []string{"", "  ", "/opt/custom/spek", "spek-custom"} {
+		for _, kind := range []string{"spec", "plan"} {
+			t.Run(binary+"/"+kind, func(t *testing.T) {
+				e := &SpekHubExecutor{Config: config.RunsConfig{Spektacular: config.SpektacularConfig{Binary: binary}}}
+				want := strings.TrimSpace(binary)
+				if want == "" {
+					want = "spektacular"
+				}
+				e.Exec = func(_ context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
+					if name != want || strings.Join(args, " ") != kind+" status my-artifact" || dir != "worktree" || strings.Join(env, " ") != "TEST=1" {
+						t.Fatalf("unexpected invocation: %s %v in %s with %v", name, args, dir, env)
+					}
+					return []byte(`{"document_status":"final","name":"my-artifact"}`), nil
+				}
+				status, err := e.spekStatus(context.Background(), "worktree", []string{"TEST=1"}, kind, "my-artifact")
+				if err != nil || status.DocumentStatus != "final" {
+					t.Fatalf("status = %+v, err = %v", status, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSpekHubExecutorPromptUsesConfiguredBinary(t *testing.T) {
+	for _, tc := range []struct{ binary, command string }{
+		{"", "spektacular"},
+		{"/opt/custom/spek", "'/opt/custom/spek'"},
+		{"/opt/custom bin/spek's", "'/opt/custom bin/spek'\"'\"'s'"},
+		{"spek-custom", "'spek-custom'"},
+	} {
+		for _, stage := range []string{StageSpec, StagePlan} {
+			for _, source := range []string{"github", "linear"} {
+				t.Run(tc.binary+"/"+stage+"/"+source, func(t *testing.T) {
+					e := &SpekHubExecutor{Config: config.RunsConfig{Spektacular: config.SpektacularConfig{Binary: tc.binary}}}
+					st := spekHubStage{stage: stage, repo: "org/repo", number: 57, runKey: "org/repo#57", workItem: worksource.WorkItemContext{SourceType: source}}
+					prompt := e.stagePrompt(st, "my-artifact")
+					for _, command := range []string{"new --data", "status my-artifact", "file ..."} {
+						if !strings.Contains(prompt, "`"+tc.command+" "+stage+" "+command) {
+							t.Errorf("prompt missing configured command %s: %s", command, prompt)
+						}
+					}
+					if tc.binary != "" && strings.Contains(prompt, "`spektacular") {
+						t.Errorf("prompt still uses bare spektacular: %s", prompt)
+					}
+				})
+			}
+		}
 	}
 }

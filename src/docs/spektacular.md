@@ -113,7 +113,10 @@ runs:
 As of v6, the Hive hub/spoke image, hub image, and contributor-agent image
 ship a pinned `spektacular` release binary in `/usr/local/bin`, verified against
 the release `checksums.txt` during the image build. Operators may still override
-`runs.spektacular.binary` to point at another executable. At boot, when
+`runs.spektacular.binary` to point at another executable. The hub executor uses
+this executable for project initialization, status probes, and the commands in
+its spec/plan agent prompts. Use an absolute path for an executable outside PATH.
+At boot, when
 `runs.spektacular.enabled` is true, Hive probes `<binary> --version`, logs the
 found or missing binary, and exposes
 `spektacular: {present, version, binary, hub_executor}` in `/api/status`.

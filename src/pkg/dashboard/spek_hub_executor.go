@@ -355,7 +355,7 @@ func (e *SpekHubExecutor) executeStage(ctx context.Context, st spekHubStage) err
 		return nil
 	}
 	var interviewAnswers []byte
-	prompt := SpekHubStagePromptWithContext(st.stage, st.repo, st.number, st.runKey, st.title, artifact, st.workItem)
+	prompt := e.stagePrompt(st, artifact)
 	if e.stageInterviewMode() != "auto" {
 		interviewAnswers = readSpekInterviewAnswers(worktree)
 		prompt += spekInterviewPromptBlock(st.stage, artifact, interviewAnswers)
@@ -894,7 +894,7 @@ func nestedStatusString(raw map[string]any, key, nested string) string {
 }
 
 func (e *SpekHubExecutor) spekStatus(ctx context.Context, worktree string, env []string, kind, artifact string) (spekHubArtifactStatus, error) {
-	out, err := e.runner()(ctx, worktree, env, "spektacular", kind, "status", artifact)
+	out, err := e.runner()(ctx, worktree, env, e.binary(), kind, "status", artifact)
 	if err != nil {
 		return spekHubArtifactStatus{}, fmt.Errorf("spektacular %s status %s: %w: %s", kind, artifact, err, tailString(scrubSpekHubOutput(string(out)), spekHubOutputTailBytes))
 	}
@@ -1075,7 +1075,7 @@ func (e *SpekHubExecutor) prepareWorkspace(ctx context.Context, st spekHubStage)
 		} else if copied {
 			return appToken, nil
 		}
-		if _, err := e.runner()(ctx, worktree, spekGitEnv(os.Environ()), "spektacular", "init", spekInitAgent(e.backend()), "--name", filepath.Base(st.repo)); err != nil {
+		if _, err := e.runner()(ctx, worktree, spekGitEnv(os.Environ()), e.binary(), "init", spekInitAgent(e.backend()), "--name", filepath.Base(st.repo)); err != nil {
 			return "", err
 		}
 	}
@@ -1389,6 +1389,14 @@ func spekHubLastErrorSummary(msg string) string {
 	return out
 }
 
+func (e *SpekHubExecutor) binary() string {
+	return e.Config.Spektacular.BinaryOrDefault()
+}
+
+func (e *SpekHubExecutor) stagePrompt(st spekHubStage, artifact string) string {
+	return spekHubStagePromptWithBinary(st.stage, st.repo, st.number, st.runKey, st.title, artifact, st.workItem, e.binary())
+}
+
 func (e *SpekHubExecutor) runner() func(context.Context, string, []string, string, ...string) ([]byte, error) {
 	if e.Exec != nil {
 		return e.Exec
@@ -1446,6 +1454,15 @@ func SpekHubStagePrompt(stage, repo string, number int, runKey, title, artifact 
 }
 
 func SpekHubStagePromptWithContext(stage, repo string, number int, runKey, title, artifact string, item worksource.WorkItemContext) string {
+	return spekHubStagePromptWithBinary(stage, repo, number, runKey, title, artifact, item, config.DefaultSpektacularBinary)
+}
+
+func spekHubStagePromptWithBinary(stage, repo string, number int, runKey, title, artifact string, item worksource.WorkItemContext, binary string) string {
+	// Quote custom executable names for the shell, including paths with spaces.
+	cli := binary
+	if binary != config.DefaultSpektacularBinary {
+		cli = "'" + strings.ReplaceAll(binary, "'", "'\"'\"'") + "'"
+	}
 	item = item.Normalized()
 	if item.Repo == "" {
 		item.Repo = repo
@@ -1484,17 +1501,17 @@ func SpekHubStagePromptWithContext(stage, repo string, number int, runKey, title
 		}
 		switch stage {
 		case StagePlan:
-			fmt.Fprintf(&b, "You are authoring a Spektacular plan for the source work item above in this repository checkout. Use the target repository %s for code changes and PRs. Use the `spektacular` CLI (already on PATH): run `spektacular plan new --data '{\"name\":\"%s\",\"spec\":\"%s\"}'`, then follow each step it returns (`spektacular plan status %s` shows the current step and its instruction; `spektacular plan file ...` reads/writes the plan document) until the plan's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `spektacular plan status %s` reports `document_status: final`.", item.Repo, artifact, artifact, artifact, artifact)
+			fmt.Fprintf(&b, "You are authoring a Spektacular plan for the source work item above in this repository checkout. Use the target repository %s for code changes and PRs. Use the `%s` CLI configured for this run: run `%s plan new --data '{\"name\":\"%s\",\"spec\":\"%s\"}'`, then follow each step it returns (`%s plan status %s` shows the current step and its instruction; `%s plan file ...` reads/writes the plan document) until the plan's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `%s plan status %s` reports `document_status: final`.", item.Repo, cli, cli, artifact, artifact, cli, artifact, cli, cli, artifact)
 		default:
-			fmt.Fprintf(&b, "You are authoring a Spektacular spec for the source work item above in this repository checkout. Use the target repository %s for code changes and PRs. Use the `spektacular` CLI (already on PATH): run `spektacular spec new --data '{\"name\":\"%s\"}'`, then follow each step it returns (`spektacular spec status %s` shows the current step and its instruction; `spektacular spec file ...` reads/writes the spec document) until the spec's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `spektacular spec status %s` reports `document_status: final`.", item.Repo, artifact, artifact, artifact)
+			fmt.Fprintf(&b, "You are authoring a Spektacular spec for the source work item above in this repository checkout. Use the target repository %s for code changes and PRs. Use the `%s` CLI configured for this run: run `%s spec new --data '{\"name\":\"%s\"}'`, then follow each step it returns (`%s spec status %s` shows the current step and its instruction; `%s spec file ...` reads/writes the spec document) until the spec's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `%s spec status %s` reports `document_status: final`.", item.Repo, cli, cli, artifact, cli, artifact, cli, cli, artifact)
 		}
 		return b.String()
 	}
 	switch stage {
 	case StagePlan:
-		fmt.Fprintf(&b, "You are authoring a Spektacular plan for GitHub issue %s%s in this repository checkout. Read the issue with `gh issue view %d --repo %s` (if `gh` is available; otherwise use the GitHub API) and the relevant code. Use the `spektacular` CLI (already on PATH): run `spektacular plan new --data '{\"name\":\"%s\",\"spec\":\"%s\"}'`, then follow each step it returns (`spektacular plan status %s` shows the current step and its instruction; `spektacular plan file ...` reads/writes the plan document) until the plan's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `spektacular plan status %s` reports `document_status: final`.", issue, titleText, number, repo, artifact, artifact, artifact, artifact)
+		fmt.Fprintf(&b, "You are authoring a Spektacular plan for GitHub issue %s%s in this repository checkout. Read the issue with `gh issue view %d --repo %s` (if `gh` is available; otherwise use the GitHub API) and the relevant code. Use the `%s` CLI configured for this run: run `%s plan new --data '{\"name\":\"%s\",\"spec\":\"%s\"}'`, then follow each step it returns (`%s plan status %s` shows the current step and its instruction; `%s plan file ...` reads/writes the plan document) until the plan's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `%s plan status %s` reports `document_status: final`.", issue, titleText, number, repo, cli, cli, artifact, artifact, cli, artifact, cli, cli, artifact)
 	default:
-		fmt.Fprintf(&b, "You are authoring a Spektacular spec for GitHub issue %s%s in this repository checkout. Read the issue with `gh issue view %d --repo %s` (if `gh` is available; otherwise use the GitHub API) and the relevant code. Use the `spektacular` CLI (already on PATH): run `spektacular spec new --data '{\"name\":\"%s\"}'`, then follow each step it returns (`spektacular spec status %s` shows the current step and its instruction; `spektacular spec file ...` reads/writes the spec document) until the spec's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `spektacular spec status %s` reports `document_status: final`.", issue, titleText, number, repo, artifact, artifact, artifact)
+		fmt.Fprintf(&b, "You are authoring a Spektacular spec for GitHub issue %s%s in this repository checkout. Read the issue with `gh issue view %d --repo %s` (if `gh` is available; otherwise use the GitHub API) and the relevant code. Use the `%s` CLI configured for this run: run `%s spec new --data '{\"name\":\"%s\"}'`, then follow each step it returns (`%s spec status %s` shows the current step and its instruction; `%s spec file ...` reads/writes the spec document) until the spec's `document_status` is `final`. Do not implement code, do not commit, do not push, do not open PRs. Stop when `%s spec status %s` reports `document_status: final`.", issue, titleText, number, repo, cli, cli, artifact, cli, artifact, cli, cli, artifact)
 	}
 	return b.String()
 }
