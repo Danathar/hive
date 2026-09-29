@@ -1,1 +1,0 @@
-- Rewrite the Podman host-move runbook with fresh-host unit installation, source image pinning, config and secrets restoration, and per-mode verification and execution status.
