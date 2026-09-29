@@ -268,12 +268,16 @@ func (p *pendingInterview) lowestUnanswered() (inceptionQuestion, bool) {
 	return inceptionQuestion{}, false
 }
 
+// pendingKey keys a pending interview by config.IdentityMatchKey(author):
+// seeding walks the configured allowlist identities while replies carry the
+// transport's author ID, and the two must meet the same way the allowlist
+// lookup (allowedUserRole) matches them.
 func (s *Service) pendingKey(author string) pendingInterviewKey {
 	backend := ""
 	if s.backend != nil {
 		backend = s.backend.Name()
 	}
-	return pendingInterviewKey{backend: backend, author: author}
+	return pendingInterviewKey{backend: backend, author: config.IdentityMatchKey(author)}
 }
 
 func (s *Service) diffInception(prev, cur *statusSnapshot) {

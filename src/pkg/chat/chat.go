@@ -142,7 +142,7 @@ type Service struct {
 	backend           Backend
 	dashboardURL      string
 	dashboardToken    string
-	allowedUsers      map[string]string
+	allowedUsers      map[string]allowedUser
 	allowedUsersMu    sync.RWMutex
 	commands          map[string]CommandHandler
 	agentNames        []string
@@ -234,12 +234,28 @@ func NewService(backend Backend, cfg Config, logger *slog.Logger) *Service {
 	}
 }
 
-func parseAllowedUsers(entries []string) map[string]string {
-	allowed := make(map[string]string, len(entries))
+// allowedUser is one chat allowlist entry: the identity as configured (role
+// suffix stripped) and its role. Per-author prompts and persona lookups use id
+// unchanged; lookups by message author go through allowedUserRole.
+type allowedUser struct {
+	id   string
+	role string
+}
+
+// parseAllowedUsers keys the allowlist by config.IdentityMatchKey so the spine
+// resolves an author the same way the dashboard's AuthorizedRole does
+// (case-insensitive, "github:alice" == "alice"). As there, the first entry for
+// an identity wins.
+func parseAllowedUsers(entries []string) map[string]allowedUser {
+	allowed := make(map[string]allowedUser, len(entries))
 	for i, entry := range entries {
 		id, role := parseAllowedUser(entry, i)
-		if id != "" {
-			allowed[id] = role
+		if id == "" {
+			continue
+		}
+		key := config.IdentityMatchKey(id)
+		if _, dup := allowed[key]; !dup {
+			allowed[key] = allowedUser{id: id, role: role}
 		}
 	}
 	return allowed
@@ -257,9 +273,9 @@ func (s *Service) SetAllowedUsers(entries []string) {
 
 func (s *Service) allowedUserRole(author string) (string, bool) {
 	s.allowedUsersMu.RLock()
-	role, ok := s.allowedUsers[author]
+	user, ok := s.allowedUsers[config.IdentityMatchKey(author)]
 	s.allowedUsersMu.RUnlock()
-	return role, ok
+	return user.role, ok
 }
 
 func (s *Service) allowedUserCount() int {
@@ -269,11 +285,12 @@ func (s *Service) allowedUserCount() int {
 	return count
 }
 
+// allowedUsersSnapshot maps each configured identity to its role.
 func (s *Service) allowedUsersSnapshot() map[string]string {
 	s.allowedUsersMu.RLock()
 	users := make(map[string]string, len(s.allowedUsers))
-	for author, role := range s.allowedUsers {
-		users[author] = role
+	for _, user := range s.allowedUsers {
+		users[user.id] = user.role
 	}
 	s.allowedUsersMu.RUnlock()
 	return users

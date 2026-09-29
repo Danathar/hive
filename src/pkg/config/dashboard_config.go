@@ -241,13 +241,13 @@ func (d DashboardConfig) AuthorizedRole(username string) (string, bool) {
 	if username == "" {
 		return "", false
 	}
-	want := identityMatchKey(username)
+	want := IdentityMatchKey(username)
 	for i, entry := range d.AuthorizedUsers {
 		name, role := splitAuthorizedEntry(entry)
 		if name == "" {
 			continue
 		}
-		if identityMatchKey(name) != want {
+		if IdentityMatchKey(name) != want {
 			continue
 		}
 		if role == "" {
@@ -262,13 +262,13 @@ func (d DashboardConfig) AuthorizedRole(username string) (string, bool) {
 	return "", false
 }
 
-// identityMatchKey normalizes an identity string for allowlist comparison:
+// IdentityMatchKey normalizes an identity string for allowlist comparison:
 // lower-cased (GitHub logins are case-insensitive, and the pre-existing
 // allowlist match always folded case), with the legacy-GitHub provider prefix
 // stripped so "github:alice" and "alice" compare equal. Other providers'
 // prefixes ("ibmid:", "google:", ...) are kept — those subjects are only ever
 // delivered and presented in their full canonical form.
-func identityMatchKey(id string) string {
+func IdentityMatchKey(id string) string {
 	key := strings.ToLower(strings.TrimSpace(id))
 	return strings.TrimPrefix(key, "github:")
 }
