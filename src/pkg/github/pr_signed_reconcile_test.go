@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // Follow-up signing (#9364): the reconciler pass over open hive PRs.
@@ -369,13 +371,15 @@ func TestSignedReconcile_RunsFromWatcherLoop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := c.StartPRRequestWatcher(ctx, nil, nil, nil)
-	deadline := time.Now().Add(5 * time.Second)
-	for m.countExact(prCommitsCall) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	<-done
-	if m.countExact(prCommitsCall) == 0 {
-		t.Fatalf("the watcher loop never ran the reconcile pass:\n%s", strings.Join(m.calls, "\n"))
-	}
+	// Registered last so it runs first: the watcher stops before the fixture's
+	// server and the overridden poll interval / request dir are torn down, on
+	// the failure path too.
+	t.Cleanup(func() { cancel(); <-done })
+	testutil.EventuallyEveryFunc(t, 5*time.Second, 10*time.Millisecond,
+		func() bool { return m.countExact(prCommitsCall) > 0 },
+		func() string {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return "the watcher loop never ran the reconcile pass:\n" + strings.Join(m.calls, "\n")
+		})
 }
