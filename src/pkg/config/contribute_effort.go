@@ -7,7 +7,7 @@ import (
 
 // ReasoningEffortLadder is the canonical, ordered reasoning-effort scale used
 // to compare efforts across backends for the contributor effort floor
-// (hub.contribute_min_reasoning_effort, hivecommons/hive#9344). Every level in
+// (hub.contribute_min_reasoning_effort, hivecommons/hive#9197). Every level in
 // ReasoningEffortsByBackend is a point on this ladder, so a relay's effort can
 // be ranked without a raw string compare: codex's "minimal" sits below
 // claude's "low", and claude's "max" sits above codex's "xhigh".

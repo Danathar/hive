@@ -152,7 +152,7 @@ func (c *Config) applyDefaults() {
 	c.Hub.ContributeLabelsMode = NormalizeFilterMode(c.Hub.ContributeLabelsMode)
 	c.Hub.NormalizeContributeRepoFilters()
 	if floor, err := NormalizeContributeMinReasoningEffort(c.Hub.ContributeMinReasoningEffort); err != nil {
-		log.Printf("config: invalid hub.contribute_min_reasoning_effort %q: %v; disabling effort floor", c.Hub.ContributeMinReasoningEffort, err)
+		log.Printf("WARNING: hub.%v — ignoring the floor", err)
 		c.Hub.ContributeMinReasoningEffort = ""
 	} else {
 		c.Hub.ContributeMinReasoningEffort = floor
