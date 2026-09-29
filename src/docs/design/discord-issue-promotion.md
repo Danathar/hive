@@ -8,8 +8,9 @@ Status: Proposed — discussion on #6239.
 > and predated the v6 command spine — no allowlist/ioscan/scrub). The current
 > Discord implementation is the Go bot at `src/pkg/discord`, built on the
 > shared `pkg/chat` spine. This proposal has not been re-checked against that
-> implementation; treat the paths below as historical context for the RFC's
-> intent, not as current line references.
+> implementation; the legacy-bot links below are pinned to the last `v6`
+> commit that still contained it (`78b126072`) and are historical context for
+> the RFC's intent, not current code references.
 
 RFC credit: this design turns the adopter RFC in
 [#6239](https://github.com/hivecommons/hive/issues/6239) into a reviewable plan
@@ -33,17 +34,25 @@ label (`src/pkg/config/issue_filter.go:5`). That means an operator can configure
 issue enumeration, duplicate-claim guard, actionable issue accounting, and agent
 assignment paths continue unchanged.
 
-The missing piece is the label write. Today the in-repo Discord bot is
-operator-command oriented: `bot.js` constructs a client with `Guilds`,
-`GuildMessages`, and `MessageContent` intents only (`discord/bot.js:23-27`), and it
-registers `ClientReady` plus `MessageCreate` handlers, not reaction handlers
-(`discord/bot.js:72`, `discord/bot.js:86`). It talks to the dashboard via
-`DashboardBridge`, which connects to `/api/events` and command endpoints
-(`discord/lib/dashboard-bridge.js:32`), and the bot README explicitly says it
-talks to Hive's dashboard API and does not need cluster access
-(`discord/README.md:1`). Its config is environment-first with a `discord:` block
-fallback in `hive-project.yaml` (`discord/lib/config.js:6`,
-`discord/lib/config.js:18`).
+The missing piece is the label write. The legacy in-repo Discord bot was
+operator-command oriented: `bot.js` constructed a client with `Guilds`,
+`GuildMessages`, and `MessageContent` intents only
+([bot.js L23-27](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/bot.js#L23-L27)),
+and it registered `ClientReady` plus `MessageCreate` handlers, not reaction
+handlers
+([bot.js L86](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/bot.js#L86),
+[bot.js L110](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/bot.js#L110)).
+It talked to the dashboard via `DashboardBridge`, which connected to
+`/api/events` and command endpoints
+([dashboard-bridge.js L69](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/lib/dashboard-bridge.js#L69),
+[L96](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/lib/dashboard-bridge.js#L96)),
+and the bot README explicitly said it talked to Hive's dashboard API and did
+not need cluster access
+([README.md L5](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/README.md#L5)).
+Its config was environment-first with a `discord:` block fallback in
+`hive-project.yaml`
+([config.js L8](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/lib/config.js#L8),
+[L22](https://github.com/hivecommons/hive/blob/78b126072cb6d4d3bb04e9153c6a269d22a87c21/discord/lib/config.js#L22)).
 
 Labeling a GitHub issue is a privileged write. Hive already has GitHub App
 credentials and label-writing code: `QueuePRAutoMerge` audits a mediated action
