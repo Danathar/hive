@@ -302,6 +302,26 @@ jobs:
                     ;;
                 esac
                 ;;
+              *coverage:*)
+                # Go >=1.20 with -cover prints no-test packages as a
+                # tab-prefixed "<pkg>\t\tcoverage: 0.0% of statements" line
+                # instead of the old "?   <pkg> [no test files]" line.
+                pkgpath=$(echo "$line" | awk '{print $1}')
+                case "$pkgpath" in
+                  */pkg/*|*/cmd/*|*/internal/*)
+                    pkg=$(floor_key "$pkgpath")
+                    case " $UNTESTED_CMD_MAINS " in
+                      *" $pkg "*)
+                        REPORT="${REPORT}${pkg}: no tests (exempt thin main)\n"
+                        ;;
+                      *)
+                        BROKEN="${BROKEN}${pkg}: NO TEST FILES\n"
+                        REPORT="${REPORT}${pkg}: no tests\n"
+                        ;;
+                    esac
+                    ;;
+                esac
+                ;;
             esac
           done < cover-run.log
 
