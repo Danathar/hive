@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.92.0)
+
+### Added
+
+- Added **reporter trust**, an opt-in gate on *who filed an issue* (#9665). With `project.issue_filter.reporter_trust.enabled: true`, issues from repository owners, members and collaborators (or an explicit login list) are worked as before, while issues from anyone else wait until a maintainer adds `triage/accepted` (configurable), and a PR whose rationale traces to such an issue is held with a marked notice at **every** ACMM level, L6 included — a human removes the hold and Hive never auto-releases it. Both halves are editable in the dashboard (Settings → Labels → Reporter trust; Settings → Repos for the hold, with per-repo overrides and the `HIVE_REPORTER_TRUST_HOLD` environment lock), the Repositories note states the active rule, repo cards count issues awaiting reporter triage, and the PR-created audit entry records the reporter and their GitHub association. Off by default: existing hives change nothing.
+
+### Fixed
+
+- The signed-commit reconciler's one-time "Signed commits" note on a PR it can't re-sign no longer claims the PR head is unverified: since [#9531](https://github.com/hivecommons/hive/issues/9531) it also fires when an unsigned agent commit sits under a person's Verified commit. The note now says a commit on the branch is not Verified and gives the manual fix: squash the unsigned commit into a commit the person signs, or drop the person's commit so the hive can re-sign and push it again, signed, on top. `src/docs/github-app-setup.md` now describes the any-unverified-commit rule instead of "the tail after the newest Verified commit".
+
 ## 2026-09-29 (v5.91.0)
 
 ### Added
