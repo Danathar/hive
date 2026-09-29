@@ -96,7 +96,7 @@ func (c *Config) applyDefaults() {
 		c.Data.BobSessionsDir = "/data/home/.bob"
 	}
 	if c.Data.AgentsDir == "" {
-		c.Data.AgentsDir = "/data/agent-configs"
+		c.Data.AgentsDir = DefaultAgentOverlayDir
 	}
 	if c.Hub.URL == "" {
 		c.Hub.URL = "https://hive.hivecommons.dev"

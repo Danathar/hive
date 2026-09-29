@@ -76,7 +76,7 @@ phase map stays small.
 - **The lane vocabulary.** `classify.LaneConfig`
   (`src/pkg/classify/classifier.go:28`) and `classifyLane`
   (`src/pkg/classify/classifier.go:249`) route an issue to a lane;
-  `filterByLane` (`src/pkg/scheduler/scheduler.go:1862`) is the per-lane
+  `filterByLane` (`src/pkg/scheduler/repofilter.go:191`) is the per-lane
   selection already used to build kicks. Per-lane queue depth is a count over
   work the scheduler already computes.
 - **The tier vocabulary.** `RotationConfig.AgentTiers`
