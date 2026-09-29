@@ -1,0 +1,1 @@
+- Include all hub subpackages in the pre-merge coverage gate and remove the unused `pkg/hub/wire` placeholder (#9662).
