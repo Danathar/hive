@@ -24,6 +24,9 @@ const (
 	sseIdleTimeout = 10 * time.Minute
 	// sseMaxPendingBytes bounds the buffered, not-yet-terminated SSE frame.
 	sseMaxPendingBytes = 8 << 20
+	// sseResponseHeaderTimeout bounds the wait for the dashboard to answer the
+	// stream request at all, well before the idle watchdog would fire.
+	sseResponseHeaderTimeout = 30 * time.Second
 
 	sseEventAgentStatus = "agent-status"
 )
@@ -122,7 +125,9 @@ func (s *Service) consumeSSE(ctx context.Context) (bool, error) {
 	}
 	s.authorizeDashboardRequest(ctx, req)
 
-	sseClient := &http.Client{Timeout: 0}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = sseResponseHeaderTimeout
+	sseClient := &http.Client{Transport: transport}
 	resp, err := sseClient.Do(req)
 	if err != nil {
 		return false, sseErr(ctx, err)

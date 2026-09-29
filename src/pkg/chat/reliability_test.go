@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -79,6 +80,53 @@ func TestConsumeSSEContextCancelUnblocksRead(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("consumeSSE did not unblock after context cancellation")
+	}
+}
+
+func TestConsumeSSEIdleWatchdogUnblocksRead(t *testing.T) {
+	started := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	s := newTestBot(ts, "ch")
+	s.sseIdleTimeout = 25 * time.Millisecond
+	startedAt := time.Now()
+	connected, err := s.consumeSSE(context.Background())
+	if !connected {
+		t.Fatal("consumeSSE did not report connected")
+	}
+	if !errors.Is(err, errSSEIdle) {
+		t.Fatalf("consumeSSE error = %v, want idle timeout", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("idle watchdog took %v to stop the read", elapsed)
+	}
+}
+
+func TestConsumeSSEBoundsIncompleteFrame(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, sseMaxPendingBytes+1))
+	}))
+	defer ts.Close()
+
+	s := newTestBot(ts, "ch")
+	s.sseIdleTimeout = time.Second
+	connected, err := s.consumeSSE(context.Background())
+	if !connected {
+		t.Fatal("consumeSSE did not report connected")
+	}
+	if err == nil || !strings.Contains(err.Error(), "without terminator") {
+		t.Fatalf("consumeSSE error = %v, want bounded buffer error", err)
 	}
 }
 
