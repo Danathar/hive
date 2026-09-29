@@ -60,14 +60,49 @@ type SpekHubExecutor struct {
 	CloneURL  func(repo string) string
 	Artifact  func(runKey string) string
 
+	tickMu   sync.Mutex
 	mu       sync.Mutex
-	inFlight map[string]time.Time
+	stopped  bool
+	inFlight map[string]*spekHubExecution
 	// held marks generations (executionKey) Tick must not launch again: the
 	// document is already final, or the generation was spent and settled
 	// against the stage budget. The key changes with every new generation.
 	held      map[string]bool
 	activity  map[string]runActivitySignal
 	lastError string
+}
+
+type spekHubExecution struct {
+	started time.Time
+	stage   spekHubStage
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+// Stop prevents new launches, cancels every owned process group, and waits for
+// workers (including their status pollers) with a shutdown bound.
+func (e *SpekHubExecutor) Stop() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.stopped = true
+	var done []<-chan struct{}
+	for _, run := range e.inFlight {
+		run.cancel()
+		done = append(done, run.done)
+	}
+	e.mu.Unlock()
+	timer := time.NewTimer(2 * spekHubWaitDelay)
+	defer timer.Stop()
+	for _, ch := range done {
+		select {
+		case <-ch:
+		case <-timer.C:
+			e.log().Warn("[spektacular] executor shutdown timed out")
+			return
+		}
+	}
 }
 
 type spekHubStage struct {
@@ -98,6 +133,14 @@ func (e *SpekHubExecutor) Tick(ctx context.Context, now time.Time) {
 	if e == nil || e.Server == nil || !e.Config.Spektacular.Enabled || !e.Config.Spektacular.HubExecutorEnabled() {
 		return
 	}
+	e.tickMu.Lock()
+	defer e.tickMu.Unlock()
+	e.mu.Lock()
+	stopped := e.stopped
+	e.mu.Unlock()
+	if stopped {
+		return
+	}
 	// Sweep first: it runs git and can take a while, and the lease snapshot
 	// below must be as fresh as possible before it is compared with inFlight.
 	if err := e.sweepStaleWorktrees(ctx); err != nil {
@@ -120,19 +163,20 @@ func (e *SpekHubExecutor) Tick(ctx context.Context, now time.Time) {
 		key := e.executionKey(st)
 		e.mu.Lock()
 		if e.inFlight == nil {
-			e.inFlight = map[string]time.Time{}
+			e.inFlight = map[string]*spekHubExecution{}
 		}
 		if e.held == nil {
 			e.held = map[string]bool{}
 		}
-		if _, running := e.inFlight[key]; running || e.held[key] || e.runningLocked() >= e.maxConcurrent() {
+		if _, running := e.inFlight[key]; e.stopped || running || e.held[key] || e.runningLocked() >= e.maxConcurrent() {
 			e.mu.Unlock()
 			continue
 		}
-		e.inFlight[key] = now
+		runCtx, cancel := context.WithCancel(ctx)
+		e.inFlight[key] = &spekHubExecution{started: now, stage: st, cancel: cancel, done: make(chan struct{})}
 		e.recordActivityLocked(st, now, "executor claimed stage slot", 0)
 		e.mu.Unlock()
-		go e.runStage(ctx, st, key)
+		go e.runStage(runCtx, st, key)
 	}
 }
 
@@ -162,7 +206,9 @@ func (e *SpekHubExecutor) IsExecuting(runKey, stage string) bool {
 
 func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 	live := map[string]bool{}
+	active := map[string]bool{}
 	if err := e.Server.VisitActiveStageLeases(func(runKey, key, stage, identity, taskID, repo string, gen uint64, expiresAt time.Time) {
+		active[e.executionKey(spekHubStage{runKey: runKey, stage: stage, gen: gen})] = true
 		// A run's single worktree carries its spec/plan artifacts across
 		// generations, so it stays live while ANY lease on the run is
 		// active — including a freshly minted, not-yet-claimed retry
@@ -182,6 +228,30 @@ func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	// A revoked generation must finish cancellation before its directory can
+	// be swept. Keep its bookkeeping until that worker has joined as well.
+	e.mu.Lock()
+	for key, run := range e.inFlight {
+		if !active[key] {
+			run.cancel()
+		}
+		active[key] = true
+		live[spekHubRunWorktreePath(e.Identity, run.stage.runKey)] = true
+		for _, path := range existingRunWorktreeDirs(e.Identity, run.stage.runKey) {
+			live[path] = true
+		}
+	}
+	for key := range e.held {
+		if !active[key] {
+			delete(e.held, key)
+		}
+	}
+	for key := range e.activity {
+		if !active[key] {
+			delete(e.activity, key)
+		}
+	}
+	e.mu.Unlock()
 	root := filepath.Join(agentWorkspaceRoot, e.Identity, "runs")
 	runDirs, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -196,8 +266,15 @@ func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 		if !runDir.IsDir() {
 			continue
 		}
+		// The stable lock lives outside the removable worktree. Never unlink it:
+		// another hub or an orphaned CLI may still hold that inode.
+		fence, err := acquireSpekHubFence(filepath.Join(root, runDir.Name(), ".executor.lock"))
+		if err != nil {
+			continue
+		}
 		stageDirs, err := os.ReadDir(filepath.Join(root, runDir.Name()))
 		if err != nil {
+			fence.Close()
 			continue
 		}
 		for _, stageDir := range stageDirs {
@@ -212,6 +289,7 @@ func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 				e.log().Warn("[spektacular] removing stale worktree failed", "path", path, "error", err)
 			}
 		}
+		fence.Close()
 	}
 	return nil
 }
@@ -293,7 +371,11 @@ func existingRunWorktreeDirs(identity, runKey string) []string {
 func (e *SpekHubExecutor) runStage(parent context.Context, st spekHubStage, key string) {
 	defer func() {
 		e.mu.Lock()
-		delete(e.inFlight, key)
+		if run := e.inFlight[key]; run != nil {
+			run.cancel()
+			close(run.done)
+			delete(e.inFlight, key)
+		}
 		e.mu.Unlock()
 	}()
 	ctx, cancel := context.WithTimeout(parent, e.Config.Spektacular.HubExecutor.Timeout())
@@ -306,13 +388,23 @@ func (e *SpekHubExecutor) runStage(parent context.Context, st spekHubStage, key 
 	}
 	// A canceled parent is hub shutdown, not a failed generation: spending
 	// the stage budget on it would burn a retry on every restart.
-	if err := e.executeStage(ctx, st); err != nil && parent.Err() == nil {
+	// A fence held by another process is not a failed generation either.
+	if err := e.executeStage(ctx, st); err != nil && parent.Err() == nil && !errors.Is(err, errSpekHubFenceBusy) {
 		e.recordFailure(st, key, err)
 		e.settleGeneration(st, spekHubFailureReason)
 	}
 }
 
 func (e *SpekHubExecutor) executeStage(ctx context.Context, st spekHubStage) error {
+	fence, err := acquireSpekHubFence(filepath.Join(filepath.Dir(spekHubRunWorktreePath(e.Identity, st.runKey)), ".executor.lock"))
+	if err != nil {
+		return err
+	}
+	defer fence.Close()
+	ctx = context.WithValue(ctx, spekHubFenceContextKey{}, fence)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	receiptDir := runReceiptsDir
 	taskID := e.stageTaskID(st)
@@ -422,7 +514,7 @@ func (e *SpekHubExecutor) runStageCommand(ctx context.Context, worktree string, 
 		}
 	}
 	if e.Exec == nil {
-		var buf bytes.Buffer
+		var buf spekHubTailWriter
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil {
 			return nil, 0, err
@@ -436,6 +528,7 @@ func (e *SpekHubExecutor) runStageCommand(ctx context.Context, worktree string, 
 		// whole group on timeout/cancel and bound Wait so an orphan holding
 		// the inherited output pipe cannot pin the executor slot forever.
 		spekHubConfigureProcessGroup(c)
+		spekHubInheritFence(c, ctx)
 		c.WaitDelay = spekHubWaitDelay
 		w := io.MultiWriter(&buf, logWriter)
 		c.Stdout = w
@@ -571,6 +664,7 @@ func (e *SpekHubExecutor) afterCLIExit(ctx context.Context, st spekHubStage, tas
 
 func (e *SpekHubExecutor) startStageStatusCapture(ctx context.Context, st spekHubStage, worktree string, env []string, kind, artifact string) (func() []RunDetailStageStatus, func()) {
 	pollCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	var mu sync.Mutex
 	var history []RunDetailStageStatus
 	remember := func(status spekHubArtifactStatus) {
@@ -605,6 +699,7 @@ func (e *SpekHubExecutor) startStageStatusCapture(ctx context.Context, st spekHu
 		}
 	}
 	go func() {
+		defer close(done)
 		poll()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -623,6 +718,7 @@ func (e *SpekHubExecutor) startStageStatusCapture(ctx context.Context, st spekHu
 			return append([]RunDetailStageStatus(nil), history...)
 		}, func() {
 			cancel()
+			<-done
 		}
 }
 
@@ -781,8 +877,8 @@ func (e *SpekHubExecutor) recordActivityLocked(st spekHubStage, at time.Time, ev
 		return
 	}
 	if sig.stageStartedAt.IsZero() {
-		if started := e.inFlight[e.executionKey(st)]; !started.IsZero() {
-			sig.stageStartedAt = started.UTC()
+		if run := e.inFlight[e.executionKey(st)]; run != nil {
+			sig.stageStartedAt = run.started.UTC()
 		} else {
 			sig.stageStartedAt = at.UTC()
 		}
@@ -1011,7 +1107,9 @@ func commandExitCode(err error) int {
 
 func (e *SpekHubExecutor) startRenewing(ctx context.Context, taskID string) func() {
 	done := make(chan struct{})
+	joined := make(chan struct{})
 	go func() {
+		defer close(joined)
 		ticker := time.NewTicker(spekHubLeaseRenewInterval)
 		defer ticker.Stop()
 		for {
@@ -1027,7 +1125,7 @@ func (e *SpekHubExecutor) startRenewing(ctx context.Context, taskID string) func
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() { close(done); <-joined }
 }
 
 func (e *SpekHubExecutor) prepareWorkspace(ctx context.Context, st spekHubStage) (string, error) {
@@ -1408,6 +1506,9 @@ func (e *SpekHubExecutor) runner() func(context.Context, string, []string, strin
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.Dir = dir
 		cmd.Env = env
+		spekHubConfigureProcessGroup(cmd)
+		spekHubInheritFence(cmd, ctx)
+		cmd.WaitDelay = spekHubWaitDelay
 		cmd.Stdout = &buf
 		cmd.Stderr = &buf
 		err := cmd.Run()
@@ -1544,3 +1645,22 @@ func firstSpekNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// Keep a bounded diagnostic tail in memory; the scrubbed full transcript is
+// streamed to disk by the other MultiWriter destination.
+type spekHubTailWriter struct{ tail []byte }
+
+func (w *spekHubTailWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= spekHubOutputTailBytes {
+		w.tail = append(w.tail[:0], p[len(p)-spekHubOutputTailBytes:]...)
+	} else {
+		if excess := len(w.tail) + len(p) - spekHubOutputTailBytes; excess > 0 {
+			copy(w.tail, w.tail[excess:])
+			w.tail = w.tail[:len(w.tail)-excess]
+		}
+		w.tail = append(w.tail, p...)
+	}
+	return n, nil
+}
+func (w *spekHubTailWriter) String() string { return string(w.tail) }

@@ -19,6 +19,26 @@ Spek campaign does not copy spek contents into Hive; `POST
 command, while Spek reloads the current state from its working files and
 spek backend.
 
+## Hub executor lifecycle
+
+The hub cancels a running stage on the next executor tick after its lease is
+removed or its stage/generation changes. Its worktree remains protected until
+the worker and status poller exit. Shutdown stops new launches, cancels owned
+process groups, and waits up to 20 seconds for workers. Replacing an executor
+also stops the old instance.
+
+On Unix, each run has a stable `.executor.lock` beside its `work/` directory.
+The executor holds an exclusive file lock through preparation, execution, and
+capture; the agent inherits the lock descriptor. If the hub dies while the
+agent survives, a new hub skips launching or sweeping that worktree until the
+old process releases the lock. Do not delete these lock files to force a
+restart: terminate the surviving agent first. Hub execution fails closed on
+Windows, where inheritable worktree fencing is not implemented.
+
+CLI output streams to the scrubbed stage log; only the last 64 KiB stays in
+memory for diagnostics and transcript capture. Sweeps discard held-generation
+and activity entries for obsolete generations once their workers have exited.
+
 ## Polling and timeouts
 
 The hub polls stages on a separate serial worker every 30 seconds. Slow polls
@@ -445,7 +465,11 @@ id is cached for the stage and used for subsequent status/export calls.
   `stale_plan`, above). A relay-held stage whose relay vanishes is re-offered
   at the same generation when its lease lapses; that is not a spent
   generation. Hub shutdown cancels a running agent job without recording a
-  failure or spending its generation.
+  failure or spending its generation. Nor is a generation the hub cancels
+  because its lease was removed or reset, or because the executor is being
+  replaced, nor a launch skipped because another process still holds the
+  run's `.executor.lock` ([Hub executor lifecycle](#hub-executor-lifecycle));
+  Tick tries a fenced generation again once the lock is released.
 - The hub executor also treats a live lease already owned by its own identity as
   restartable work when no in-flight process is tracked for that lease
   key/generation and the generation is not escalated.

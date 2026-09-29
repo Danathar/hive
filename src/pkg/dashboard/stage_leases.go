@@ -226,8 +226,14 @@ func (s *Server) SetStageExecutor(e StageExecutor) {
 		return
 	}
 	s.stageExecutorMu.Lock()
-	defer s.stageExecutorMu.Unlock()
+	old := s.stageExecutor
 	s.stageExecutor = e
+	s.stageExecutorMu.Unlock()
+	if old != e {
+		if stopper, ok := old.(interface{ Stop() }); ok {
+			stopper.Stop()
+		}
+	}
 }
 
 func (s *Server) stageExecutorExecuting(runKey, stage string) bool {

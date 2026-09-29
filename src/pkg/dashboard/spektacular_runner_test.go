@@ -797,8 +797,9 @@ func TestRunStageAccessor_SkipsExecutorInFlightStage(t *testing.T) {
 	}
 	e := NewSpekHubExecutor(s, config.RunsConfig{Spektacular: config.SpektacularConfig{Enabled: true}}, "copilot", "", nil, nil)
 	e.mu.Lock()
-	e.inFlight = map[string]time.Time{e.executionKey(spekHubStage{runKey: spekRunKey, stage: StageImplement, gen: spekGen}): now}
+	e.inFlight = map[string]*spekHubExecution{e.executionKey(spekHubStage{runKey: spekRunKey, stage: StageImplement, gen: spekGen}): {started: now}}
 	e.mu.Unlock()
+	defer func() { e.mu.Lock(); clear(e.inFlight); e.mu.Unlock() }()
 	s.SetStageExecutor(e)
 
 	stages, err := s.RunStageAccessor().PendingRunStages(context.Background())

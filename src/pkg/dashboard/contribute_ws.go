@@ -4735,6 +4735,11 @@ func (h *ContributeWSHub) Close() {
 	if h.standbyReconcileDone != nil {
 		<-h.standbyReconcileDone
 	}
+	if h.server != nil {
+		if stopper, ok := h.server.StageExecutor().(interface{ Stop() }); ok {
+			stopper.Stop()
+		}
+	}
 }
 
 // Stop terminates the hub's background cleanup loop, matching Close.
