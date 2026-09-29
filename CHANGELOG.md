@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.81.2)
+
+### Fixed
+
+- Seeded policy templates in `/data/policies` no longer silently shadow embedded default updates forever. Boot now refreshes any seeded copy that has not been edited since it was last seeded (matching a stale byte-identical-to-an-old-image case seen on live spokes), while a genuine dashboard-saved prompt override still wins over the embedded default and survives image rolls ([#9428](https://github.com/hivecommons/hive/issues/9428)).
+- Fixed per-agent Copilot CLI session-state isolation: `~/.copilot` was bridged as a whole symlink into the shared home, so every per-UID agent's `.copilot/session-state` chat transcripts were the same physical directory — another agent's session (and its mtime) showed up under any agent's own home. `.copilot` is now a real per-agent directory with only `config.json` (the shared token map) bridged back ([#9444](https://github.com/hivecommons/hive/issues/9444)).
+
 ## 2026-09-29 (v5.81.1)
 
 ### Changed
