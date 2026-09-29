@@ -127,6 +127,13 @@ func TestStandbyAutoDispatchAssignsThroughHoldMarkedPath(t *testing.T) {
 	if msg.Type != "task_assign" {
 		t.Fatalf("auto dispatch msg = %s: %s", msg.Type, msg.Reason)
 	}
+	h := s.contributeHub
+	h.completedMu.Lock()
+	outcomes := len(h.standbyOutcomes)
+	h.completedMu.Unlock()
+	if outcomes != 0 {
+		t.Fatalf("dispatch created %d PR outcome rows for an issue", outcomes)
+	}
 	if msg.StandbyLane != "quality" || msg.StandbyTier != "T2" {
 		t.Fatalf("standby markers = lane %q tier %q, want quality/T2", msg.StandbyLane, msg.StandbyTier)
 	}

@@ -69,9 +69,9 @@ func TestStandbyReconcileConcurrentRecordsClosureOnce(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); h.reconcileOpenStandbyOutcomes() }()
+	go func() { defer wg.Done(); h.reconcileOpenStandbyOutcomes(context.Background()) }()
 	<-arrived // first reconcile is inside its GitHub GET
-	go func() { defer wg.Done(); h.reconcileOpenStandbyOutcomes() }()
+	go func() { defer wg.Done(); h.reconcileOpenStandbyOutcomes(context.Background()) }()
 	// Give the second reconcile the window the race needs: if it is not
 	// serialized behind the first it snapshots the still-open ledger and
 	// issues its own GET, which arrives here.

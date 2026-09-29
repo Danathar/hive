@@ -871,3 +871,18 @@ construction. The live-hive runbook above stays a human's job.
 - Mode ladder and hold gating: [`src/docs/acmm-policy-matrix.md`](../acmm-policy-matrix.md),
   `src/pkg/agentmode/agentmode.go`, `src/pkg/github/pr_request_watcher.go`.
 - CI surface: [`src/docs/backend-smoke.md`](../backend-smoke.md).
+
+### Outcome reconciliation
+
+The hub reads the local outcome ledger when evaluating suspension, including
+status counts and standby declarations. A single background worker waits five
+minutes between reconciliation passes; GitHub lookups never run on those read
+paths. Shutdown cancels any in-flight lookup and waits for the worker. A newly
+closed PR can therefore take a reconciliation interval plus the pass duration
+to affect suspension.
+
+Dispatch is recorded in the daily-cap ledger only. Outcome `open` rows identify
+verified PRs, never assignment issue numbers. A GitHub 404 retires an old open
+row with an unknown outcome, which does not count toward suspension; transient
+failures and permission errors other than 404 remain retryable. The persisted
+outcome ledger remains an append-only audit history.

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	github "github.com/google/go-github/v72/github"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	standbypkg "github.com/hivecommons/hive/pkg/standby"
 )
@@ -188,13 +190,31 @@ func (h *ContributeWSHub) recordVerifiedStandbyPR(contributor, lane, repo, prURL
 	})
 }
 
-// reconcileOpenStandbyOutcomes settles open donated PRs against GitHub. It is
-// reachable concurrently (status build, standby_declare, dispatch), so it is
-// serialized on standbyReconcileMu, and settlement is re-checked against the
+// Reconciliation is owned by one background worker. Suspension reads never do
+// network I/O, including reads under h.mu or on the WebSocket read loop. Wait
+// between completed passes so slow GitHub responses cannot queue more work.
+const standbyReconcileInterval = 5 * time.Minute
+
+func (h *ContributeWSHub) standbyReconcileLoop(ctx context.Context) {
+	defer close(h.standbyReconcileDone)
+	for {
+		timer := time.NewTimer(standbyReconcileInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			h.reconcileOpenStandbyOutcomes(ctx)
+		}
+	}
+}
+
+// reconcileOpenStandbyOutcomes settles open donated PRs against GitHub. Passes
+// are serialized on standbyReconcileMu, and settlement is re-checked against the
 // live ledger under completedMu right before appending (#9184): a closure
 // recorded while this pass was inside its GitHub GETs — by another path such
 // as the completion handler's merged row — must not be recorded a second time.
-func (h *ContributeWSHub) reconcileOpenStandbyOutcomes() {
+func (h *ContributeWSHub) reconcileOpenStandbyOutcomes(ctx context.Context) {
 	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.GHClient == nil {
 		return
 	}
@@ -208,18 +228,37 @@ func (h *ContributeWSHub) reconcileOpenStandbyOutcomes() {
 	settled := settledStandbyPRs(rows)
 
 	var add []standbyOutcomeRecord
+	checked := map[string]bool{}
 	for _, rec := range rows {
 		if rec.Kind != standbypkg.OutcomeOpen || rec.Repo == "" || rec.Number <= 0 || settled[standbyOutcomePRKey(rec)] {
 			continue
 		}
+		prKey := standbyOutcomePRKey(rec)
+		if checked[prKey] {
+			continue
+		}
+		checked[prKey] = true
+		if ctx.Err() != nil {
+			break
+		}
 		contributor, _, _ := strings.Cut(rec.Key, "|")
 		prURL := "https://github.com/" + rec.Repo + "/pull/" + strconv.Itoa(rec.Number)
-		detail := h.verifyReportedPRDetail(rec.Repo, prURL, contributor)
-		if !detail.Verified {
-			continue
+		// Use verification directly: a background lookup is not a reported
+		// completion and must not emit the misleading "no-PR" completion log.
+		lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		detail := h.server.deps.GHClient.VerifyReportedPR(lookupCtx, rec.Repo, prURL, contributor)
+		cancel()
+		var apiErr *github.ErrorResponse
+		missing := errors.As(detail.Err, &apiErr) && apiErr.Response != nil && apiErr.Response.StatusCode == http.StatusNotFound
+		if !detail.Verified && !missing {
+			continue // transient and permission errors remain retryable
 		}
 		var kind standbypkg.OutcomeKind
 		switch {
+		case missing:
+			// Legacy dispatch rows name issues. A 404 is not evidence against
+			// a donor; retire it as unknown rather than retrying forever.
+			kind = standbypkg.OutcomeUnknown
 		case detail.Merged:
 			kind = standbypkg.OutcomeMerged
 		case strings.EqualFold(detail.State, "closed"):
@@ -258,11 +297,12 @@ func (h *ContributeWSHub) reconcileOpenStandbyOutcomes() {
 }
 
 // settledStandbyPRs is the set of donated PRs (by standbyOutcomePRKey) that
-// already carry a settled outcome row.
+// already carry a settled outcome row. An unknown row (a retired 404 lookup)
+// settles the PR too, so it is never looked up again.
 func settledStandbyPRs(rows []standbyOutcomeRecord) map[string]bool {
 	settled := map[string]bool{}
 	for _, rec := range rows {
-		if rec.Kind == standbypkg.OutcomeMerged || rec.Kind == standbypkg.OutcomeClosedUnmerged || rec.Kind == standbypkg.OutcomeMergedAfterRework {
+		if rec.Kind == standbypkg.OutcomeUnknown || rec.Kind == standbypkg.OutcomeMerged || rec.Kind == standbypkg.OutcomeClosedUnmerged || rec.Kind == standbypkg.OutcomeMergedAfterRework {
 			settled[standbyOutcomePRKey(rec)] = true
 		}
 	}
@@ -274,7 +314,6 @@ func standbyOutcomePRKey(rec standbyOutcomeRecord) string {
 }
 
 func (h *ContributeWSHub) standbySuspended(key string) (bool, int) {
-	h.reconcileOpenStandbyOutcomes()
 	h.completedMu.Lock()
 	defer h.completedMu.Unlock()
 	rows := standbypkg.OutcomesFor(h.standbyOutcomes, key)

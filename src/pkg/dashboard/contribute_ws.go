@@ -981,12 +981,14 @@ type ContributeWSHub struct {
 	// EXPIRING before the next dispatch, so this must survive that sweep.
 	// Guarded by completedMu; persisted in the same PVC-backed ledger dir as
 	// the cooldowns so a pod restart does not forget the verdict.
-	noWorkVerdicts     map[string]noWorkVerdictRecord
-	standbyOutcomes    []standbyOutcomeRecord
-	activityFilePath   string
-	completedTasksFile string
-	failedTasksFile    string
-	noPRStreaksFile    string
+	noWorkVerdicts         map[string]noWorkVerdictRecord
+	standbyReconcileCancel context.CancelFunc
+	standbyReconcileDone   chan struct{}
+	standbyOutcomes        []standbyOutcomeRecord
+	activityFilePath       string
+	completedTasksFile     string
+	failedTasksFile        string
+	noPRStreaksFile        string
 	// taskLeasesFile is where the server-issued lease registry is persisted so it
 	// survives a hub restart (#5681). Overridable per hub for tests, like the
 	// sibling ledgers.
@@ -1189,6 +1191,10 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 	// reconnect, so an in-flight task survives the restart instead of being revoked
 	// out from under a working agent.
 	hub.loadLeases()
+	standbyCtx, standbyCancel := context.WithCancel(context.Background())
+	hub.standbyReconcileCancel = standbyCancel
+	hub.standbyReconcileDone = make(chan struct{})
+	go hub.standbyReconcileLoop(standbyCtx)
 	go hub.cleanupLoop()
 	return hub
 }
@@ -4708,12 +4714,18 @@ func (h *ContributeWSHub) Close() {
 		return
 	}
 	h.stopOnce.Do(func() {
+		if h.standbyReconcileCancel != nil {
+			h.standbyReconcileCancel()
+		}
 		if h.stopCh != nil {
 			close(h.stopCh)
 		}
 	})
 	if h.doneCh != nil {
 		<-h.doneCh
+	}
+	if h.standbyReconcileDone != nil {
+		<-h.standbyReconcileDone
 	}
 }
 

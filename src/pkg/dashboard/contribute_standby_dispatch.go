@@ -366,15 +366,6 @@ func (h *ContributeWSHub) assignStandbyTask(c *ContributorConnection, item Ready
 		return nil, err
 	}
 	h.recordStandbyDispatch(c.profile.GitHubUsername, lane, assignedAt)
-	cfg := standbyConfigFromConnection(c)
-	h.appendStandbyOutcome(standbyOutcomeRecord{
-		Key:          standbyOutcomeKey(c.profile.GitHubUsername, cfg),
-		Lane:         lane,
-		Repo:         item.Repo,
-		Number:       item.Number,
-		DispatchedAt: assignedAt.UTC(),
-		Kind:         standbypkg.OutcomeOpen,
-	})
 	h.addActivity(c.profile.GitHubUsername, "standby dispatched", c.role, state.CLIBackend, state.Model, state.ReasoningEffort, taskDescOf(assignment), c.advisor())
 	return msg, nil
 }
