@@ -361,7 +361,7 @@ Prerequisites:
   `allowed_users` with the maintainer's Telegram numeric user ID. The config
   field names and fail-closed allowed-user contract are in `TelegramConfig`
   (`src/pkg/config/notifications_config.go:36-49`), and startup requires bot token and
-  chat ID (`src/pkg/telegram/bot.go:124-129`).
+  chat ID (`src/pkg/telegram/bot.go:135-138`).
 
 Run:
 
@@ -372,7 +372,7 @@ Run:
    transition; save the Telegram notification screenshot/link.
 4. If retry/backoff occurs, save `telegram poll failed`; successful inbound
    messages are delivered after chat-ID filtering and `ioscan`
-   (`src/pkg/telegram/bot.go:175-192`, `src/pkg/telegram/bot.go:212-218`).
+   (`src/pkg/telegram/bot.go:191-214`, `handleUpdate`, `src/pkg/telegram/bot.go:266-271`).
 
 Evidence checklist:
 

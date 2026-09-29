@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hivecommons/hive/pkg/chat"
@@ -29,6 +31,9 @@ const (
 	pollReconnectBase         = 5 * time.Second
 	pollReconnectMax          = 60 * time.Second
 	maxRetryAfter             = 60 * time.Second
+	// rateLimitRetries is how many times a 429'd request is re-issued after
+	// waiting out retry_after before the error is returned.
+	rateLimitRetries = 1
 )
 
 type AgentIdentity = chat.AgentIdentity
@@ -149,7 +154,17 @@ func (b *telegramBackend) Send(content string) error {
 	content = logscrub.ScrubString(content)
 	for _, part := range splitTelegramMessage(markdownToHTML(content)) {
 		payload := map[string]string{"chat_id": b.chatID, "text": part, "parse_mode": "HTML"}
-		if err := b.callTelegram(context.Background(), "sendMessage", payload, nil); err != nil {
+		err := b.callTelegram(context.Background(), "sendMessage", payload, nil)
+		var apiErr *apiError
+		if errors.As(err, &apiErr) && apiErr.status == http.StatusBadRequest {
+			// Telegram rejects the whole message when it cannot parse the
+			// entities; resend the part as plain text so the content still
+			// lands (hivecommons/hive#9158).
+			b.logger.Warn("telegram rejected HTML message; resending as plain text", "error", err)
+			plain := map[string]string{"chat_id": b.chatID, "text": htmlToPlainText(part)}
+			err = b.callTelegram(context.Background(), "sendMessage", plain, nil)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -172,13 +187,20 @@ func (b *telegramBackend) Listen(ctx context.Context, deliver func(chat.Message)
 		maxDelay = pollReconnectMax
 	}
 	var offset int64
+	primed := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		polled, err := b.pollOnce(ctx, offset, deliver, func(next int64) { offset = next })
+		var polled bool
+		var err error
+		if primed {
+			polled, err = b.pollOnce(ctx, offset, deliver, func(next int64) { offset = next })
+		} else if offset, err = b.skipBacklog(ctx); err == nil {
+			primed, polled = true, true
+		}
 		if err != nil {
 			b.logger.Warn("telegram poll failed", "error", err)
 		} else if polled {
@@ -197,6 +219,29 @@ func (b *telegramBackend) Listen(ctx context.Context, deliver func(chat.Message)
 	}
 }
 
+// skipBacklog drops updates queued before this process started and returns the
+// offset to poll from. The offset is only held in memory, so without this a
+// restart would replay every unconfirmed update — including a !kick that was
+// being handled at crash time, or hours-old commands typed during downtime
+// (hivecommons/hive#9158). offset=-1 makes Telegram forget all but the last
+// update; confirming that one via the returned offset drops it too. This
+// mirrors Matrix skipping its initial sync.
+func (b *telegramBackend) skipBacklog(ctx context.Context) (int64, error) {
+	payload := map[string]any{"offset": -1, "timeout": 0, "allowed_updates": []string{"message"}}
+	var updates []update
+	if err := b.callTelegram(ctx, "getUpdates", payload, &updates); err != nil {
+		return 0, err
+	}
+	var next int64
+	for _, upd := range updates {
+		next = max(next, upd.UpdateID+1)
+	}
+	if next > 0 {
+		b.logger.Info("telegram skipped updates queued before start", "next_offset", next)
+	}
+	return next, nil
+}
+
 func (b *telegramBackend) pollOnce(ctx context.Context, offset int64, deliver func(chat.Message), advance func(int64)) (bool, error) {
 	payload := map[string]any{"timeout": longPollTimeoutSeconds, "allowed_updates": []string{"message"}}
 	if offset > 0 {
@@ -207,8 +252,13 @@ func (b *telegramBackend) pollOnce(ctx context.Context, offset int64, deliver fu
 		return false, err
 	}
 	for _, upd := range updates {
+		if offset > 0 && upd.UpdateID < offset {
+			// Already confirmed; never run a command twice.
+			continue
+		}
 		b.handleUpdate(upd, deliver)
-		advance(upd.UpdateID + 1)
+		offset = upd.UpdateID + 1
+		advance(offset)
 	}
 	return true, nil
 }
@@ -227,55 +277,77 @@ func (b *telegramBackend) handleUpdate(upd update, deliver func(chat.Message)) {
 	})
 }
 
+// apiError is a non-2xx Bot API response; status lets callers tell a rejected
+// request (400) from a transient failure.
+type apiError struct {
+	status int
+	msg    string
+}
+
+func (e *apiError) Error() string { return e.msg }
+
+// callTelegram re-issues a request once after a 429's retry_after wait, so the
+// wait buys a delivery instead of preceding a drop (hivecommons/hive#9158).
 func (b *telegramBackend) callTelegram(ctx context.Context, method string, payload any, result any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+	for attempt := 0; ; attempt++ {
+		retryAfter, err := b.callTelegramOnce(ctx, method, data, result)
+		if retryAfter < 0 || attempt >= rateLimitRetries {
+			return err
+		}
+		if retryAfter > 0 {
+			if werr := b.sleep(ctx, min(retryAfter, maxRetryAfter)); werr != nil {
+				return b.redactError(fmt.Errorf("telegram %s retry wait: %w", method, werr))
+			}
+		}
+	}
+}
+
+// callTelegramOnce issues one request. retryAfter is >= 0 only for a 429, and
+// is the server-requested wait before the request may be re-issued.
+func (b *telegramBackend) callTelegramOnce(ctx context.Context, method string, data []byte, result any) (retryAfter time.Duration, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.apiBase+"/bot"+b.botToken+"/"+method, bytes.NewReader(data))
 	if err != nil {
-		return b.redactError(fmt.Errorf("telegram %s: %w", method, err))
+		return -1, b.redactError(fmt.Errorf("telegram %s: %w", method, err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := b.client.Do(req)
 	if err != nil {
 		if urlErr, ok := err.(*url.Error); ok {
-			return b.redactError(fmt.Errorf("telegram %s: %w", method, urlErr.Err))
+			return -1, b.redactError(fmt.Errorf("telegram %s: %w", method, urlErr.Err))
 		}
-		return b.redactError(fmt.Errorf("telegram %s: %w", method, err))
+		return -1, b.redactError(fmt.Errorf("telegram %s: %w", method, err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var parsed apiResponse
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			return err
+			return -1, err
 		}
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		if parsed.Parameters.RetryAfter > 0 {
-			wait := min(time.Duration(parsed.Parameters.RetryAfter)*time.Second, maxRetryAfter)
-			if err := b.sleep(ctx, wait); err != nil {
-				return b.redactError(fmt.Errorf("telegram %s retry wait: %w", method, err))
-			}
-		}
-		return b.redactError(fmt.Errorf("telegram API 429: %s", parsed.Description))
+		wait := max(time.Duration(parsed.Parameters.RetryAfter)*time.Second, 0)
+		return wait, &apiError{status: resp.StatusCode, msg: b.redactError(fmt.Errorf("telegram API 429: %s", parsed.Description)).Error()}
 	}
 	if resp.StatusCode >= 400 {
-		return b.redactError(fmt.Errorf("telegram API %d: %s", resp.StatusCode, string(body)))
+		return -1, &apiError{status: resp.StatusCode, msg: b.redactError(fmt.Errorf("telegram API %d: %s", resp.StatusCode, string(body))).Error()}
 	}
 	if !parsed.OK {
 		if parsed.Description == "" {
 			parsed.Description = "not ok"
 		}
-		return b.redactError(fmt.Errorf("telegram API error: %s", parsed.Description))
+		return -1, b.redactError(fmt.Errorf("telegram API error: %s", parsed.Description))
 	}
 	if result != nil && len(parsed.Result) > 0 {
 		if err := json.Unmarshal(parsed.Result, result); err != nil {
-			return err
+			return -1, err
 		}
 	}
-	return nil
+	return -1, nil
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -300,18 +372,28 @@ func (b *telegramBackend) redactError(err error) error {
 	return fmt.Errorf("%s", msg)
 }
 
+// markdownToHTML always returns balanced HTML: Telegram rejects the whole
+// message when a <code>/<pre> is left open, so an unmatched backtick or fence
+// is closed at the end, and code spans never nest (backticks inside inline code
+// are literal) (hivecommons/hive#9158).
 func markdownToHTML(s string) string {
 	var out strings.Builder
 	inCode := false
 	inFence := false
 	for i := 0; i < len(s); {
-		if strings.HasPrefix(s[i:], "```") {
+		if !inCode && strings.HasPrefix(s[i:], "```") {
+			i += 3
 			if inFence {
 				out.WriteString("</pre>")
 			} else {
 				out.WriteString("<pre>")
+				i += fenceInfoLen(s[i:])
 			}
 			inFence = !inFence
+			continue
+		}
+		if inCode && strings.HasPrefix(s[i:], "```") {
+			out.WriteString("```")
 			i += 3
 			continue
 		}
@@ -350,7 +432,65 @@ func markdownToHTML(s string) string {
 		out.WriteString(html.EscapeString(s[i : i+size]))
 		i += size
 	}
+	if inCode {
+		out.WriteString("</code>")
+	}
+	if inFence {
+		out.WriteString("</pre>")
+	}
 	return out.String()
+}
+
+// fenceInfoLen returns the length of a fence's language tag ("go" in
+// "```go\n"), which is dropped rather than rendered as the block's first line.
+// Anything other than a single word followed by a newline is block content.
+func fenceInfoLen(s string) int {
+	end := strings.IndexByte(s, '\n')
+	if end <= 0 {
+		return 0
+	}
+	for _, r := range s[:end] {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("+-_.#", r) {
+			return 0
+		}
+	}
+	return end
+}
+
+// htmlToPlainText undoes markdownToHTML for a plain-text resend: tags are
+// dropped, entities unescaped, and a link keeps its target as "text (url)".
+func htmlToPlainText(s string) string {
+	var out strings.Builder
+	var href string
+	for pos := 0; pos < len(s); {
+		token, width := nextHTMLToken(s[pos:])
+		pos += width
+		name, closing, ok := telegramHTMLTag(token)
+		switch {
+		case !ok:
+			out.WriteString(html.UnescapeString(token))
+		case name == "a" && !closing:
+			href = linkTarget(token)
+		case name == "a" && closing && href != "":
+			out.WriteString(" (" + href + ")")
+			href = ""
+		}
+	}
+	return out.String()
+}
+
+func linkTarget(tag string) string {
+	const attr = `href="`
+	start := strings.Index(tag, attr)
+	if start < 0 {
+		return ""
+	}
+	rest := tag[start+len(attr):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return html.UnescapeString(rest[:end])
 }
 
 func parseMarkdownLink(s string) (text, url string, width int, ok bool) {
