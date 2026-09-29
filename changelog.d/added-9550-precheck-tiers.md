@@ -1,1 +1,0 @@
-- Added PR-request precheck tiers for docs guards and isolated touched-package Go test failures before agent PRs open.

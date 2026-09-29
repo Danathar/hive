@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.87.0)
+
+### Added
+
+- Added PR-request precheck tiers for docs guards and isolated touched-package Go test failures before agent PRs open.
+
+### Fixed
+
+- Prevent automerge from treating freshly pushed heads as green before expected CI check-runs have started.
+
 ## 2026-09-29 (v5.86.2)
 
 ### Fixed
