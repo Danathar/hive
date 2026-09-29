@@ -304,7 +304,9 @@ func (e *SpekHubExecutor) runStage(parent context.Context, st spekHubStage, key 
 		e.log().Info("[spektacular] hub executor skipping stale stage snapshot", "run", st.runKey, "stage", st.stage, "gen", st.gen)
 		return
 	}
-	if err := e.executeStage(ctx, st); err != nil {
+	// A canceled parent is hub shutdown, not a failed generation: spending
+	// the stage budget on it would burn a retry on every restart.
+	if err := e.executeStage(ctx, st); err != nil && parent.Err() == nil {
 		e.recordFailure(st, key, err)
 		e.settleGeneration(st, spekHubFailureReason)
 	}

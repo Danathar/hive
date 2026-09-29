@@ -1291,3 +1291,59 @@ func TestTick_OwnerChangeReArmsRefusedStage(t *testing.T) {
 		t.Fatalf("re-armed tick = %+v, want Polled=1", res)
 	}
 }
+
+func TestBinaryExec_Deadline(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		parentTimeout, execTimeout time.Duration
+	}{
+		{"per invocation", time.Hour, 50 * time.Millisecond},
+		{"earlier caller", 50 * time.Millisecond, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), tc.parentTimeout)
+			defer cancel()
+			start := time.Now()
+			out, err := binaryExec("sh", tc.execTimeout, 20*time.Millisecond)(ctx, "", []string{"-c", "printf partial; exec sleep 5"})
+			if !errors.Is(err, context.DeadlineExceeded) || string(out) != "partial" {
+				t.Fatalf("got %q, %v; want partial stdout and deadline exceeded", out, err)
+			}
+			if time.Since(start) > 2*time.Second {
+				t.Fatal("invocation did not return promptly")
+			}
+		})
+	}
+}
+
+func TestBinaryExec_BoundsInheritedOutputPipes(t *testing.T) {
+	start := time.Now()
+	out, err := binaryExec("sh", time.Second, 20*time.Millisecond)(context.Background(), "", []string{"-c", "sleep 5 & echo $!"})
+	// The child holds stdout/stderr open after the shell exits. Clean it up.
+	var pid int
+	if _, scanErr := fmt.Sscan(string(out), &pid); scanErr != nil {
+		t.Fatalf("child pid: %q: %v", out, scanErr)
+	}
+	child, findErr := os.FindProcess(pid)
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	defer child.Kill()
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("got %v, want exec.ErrWaitDelay", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("inherited output pipes blocked invocation")
+	}
+}
+
+func TestTick_CanceledContextSkipsPolling(t *testing.T) {
+	reg := newFakeRegistry(StageSpec)
+	ex := &scriptedExec{statuses: []string{statusJSON(KindSpec, testRunKey, DocumentDraft)}}
+	r := newRunner(reg, ex)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.Tick(ctx, t0)
+	if ex.statusCalls() != 0 {
+		t.Fatal("canceled tick still polled a stage")
+	}
+}

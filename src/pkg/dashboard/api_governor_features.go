@@ -530,7 +530,7 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 // Values of the features response's spektacularApply field (#9172).
 const (
 	spektacularApplyLive     = "live"     // runner/executor/probe rewired now
-	spektacularApplyDeferred = "deferred" // waiting for the busy hub executor; retried every cleanup tick
+	spektacularApplyDeferred = "deferred" // waiting for the busy hub executor; retried every stage worker tick
 	spektacularApplyRestart  = "restart"  // nothing wired to rewire; takes effect on next boot
 )
 

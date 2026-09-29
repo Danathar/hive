@@ -4618,6 +4618,19 @@ func (h *ContributeWSHub) cleanupLoop() {
 	if h.doneCh != nil {
 		defer close(h.doneCh)
 	}
+	// The stage worker has its own clock: CLI latency must not stall cleanup.
+	ctx, cancel := context.WithCancel(context.Background())
+	stageTicker := time.NewTicker(30 * time.Second)
+	stageDone := make(chan struct{})
+	go func() {
+		defer close(stageDone)
+		stageRunnerLoop(ctx, stageTicker.C, func() *Server { return h.server })
+	}()
+	defer func() {
+		cancel()
+		stageTicker.Stop()
+		<-stageDone
+	}()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -4680,7 +4693,9 @@ func (h *ContributeWSHub) cleanupLoop() {
 
 // tickLeaseLifecycle is the lease half of one cleanupLoop tick, in the order
 // the loop has always run it. It is a method so tests drive the exact
-// production order rather than a hand-copied one (#9143).
+// production order rather than a hand-copied one (#9143). The hub executor
+// and stage runner are not ticked here: stageRunnerLoop drives them on their
+// own worker so a slow poll cannot delay lease or websocket cleanup (#9144).
 func (h *ContributeWSHub) tickLeaseLifecycle(now time.Time) {
 	// #2568: reclaim wedged-but-connected task leases first (the backstop). A
 	// connection whose lastPong is still fresh (so the heartbeat sweep will NOT
@@ -4688,13 +4703,6 @@ func (h *ContributeWSHub) tickLeaseLifecycle(now time.Time) {
 	// "connected but wedged" case the issue describes; this releases its task
 	// through the SAME cooldown+generation-bump path a manual requeue uses.
 	h.reclaimExpiredLeases(now)
-
-	// #8303: drive the installed hub executor (launch, then retry or escalate
-	// a spent generation, #9143) and stage runner (advance on final). Nothing
-	// is installed unless runs.spektacular.enabled was set at boot.
-	if h.server != nil {
-		h.server.tickStageRunner(now)
-	}
 
 	// A run stage waiting on a taker must outlive leaseTTL; extend those
 	// BEFORE the prune below can drop them.

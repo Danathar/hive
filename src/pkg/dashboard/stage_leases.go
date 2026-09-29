@@ -26,7 +26,7 @@ import (
 // spektacular.LeaseRegistry structurally, and the runner reaches the hub
 // through the StageRunner interface below.
 
-// StageRunner is what the contribute hub's cleanup loop drives once per tick
+// StageRunner is what the contribute hub's stage worker drives once per tick
 // when a runner has been installed with SetStageRunner.
 type StageRunner interface {
 	Tick(ctx context.Context, now time.Time)
@@ -253,6 +253,10 @@ func (s *Server) IsPendingStageIdentity(identity string) bool {
 // tickStageRunner runs one tick of the installed runner and reports whether
 // one was installed.
 func (s *Server) tickStageRunner(now time.Time) bool {
+	return s.tickStageRunnerContext(context.Background(), now)
+}
+
+func (s *Server) tickStageRunnerContext(ctx context.Context, now time.Time) bool {
 	if s == nil {
 		return false
 	}
@@ -269,10 +273,33 @@ func (s *Server) tickStageRunner(now time.Time) bool {
 	e := s.stageExecutor
 	s.stageExecutorMu.Unlock()
 	if e != nil {
-		e.Tick(context.Background(), now)
+		e.Tick(ctx, now)
 	}
-	r.Tick(context.Background(), now)
+	// Executor jobs retain the lifecycle context and their own stage timeout;
+	// the shorter poll budget must not cancel an agent launched by e.Tick.
+	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	r.Tick(pollCtx, now)
 	return true
+}
+
+// stageRunnerLoop serializes polling on a dedicated worker. Slow ticks coalesce
+// instead of accumulating goroutines or delaying lease and websocket cleanup.
+// server is resolved on every tick, not once at start: the hub launches this
+// worker from its constructor, before callers that wire the server afterwards
+// have done so.
+func stageRunnerLoop(ctx context.Context, ticks <-chan time.Time, server func() *Server) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticks:
+			if ctx.Err() != nil {
+				return
+			}
+			server().tickStageRunnerContext(ctx, now)
+		}
+	}
 }
 
 // Artifact address spellings the dashboard reduces to the bare name. They

@@ -61,7 +61,7 @@ func TestFeaturesSpektacularChangeRewiresRunner(t *testing.T) {
 		t.Fatalf("unrelated save reported %q / rewired (calls=%d)", got, calls)
 	}
 
-	// A busy hub executor defers: the cleanup loop keeps retrying until it
+	// A busy hub executor defers: the stage worker keeps retrying until it
 	// applies, and stops once it has.
 	applied = false
 	if got, _ := featuresApply(t, s, map[string]any{"spektacularHubExecutor": true}); got != spektacularApplyDeferred || !s.SpektacularReconfigurePending() {

@@ -415,14 +415,15 @@ func TestImportRunPlanFanoutDisabledIsNoop(t *testing.T) {
 
 // TestHubExecutorSpendsStageBudgetUnderCleanupLoop is the #9143 regression: a
 // hub-executed spec stage whose agent never produces a final document — it
-// exits with the document still draft, or the CLI fails outright. Driven
-// through tickLeaseLifecycle, the cleanup loop's own order in which
-// keepPendingStageLeasesAlive re-arms the executor's lease on every tick, the
-// default budget of two must mint exactly one retry generation and then raise
-// one decision escalation, launch nothing further for two lease windows, and
-// keep the escalated run leased (not pruned) across a restart so a person can
-// act on it. Before the fix the keepalive re-armed the lease forever and
-// neither a retry nor an escalation ever happened.
+// exits with the document still draft, or the CLI fails outright. Driven by
+// the stage worker's tick and tickLeaseLifecycle (the cleanup loop's own
+// order, in which keepPendingStageLeasesAlive re-arms the executor's lease on
+// every tick), the default budget of two must mint exactly one retry
+// generation and then raise one decision escalation, launch nothing further
+// for two lease windows, and keep the escalated run leased (not pruned)
+// across a restart so a person can act on it. Before the fix the keepalive
+// re-armed the lease forever and neither a retry nor an escalation ever
+// happened.
 func TestHubExecutorSpendsStageBudgetUnderCleanupLoop(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -486,10 +487,12 @@ func TestHubExecutorSpendsStageBudgetUnderCleanupLoop(t *testing.T) {
 				}
 				return *l, true
 			}
-			// Every 30 s, as cleanupLoop does, for two lease windows; each tick
-			// waits for the executor's stage goroutine before the next.
+			// Every 30 s, as the stage worker and cleanupLoop do, for two lease
+			// windows; each tick waits for the executor's stage goroutine before
+			// the next.
 			now := start
 			for now.Before(start.Add(2 * leaseTTL)) {
+				s.tickStageRunner(now)
 				hub.tickLeaseLifecycle(now)
 				testutil.Eventually(t, 10*time.Second, func() bool {
 					return e.Status().Running == 0
@@ -562,6 +565,86 @@ func TestHubExecutorSpendsStageBudgetUnderCleanupLoop(t *testing.T) {
 				t.Fatalf("a fresh executor would relaunch the escalated stage: %+v, %v", stages, err)
 			}
 		})
+	}
+}
+
+// Hub shutdown cancels the stage worker's lifecycle context, and with it any
+// agent job the hub executor launched from that tick. That cancellation is not
+// a failed generation: it must not record a failure or spend the stage budget
+// (#9143), or every restart would burn a retry and eventually escalate.
+func TestHubExecutorShutdownDoesNotSpendStageBudget(t *testing.T) {
+	hub, s, _, _ := spekHub(t)
+	const runKey = spekRepo + "#9221"
+	start := time.Now()
+	admitTask := runAdmissionTaskPrefix + sanitizeReceiptSegment(runKey)
+	if err := hub.recordLeaseForKeyStage(runAdmissionIdentity, admitTask, spekRepo, 9221, spekRepo+"!"+runKey+":"+StageSpec, "triage", StageSpec, 1, start); err != nil {
+		t.Fatal(err)
+	}
+	e := NewSpekHubExecutor(s, config.RunsConfig{Spektacular: config.SpektacularConfig{Enabled: true}}, "copilot", "", nil, nil)
+	worktree := spekHubRunWorktreePath(e.Identity, runKey)
+	for _, dir := range []string{
+		filepath.Join(worktree, ".spektacular", "specs"),
+		filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// With no spec file on disk the only status call is the in-flight status
+	// capture. It blocks until the stage is canceled, so that goroutine
+	// records nothing after the test ends.
+	var captureOnce sync.Once
+	captureDone := make(chan struct{})
+	launched := make(chan struct{})
+	e.Exec = func(ctx context.Context, _ string, _ []string, name string, args ...string) ([]byte, error) {
+		switch name {
+		case "git":
+			return []byte("ok"), nil
+		case "spektacular":
+			if len(args) >= 3 && args[1] == "status" {
+				<-ctx.Done()
+				captureOnce.Do(func() { close(captureDone) })
+				return nil, ctx.Err()
+			}
+			return []byte("ok"), nil
+		}
+		close(launched)
+		<-ctx.Done()
+		return []byte("killed"), ctx.Err()
+	}
+	s.SetStageExecutor(e)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.Tick(ctx, start)
+	select {
+	case <-launched:
+	case <-time.After(10 * time.Second):
+		t.Fatal("hub executor did not launch the agent")
+	}
+	cancel()
+	testutil.Eventually(t, 10*time.Second, func() bool {
+		return e.Status().Running == 0
+	}, "hub executor stage did not stop on shutdown")
+	select {
+	case <-captureDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("status capture did not stop on shutdown")
+	}
+
+	if got := e.Status().LastError; got != "" {
+		t.Fatalf("shutdown recorded a stage failure: %q", got)
+	}
+	for _, action := range auditActions(t, hub) {
+		if action == agentaudit.AuditLeaseStageRetried || action == agentaudit.AuditLeaseStageEscalated {
+			t.Fatalf("shutdown spent the stage budget: %s", action)
+		}
+	}
+	hub.leaseMu.Lock()
+	l := hub.leaseForLocked(e.Identity, e.stageTaskID(spekHubStage{runKey: runKey, stage: StageSpec, gen: 1}))
+	hub.leaseMu.Unlock()
+	if l == nil || l.gen != 1 || l.stageRetries != 0 || !l.stageEscalatedAt.IsZero() {
+		t.Fatalf("lease after shutdown = %+v, want generation 1 unspent", l)
 	}
 }
 
@@ -1409,5 +1492,69 @@ func TestRunStageAccessorAutoApprovesDisabledImplementCheckpoint(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("auto implement approval audit not recorded: %+v", s.audit.Recent(10))
+	}
+}
+
+type blockingStageRunner struct{ started chan context.Context }
+
+func (r *blockingStageRunner) Tick(ctx context.Context, _ time.Time) {
+	r.started <- ctx
+	<-ctx.Done()
+}
+
+func TestStageRunnerWorker_CancelsAndSerializes(t *testing.T) {
+	s := &Server{}
+	r := &blockingStageRunner{started: make(chan context.Context, 2)}
+	s.SetStageRunner(r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); stageRunnerLoop(ctx, ticks, func() *Server { return s }) }()
+	ticks <- time.Now()
+	select {
+	case tickCtx := <-r.started:
+		if deadline, ok := tickCtx.Deadline(); !ok || time.Until(deadline) > 30*time.Second {
+			t.Fatal("tick has no bounded deadline")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not start")
+	}
+	// A blocked runner does not block the producer or start overlapping ticks.
+	ticks <- time.Now()
+	select {
+	case <-r.started:
+		t.Fatal("overlapping tick")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not cancel its active tick on shutdown")
+	}
+}
+
+type contextStageExecutor struct{ ctx context.Context }
+
+func (e *contextStageExecutor) Tick(ctx context.Context, _ time.Time) { e.ctx = ctx }
+func (e *contextStageExecutor) Status() FrontendSpektacularHubExecutor {
+	return FrontendSpektacularHubExecutor{}
+}
+
+func TestStageRunner_PollDoesNotCancelExecutorJobs(t *testing.T) {
+	s := &Server{}
+	e := &contextStageExecutor{}
+	s.SetStageExecutor(e)
+	s.SetStageRunner(&countingRunner{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.tickStageRunnerContext(ctx, time.Now())
+	if e.ctx == nil || e.ctx.Err() != nil {
+		t.Fatal("poll completion canceled executor jobs")
+	}
+	cancel()
+	if e.ctx.Err() != context.Canceled {
+		t.Fatal("executor jobs lost lifecycle cancellation")
 	}
 }

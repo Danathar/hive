@@ -289,10 +289,22 @@ type Plan struct {
 // runner always supplies the repo checkout/worktree that owns the artifact.
 type ExecFunc func(ctx context.Context, dir string, args []string) ([]byte, error)
 
-// BinaryExec returns an ExecFunc that runs binary with the given args.
+const binaryExecTimeout = 30 * time.Second
+const binaryExecWaitDelay = time.Second
+
+// BinaryExec returns an ExecFunc with a per-invocation deadline, including when
+// its caller has no deadline. Earlier caller deadlines still take precedence.
 func BinaryExec(binary string) ExecFunc {
+	return binaryExec(binary, binaryExecTimeout, binaryExecWaitDelay)
+}
+
+func binaryExec(binary string, timeout, waitDelay time.Duration) ExecFunc {
 	return func(ctx context.Context, dir string, args []string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 		cmd := exec.CommandContext(ctx, binary, args...)
+		// Descendants may inherit the output pipes after the CLI is killed.
+		cmd.WaitDelay = waitDelay
 		if strings.TrimSpace(dir) != "" {
 			cmd.Dir = dir
 		}
@@ -301,6 +313,9 @@ func BinaryExec(binary string) ExecFunc {
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		if err != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
 			return stdout.Bytes(), fmt.Errorf("spektacular %s: %w (stderr: %s)",
 				strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 		}

@@ -19,6 +19,18 @@ Spek campaign does not copy spek contents into Hive; `POST
 command, while Spek reloads the current state from its working files and
 spek backend.
 
+## Polling and timeouts
+
+The hub polls stages on a separate serial worker every 30 seconds. Slow polls
+coalesce instead of delaying contributor lease cleanup or websocket sweeps.
+Each poll has a 30-second budget; shutdown cancels the active poll. Agent jobs
+launched by the hub executor retain their configured stage execution timeout.
+
+Each CLI call through the stage runner's `BinaryExec` has a 30-second deadline
+(or the caller's earlier deadline), plus at most one second to drain inherited
+output pipes. Timeout errors retain partial stdout and report the context
+error. A poll stops visiting further stages once its context is canceled.
+
 ## Work sources
 
 Spek runs can start from any configured Hive work source. GitHub Issues and
@@ -134,7 +146,7 @@ when a dashboard save changes `runs` config (`rewireSpektacular`, #9172): the
 binary is re-probed, the stage runner and hub executor are rebuilt from the new
 settings, and turning Spektacular off removes them. A hub executor that is
 running a stage is never swapped out from under it; the change is deferred and
-retried on every hub cleanup tick until the executor is idle. The save
+retried on every stage worker tick until the executor is idle. The save
 response's `spektacularApply` field reports `live`, `deferred`, or `restart`
 (nothing wired to rewire; the change takes effect on the next boot), and the
 dashboard warns on the last two. A save the config volume refuses returns 500
@@ -178,7 +190,7 @@ the receipt; `pkg/dashboard` exposes its lease registry as a primitives-only
 surface on `*Server` (`VisitActiveStageLeases`, `AdvanceStageLease`,
 `RetryStageLease`, `RefuseStageLease`, `EscalateStageLease`, `ImportRunPlan`)
 and drives whatever `StageRunner` was installed with `SetStageRunner` from the
-contribute hub's cleanup tick. The dashboard never imports `pkg/spektacular`
+contribute hub's stage worker. The dashboard never imports `pkg/spektacular`
 (its internal-import ratchet); `pkg/spektacular.NewHubRunner` takes the
 server through the `LeaseRegistry` interface.
 
@@ -255,7 +267,7 @@ runs:
 
 ## What the runner does
 
-Every 30 seconds (the contribute hub's cleanup tick) the runner looks at every
+Every 30 seconds (the contribute hub's stage worker) the runner looks at every
 lease that carries a stage. For each `spec` or `plan` stage whose poll interval
 has elapsed it first resolves the lease's repository working directory: the
 hub executor's single run worktree at `$HIVE_WORKSPACE_DIR/runs/<runKey>/work`
@@ -432,7 +444,8 @@ id is cached for the stage and used for subsequent status/export calls.
   does an agent exit that leaves the plan `stale` (that run is parked as
   `stale_plan`, above). A relay-held stage whose relay vanishes is re-offered
   at the same generation when its lease lapses; that is not a spent
-  generation.
+  generation. Hub shutdown cancels a running agent job without recording a
+  failure or spending its generation.
 - The hub executor also treats a live lease already owned by its own identity as
   restartable work when no in-flight process is tracked for that lease
   key/generation and the generation is not escalated.

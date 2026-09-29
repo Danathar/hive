@@ -194,6 +194,9 @@ func (r *Runner) Tick(ctx context.Context, now time.Time) TickResult {
 	}
 	live := make(map[string]bool, len(stages))
 	for _, st := range stages {
+		if ctx.Err() != nil {
+			return res
+		}
 		key := stageKey(st)
 		live[key] = true
 		state := r.stages[key]

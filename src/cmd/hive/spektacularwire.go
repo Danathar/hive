@@ -77,7 +77,7 @@ var spektacularRewireMu sync.Mutex
 // owns the in-flight bookkeeping that keeps that stage's lease alive and its
 // worktree unswept, so a busy executor whose settings changed is never swapped
 // out from under the stage. Then nothing is touched and false is returned; the
-// dashboard retries on every cleanup tick until the executor is idle. An
+// dashboard retries on every stage worker tick until the executor is idle. An
 // executor whose settings did not change is kept as is.
 func rewireSpektacular(cfg *config.Config, srv *dashboard.Server, logger *slog.Logger, cloneAuth dashboard.SpekHubCloneAuth) bool {
 	if cfg == nil || srv == nil {
