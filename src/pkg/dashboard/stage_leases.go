@@ -502,7 +502,7 @@ func (s *Server) ResolveRunStageWorkDir(runKey, stage, identity, repo string, ge
 	}
 	candidates := []string{spekHubRunWorktreePath(identity, runKey), runStageWorktreePath(identity, runKey, stage, gen)}
 	if strings.TrimSpace(identity) != "" && strings.TrimSpace(repo) != "" {
-		candidates = append(candidates, filepath.Join(agentWorkspaceRoot, identity, filepath.FromSlash(strings.TrimSpace(repo))))
+		candidates = append(candidates, filepath.Join(currentAgentWorkspaceRoot(), identity, filepath.FromSlash(strings.TrimSpace(repo))))
 	}
 	for _, candidate := range candidates {
 		if candidate == "" {

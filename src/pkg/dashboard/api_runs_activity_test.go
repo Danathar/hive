@@ -98,16 +98,14 @@ func TestRunLiveActivityUsesNewestReceiptWrite(t *testing.T) {
 
 func TestRunLiveActivityPrefersAgentOutputOverHubLeaseRenewal(t *testing.T) {
 	base := time.Date(2026, 9, 26, 19, 14, 0, 0, time.UTC)
-	oldRoot := agentWorkspaceRoot
 	root, err := os.MkdirTemp(".", "run-activity-agent-root-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		agentWorkspaceRoot = oldRoot
 		_ = os.RemoveAll(root)
 	})
-	agentWorkspaceRoot = root
+	setAgentWorkspaceRootForTest(t, root)
 
 	runKey := "kubestellar/console#23615"
 	worktree := spekHubRunWorktreePath(config.DefaultSpektacularHubExecutorIdentity, runKey)
@@ -161,16 +159,14 @@ func TestSpekActivityEventArtifactMissing(t *testing.T) {
 
 func TestNewestAgentOutputActivityRejectsSymlink(t *testing.T) {
 	base := time.Date(2026, 9, 26, 19, 14, 0, 0, time.UTC)
-	oldRoot := agentWorkspaceRoot
 	root, err := os.MkdirTemp(".", "run-activity-symlink-root-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		agentWorkspaceRoot = oldRoot
 		_ = os.RemoveAll(root)
 	})
-	agentWorkspaceRoot = root
+	setAgentWorkspaceRootForTest(t, root)
 
 	runKey := "kubestellar/console#23615"
 	worktree := spekHubRunWorktreePath(config.DefaultSpektacularHubExecutorIdentity, runKey)

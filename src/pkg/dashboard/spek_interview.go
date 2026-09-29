@@ -468,7 +468,7 @@ func (s *Server) spekInterviewWorktree(key string) (string, error) {
 			}
 		})
 	}
-	root := agentWorkspaceRoot
+	root := currentAgentWorkspaceRoot()
 	if entries, err := os.ReadDir(root); err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() {
