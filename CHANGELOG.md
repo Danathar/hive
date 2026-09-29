@@ -11,6 +11,15 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.85.1)
+
+### Fixed
+
+- The signed-commit reconciler (#9369) no longer misses an unsigned agent commit sitting under a later Verified commit ([#9531](https://github.com/hivecommons/hive/issues/9531)). It used to stop as soon as the PR's head was Verified, so a human signing their own commit on top of an agent's plain-git push hid that unsigned commit from it entirely, leaving the PR silently `BLOCKED` under `required_signatures`; it now walks every commit oldest to newest, treats the PR as needing signing whenever any commit (not just the head) is unverified, and — when a person's commit sits in the unsigned range — posts the one blocked comment naming both the unsigned commit and the human commit that can't be re-authored.
+- The README "Quick apply (all manifests)" block now applies `dashboard-route-rbac.yaml` and `sandbox-job-rbac.yaml` before the Deployment ([#9532](https://github.com/hivecommons/hive/issues/9532)). Without them the `hive` ServiceAccount did not exist and no pod started.
+- The README Kubernetes ports table now matches the manifests ([#9533](https://github.com/hivecommons/hive/issues/9533)). The hive pod serves the dashboard and `/api/*` on 3002. It no longer lists 3001, which is the hub's port, and it says ttyd on 7681 is loopback only and reached through `/terminal`.
+- CI flake coverage for dashboard workspace cleanup, sandbox state transitions, and fixture startup now uses race-safe workspace root access and deterministic readiness/completion signals instead of short polling windows.
+
 ## 2026-09-29 (v5.85.0)
 
 ### Added
