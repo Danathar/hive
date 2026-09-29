@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.83.0)
+
+### Added
+
+- `hive-open-issue` and the issue-request watcher now accept an optional `--parent <n>` / `parent` field on `issue` requests; when set, the newly created issue is linked to `n` as a real GitHub sub-issue via `POST /repos/{owner}/{repo}/issues/{n}/sub_issues`, so a split-out child shows up on the parent's sub-issue list and completion progress bar instead of only a plain-text "Part of #N" line ([#9435](https://github.com/hivecommons/hive/issues/9435)). A failed link (parent missing, GitHub's sub-issue cap reached, transient API error) is logged and recorded in the request result but never blocks the child issue from being created.
+- The dashboard has a new 📬 PR Throughput card showing how many PRs the hive opened, merged and closed without merging over the last 1h / 6h / 12h / 24h / 48h / 7d or all time, labelled with how far back the recorded data goes ([#9427](https://github.com/hivecommons/hive/issues/9427)). It is backed by a new `GET /api/pr-throughput?hours=N` endpoint (`hours=0` = all time) ([#9431](https://github.com/hivecommons/hive/issues/9431), [#9432](https://github.com/hivecommons/hive/issues/9432)) and by durable all-time counters in `/data/pr-throughput-counters.json` that survive restarts and audit log rotation ([#9430](https://github.com/hivecommons/hive/issues/9430)). The audit trail now records a `pr_closed` entry when the hive closes a PR without merging, and `pr_merged` entries carry `path=sweep|queue|relay` so merges the hive decided on alone can be told apart from merges a person queued ([#9429](https://github.com/hivecommons/hive/issues/9429)).
+
 ## 2026-09-29 (v5.82.0)
 
 ### Added
