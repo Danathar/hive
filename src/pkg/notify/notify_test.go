@@ -319,7 +319,7 @@ func TestSend_DiscordOnly_CorrectJSONPayload(t *testing.T) {
 		Discord: &config.DiscordConfig{Webhook: srv.URL + "/discord"},
 	}
 	n := New(cfg, silentLogger())
-	n.Send("Incident", "Cluster is down", PriorityHigh)
+	n.Send("@everyone", "Cluster is down <@&123>", PriorityHigh)
 
 	if !waitForN(1, reqs, mu, asyncWaitTimeout) {
 		t.Fatal("timed out waiting for discord request")
@@ -338,9 +338,19 @@ func TestSend_DiscordOnly_CorrectJSONPayload(t *testing.T) {
 		t.Fatalf("failed to parse discord JSON: %v (body: %q)", err, string(r.body))
 	}
 
-	wantContent := "**Incident**\nCluster is down"
+	wantContent := "**@everyone**\nCluster is down <@&123>"
 	if got, _ := payload["content"].(string); got != wantContent {
 		t.Errorf("discord content = %q; want %q", got, wantContent)
+	}
+	mentions, ok := payload["allowed_mentions"].(map[string]any)
+	if !ok {
+		t.Fatalf("allowed_mentions = %#v, want object", payload["allowed_mentions"])
+	}
+	if parse, ok := mentions["parse"].([]any); !ok || len(parse) != 0 {
+		t.Errorf("allowed_mentions.parse = %#v, want empty array", mentions["parse"])
+	}
+	if flags, ok := payload["flags"].(float64); !ok || flags != DiscordSuppressEmbeds {
+		t.Errorf("flags = %#v, want %d", payload["flags"], DiscordSuppressEmbeds)
 	}
 }
 

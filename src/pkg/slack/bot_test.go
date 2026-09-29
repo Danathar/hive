@@ -344,11 +344,14 @@ func TestListenFiltersChannelAndMarksBots(t *testing.T) {
 
 func TestMarkdownToMrkdwn(t *testing.T) {
 	tests := map[string]string{
-		"**bold**":                        "*bold*",
-		"keep `**code**` literal":         "keep `**code**` literal",
-		"mix **bold** and `code` here":    "mix *bold* and `code` here",
-		"see [docs](https://example.com)": "see <https://example.com|docs>",
-		"keep `[x](y)` literal":           "keep `[x](y)` literal",
+		"**bold**":                                  "*bold*",
+		"keep `**code**` literal":                   "keep `**code**` literal",
+		"mix **bold** and `code` here":              "mix *bold* and `code` here",
+		"see [docs](https://example.com)":           "see <https://example.com|docs>",
+		"keep `[x](y)` literal":                     "keep `[x](y)` literal",
+		"escape & <@U123> <!channel> >":             "escape &amp; &lt;@U123&gt; &lt;!channel&gt; &gt;",
+		"see [<docs>](https://example.com?a=1&b=2)": "see <https://example.com?a=1&b=2|&lt;docs&gt;>",
+		"keep `<!channel> &` literal":               "keep `<!channel> &` literal",
 	}
 	for in, want := range tests {
 		if got := markdownToMrkdwn(in); got != want {

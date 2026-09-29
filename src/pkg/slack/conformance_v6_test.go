@@ -49,7 +49,7 @@ func TestV6ConformanceSlack_OutboundMessagesAreScrubbed(t *testing.T) {
 	defer ts.Close()
 
 	b := newTestBot(ts.URL)
-	if err := b.Send("notify " + v6SlackLeakyToken + " " + v6SlackLeakyCanary); err != nil {
+	if err := b.Send("notify " + v6SlackLeakyToken + " " + v6SlackLeakyCanary + " <!channel> <@U123> a<b && c>d"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	for _, secret := range []string{v6SlackLeakyToken, v6SlackLeakyCanary} {
@@ -59,6 +59,17 @@ func TestV6ConformanceSlack_OutboundMessagesAreScrubbed(t *testing.T) {
 	}
 	if !strings.Contains(wire, "[REDACTED]") {
 		t.Fatalf("v6 conformance (canary/secret scrubbing): Slack payload did not carry shared redaction marker: %q", wire)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(wire, "POST /chat.postMessage\n")), &payload); err != nil {
+		t.Fatalf("v6 conformance (mention escaping): invalid Slack payload: %v", err)
+	}
+	text := payload["text"]
+	if strings.Contains(text, "<!channel>") || strings.Contains(text, "<@U123>") {
+		t.Fatalf("v6 conformance (mention escaping): Slack payload contains an active mention: %q", text)
+	}
+	if !strings.Contains(text, "&lt;!channel&gt;") || !strings.Contains(text, "&lt;@U123&gt;") {
+		t.Fatalf("v6 conformance (mention escaping): Slack payload did not escape mrkdwn controls: %q", text)
 	}
 }
 

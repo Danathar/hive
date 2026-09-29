@@ -162,8 +162,9 @@ func (n *Notifier) sendDiscordWebhook(title, message string) {
 		return
 	}
 	payload := map[string]any{
-		"content": fmt.Sprintf("**%s**\n%s", title, message),
-		"flags":   DiscordSuppressEmbeds,
+		"content":          fmt.Sprintf("**%s**\n%s", title, message),
+		"allowed_mentions": map[string]any{"parse": []string{}},
+		"flags":            DiscordSuppressEmbeds,
 	}
 
 	body, err := json.Marshal(payload)

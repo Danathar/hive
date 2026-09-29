@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -565,12 +566,16 @@ func markdownToMrkdwn(s string) string {
 		}
 		if !inCode && s[i] == '[' {
 			if text, url, width, ok := parseMarkdownLink(s[i:]); ok {
-				out.WriteString("<" + url + "|" + text + ">")
+				out.WriteString("<" + url + "|" + escapeMrkdwn(text) + ">")
 				i += width
 				continue
 			}
 		}
-		out.WriteByte(s[i])
+		if !inCode {
+			out.WriteString(escapeMrkdwn(string(s[i])))
+		} else {
+			out.WriteByte(s[i])
+		}
 		i++
 	}
 	return out.String()
@@ -586,7 +591,18 @@ func parseMarkdownLink(s string) (text, url string, width int, ok bool) {
 		return "", "", 0, false
 	}
 	closeURL += closeText + 2
-	return s[1:closeText], s[closeText+2 : closeURL], closeURL + 1, true
+	linkURL := s[closeText+2 : closeURL]
+	parsed, err := neturl.Parse(linkURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || strings.ContainsAny(linkURL, "<>|\r\n\t ") {
+		return "", "", 0, false
+	}
+	return s[1:closeText], linkURL, closeURL + 1, true
+}
+
+// escapeMrkdwn quotes Slack control characters in untrusted text. Link URLs
+// are handled separately because they are delimiters inside a mrkdwn link.
+func escapeMrkdwn(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
 func splitSlackMessage(s string) []string {

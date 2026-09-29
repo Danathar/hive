@@ -48,7 +48,7 @@ func TestV6ConformanceDiscord_OutboundMessagesAreScrubbed(t *testing.T) {
 	defer ts.Close()
 
 	b := newTestBot(ts, "C1")
-	if err := b.SendMessage("notify " + v6DiscordLeakyToken + " " + v6DiscordLeakyCanary); err != nil {
+	if err := b.SendMessage("notify " + v6DiscordLeakyToken + " " + v6DiscordLeakyCanary + " @everyone <@&123>"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	for _, secret := range []string{v6DiscordLeakyToken, v6DiscordLeakyCanary} {
@@ -58,6 +58,20 @@ func TestV6ConformanceDiscord_OutboundMessagesAreScrubbed(t *testing.T) {
 	}
 	if !strings.Contains(wire, "[REDACTED]") {
 		t.Fatalf("v6 conformance (canary/secret scrubbing): Discord payload did not carry shared redaction marker: %q", wire)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(wire, "POST /api/v10/channels/C1/messages\n")), &payload); err != nil {
+		t.Fatalf("v6 conformance (mention suppression): invalid Discord payload: %v", err)
+	}
+	mentions, ok := payload["allowed_mentions"].(map[string]any)
+	if !ok {
+		t.Fatalf("v6 conformance (mention suppression): allowed_mentions = %#v, want object", payload["allowed_mentions"])
+	}
+	if parse, ok := mentions["parse"].([]any); !ok || len(parse) != 0 {
+		t.Fatalf("v6 conformance (mention suppression): allowed_mentions.parse = %#v, want empty array", mentions["parse"])
+	}
+	if flags, ok := payload["flags"].(float64); !ok || flags != 4 {
+		t.Fatalf("v6 conformance (mention suppression): flags = %#v, want 4", payload["flags"])
 	}
 }
 

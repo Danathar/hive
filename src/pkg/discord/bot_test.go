@@ -177,12 +177,22 @@ func TestSendMessage_CorrectURLAndHeaders(t *testing.T) {
 		t.Errorf("Content-Type: got %q, want %q", gotContentType, "application/json")
 	}
 
-	var payload map[string]string
+	var payload map[string]any
 	if err := json.Unmarshal([]byte(gotBody), &payload); err != nil {
 		t.Fatalf("body is not valid JSON: %v – raw: %s", err, gotBody)
 	}
 	if payload["content"] != "hello world" {
 		t.Errorf("body content: got %q, want %q", payload["content"], "hello world")
+	}
+	mentions, ok := payload["allowed_mentions"].(map[string]any)
+	if !ok {
+		t.Fatalf("allowed_mentions = %#v, want object", payload["allowed_mentions"])
+	}
+	if parse, ok := mentions["parse"].([]any); !ok || len(parse) != 0 {
+		t.Errorf("allowed_mentions.parse = %#v, want empty array", mentions["parse"])
+	}
+	if flags, ok := payload["flags"].(float64); !ok || flags != 4 {
+		t.Errorf("flags = %#v, want 4", payload["flags"])
 	}
 }
 
