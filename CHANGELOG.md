@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.86.0)
+
+### Added
+
+- Add an internal testutil ratchet that prevents pkg/dashboard from gaining new top-level pkg dependencies without an allowlist update and PR justification.
+- Add ADR-0019 and agent policy guidance for escalating stalled work to direction, spec, signal, or meta-issues.
+
+### Fixed
+
+- Ensure dashboard chat commands from owner-authenticated token, internal, and open/dev paths carry a verified user identity instead of falling back to `local`.
+
 ## 2026-09-29 (v5.85.2)
 
 ### Changed
