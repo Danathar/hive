@@ -105,12 +105,12 @@ func (m *signedMock) resetCalls() {
 
 const prCommitsCall = "GET /repos/o/r/pulls/77/commits"
 
-// A Verified head is already mergeable under required_signatures: nothing to
-// rewrite, nothing to say.
+// Every commit Verified is already mergeable under required_signatures:
+// nothing to rewrite, nothing to say.
 func TestSignedReconcile_VerifiedHeadIsNoop(t *testing.T) {
 	m, c := reconcileFixture(t, true)
 	m.prCommits = []map[string]any{
-		prCommitJSON(agentSHA, false, "", "quality@hive.kubestellar.io"),
+		prCommitJSON(verifiedSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
 		prCommitJSON(m.headSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
 	}
 
@@ -131,7 +131,7 @@ func TestSignedReconcile_SignsAgentTailOnLastVerified(t *testing.T) {
 	m, c := reconcileFixture(t, true)
 	m.mergeBase = verifiedSHA // GitHub: merge base of sha...head is the sha
 	m.prCommits = []map[string]any{
-		prCommitJSON("1111000000000000000000000000000000000001", false, "", "quality@hive.kubestellar.io"),
+		prCommitJSON("1111000000000000000000000000000000000001", true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
 		prCommitJSON(verifiedSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
 		prCommitJSON(agentSHA, false, "", "quality@hive.kubestellar.io"),
 		prCommitJSON(m.headSHA, false, "", "4744647+hive-app[bot]@users.noreply.github.com"),
@@ -163,6 +163,39 @@ func TestSignedReconcile_SignsAgentTailOnLastVerified(t *testing.T) {
 	}
 	if got := c.signedReconcile.settledHead("o/r#77"); got != reconcileOID {
 		t.Errorf("the signed commit must be remembered as the settled head, got %q", got)
+	}
+}
+
+// #9531, hive-only case: an agent's unsigned commit sits under a Verified head
+// the hive itself authored. The head being Verified must not hide it; the
+// range from the unsigned commit through the head is re-authored on top of
+// the Verified commit before it.
+func TestSignedReconcile_SignsUnverifiedCommitUnderVerifiedHiveHead(t *testing.T) {
+	m, c := reconcileFixture(t, true)
+	m.mergeBase = verifiedSHA
+	m.prCommits = []map[string]any{
+		prCommitJSON(verifiedSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
+		prCommitJSON(agentSHA, false, "", "quality@hive.kubestellar.io"),
+		prCommitJSON(m.headSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
+	}
+
+	c.reconcileSignedCommits(context.Background())
+
+	if m.callIndex("GET /repos/o/r/compare/"+verifiedSHA+"...") < 0 {
+		t.Fatalf("signBranch must compare from the commit before the first unverified one:\n%s", strings.Join(m.calls, "\n"))
+	}
+	if m.graphql == nil {
+		t.Fatal("createCommitOnBranch was never called")
+	}
+	input := m.graphql["variables"].(map[string]any)["input"].(map[string]any)
+	if input["expectedHeadOid"] != verifiedSHA {
+		t.Errorf("the signed commit must sit on the verified commit before the unsigned one, got parent %v", input["expectedHeadOid"])
+	}
+	if m.refPatch == nil || m.refPatch["sha"] != reconcileOID {
+		t.Errorf("the PR branch must be moved to the signed commit, got %v", m.refPatch)
+	}
+	if len(m.posted) != 0 {
+		t.Errorf("a successful signing must not comment: %v", m.posted)
 	}
 }
 
@@ -209,6 +242,40 @@ func TestSignedReconcile_HumanCommitInTailSkipsAndCommentsOnce(t *testing.T) {
 	restarted.reconcileSignedCommits(context.Background())
 	if len(m.posted) != 1 {
 		t.Errorf("the marker comment must stop a repeat after a restart, got %d", len(m.posted))
+	}
+}
+
+// A verified head is not enough: a human can sign their own commit on top of
+// an agent's unsigned one, which is invisible to a check that only looks at
+// the newest Verified commit and stops there (#9531). The pass must still
+// find the unverified commit underneath, refuse to rewrite past the human's
+// work, and comment once naming both the unsigned sha and the blocking
+// commit, rather than staying silent because the head itself is Verified.
+func TestSignedReconcile_UnverifiedCommitUnderVerifiedHeadSkipsAndComments(t *testing.T) {
+	m, c := reconcileFixture(t, true)
+	unverifiedAgent := "eeee0000000000000000000000000000000abc1"
+	m.prCommits = []map[string]any{
+		prCommitJSON(verifiedSHA, true, reconcileBot, "1+hive-app[bot]@users.noreply.github.com"),
+		prCommitJSON(unverifiedAgent, false, "", "quality@hive.kubestellar.io"),
+		prCommitJSON(m.headSHA, true, "alice", "alice@example.com"),
+	}
+
+	c.reconcileSignedCommits(context.Background())
+
+	if m.callIndex("GET /repos/o/r/compare/") >= 0 || m.graphql != nil || m.refPatch != nil {
+		t.Fatalf("a verified head over an unverified commit must not be rewritten:\n%s", strings.Join(m.calls, "\n"))
+	}
+	if len(m.posted) != 1 {
+		t.Fatalf("exactly one comment expected, got %d: %v", len(m.posted), m.posted)
+	}
+	if !strings.Contains(m.posted[0], shortSHA(unverifiedAgent)) {
+		t.Errorf("the comment must name the unsigned commit %s: %q", unverifiedAgent, m.posted[0])
+	}
+	if !strings.Contains(m.posted[0], "alice@example.com") {
+		t.Errorf("the comment must name the human commit on top: %q", m.posted[0])
+	}
+	if got := c.signedReconcile.settledHead("o/r#77"); got != m.headSHA {
+		t.Errorf("the PR must be recorded settled only once the comment is posted, got %q", got)
 	}
 }
 
