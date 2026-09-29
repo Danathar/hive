@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.81.1)
+
+### Changed
+
+- The Kubernetes Kustomize base (`src/deploy/k8s/kustomization.yaml`) now uses `labels` with `includeSelectors: true` instead of the deprecated `commonLabels` ([#9333](https://github.com/hivecommons/hive/issues/9333)). `kustomize build` no longer prints a deprecation warning for the base and the `standalone` and `openshift` overlays. The rendered manifests are unchanged, so existing installs apply cleanly.
+
+### Fixed
+
+- The README Kubernetes prerequisites now name ingress-nginx instead of nginx-ingress ([#9438](https://github.com/hivecommons/hive/issues/9438)). The example Ingress uses `nginx.ingress.kubernetes.io/*` annotations, which F5's NGINX Ingress Controller ignores, so the 50m body size and 3600s SSE timeouts did not apply on that controller.
+- `src/docs/general-technical-review.md` now lists every manifest under `src/deploy/k8s/`, including `sandbox-job-rbac.yaml` and `error-pages.yaml`, and its Kubernetes install path includes the `hive` ServiceAccount and RBAC ([#9439](https://github.com/hivecommons/hive/issues/9439)).
+
 ## 2026-09-29 (v5.81.0)
 
 ### Added
