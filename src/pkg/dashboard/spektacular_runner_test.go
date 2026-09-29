@@ -95,9 +95,7 @@ func spekHub(t *testing.T) (*ContributeWSHub, *Server, *beads.Store, *hookCaptur
 	resetLifecycleStore()
 	hub, s := covK2Hub(t)
 	s.contributeHub = hub
-	oldRoot := agentWorkspaceRoot
-	agentWorkspaceRoot = t.TempDir()
-	t.Cleanup(func() { agentWorkspaceRoot = oldRoot })
+	setAgentWorkspaceRootForTest(t, t.TempDir())
 	old := runReceiptsDir
 	runReceiptsDir = filepath.Join(t.TempDir(), "receipts")
 	t.Cleanup(func() { runReceiptsDir = old })
@@ -143,7 +141,7 @@ func spekLease(t *testing.T, hub *ContributeWSHub, stage string, now time.Time) 
 	if err := os.MkdirAll(runStageWorktreePath(spekIdentity, spekRunKey, stage, spekGen), 0o755); err != nil {
 		t.Fatalf("create run worktree: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(agentWorkspaceRoot, spekIdentity, filepath.FromSlash(spekRepo)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(currentAgentWorkspaceRoot(), spekIdentity, filepath.FromSlash(spekRepo)), 0o755); err != nil {
 		t.Fatalf("create shared checkout: %v", err)
 	}
 }
@@ -446,7 +444,7 @@ func TestHubExecutorSpendsStageBudgetUnderCleanupLoop(t *testing.T) {
 			worktree := spekHubRunWorktreePath(e.Identity, runKey)
 			for _, dir := range []string{
 				filepath.Join(worktree, ".spektacular", "specs"),
-				filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git"),
+				filepath.Join(currentAgentWorkspaceRoot(), e.Identity, filepath.FromSlash(spekRepo), ".git"),
 			} {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatal(err)
@@ -584,7 +582,7 @@ func TestHubExecutorShutdownDoesNotSpendStageBudget(t *testing.T) {
 	worktree := spekHubRunWorktreePath(e.Identity, runKey)
 	for _, dir := range []string{
 		filepath.Join(worktree, ".spektacular", "specs"),
-		filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git"),
+		filepath.Join(currentAgentWorkspaceRoot(), e.Identity, filepath.FromSlash(spekRepo), ".git"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
