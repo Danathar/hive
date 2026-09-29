@@ -11,6 +11,43 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.85.1)
+
+### Fixed
+
+- The signed-commit reconciler (#9369) no longer misses an unsigned agent commit sitting under a later Verified commit ([#9531](https://github.com/hivecommons/hive/issues/9531)). It used to stop as soon as the PR's head was Verified, so a human signing their own commit on top of an agent's plain-git push hid that unsigned commit from it entirely, leaving the PR silently `BLOCKED` under `required_signatures`; it now walks every commit oldest to newest, treats the PR as needing signing whenever any commit (not just the head) is unverified, and — when a person's commit sits in the unsigned range — posts the one blocked comment naming both the unsigned commit and the human commit that can't be re-authored.
+- The README "Quick apply (all manifests)" block now applies `dashboard-route-rbac.yaml` and `sandbox-job-rbac.yaml` before the Deployment ([#9532](https://github.com/hivecommons/hive/issues/9532)). Without them the `hive` ServiceAccount did not exist and no pod started.
+- The README Kubernetes ports table now matches the manifests ([#9533](https://github.com/hivecommons/hive/issues/9533)). The hive pod serves the dashboard and `/api/*` on 3002. It no longer lists 3001, which is the hub's port, and it says ttyd on 7681 is loopback only and reached through `/terminal`.
+- CI flake coverage for dashboard workspace cleanup, sandbox state transitions, and fixture startup now uses race-safe workspace root access and deterministic readiness/completion signals instead of short polling windows.
+
+## 2026-09-29 (v5.85.0)
+
+### Added
+
+- Add `hivectl hives reissue` for profile-safe single-hive token rotation and guard legacy `contribute-move` when profiles are present. ([#9241](https://github.com/hivecommons/hive/issues/9241))
+- Add deterministic PR-open prechecks for changelog/DCO failures and clearer fork-PR red-check guidance so stuck contributor and agent PRs fail before review.
+- Add shared CI automation to close linked issues when PRs merge to non-default branches.
+- Add a scanner supersession sweep for open PRs whose claimed issue was closed by another merged PR, and allow the fallback fixer to update hive-created sibling branches.
+
+### Changed
+
+- Changed the CLI pin bump workflow to skip patch-only releases by default and only open PRs for major/minor updates.
+
+### Fixed
+
+- Stuck-red PR "re-dispatches" are now actually delivered to an agent ([#9472](https://github.com/hivecommons/hive/issues/9472)). The reaper and the merge-watcher re-engage hook previously only incremented a counter, so a pull request could reach the escalation comment claiming "6 automated fix re-dispatches" without a single agent ever having been told about it; the budget is now charged only when a targeted `FIX-BEFORE-NEW` kick is accepted, is spaced by the owner's own slowest cadence rather than a flat ten minutes, and is rerouted to `review.fixer_agent` when the owning agent is paused in every governor mode or otherwise unreachable.
+- The escalation fix-loop breaker no longer counts CI breakage that is not the pull request's fault ([#9473](https://github.com/hivecommons/hive/issues/9473)). A failing check that is red across four or more open PRs is treated as a shared/base-branch incident: it no longer advances the attempt counter or starts the staleness clock, retries against an unchanged tree are deduplicated instead of counted, the clock only starts once CI has settled rather than while checks are still running, and a parked PR is automatically un-parked (label removed, comment posted) once its head goes green or the shared incident clears.
+- The `escalation_red` hook payload finally sets `agent` ([#9474](https://github.com/hivecommons/hive/issues/9474)). The hook catalog and `src/docs/hooks.md` have always documented the field, but nothing populated it, so every `when: t.agent == "..."` rule silently never matched; red-PR ownership is now resolved from the audit log (falling back to `review.fixer_agent` for unattributed PRs) and the payload additionally carries `attrs.head_sha` and `attrs.excerpt`.
+- The escalated-PR reviewer lane (REPAIR / DE-ESCALATE / RECOMMEND-CLOSE) is now reachable at ACMM L5/L6. The pack `reviewer`'s `kick_template: reviewer-queue.md` shadowed the role-based routing, so nothing ever worked `needs-human` PRs. The packs now ship a separate template-less `adjudicator` agent (`role: reviewer`, `ISSUES_AND_PRS`, 30m cadence) whose kick is `reviewer-lane.md`. The hub also lists escalated PRs that are conflicted, green, or pending, with their mergeability and CI state, under a new `escalated` key in `ci-failing.json`, so they no longer drop out of the lane once their checks stop failing ([#9477](https://github.com/hivecommons/hive/issues/9477)).
+- Hive commits now carry the identity of the lane that made them ([#9478](https://github.com/hivecommons/hive/issues/9478)). Per-UID agents share one bridged `~/.gitconfig` and one working tree per repo, so a `git config user.*` write by any agent re-attributed every lane's commits and `Signed-off-by` trailers (scanner-lane commits were signed off as `sec-check`). The manager now pins `GIT_AUTHOR_*` and `GIT_COMMITTER_*` to `<agent> <agent>@$HIVE_GIT_BOT_EMAIL_DOMAIN` (default `hive.kubestellar.io`) at launch. These variables override every git config layer, so author, committer and DCO sign-off now name the right lane.
+- Route conflicted hive-created PRs into fix-lane ownership, including dirty mergeability evidence and scanner fallback for paused or unavailable owners.
+
+## 2026-09-29 (v5.84.2)
+
+### Fixed
+
+- The CI failure excerpt fed to fix-lane kicks and escalation comments now sorts failing check runs deterministically and reads up to 8 of them (was a random 2), filling lines round-robin so one noisy shard can no longer crowd out every other failing check, and drops a bare "Process completed with exit code N." annotation whenever the same run has a more informative one ([#9475](https://github.com/hivecommons/hive/issues/9475)).
+
 ## 2026-09-29 (v5.84.1)
 
 ### Fixed
