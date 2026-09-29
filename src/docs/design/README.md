@@ -20,6 +20,17 @@ that status is the thing to check before treating a page as current behaviour:
 
 ## Records
 
+- [The advisor lane](advisor-lane.md) — **design only (v6).** A second, independently chosen
+  model that reviews each turn a hub-launched agent finishes and can object before the agent
+  takes its next step, on Claude Code, OMP, Copilot CLI and Codex CLI — the four backends that
+  expose a synchronous turn-end hook. Hive owns the evaluator, the severity vocabulary (aside,
+  concern, blocker) and the record; each backend gets a thin adapter projected at launch, never
+  an edit to the operator's own harness config. Read it for how the lane differs from trajectory
+  review (at the turn, speaks to the agent, cannot pause it), what it inherits (the trajectory
+  lane's endpoint resolution and fail-open posture, the per-agent home, the dashboard's gates)
+  and the one thing it must not add (a credential in the agent's session). Also introduces a
+  minimal `model_roles` map so "the advisor model" is named once, with migration of the four
+  existing second-model fields recorded as deliberately absent.
 - [The operator-facing admin MCP](admin-mcp.md) — **partly shipped (v6 phase 3).** The complement to
   [task-mcp.md](task-mcp.md): hive administration exposed as Model Context Protocol tools for an
   operator's assistant — phase 1 ships the MCP endpoint on the dashboard mux, a stdio `cmd/` binary beside
