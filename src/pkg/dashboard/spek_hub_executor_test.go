@@ -115,7 +115,7 @@ func TestSpekHubExecutorPrepareWorkspaceCreatesCloneAndWorktree(t *testing.T) {
 			if _, err := e.prepareWorkspace(context.Background(), st); err != nil {
 				t.Fatalf("prepareWorkspace: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git")); err != nil {
+			if _, err := os.Stat(filepath.Join(currentAgentWorkspaceRoot(), e.Identity, filepath.FromSlash(spekRepo), ".git")); err != nil {
 				t.Fatalf("shared clone missing: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(spekHubRunWorktreePath(e.Identity, st.runKey), ".spektacular")); err != nil {
@@ -180,7 +180,7 @@ func TestSpekHubExecutorTickRestartsOwnStalledLeaseAndReportsRunning(t *testing.
 	if err := os.MkdirAll(filepath.Join(worktree, ".spektacular"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(agentWorkspaceRoot, config.DefaultSpektacularHubExecutorIdentity, filepath.FromSlash(spekRepo), ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(currentAgentWorkspaceRoot(), config.DefaultSpektacularHubExecutorIdentity, filepath.FromSlash(spekRepo), ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	launched := make(chan struct{})
@@ -439,7 +439,7 @@ func TestSpekHubExecutorEnvUsesAllowlistedValuesAndRunToken(t *testing.T) {
 		k, v, _ := strings.Cut(entry, "=")
 		byKey[k] = v
 	}
-	if byKey["HOME"] != filepath.Join(agentWorkspaceRoot, e.Identity, "home") {
+	if byKey["HOME"] != filepath.Join(currentAgentWorkspaceRoot(), e.Identity, "home") {
 		t.Fatalf("HOME = %q", byKey["HOME"])
 	}
 	if byKey["PATH"] != "/usr/bin" || byKey["LANG"] != "C.UTF-8" || byKey["LC_ALL"] != "C.UTF-8" || byKey["HTTPS_PROXY"] != "http://proxy.example" {
@@ -735,7 +735,7 @@ func TestSpekHubExecutorDoesNotRelaunchWhenDocumentAlreadyFinal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(planDir, "plan.md"), []byte("# plan"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(spekRepo), ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(currentAgentWorkspaceRoot(), e.Identity, filepath.FromSlash(spekRepo), ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	agentLaunched := false

@@ -19,9 +19,7 @@ import (
 func runInterviewTestServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
 	s, _ := runsTestServer(t)
-	oldRoot := agentWorkspaceRoot
-	agentWorkspaceRoot = t.TempDir()
-	t.Cleanup(func() { agentWorkspaceRoot = oldRoot })
+	setAgentWorkspaceRootForTest(t, t.TempDir())
 	runKey := "myorg/repo1#9024"
 	identity := config.DefaultSpektacularHubExecutorIdentity
 	if err := s.contributeHub.recordLeaseForKeyStage(identity, "run-hub-9024", "myorg/repo1", 9024, runKey, "trusted", StageSpec, 4, time.Now()); err != nil {

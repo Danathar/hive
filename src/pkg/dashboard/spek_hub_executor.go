@@ -252,7 +252,7 @@ func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 		}
 	}
 	e.mu.Unlock()
-	root := filepath.Join(agentWorkspaceRoot, e.Identity, "runs")
+	root := filepath.Join(currentAgentWorkspaceRoot(), e.Identity, "runs")
 	runDirs, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -295,7 +295,7 @@ func (e *SpekHubExecutor) sweepStaleWorktrees(ctx context.Context) error {
 }
 
 func (e *SpekHubExecutor) sharedRepoDirs() []string {
-	root := filepath.Join(agentWorkspaceRoot, e.Identity)
+	root := filepath.Join(currentAgentWorkspaceRoot(), e.Identity)
 	owners, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -350,11 +350,11 @@ func spekHubRunWorktreePath(identity, runKey string) string {
 	if identity == "" || runKey == "" {
 		return ""
 	}
-	return filepath.Join(agentWorkspaceRoot, identity, "runs", sanitizeRunPromptPath(runKey), "work")
+	return filepath.Join(currentAgentWorkspaceRoot(), identity, "runs", sanitizeRunPromptPath(runKey), "work")
 }
 
 func existingRunWorktreeDirs(identity, runKey string) []string {
-	root := filepath.Join(agentWorkspaceRoot, identity, "runs", sanitizeRunPromptPath(runKey))
+	root := filepath.Join(currentAgentWorkspaceRoot(), identity, "runs", sanitizeRunPromptPath(runKey))
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -1129,7 +1129,7 @@ func (e *SpekHubExecutor) startRenewing(ctx context.Context, taskID string) func
 }
 
 func (e *SpekHubExecutor) prepareWorkspace(ctx context.Context, st spekHubStage) (string, error) {
-	repoDir := filepath.Join(agentWorkspaceRoot, e.Identity, filepath.FromSlash(st.repo))
+	repoDir := filepath.Join(currentAgentWorkspaceRoot(), e.Identity, filepath.FromSlash(st.repo))
 	if err := os.MkdirAll(filepath.Dir(repoDir), 0o755); err != nil {
 		return "", err
 	}
@@ -1183,7 +1183,7 @@ func (e *SpekHubExecutor) prepareWorkspace(ctx context.Context, st spekHubStage)
 }
 
 func copyPreviousSpektacularProject(identity, runKey, worktree string) (bool, error) {
-	runRoot := filepath.Join(agentWorkspaceRoot, identity, "runs", sanitizeRunPromptPath(runKey))
+	runRoot := filepath.Join(currentAgentWorkspaceRoot(), identity, "runs", sanitizeRunPromptPath(runKey))
 	entries, err := os.ReadDir(runRoot)
 	if err != nil {
 		return false, nil
@@ -1243,7 +1243,7 @@ func (e *SpekHubExecutor) cloneAuthArgs(ctx context.Context, repo, dir string) (
 }
 
 func (e *SpekHubExecutor) executorEnv(appToken string) ([]string, error) {
-	home := filepath.Join(agentWorkspaceRoot, e.Identity, "home")
+	home := filepath.Join(currentAgentWorkspaceRoot(), e.Identity, "home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, err
 	}
