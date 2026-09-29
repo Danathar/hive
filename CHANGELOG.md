@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.86.2)
+
+### Fixed
+
+- Stop the dashboard from claiming an agent terminal has a login URL when an inference backend 401/outage only printed `/login` advice.
+
 ## 2026-09-29 (v5.86.1)
 
 ### Fixed
