@@ -16,6 +16,7 @@ func actionableForRepo(actionable *github.ActionableResult, repo string) *github
 	out.Issues = github.IssueResultFromItems(filterIssuesByRepo(actionable.Issues.Items, repo))
 	out.PRs = github.PRResult{
 		Items:       filterPRsByRepo(actionable.PRs.Items, repo),
+		Attributed:  filterPRsByRepo(actionable.PRs.Attributed, repo),
 		StaleDrafts: filterPRsByRepo(actionable.PRs.StaleDrafts, repo),
 	}
 	out.PRs.Count = len(out.PRs.Items)

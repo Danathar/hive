@@ -3,6 +3,7 @@ package scheduler
 import (
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
@@ -14,6 +15,7 @@ import (
 )
 
 type Scheduler struct {
+	surgeDuration        func() (time.Duration, bool)
 	cfg                  *config.Config
 	primer               *knowledge.Primer
 	inception            *knowledge.InceptionEngine

@@ -26,6 +26,52 @@ Follow ADR-0019 when an item is stalled (any `hold` for more than 48h, or at lea
 - `needs-signal`: when the same check fails three or more times with no code cause, file a `ci`/`kind/test` issue labelled `needs-signal` for the missing guard or CI evidence.
 - `meta-issue`: when three or more open items share a root cause, file one `meta` tracker, link the children, and stop working them individually.
 
+## Surge-coach lens (flow health)
+
+Read the runtime `HIVE_FLOW:` line before choosing an audit. `HIVE_FLOW: clogged`
+means prioritize a flow-health write-up for this kick. `HIVE_FLOW: normal` means
+skip this lens and do the normal documentation audit. `HIVE_FLOW: unknown` (or
+an absent line) is insufficient evidence: do the normal audit, and do not claim
+that the hive is healthy or launch an unbounded discovery scan.
+
+The initial signals are continuous observed SURGE of at least 3 days, sampled
+mean time to merge over 7 days for attributed PRs merged in the trailing 14 days,
+or oldest actionable issue/PR of at least 14 days. SURGE is hive-wide; item ages
+and merge samples cover only authorized repos in the kick snapshot. The merge
+sample is bounded and may be cached or incomplete, and no merges means unknown,
+not zero. Do not describe the sample as all PRs or infer a cause from dwell alone.
+
+When clogged:
+
+1. Stay within the authorized repos and any repo-scoped cadence target. Use the
+   kick evidence first, then bounded, read-only GitHub issue/PR queries where
+   permitted by the existing policy. Respect API budgets; disclose unavailable,
+   stale, or truncated data instead of inventing counts or scanning other repos.
+2. Bucket the observed backlog per repo: hold-parked / needs-human, red-CI,
+   review-starved, missing-grant, agent-side (budget, paused/off/no cadence), and
+   threshold-mistuned (explicit versus scaled thresholds or ladder inversion).
+   Missing merge grants and governor settings require direct evidence; a stuck
+   PR alone does not prove either. Count held work separately from actionable
+   work. Distinguish overlapping blockers so percentages do not double-count.
+3. Rank the top 3 supported causes with counts, denominators, age ranges, links,
+   and confidence. Describe concentration across the authorized repos, not a
+   fleet-wide causal percentage inferred from a snapshot. Separate observations
+   from hypotheses and say which evidence would confirm each hypothesis.
+4. Recommend systemic changes at org and per-repo scope: reviewer coverage,
+   triage sweeps, CI repair, merge-policy/grant review, or threshold/cadence
+   rebalancing. Give the responsible human role, expected effect, and a measurable
+   follow-up criterion. Propose governor changes as documentation text only.
+5. Record one deduplicated flow-health finding using this template's existing
+   write permissions: advisory beads at L2, issues only where this mode permits
+   them (L3+), and documentation PRs only where permitted, retaining L5 holds.
+   This lens grants no extra write authority. Reuse an existing finding for the
+   same root cause; reap only your own guide beads after re-verifying that the
+   blocker cleared and the queue drained. Unknown telemetry is not resolution.
+
+Never merge, edit thresholds/cadences, change grants, assign reviewers, remove
+holds, or create configuration/code PRs as part of this lens. All fixes here are
+recommendations for a human; normal write gates and repository scope still apply.
+
 ## Command Verification (MANDATORY)
 
 Before writing, publishing, or proposing any shell command in documentation or a finding:

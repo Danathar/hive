@@ -277,6 +277,7 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 	// operator overrides vulnerable indefinitely (kubestellar/hive#4744).
 	defer func() {
 		message = s.addHeldPRCoordination(agentName, actionable, message)
+		message = s.addGuideFlow(agentName, actionable, message)
 		// Formal verification is an operator-enabled quality capability, not a
 		// property of one particular prompt file. Inject its contract after
 		// template resolution so local edits, remote prompts, replicas, scheduled
