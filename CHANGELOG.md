@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.94.0)
+
+### Added
+
+- Standalone hives (no hub link) can send dashboard NPS responses to the hivecommons relay when the operator opts in (`HIVE_NPS_ENABLED=true`) and sets `hub.nps_relay_url` / `HIVE_NPS_RELAY_URL`; the hive generates and self-registers an Ed25519 install key (stored 0600 under `/data/secrets`) and signs every submission, so no per-install token is issued or configured. A hub with a pull secret (`hub.nps_relay_pull_secret` / `HIVE_NPS_RELAY_PULL_SECRET`) periodically pulls, deduplicates and acks those entries, which appear in `GET /api/admin/nps` tagged `source: relay` with their `install_id` and are labeled "unverified install" in the admin card. Everything defaults off; see `src/docs/nps.md` (#9619; v5 port of #9634).
+
+### Fixed
+
+- Scanner kick templates now tell the agent to move on after pushing a PR instead of polling CI; infra-red or queued checks are deferred to the automerge sweep (#9673).
+
 ## 2026-09-29 (v5.93.0)
 
 ### Added
