@@ -1,1 +1,0 @@
-- Stop the dashboard from claiming an agent terminal has a login URL when an inference backend 401/outage only printed `/login` advice.
