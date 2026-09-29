@@ -162,6 +162,13 @@ type Client struct {
 	selfAuthorizationHoldEnabled func(repo string) bool
 	selfAuthDisabledLoggedMu     sync.Mutex
 	selfAuthDisabledLogged       map[string]bool
+	// reporterTrustHoldEnabled and reporterTrusted are the live config seams
+	// for the #9665 reporter-trust hold (pr_reporter_trust.go). Both nil
+	// until the boot wiring installs them; nil means "off" and "nobody",
+	// respectively, so an unwired client never holds.
+	reporterTrustMu          sync.RWMutex
+	reporterTrustHoldEnabled func(repo string) bool
+	reporterTrusted          func(login, association string) bool
 	// prSignedCommits, when set and returning true, makes the PR-request watcher
 	// re-author each head branch through createCommitOnBranch before opening the
 	// PR, so the commit is GitHub-signed (Verified) and authored by the App bot.
@@ -1148,6 +1155,19 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		// exactly as before, and the EXCLUDE polarity stays the sole property
 		// of governor.labels.exempt (the dashboard Labels tab) — which
 		// therefore wins over the require gate by construction.
+		// #9665 reporter trust runs FIRST: a stranger's issue needs a triage
+		// label before anything else is asked of it. Counted apart from the
+		// generic filter bucket so the dashboard can name the reason. Hive-
+		// and bot-filed issues are not "reporters" in this sense; they go
+		// through #5117 on the PR side instead, so only human authors are
+		// judged here.
+		if ra, ok := issueFilter.(ReporterAdmitter); ok && ra.ReporterTrustEnabled() && c.isHumanAuthor(issue.GetUser()) {
+			if !ra.AdmitsReporter(labels, safeGetLogin(issue.GetUser()), issue.GetAuthorAssociation()) {
+				breakdown.ReporterTriage++
+				continue
+			}
+		}
+
 		if !issueFilter.Admits(labels) {
 			breakdown.Filtered++
 			continue
@@ -3064,11 +3084,16 @@ type RepoIssueBreakdown struct {
 	HiveAdvisory        int `json:"hive_advisory"`
 	DependencyDashboard int `json:"dependency_dashboard"`
 	Filtered            int `json:"filtered"`
-	Other               int `json:"other"`
+	// ReporterTriage counts open issues from reporters the hive does not
+	// trust that are waiting for a maintainer's triage label (#9665). Kept
+	// apart from Filtered so the repo card can say "N awaiting reporter
+	// triage" rather than folding them into the generic filter bucket.
+	ReporterTriage int `json:"reporter_triage,omitempty"`
+	Other          int `json:"other"`
 }
 
 func (b RepoIssueBreakdown) Total() int {
-	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.Other
+	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.ReporterTriage + b.Other
 }
 
 type RepoPRBreakdown struct {

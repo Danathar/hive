@@ -875,6 +875,26 @@ Semantics:
 
 Both polarities are enforced at **enumeration** — the point where GitHub issues become the hive's actionable set — not in the prompt. A filtered issue never enters the queue, never appears in a kick, never triggers plan-from-label, and cannot be re-selected by a confused (or prompt-injected) agent re-listing the repo. Kick prompts additionally state the active require policy so agents know the list is intentionally short. Both lists are edited on the Labels tab; an active require gate is also noted read-only under **Repositories**, and hub-managed hives can receive `issue_filter` with their project config over the heartbeat.
 
+### Reporter trust: who filed it, not only what it is labelled
+
+The two polarities above look only at labels, so a maintainer's issue and a first-time stranger's issue are admitted by the same rule — and at ACMM L6 a stranger's request can be worked and merged on green CI with nobody looking. The require polarity fixes that only by making *everyone*, maintainers included, hand-label their own issues first. **Reporter trust** ([#9665](https://github.com/hivecommons/hive/issues/9665)) splits the two:
+
+```yaml
+project:
+  issue_filter:
+    reporter_trust:
+      enabled: true                                  # off by default — existing hives change nothing
+      trusted_associations: [OWNER, MEMBER, COLLABORATOR]   # the default; CONTRIBUTOR is deliberately not in it
+      trusted_logins: [external-maintainer]          # trusted whatever GitHub says about them
+      untrusted_require_labels: [triage/accepted]    # the default
+github:
+  reporter_trust_hold: true                          # optional; nil follows reporter_trust.enabled
+```
+
+- **Admission.** GitHub reports an `author_association` on every issue. A reporter in `trusted_associations` (or whose login is in `trusted_logins`) has their issues admitted by the ordinary rules. Anyone else's issue is not actionable until a maintainer adds one of `untrusted_require_labels`. This runs after the hold/exempt checks and **before** `require_labels`, so the ordinary allow-list still applies to trusted reporters afterwards — "everyone needs an approval label" stays expressible exactly as before. Hive- and bot-filed issues are not judged here; the [#5117 self-authorization gate](labels-and-control-signals.md) owns those on the PR side. An unknown reporter (no login, or no association in the payload) is treated as untrusted.
+- **Merge.** A PR whose rationale (its closing or referencing links, or the request's declared issue list) traces to an untrusted reporter's issue receives `hold` at **every** ACMM level, including L6, together with a marked notice explaining who asked. Any one untrusted citation holds. A human removes the label; Hive never auto-releases a reporter-trust hold — the level-hold release path recognises the notice and leaves the label, and holdguard re-holds on a new head SHA. `github.reporter_trust_hold` follows `reporter_trust.enabled` unless set explicitly; `project.repo_policies[].reporter_trust_hold` overrides per repo; `HIVE_REPORTER_TRUST_HOLD` locks it from the environment, exactly like the #5117 knobs.
+- **Where you see it.** Both halves are edited in the dashboard: **Settings → Labels → Reporter trust** (the switch, the association checkboxes, extra logins, triage labels) and **Settings → Repos** (the hold, with the same all-repos default / per-repo override / inherit rows as #5117). An active gate is stated in the read-only note under **Repositories**, and each repo card counts issues **awaiting reporter triage** separately from generic filter refusals. Holds carry the reason in the PR notice and in the `agent_pr_created` audit entry (`reporter_trust_held`, `reporter_login`, `reporter_association`).
+
 **Not the same thing as the contribute filters.** `hub.contribute_labels_mode` + its label list gate which issues are *handed out to external contributors* over `/contribute` — they have never gated the hive's **own** agents, so an operator who allow-listed a queue label there (a common setup for routing labeled issues to contributors) still had a hive whose own scanner could work every other open issue. `project.issue_filter.require_labels` is the agent-side gate; configure both if you want the same label to govern both lanes.
 
 ## When to add what

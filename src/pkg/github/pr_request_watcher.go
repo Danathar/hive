@@ -109,6 +109,10 @@ type PRResponse struct {
 	// handleOnePRRequest. A duplicate request opened no PR, so there is nothing
 	// of this request's to have authorised.
 	SelfAuthorized bool `json:"self_authorized,omitempty"`
+	// ReporterTrustHeld is true when the #9665 reporter-trust gate held the
+	// PR: its rationale traces to an issue filed by a reporter this hive does
+	// not trust. Applied at every ACMM level, released only by a human.
+	ReporterTrustHeld bool `json:"reporter_trust_held,omitempty"`
 	// SignedCommit is the oid of the GitHub-signed commit the watcher re-authored
 	// the head branch to before opening the PR (github.app_signed_commits). The
 	// agent's own commits are no longer on the branch: this one carries their
@@ -564,7 +568,18 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 			resp.SelfAuthorized = selfAuth.Held
 		}
 	}
-	if !res.DuplicateTree && (holdByLevel || selfAuth.Held) {
+	// #9665 adds a third, level-independent reason to hold: the rationale
+	// traces to an issue filed by a reporter this hive does not trust. Unlike
+	// #5117 it IS evaluated at hold-gated levels too, because its notice is
+	// what stops the level-hold release from lifting the label on promotion
+	// to L6 — the whole point is that a stranger's request waits for a human
+	// at every level. Same duplicate-tree precedence as the other two.
+	var reporter ReporterTrust
+	if !res.DuplicateTree && c.reporterTrustHoldActive(req.Repo) {
+		reporter = c.EvaluateReporterTrust(ctx, req.Repo, title, body, req.IssueN)
+		resp.ReporterTrustHeld = reporter.Held
+	}
+	if !res.DuplicateTree && (holdByLevel || selfAuth.Held || reporter.Held) {
 		if lerr := c.AddLabels(ctx, req.Repo, res.Number, []string{"hold"}); lerr != nil {
 			// A missing hold label is a policy failure, not a cosmetic one. Keep
 			// the request queued: the next bounded retry deduplicates the existing
@@ -578,6 +593,12 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 				slog.String("repo", req.Repo), slog.Int("number", res.Number),
 				slog.String("rationale_repo", selfAuth.Repo), slog.Int("rationale_issue", selfAuth.Issue),
 				slog.String("reason", selfAuth.Reason), slog.String("agent", req.Agent))
+		} else if reporter.Held && !holdByLevel {
+			c.logger.Info("pr-request watcher: held PR — its rationale traces to an issue from a reporter this hive does not trust",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number),
+				slog.String("rationale_repo", reporter.Repo), slog.Int("rationale_issue", reporter.Issue),
+				slog.String("reporter", reporter.Reporter), slog.String("association", reporter.Association),
+				slog.String("agent", req.Agent))
 		} else {
 			c.logger.Info("pr-request watcher: applied hold label (hold-gated ACMM level)",
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("agent", req.Agent))
@@ -604,6 +625,18 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", cerr.Error()))
 		}
 	}
+	// The reporter-trust notice is posted whenever that gate held, even
+	// alongside a level notice: it is the release provenance that tells the
+	// L6 promotion path this hold is a human's to lift, so a level hold that
+	// also carried a reporter-trust reason must not shed the label on
+	// promotion. Best-effort like the #5117 notice — the label is the
+	// enforcement, and the release path re-evaluates and re-posts if needed.
+	if reporter.Held && !res.DuplicateTree && !res.AlreadyExisted {
+		if cerr := c.CreateIssueComment(ctx, req.Repo, res.Number, reporterTrustNotice(reporter)); cerr != nil {
+			c.logger.Warn("pr-request watcher: reporter-trust-held PR but could not post the explanation",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", cerr.Error()))
+		}
+	}
 
 	// Audit the creation UNCONDITIONALLY (not gated by the trailer toggle) —
 	// this is the durable answer to "which backend/model produced this PR?".
@@ -626,6 +659,9 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		"url", res.URL,
 		"reused", strconv.FormatBool(res.AlreadyExisted),
 		"self_authorized", strconv.FormatBool(selfAuth.Held),
+		"reporter_trust_held", strconv.FormatBool(reporter.Held),
+		"reporter_login", reporter.Reporter,
+		"reporter_association", reporter.Association,
 		"duplicate_tree", strconv.FormatBool(res.DuplicateTree))
 	c.writePRResult(path, resp)
 	// Success (or reuse of an existing PR) — consume the request so it isn't

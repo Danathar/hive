@@ -19,6 +19,21 @@ type IssueAdmitter interface {
 	Admits(labels []string) bool
 }
 
+// ReporterAdmitter is the optional reporter-trust half of admission
+// (hivecommons/hive#9665). A filter that implements it is asked, BEFORE
+// Admits, whether the issue's reporter may have it worked without triage.
+// config.IssueFilterConfig implements it; the zero-value filter admits
+// everyone, so existing hives change nothing.
+type ReporterAdmitter interface {
+	// AdmitsReporter reports whether an issue with these labels, filed by
+	// login with this GitHub author_association, may be worked.
+	AdmitsReporter(labels []string, login, association string) bool
+	// ReporterTrustEnabled reports whether the gate is switched on at all, so
+	// a refusal can be counted as "awaiting reporter triage" rather than as
+	// an ordinary filter refusal.
+	ReporterTrustEnabled() bool
+}
+
 // admitAllIssues is the filter used when none has been installed. It preserves
 // the pre-existing zero-value behaviour of config.IssueFilterConfig, where an
 // unset filter admits every issue.
