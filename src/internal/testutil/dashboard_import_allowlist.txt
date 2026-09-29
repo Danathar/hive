@@ -5,7 +5,9 @@
 # in hivecommons/hive#5565: new github.com/hivecommons/hive/pkg/<x> imports
 # from pkg/dashboard must route through an existing seam or be added here with
 # PR justification; removed imports must be deleted so the ratchet tightens.
+# v6-only seams (admin MCP, log scrub, mentions, output schema, standby, task MCP) added on forward-merge; see hivecommons/hive#9643.
 github.com/hivecommons/hive/pkg/acmmadvisor
+github.com/hivecommons/hive/pkg/adminmcp
 github.com/hivecommons/hive/pkg/advisory
 github.com/hivecommons/hive/pkg/agent
 github.com/hivecommons/hive/pkg/agentparse
@@ -28,7 +30,10 @@ github.com/hivecommons/hive/pkg/hubbackup
 github.com/hivecommons/hive/pkg/inferencehealth
 github.com/hivecommons/hive/pkg/ioscan
 github.com/hivecommons/hive/pkg/knowledge
+github.com/hivecommons/hive/pkg/logscrub
+github.com/hivecommons/hive/pkg/mention
 github.com/hivecommons/hive/pkg/notify
+github.com/hivecommons/hive/pkg/outputschema
 github.com/hivecommons/hive/pkg/planning
 github.com/hivecommons/hive/pkg/policies
 github.com/hivecommons/hive/pkg/promptsrc
@@ -39,6 +44,8 @@ github.com/hivecommons/hive/pkg/rotation
 github.com/hivecommons/hive/pkg/scheduler
 github.com/hivecommons/hive/pkg/skillreg
 github.com/hivecommons/hive/pkg/spokebackup
+github.com/hivecommons/hive/pkg/standby
+github.com/hivecommons/hive/pkg/taskmcp
 github.com/hivecommons/hive/pkg/terminalassert
 github.com/hivecommons/hive/pkg/timeline
 github.com/hivecommons/hive/pkg/tokens
