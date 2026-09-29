@@ -2332,6 +2332,19 @@
        features instead of one feature with parts, so the rule stays reserved
        for the section boundary and keeps meaning what it means. */
     .config-subgroup { font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; opacity: 0.75; margin: var(--sp-7) var(--sp-0) var(--sp-4); }
+    /* Question auto-close section and its live schedule table (#9584). */
+    .qa-section { margin: var(--sp-7) var(--sp-0); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+    .qa-section-title { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: var(--sp-3); }
+    .qa-hours { margin-top: var(--sp-5); }
+    .qa-schedule { margin-top: var(--sp-5); }
+    .qa-schedule-label { font-size: var(--fs-2xs); color: var(--muted); margin-bottom: var(--sp-3); }
+    .qa-note { font-size: var(--fs-2xs); color: var(--muted); }
+    .qa-note.warn { color: var(--yellow); }
+    .qa-table { width: 100%; border-collapse: collapse; font-size: var(--fs-2xs); }
+    .qa-table thead tr { text-align: left; color: var(--muted); border-bottom: 1px solid var(--border); }
+    .qa-table th, .qa-table td { padding: var(--sp-2) var(--sp-5); }
+    .qa-table th:first-child, .qa-table td:first-child { padding-left: var(--sp-0); }
+    .qa-table th:last-child, .qa-table td:last-child { padding-right: var(--sp-0); }
     .config-subgroup:first-of-type { margin-top: var(--sp-2); }
 
     .config-stat-row { padding: var(--sp-3) var(--sp-0); border-bottom: 1px solid var(--border); }
@@ -28076,7 +28089,8 @@ function burnAreaChart() {
             </div>
           </div>
         </div>
-        ${renderGovReplanSection((_configState.data || {}).replan || {})}`;
+        ${renderGovReplanSection((_configState.data || {}).replan || {})}
+        ${renderGovQuestionAutocloseSection((_configState.data || {}).question_autoclose || {})}`;
     }
 
     // renderGovReplanSection renders the stall-replan lane settings: the
@@ -28100,6 +28114,82 @@ function burnAreaChart() {
           </div>
           <div class="config-field"><label>Max replans per plan <span class="config-info">i<span class="config-tooltip">Caps replans per plan before the lane stops and escalates to a human. 0 means the default (5).</span></span></label><input type="number" min="0" step="1" value="${rp.max_replans || 0}" placeholder="5" data-change-action="markDirty" data-arg0="replan" data-arg1="max_replans" data-arg-types="s,s,N"></div>
         </div>`;
+    }
+
+    // renderGovQuestionAutocloseSection renders the question auto-close
+    // toggle (hivecommons/hive#9584 dashboard follow-up): once the hive has
+    // answered a `question`-labelled issue, it closes automatically after
+    // an objection window unless the author reacts 👎. Values are marked
+    // dirty under the 'question-autoclose' section, which the generic Save
+    // dispatcher PUTs to /api/config/governor/question-autoclose. The live
+    // schedule table is loaded separately (read-only, its own endpoint) via
+    // loadQuestionAutocloseSchedule, scheduled with setTimeout the same way
+    // renderGovFeatures kicks off loadRotationHeadroom.
+    function renderGovQuestionAutocloseSection(qa) {
+      qa = qa || {};
+      const qaOn = qa.enabled === true;
+      setTimeout(() => { if (qaOn) loadQuestionAutocloseSchedule(); }, 0);
+      return `
+        <div class="qa-section">
+          <div class="qa-section-title">Question Auto-Close</div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${qaOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="question-autoclose" data-key="enabled"></div>
+            <span class="config-toggle-label">Auto-close answered questions <span class="config-info">i<span class="config-tooltip">Once the hive posts an answer on a question-labelled issue, it closes the issue after the window below unless the author reacts 👎 to the answer. Off by default.</span></span></span>
+          </div>
+          <div class="config-field qa-hours"><label>Objection window (hours) <span class="config-info">i<span class="config-tooltip">How long an answered question stays open for the author to object before it is closed. Minimum 1 hour; default 4.</span></span></label><input type="number" min="1" step="1" value="${qa.hours || 4}" placeholder="4" data-change-action="markDirty" data-arg0="question-autoclose" data-arg1="hours" data-arg-types="s,s,N"></div>
+          <div class="qa-schedule">
+            <div class="qa-schedule-label">Live schedule</div>
+            <div id="qa-schedule-host">${qaOn ? '<div class="qa-note">Loading…</div>' : '<div class="qa-note">Enable auto-close to see the live schedule.</div>'}</div>
+          </div>
+        </div>`;
+    }
+
+    // renderQuestionAutocloseScheduleTable renders the live schedule as a
+    // plain text-only table — every field comes from GitHub (repo name,
+    // issue number, timestamps) and is rendered through esc(), never as raw
+    // innerHTML, so an issue in a repo the hive watches cannot inject markup
+    // into the dashboard.
+    function renderQuestionAutocloseScheduleTable(entries) {
+      entries = entries || [];
+      if (entries.length === 0) {
+        return '<div class="qa-note">Nothing scheduled right now.</div>';
+      }
+      const rows = entries.map(e => `
+        <tr>
+          <td>${esc(e.repo || '')}#${esc(String(e.issue || ''))}</td>
+          <td>${esc(e.answered_at || '')}</td>
+          <td>${esc(e.closes_at || '')}</td>
+          <td>${esc(e.state || '')}</td>
+        </tr>`).join('');
+      return `
+        <table class="qa-table">
+          <thead>
+            <tr>
+              <th>Issue</th>
+              <th>Answered</th>
+              <th>Closes</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    // loadQuestionAutocloseSchedule fetches the live schedule and paints it
+    // into the placeholder renderGovQuestionAutocloseSection left behind.
+    // Errors render as plain text via esc(), matching loadRotationHeadroom's
+    // failure path.
+    async function loadQuestionAutocloseSchedule() {
+      const host = document.getElementById('qa-schedule-host');
+      if (!host) return;
+      try {
+        const resp = await fetch('/api/config/governor/question-autoclose/schedule');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
+        host.innerHTML = renderQuestionAutocloseScheduleTable(data.entries);
+      } catch (e) {
+        host.innerHTML = '<div class="qa-note warn">Schedule unavailable: ' + esc(e.message) + '</div>';
+      }
     }
 
     function projectObservabilityPlatformsChanged(el) {

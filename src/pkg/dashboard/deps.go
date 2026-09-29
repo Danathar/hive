@@ -207,6 +207,13 @@ type Dependencies struct {
 	// into this binary (#8361). cmd/hive backs it with the extwork registry;
 	// nil means none, and the Features panel says so.
 	ExternalExec ExternalExecution
+	// QuestionAutoclose is the live question auto-close schedule (#9584),
+	// read only by GET /api/config/governor/question-autoclose/schedule;
+	// every write to governor.question_autoclose goes through Config like
+	// any other setting. cmd/hive adapts questionclose.Manager to this
+	// consumer-defined interface so pkg/dashboard does not import it. Nil in
+	// bare test Dependencies.
+	QuestionAutoclose QuestionAutocloseSchedule
 }
 
 type NousState struct {
