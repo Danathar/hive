@@ -1,1 +1,0 @@
-- Prevent automerge from treating freshly pushed heads as green before expected CI check-runs have started.
