@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.84.0)
+
+### Added
+
+- `src/scripts/comment-merged-refs.sh`'s post-merge sweep now auto-closes a parent issue once every one of its GitHub sub-issues (#9435) is closed, posting a comment first that lists each sub-issue and the PR(s) that closed it; applies to human-filed parents too, and anything later found broken/missing gets its own new issue rather than reopening the parent ([#9449](https://github.com/hivecommons/hive/issues/9449)).
+
+### Fixed
+
+- Fixed contributor agent knowledge downloads sending the combined, comma-separated `HIVE_REGISTRATION_TOKEN` value to every hub instead of just that hub's own token, which made every knowledge export request fail (HTTP redirect to login) once a contributor was configured with more than one hub ([#9442](https://github.com/hivecommons/hive/issues/9442)). `fetch_knowledge_export` now accepts a per-hub token and both the startup fetch and the periodic refresh loop pair each hub URL with the matching token from `HIVE_REGISTRATION_TOKEN`, in the same comma-separated order as `HIVE_HUB`.
+
 ## 2026-09-29 (v5.83.0)
 
 ### Added
