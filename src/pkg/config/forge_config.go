@@ -92,3 +92,24 @@ func (g GitHubConfig) SelfAuthorizationHoldEnabledAtLevel(acmmLevel int) bool {
 func (g GitHubConfig) SelfAuthorizationHoldEnvOverrideSet() bool {
 	return g.selfAuthorizationHoldEnvOverride != nil
 }
+
+// ReporterTrustHoldEnabled reports whether the #9665 reporter-trust hold is
+// active hive-wide. Env wins, then an explicit config value, then the gate's
+// own enabled flag: switching reporter_trust on covers both admission and
+// merge unless the operator says otherwise. It never depends on ACMM level —
+// holding a stranger's request for a human is the point at L6.
+func (g GitHubConfig) ReporterTrustHoldEnabled(gateEnabled bool) bool {
+	if g.reporterTrustHoldEnvOverride != nil {
+		return *g.reporterTrustHoldEnvOverride
+	}
+	if g.ReporterTrustHold == nil {
+		return gateEnabled
+	}
+	return *g.ReporterTrustHold
+}
+
+// ReporterTrustHoldEnvOverrideSet reports whether HIVE_REPORTER_TRUST_HOLD is
+// currently forcing the effective value.
+func (g GitHubConfig) ReporterTrustHoldEnvOverrideSet() bool {
+	return g.reporterTrustHoldEnvOverride != nil
+}

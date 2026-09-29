@@ -9346,6 +9346,7 @@
           hive_advisory: 'Issues that belong to the Hive advisory/backlog lane, not the ordinary work lane',
           dependency_dashboard: 'Dependency-dashboard issues grouped separately from ordinary actionable work',
           filtered: 'Open issues skipped by the configured project.issue_filter label policy',
+          reporter_triage: 'Open issues from reporters this hive does not trust (not an owner, member or collaborator) that are waiting for a maintainer to add the triage label (#9665)',
           other: 'Open issues that did not land in an actionable, held, advisory, dependency dashboard or filtered bucket'
         },
         prs: {
@@ -9370,6 +9371,7 @@
             ['hive_advisory', 'advisory'],
             ['dependency_dashboard', 'dependency dashboard'],
             ['filtered', 'filtered'],
+            ['reporter_triage', 'awaiting reporter triage'],
             ['other', 'other']
           ]
         : [
@@ -21454,10 +21456,23 @@ function burnAreaChart() {
       // innerHTML) because label names are repo-controlled text.
       const iflt = cfg.issue_filter || null;
       const ifltReq = (iflt && iflt.require_labels) || [];
+      const rt = (iflt && iflt.reporter_trust) || null;
+      const rtOn = !!(rt && rt.enabled);
+      const noteParts = [];
       if (ifltReq.length) {
+        noteParts.push('🏷️ Issue filter active — agents only work issues labeled: ' + ifltReq.join(', '));
+      }
+      if (rtOn) {
+        // #9665: say the reporter rule in one line. Lists fall back to the
+        // server defaults when the operator has not overridden them.
+        const trusted = (rt.trusted_associations && rt.trusted_associations.length) ? rt.trusted_associations : ['OWNER', 'MEMBER', 'COLLABORATOR'];
+        const triage = (rt.untrusted_require_labels && rt.untrusted_require_labels.length) ? rt.untrusted_require_labels : ['triage/accepted'];
+        noteParts.push('👤 Reporter trust active — issues from ' + trusted.map(a => String(a).toLowerCase()).join('/') + ' reporters are worked as-is; anyone else\'s need a maintainer to add ' + triage.join(' or ') + ' first, and their PRs are held for a maintainer at every level');
+      }
+      if (noteParts.length) {
         const note = document.getElementById('repos-issue-filter');
         if (note) {
-          note.textContent = '🏷️ Issue filter active — agents only work issues labeled: ' + ifltReq.join(', ');
+          note.textContent = noteParts.join('  ·  ');
           note.style.display = '';
         }
       }
@@ -26254,6 +26269,7 @@ function burnAreaChart() {
             <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="require" data-arg2="cfg-require-label-input" title="Add this label to the required (allow) list">+ Add</button>
           </div>
         </div>
+        ${renderReporterTrustBlock()}
         <h4>Writing guide</h4>
         <div class="config-field">
           <label for="cfg-writing-guide">Project writing guide</label>
@@ -26261,6 +26277,109 @@ function burnAreaChart() {
           <div class="fs-xs text-muted mt-2">
             Lands as <code>${'${WRITING_GUIDE}'}</code> before the body template in every issue/PR-filing kick and now in review-swarm comments.
             See <a class="text-accent" href="https://github.com/hivecommons/hive/blob/v5/src/docs/agent-configuration.md#writing-guide-how-issues-and-prs-should-read-projectwriting_guide" target="_blank" rel="noopener">Writing guide docs ↗</a>.
+          </div>
+        </div>`;
+    }
+
+    // Reporter trust (hivecommons/hive#9665): gate agent work on WHO filed the
+    // issue. Trusted reporters (by GitHub association or explicit login) are
+    // admitted by the ordinary rules; anyone else's issue needs a triage label
+    // first. The merge-side hold for the same reporters lives on the Repos tab.
+    // State: _configState.data.reporterTrust as served by GET /api/config/governor;
+    // every edit re-stages the WHOLE block under dirty.labels.reporter_trust,
+    // because the server merges absent fields as "unchanged" and we want one
+    // coherent save.
+    const REPORTER_ASSOCIATION_HELP = {
+      OWNER: 'Repository or organization owner',
+      MEMBER: 'Member of the organization that owns the repo',
+      COLLABORATOR: 'Invited as a collaborator on the repo',
+      CONTRIBUTOR: 'Has had a commit merged before — one typo fix counts, so this is NOT trusted by default',
+      FIRST_TIME_CONTRIBUTOR: 'Opening their first contribution to this repo',
+      FIRST_TIMER: 'Opening their first contribution on GitHub at all',
+      NONE: 'No relationship to the repo'
+    };
+
+    function reporterTrustState() {
+      const d = _configState.data.reporterTrust || {};
+      return {
+        enabled: !!d.enabled,
+        trustedAssociations: Array.isArray(d.trustedAssociations) ? d.trustedAssociations : ['OWNER', 'MEMBER', 'COLLABORATOR'],
+        trustedLogins: Array.isArray(d.trustedLogins) ? d.trustedLogins : [],
+        untrustedRequireLabels: Array.isArray(d.untrustedRequireLabels) ? d.untrustedRequireLabels : ['triage/accepted'],
+        knownAssociations: Array.isArray(d.knownAssociations) && d.knownAssociations.length
+          ? d.knownAssociations
+          : ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE']
+      };
+    }
+
+    function stageReporterTrust(next) {
+      _configState.data.reporterTrust = Object.assign({}, _configState.data.reporterTrust || {}, next);
+      const st = reporterTrustState();
+      markDirty('labels', 'reporter_trust', {
+        enabled: st.enabled,
+        trusted_associations: st.trustedAssociations,
+        trusted_logins: st.trustedLogins,
+        untrusted_require_labels: st.untrustedRequireLabels
+      });
+    }
+
+    function toggleReporterTrustEnabled(el) {
+      const isOn = el.classList.toggle('on');
+      stageReporterTrust({ enabled: isOn });
+      renderConfigTab('Labels');
+    }
+
+    function toggleReporterTrustAssociation(assoc, checked) {
+      const st = reporterTrustState();
+      const set = new Set(st.trustedAssociations.map(a => String(a).toUpperCase()));
+      if (checked) set.add(String(assoc).toUpperCase()); else set.delete(String(assoc).toUpperCase());
+      // Keep GitHub's order so the saved list is stable across edits.
+      stageReporterTrust({ trustedAssociations: st.knownAssociations.filter(a => set.has(a)) });
+      renderConfigTab('Labels');
+    }
+
+    function renderReporterTrustBlock() {
+      const st = reporterTrustState();
+      const trusted = new Set(st.trustedAssociations.map(a => String(a).toUpperCase()));
+      const assocRows = st.knownAssociations.map(a => `
+            <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);white-space:nowrap" title="${esc(REPORTER_ASSOCIATION_HELP[a] || a)}">
+              <input type="checkbox" ${trusted.has(a) ? 'checked' : ''} ${st.enabled ? '' : 'disabled'} data-change-action="toggleReporterTrustAssociation" data-arg0="${esc(a)}" data-arg-types="s,c"> <code>${esc(a)}</code>
+            </label>`).join('');
+      const loginList = st.trustedLogins.map((l, i) =>
+        `<div class="config-list-item"><span>@${esc(l)}</span><button class="remove-item" data-action="removeListItem" data-arg0="labels" data-arg1="reporter_login" data-arg2="${i}" data-arg-types="s,s,j">✕</button></div>`
+      ).join('');
+      const labelList = st.untrustedRequireLabels.map((l, i) =>
+        `<div class="config-list-item"><span>${esc(l)}</span><button class="remove-item" data-action="removeListItem" data-arg0="labels" data-arg1="reporter_label" data-arg2="${i}" data-arg-types="s,s,j">✕</button></div>`
+      ).join('');
+      const dim = st.enabled ? '' : 'opacity:0.55';
+      return `
+        <h4 style="margin:18px 0 6px">Reporter trust</h4>
+        <p class="fs-sm text-muted mb-4">Gate work on <b>who filed the issue</b>, not only on its labels. Issues from trusted reporters are worked under the rules above. Issues from anyone else wait until a maintainer adds one of the triage labels below — and the PR that follows is held for a maintainer at every autonomy level (see the Repos tab). Off by default; existing hives change nothing until you switch it on. <a class="text-accent" href="https://github.com/hivecommons/hive/issues/9665" target="_blank" rel="noopener">#9665 ↗</a></p>
+        <div class="config-toggle" style="margin:var(--sp-0) var(--sp-0) var(--sp-4)">
+          <div class="config-toggle-switch ${st.enabled ? 'on' : ''}" data-action="toggleReporterTrustEnabled" data-arg-types="t" title="Require maintainer triage for issues from untrusted reporters"></div>
+          <span class="config-toggle-label">Require triage for issues from untrusted reporters</span>
+        </div>
+        <div style="${dim}">
+          <div class="fs-sm mb-2" style="font-weight:600">Trusted GitHub associations</div>
+          <p class="fs-xs text-muted mb-3">GitHub reports one of these for every issue author. Checked = trusted. The default trusts owners, members and collaborators; <code>CONTRIBUTOR</code> means "had a commit merged once" and is deliberately not trusted.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--sp-3) var(--sp-6);margin-bottom:var(--sp-5)">${assocRows}</div>
+          <div class="fs-sm mb-2" style="font-weight:600">Always-trusted logins</div>
+          <p class="fs-xs text-muted mb-3">People to trust whatever GitHub says about them — an external maintainer of a dependency, for example.</p>
+          <div class="config-list">
+            ${loginList || '<div class="fs-sm text-muted mb-3">No extra logins</div>'}
+            <div class="config-list-add">
+              <input type="text" id="cfg-reporter-login-input" placeholder="github login" ${st.enabled ? '' : 'disabled'} title="GitHub login to trust as a reporter regardless of association">
+              <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="reporter_login" data-arg2="cfg-reporter-login-input" ${st.enabled ? '' : 'disabled'} title="Trust this login">+ Add</button>
+            </div>
+          </div>
+          <div class="fs-sm mb-2" style="font-weight:600">Triage labels for everyone else</div>
+          <p class="fs-xs text-muted mb-3">An issue from an untrusted reporter becomes actionable once it carries at least one of these. Exact, case-insensitive match. The ordinary required-labels list above still applies afterwards.</p>
+          <div class="config-list">
+            ${labelList || '<div class="fs-sm text-muted mb-3">No triage labels — untrusted reporters can never be admitted</div>'}
+            <div class="config-list-add">
+              <input type="text" id="cfg-reporter-label-input" placeholder="label name" ${st.enabled ? '' : 'disabled'} title="Label a maintainer adds to admit an untrusted reporter's issue">
+              <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="reporter_label" data-arg2="cfg-reporter-label-input" ${st.enabled ? '' : 'disabled'} title="Add this triage label">+ Add</button>
+            </div>
           </div>
         </div>`;
     }
@@ -26277,6 +26396,12 @@ function burnAreaChart() {
       const selfAuthDefault = _configState.data.selfAuthorizationHold !== false;
       const selfAuthEnvLocked = !!_configState.data.selfAuthorizationHoldEnvLocked;
       const repoSelfAuth = _configState.data.repoSelfAuthorizationHold || {};
+      // #9665 reporter-trust merge hold: same three-way shape as #5117
+      // (all-repos default, per-repo override, env lock).
+      const rtHoldDefault = !!_configState.data.reporterTrustHold;
+      const rtHoldEnvLocked = !!_configState.data.reporterTrustHoldEnvLocked;
+      const repoRtHold = _configState.data.repoReporterTrustHold || {};
+      const rtGateOn = !!((_configState.data.reporterTrust || {}).enabled);
       // The API sends EFFECTIVE caps (defaults already resolved), so these
       // boxes always show the number actually in force rather than a blank.
       // Dirty edits win so a value the operator just typed survives a re-render
@@ -26331,9 +26456,19 @@ function burnAreaChart() {
         const inheritButton = hasOverride
           ? '<button class="remove-item" data-action="clearRepoSelfAuthHoldOverride" data-arg0="' + esc(r) + '" data-arg-types="s" title="Clear this repo override and inherit the all-repos default">inherit</button>'
           : '<span style="font-size:var(--fs-xs);color:var(--muted);white-space:nowrap">inherits</span>';
+        const rtPolicy = repoRtHold[r] || {};
+        const rtHasOverride = Object.prototype.hasOwnProperty.call(rtPolicy, 'value');
+        const rtEffective = rtHoldEnvLocked && Object.prototype.hasOwnProperty.call(rtPolicy, 'effective') ? !!rtPolicy.effective : (rtHasOverride ? !!rtPolicy.value : rtHoldDefault);
+        const rtTitle = rtHasOverride
+          ? 'This repo has an explicit #9665 reporter-trust hold override.'
+          : 'Inherits the all-repos #9665 reporter-trust hold default.';
+        const rtInherit = rtHasOverride
+          ? '<button class="remove-item" data-action="clearRepoReporterTrustHoldOverride" data-arg0="' + esc(r) + '" data-arg-types="s" title="Clear this repo override and inherit the all-repos default">inherit</button>'
+          : '<span style="font-size:var(--fs-xs);color:var(--muted);white-space:nowrap">inherits</span>';
+        const rtRow = '<label title="' + rtTitle + '" style="display:flex;align-items:center;gap:5px;font-size:0.7rem;color:var(--muted);white-space:nowrap"><input type="checkbox" ' + (rtEffective ? 'checked' : '') + ' ' + (rtHoldEnvLocked ? 'disabled' : '') + ' data-change-action="toggleRepoReporterTrustHold" data-arg0="' + esc(r) + '" data-arg-types="s,c"> Hold PRs for untrusted reporters (#9665)</label>' + rtInherit;
         // Fully forge-qualified so the row is unambiguous: github.ibm.com/org/repo.
         const displayName = ghHost + '/' + r;
-        return `<div class="config-list-item" style="align-items:center;gap:var(--sp-3)"><span data-action="setDefaultRepo" data-arg0="${esc(r)}" style="${starStyle}" title="${starTitle}">${isDefault ? '★' : '☆'}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(displayName)}">${esc(displayName)}</span><label title="${holdTitle}" style="display:flex;align-items:center;gap:5px;font-size:0.7rem;color:var(--muted);white-space:nowrap"><input type="checkbox" ${effectiveHold ? 'checked' : ''} ${selfAuthEnvLocked ? 'disabled' : ''} data-change-action="toggleRepoSelfAuthHold" data-arg0="${esc(r)}" data-arg-types="s,c"> Hold hive-authored PRs for human sign-off (#5117)</label>${inheritButton}<span style="${pillBase}" title="${pillTitle}">${pillLabel}</span><button class="remove-item" data-action="removeListItem" data-arg0="repos" data-arg1="list" data-arg2="${i}" data-arg-types="s,s,j">&#x2715;</button></div>`;
+        return `<div class="config-list-item" style="align-items:center;gap:var(--sp-3)"><span data-action="setDefaultRepo" data-arg0="${esc(r)}" style="${starStyle}" title="${starTitle}">${isDefault ? '★' : '☆'}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(displayName)}">${esc(displayName)}</span><label title="${holdTitle}" style="display:flex;align-items:center;gap:5px;font-size:0.7rem;color:var(--muted);white-space:nowrap"><input type="checkbox" ${effectiveHold ? 'checked' : ''} ${selfAuthEnvLocked ? 'disabled' : ''} data-change-action="toggleRepoSelfAuthHold" data-arg0="${esc(r)}" data-arg-types="s,c"> Hold hive-authored PRs for human sign-off (#5117)</label>${inheritButton}${rtRow}<span style="${pillBase}" title="${pillTitle}">${pillLabel}</span><button class="remove-item" data-action="removeListItem" data-arg0="repos" data-arg1="list" data-arg2="${i}" data-arg-types="s,s,j">&#x2715;</button></div>`;
       }).join('');
       const hostNote = isGHE
         ? ` on <strong style="color:var(--indigo)">${esc(ghHost)}</strong> (GitHub Enterprise)`
@@ -26356,6 +26491,10 @@ function burnAreaChart() {
         <div class="config-toggle" style="margin:var(--sp-0) var(--sp-0) var(--sp-5)">
           <div class="config-toggle-switch ${selfAuthDefault ? 'on' : ''} ${selfAuthEnvLocked ? 'disabled' : ''}" data-action="${selfAuthEnvLocked ? '' : 'toggleSelfAuthDefault'}" data-arg-types="t" title="${selfAuthEnvLocked ? 'HIVE_SELF_AUTHORIZATION_HOLD is set, so the process environment controls this value.' : 'All-repos default for the #5117 self-authorization hold.'}"></div>
           <span class="config-toggle-label">All repos: hold hive-authored PRs for human sign-off (#5117) <span style="color:var(--muted);font-weight:400">— repo rows can override or inherit this default</span></span>
+        </div>
+        <div class="config-toggle" style="margin:var(--sp-0) var(--sp-0) var(--sp-5)">
+          <div class="config-toggle-switch ${rtHoldDefault ? 'on' : ''} ${rtHoldEnvLocked ? 'disabled' : ''}" data-action="${rtHoldEnvLocked ? '' : 'toggleReporterTrustHoldDefault'}" data-arg-types="t" title="${rtHoldEnvLocked ? 'HIVE_REPORTER_TRUST_HOLD is set; the environment controls this value.' : 'Hold, at every ACMM level, any PR whose rationale traces to an issue from a reporter this hive does not trust'}"></div>
+          <span class="config-toggle-label">All repos: hold PRs for untrusted reporters at every level (#9665) <span style="color:var(--muted);font-weight:400">— follows the Labels tab's reporter-trust switch${rtGateOn ? '' : ' (currently off)'} unless set here; a human removes the hold, Hive never does</span></span>
         </div>
         <div class="config-list">
           ${list || '<div class="fs-sm text-muted mb-3">No repos configured</div>'}
@@ -26421,6 +26560,46 @@ function burnAreaChart() {
       if (!_configState.data.repoSelfAuthorizationHold) _configState.data.repoSelfAuthorizationHold = {};
       _configState.data.repoSelfAuthorizationHold[repo] = { value: !!checked, effective: !!checked };
       markDirty('repos', 'repoSelfAuthorizationHold', Object.fromEntries(Object.entries(_configState.data.repoSelfAuthorizationHold).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(v, 'value') ? v.value : null])));
+      renderConfigTab('Repos');
+    }
+
+    function toggleReporterTrustHoldDefault(el) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; the environment controls this value.', 'error');
+        return;
+      }
+      const isOn = el.classList.toggle('on');
+      _configState.data.reporterTrustHold = isOn;
+      markDirty('repos', 'reporterTrustHold', isOn);
+      renderConfigTab('Repos');
+    }
+
+    function repoReporterTrustHoldPayload() {
+      return Object.fromEntries(Object.entries(_configState.data.repoReporterTrustHold || {}).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(v, 'value') ? v.value : null]));
+    }
+
+    function toggleRepoReporterTrustHold(repo, checked) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; repo overrides are disabled.', 'error');
+        renderConfigTab('Repos');
+        return;
+      }
+      if (!_configState.data.repoReporterTrustHold) _configState.data.repoReporterTrustHold = {};
+      _configState.data.repoReporterTrustHold[repo] = { value: !!checked, effective: !!checked };
+      markDirty('repos', 'repoReporterTrustHold', repoReporterTrustHoldPayload());
+      renderConfigTab('Repos');
+    }
+
+    function clearRepoReporterTrustHoldOverride(repo) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; repo overrides are disabled.', 'error');
+        return;
+      }
+      if (!_configState.data.repoReporterTrustHold) _configState.data.repoReporterTrustHold = {};
+      _configState.data.repoReporterTrustHold[repo] = { effective: !!_configState.data.reporterTrustHold };
+      const payload = repoReporterTrustHoldPayload();
+      payload[repo] = null;
+      markDirty('repos', 'repoReporterTrustHold', payload);
       renderConfigTab('Repos');
     }
 
@@ -29110,6 +29289,12 @@ function burnAreaChart() {
           if (!_configState.data.requireLabels) _configState.data.requireLabels = [];
           _configState.data.requireLabels.push(val);
           markDirty('labels', 'require_labels', _configState.data.requireLabels);
+        } else if (key === 'reporter_login') {
+          const st = reporterTrustState();
+          stageReporterTrust({ trustedLogins: st.trustedLogins.concat([val.replace(/^@/, '')]) });
+        } else if (key === 'reporter_label') {
+          const st = reporterTrustState();
+          stageReporterTrust({ untrustedRequireLabels: st.untrustedRequireLabels.concat([val]) });
         } else {
           if (!_configState.data.labels) _configState.data.labels = [];
           _configState.data.labels.push(val);
@@ -29134,6 +29319,12 @@ function burnAreaChart() {
         if (key === 'require') {
           _configState.data.requireLabels.splice(index, 1);
           markDirty('labels', 'require_labels', _configState.data.requireLabels);
+        } else if (key === 'reporter_login') {
+          const st = reporterTrustState();
+          stageReporterTrust({ trustedLogins: st.trustedLogins.filter((_, i) => i !== index) });
+        } else if (key === 'reporter_label') {
+          const st = reporterTrustState();
+          stageReporterTrust({ untrustedRequireLabels: st.untrustedRequireLabels.filter((_, i) => i !== index) });
         } else {
           _configState.data.labels.splice(index, 1);
           markDirty('labels', 'labels', _configState.data.labels);

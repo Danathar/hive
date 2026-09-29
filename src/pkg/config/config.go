@@ -3783,6 +3783,17 @@ type GitHubConfig struct {
 	// and intentionally never serialized: process env must remain the effective
 	// override even if the dashboard updates the persisted YAML field at runtime.
 	selfAuthorizationHoldEnvOverride *bool `yaml:"-" json:"-"`
+	// ReporterTrustHold controls the #9665 reporter-trust hold: when active, an
+	// App-authored PR whose rationale traces to an issue filed by a reporter
+	// project.issue_filter.reporter_trust does not trust receives `hold` at
+	// EVERY ACMM level, including L6, plus an explanatory notice. A human
+	// removes it; the App never auto-releases it. nil follows
+	// reporter_trust.enabled so switching the gate on covers both halves;
+	// an explicit value or HIVE_REPORTER_TRUST_HOLD decides on its own.
+	ReporterTrustHold *bool `yaml:"reporter_trust_hold,omitempty" json:"reporter_trust_hold,omitempty"`
+	// reporterTrustHoldEnvOverride is set by HIVE_REPORTER_TRUST_HOLD and never
+	// serialized, for the same reason as selfAuthorizationHoldEnvOverride.
+	reporterTrustHoldEnvOverride *bool `yaml:"-" json:"-"`
 	// OAuthBaseURLOverride and OAuthAPIURLOverride redirect the DEVICE-FLOW LOGIN
 	// endpoints away from public github.com. They are a TEST SEAM ONLY — see the
 	// comment on OAuthBaseURL(). They carry the `-` yaml tag so they can never be
@@ -5582,6 +5593,12 @@ func (c *Config) applyBootstrapEnv() {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			c.GitHub.SelfAuthorizationHold = &b
 			c.GitHub.selfAuthorizationHoldEnvOverride = &b
+		}
+	}
+	if v := os.Getenv("HIVE_REPORTER_TRUST_HOLD"); strings.TrimSpace(v) != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			c.GitHub.ReporterTrustHold = &b
+			c.GitHub.reporterTrustHoldEnvOverride = &b
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv(ContributeSkipLabelsEnvVar)); v != "" {

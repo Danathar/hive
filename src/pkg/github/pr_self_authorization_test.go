@@ -17,11 +17,14 @@ import (
 type selfAuthIssue struct {
 	Author     string
 	AuthorType string // "Bot" for App/bot accounts; "" means User
-	Labels     []string
-	Assignees  []string
-	Comments   []selfAuthComment
-	Status     int // non-zero to fail the GET
-	FailList   bool
+	// Association is GitHub's author_association for the author; "" omits
+	// the field, the way an abbreviated payload would.
+	Association string
+	Labels      []string
+	Assignees   []string
+	Comments    []selfAuthComment
+	Status      int // non-zero to fail the GET
+	FailList    bool
 }
 
 type selfAuthComment struct {
@@ -105,13 +108,17 @@ func (s *selfAuthServer) start(t *testing.T) *httptest.Server {
 				assignees = append(assignees, userJSON(a, ""))
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			payload := map[string]any{
 				"number":    num,
 				"user":      userJSON(issue.Author, issue.AuthorType),
 				"labels":    labels,
 				"assignees": assignees,
 				"comments":  len(issue.Comments),
-			})
+			}
+			if issue.Association != "" {
+				payload["author_association"] = issue.Association
+			}
+			_ = json.NewEncoder(w).Encode(payload)
 
 		case r.Method == "POST" && strings.HasSuffix(p, "/labels"):
 			body, _ := io.ReadAll(r.Body)

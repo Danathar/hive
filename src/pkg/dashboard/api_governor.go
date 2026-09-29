@@ -66,6 +66,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 	org := cfg.Project.Org
 	repos := make([]string, 0, len(cfg.Project.Repos))
 	repoSelfAuthorizationHold := make(map[string]map[string]any, len(cfg.Project.Repos))
+	repoReporterTrustHold := make(map[string]map[string]any, len(cfg.Project.Repos))
 	for _, repo := range cfg.Project.Repos {
 		full := repo
 		if strings.Contains(repo, "/") {
@@ -79,6 +80,25 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			entry["value"] = *rp.SelfAuthorizationHold
 		}
 		repoSelfAuthorizationHold[full] = entry
+		rtEntry := map[string]any{"effective": cfg.ReporterTrustHoldEnabledForRepo(repo)}
+		if rp, ok := cfg.RepoPolicyFor(repo); ok && rp.ReporterTrustHold != nil {
+			rtEntry["value"] = *rp.ReporterTrustHold
+		}
+		repoReporterTrustHold[full] = rtEntry
+	}
+	// #9665 reporter trust, rendered on the Labels tab (who is trusted, what
+	// label everyone else needs) and the Repos tab (the merge hold). EFFECTIVE
+	// values are sent for the two defaulted lists so the UI shows what is in
+	// force; the *Set flags say whether the operator overrode the default.
+	reporterTrust := cfg.Project.IssueFilter.ReporterTrust
+	reporterTrustPayload := map[string]any{
+		"enabled":                   reporterTrust.IsEnabled(),
+		"trustedAssociations":       reporterTrust.EffectiveTrustedAssociations(),
+		"trustedAssociationsSet":    len(reporterTrust.TrustedAssociations) > 0,
+		"trustedLogins":             append([]string{}, reporterTrust.TrustedLogins...),
+		"untrustedRequireLabels":    reporterTrust.EffectiveUntrustedRequireLabels(),
+		"untrustedRequireLabelsSet": len(reporterTrust.UntrustedRequireLabels) > 0,
+		"knownAssociations":         config.KnownAuthorAssociations,
 	}
 
 	// Build notifications — mask sensitive values like the old hive does.
@@ -110,6 +130,11 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"selfAuthorizationHold":          cfg.GitHub.SelfAuthorizationHoldEnabledAtLevel(cfg.ACMMLevelOrZero()),
 		"repoSelfAuthorizationHold":      repoSelfAuthorizationHold,
 		"selfAuthorizationHoldEnvLocked": cfg.GitHub.SelfAuthorizationHoldEnvOverrideSet(),
+		"reporterTrust":                  reporterTrustPayload,
+		"reporterTrustHold":              cfg.GitHub.ReporterTrustHoldEnabled(reporterTrust.IsEnabled()),
+		"reporterTrustHoldSet":           cfg.GitHub.ReporterTrustHold != nil,
+		"repoReporterTrustHold":          repoReporterTrustHold,
+		"reporterTrustHoldEnvLocked":     cfg.GitHub.ReporterTrustHoldEnvOverrideSet(),
 		// Kick-list caps, rendered on the Repos tab. The EFFECTIVE values are
 		// sent (defaults and ceiling already resolved) so the fields always
 		// show the number actually in force rather than an empty box when the
@@ -550,10 +575,44 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 		Labels        *[]string `json:"labels"`
 		RequireLabels *[]string `json:"require_labels"`
 		WritingGuide  *string   `json:"writing_guide"`
+		// ReporterTrust (#9665) is pointer-typed per field for the same
+		// "absent means unchanged" reason as the two lists above.
+		ReporterTrust *struct {
+			Enabled                *bool     `json:"enabled"`
+			TrustedAssociations    *[]string `json:"trusted_associations"`
+			TrustedLogins          *[]string `json:"trusted_logins"`
+			UntrustedRequireLabels *[]string `json:"untrusted_require_labels"`
+		} `json:"reporter_trust"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
+	}
+	var nextReporterTrust *config.ReporterTrustConfig
+	if body.ReporterTrust != nil {
+		rt := s.deps.Config.Project.IssueFilter.ReporterTrust
+		if body.ReporterTrust.Enabled != nil {
+			v := *body.ReporterTrust.Enabled
+			rt.Enabled = &v
+		}
+		if body.ReporterTrust.TrustedAssociations != nil {
+			rt.TrustedAssociations = normalizeAssociations(*body.ReporterTrust.TrustedAssociations)
+		}
+		if body.ReporterTrust.TrustedLogins != nil {
+			rt.TrustedLogins = trimNonEmpty(*body.ReporterTrust.TrustedLogins)
+		}
+		if body.ReporterTrust.UntrustedRequireLabels != nil {
+			if err := validateGovernorLabels(*body.ReporterTrust.UntrustedRequireLabels); err != nil {
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			rt.UntrustedRequireLabels = trimNonEmpty(*body.ReporterTrust.UntrustedRequireLabels)
+		}
+		if err := config.ValidateReporterTrust(rt); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		nextReporterTrust = &rt
 	}
 	if body.Labels != nil {
 		if err := validateGovernorLabels(*body.Labels); err != nil {
@@ -603,6 +662,12 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 		// The require gate (project.issue_filter): empty list = filter off.
 		// Takes effect on the next enumeration via the scan client.
 		s.deps.Config.Project.IssueFilter.RequireLabels = *body.RequireLabels
+		if s.deps.GHClient != nil {
+			s.deps.GHClient.SetIssueFilter(s.deps.Config.Project.IssueFilter)
+		}
+	}
+	if nextReporterTrust != nil {
+		s.deps.Config.Project.IssueFilter.ReporterTrust = *nextReporterTrust
 		if s.deps.GHClient != nil {
 			s.deps.GHClient.SetIssueFilter(s.deps.Config.Project.IssueFilter)
 		}
@@ -2042,6 +2107,9 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 		PrimaryRepo               *string          `json:"primaryRepo,omitempty"`
 		SelfAuthorizationHold     *bool            `json:"selfAuthorizationHold,omitempty"`
 		RepoSelfAuthorizationHold map[string]*bool `json:"repoSelfAuthorizationHold,omitempty"`
+		// #9665 reporter-trust merge hold, same shape as the #5117 pair.
+		ReporterTrustHold     *bool            `json:"reporterTrustHold,omitempty"`
+		RepoReporterTrustHold map[string]*bool `json:"repoReporterTrustHold,omitempty"`
 		// Kick-list caps. POINTER-typed so an absent key means "unchanged":
 		// the Repos tab sends only the fields the operator actually touched,
 		// and editing a repo must not reset the caps (or vice versa).
@@ -2057,7 +2125,8 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	// the "nothing supplied" guard must only fire when the request would change
 	// nothing at all.
 	capsOnly := body.MaxIssuesPerKick != nil || body.MaxPRsPerKick != nil
-	if len(body.Repos) == 0 && body.PrimaryRepo == nil && body.SelfAuthorizationHold == nil && body.RepoSelfAuthorizationHold == nil && !capsOnly {
+	holdOnly := body.ReporterTrustHold != nil || body.RepoReporterTrustHold != nil
+	if len(body.Repos) == 0 && body.PrimaryRepo == nil && body.SelfAuthorizationHold == nil && body.RepoSelfAuthorizationHold == nil && !capsOnly && !holdOnly {
 		jsonError(w, "at least one repo is required", http.StatusBadRequest)
 		return
 	}
@@ -2095,6 +2164,7 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	prevBaseURL := s.deps.Config.GitHub.BaseURL
 	prevAPIURL := s.deps.Config.GitHub.APIURL
 	prevSelfAuthHold := s.deps.Config.GitHub.SelfAuthorizationHold
+	prevReporterTrustHold := s.deps.Config.GitHub.ReporterTrustHold
 	prevRepoPolicies := append([]config.RepoPolicy(nil), s.deps.Config.Project.RepoPolicies...)
 
 	spokeHost := s.hiveForgeHost()
@@ -2212,6 +2282,7 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 			s.deps.Config.GitHub.BaseURL = prevBaseURL
 			s.deps.Config.GitHub.APIURL = prevAPIURL
 			s.deps.Config.GitHub.SelfAuthorizationHold = prevSelfAuthHold
+			s.deps.Config.GitHub.ReporterTrustHold = prevReporterTrustHold
 			s.deps.Config.Project.RepoPolicies = prevRepoPolicies
 			if s.deps.GHClient != nil {
 				s.deps.GHClient.SetOrg(prevOrg)
@@ -2232,6 +2303,13 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.RepoSelfAuthorizationHold != nil {
 		s.deps.Config.SetSelfAuthorizationHoldForRepos(body.RepoSelfAuthorizationHold)
+	}
+	if body.ReporterTrustHold != nil {
+		v := *body.ReporterTrustHold
+		s.deps.Config.GitHub.ReporterTrustHold = &v
+	}
+	if body.RepoReporterTrustHold != nil {
+		s.deps.Config.SetReporterTrustHoldForRepos(body.RepoReporterTrustHold)
 	}
 	s.deps.Config.PruneRepoPoliciesToWatched()
 
@@ -2528,4 +2606,32 @@ func dashboardURLOwner(hubOwned bool) string {
 		return "hub"
 	}
 	return "spoke"
+}
+
+// normalizeAssociations upper-cases and de-duplicates a trusted-association
+// list from the dashboard, dropping blanks. Validation of the names happens
+// in config.ValidateReporterTrust.
+func normalizeAssociations(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, a := range in {
+		a = strings.ToUpper(strings.TrimSpace(a))
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// trimNonEmpty trims each entry and drops blanks, preserving order.
+func trimNonEmpty(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

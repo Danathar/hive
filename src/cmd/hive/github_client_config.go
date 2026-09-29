@@ -165,6 +165,19 @@ func (b *boot) selfAuthorizationHoldEnabled(repo string) bool {
 	return b.cfg.SelfAuthorizationHoldEnabledForRepoAtLevel(repo, level)
 }
 
+// reporterTrustHoldEnabled is the live per-repo switch for the #9665
+// reporter-trust hold. Deliberately level-independent: see
+// GitHubConfig.ReporterTrustHoldEnabled.
+func (b *boot) reporterTrustHoldEnabled(repo string) bool {
+	return b.cfg.ReporterTrustHoldEnabledForRepo(repo)
+}
+
+// reporterTrusted is the live reporter-trust predicate shared by admission and
+// the PR-side hold.
+func (b *boot) reporterTrusted(login, association string) bool {
+	return b.cfg.Project.IssueFilter.ReporterTrust.Trusted(login, association)
+}
+
 // applyGitHubClientMutationBoundary installs the external-mutation fencing
 // boundary once bootAdvisory has opened it. A hive whose ledger failed to
 // open runs without one, as it always has.
@@ -211,6 +224,12 @@ func (b *boot) applyGitHubClientAgentHooks(client *github.Client) {
 		}
 	})
 	client.SetSelfAuthorizationHoldEnabled(b.selfAuthorizationHoldEnabled)
+	// #9665 reporter trust: both seams read live config, so a dashboard edit
+	// takes effect on the next PR request without a client rebuild. The
+	// trust predicate is the SAME one enumeration uses for admission
+	// (project.issue_filter.reporter_trust), so the two halves cannot drift.
+	client.SetReporterTrustHoldEnabled(b.reporterTrustHoldEnabled)
+	client.SetReporterTrusted(b.reporterTrusted)
 	// Fix #2: on a terminal merge failure caused by a failing REQUIRED check,
 	// re-engage the fix loop instead of abandoning the PR. The hook records a
 	// re-engagement under the escalation store's per-red-SHA cap (shared with
