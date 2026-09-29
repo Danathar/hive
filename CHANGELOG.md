@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.82.0)
+
+### Added
+
+- Agents that stay on a Working pane while governor kicks remain undeliverable now surface their kick backlog, transcript silence, and optional max-turn ceiling in status instead of looking like a normal due-now turn, giving operators a read-only hang signal without interrupting legitimate long work ([#9445](https://github.com/hivecommons/hive/issues/9445))
+
+### Changed
+
+- The operator dashboard now keeps the FAQ at the bottom of the default section layout: sections added after a browser saved its layout slot in next to their usual neighbours instead of being appended below the FAQ, while any operator-chosen order is still respected ([#9426](https://github.com/hivecommons/hive/issues/9426)).
+
+### Fixed
+
+- Closed likely-done issues automatically when their fixing PR merged to a configured non-default release line with an explicit GitHub closing keyword, while preserving verification for weak references and recording verified-open suppressions. ([#9447](https://github.com/hivecommons/hive/issues/9447))
+- Keep Copilot turns that are waiting for background agents marked as busy so scheduled kicks do not interrupt and clear their parent turn or sub-agents. ([#9450](https://github.com/hivecommons/hive/issues/9450))
+
 ## 2026-09-29 (v5.81.3)
 
 ### Fixed

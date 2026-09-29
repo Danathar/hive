@@ -1,1 +1,0 @@
-- Closed likely-done issues automatically when their fixing PR merged to a configured non-default release line with an explicit GitHub closing keyword, while preserving verification for weak references and recording verified-open suppressions. ([#9447](https://github.com/hivecommons/hive/issues/9447))

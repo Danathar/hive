@@ -1,1 +1,0 @@
-- The operator dashboard now keeps the FAQ at the bottom of the default section layout: sections added after a browser saved its layout slot in next to their usual neighbours instead of being appended below the FAQ, while any operator-chosen order is still respected ([#9426](https://github.com/hivecommons/hive/issues/9426)).
