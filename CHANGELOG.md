@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.92.1)
+
+### Fixed
+
+- Rewrite the Podman host-move runbook with fresh-host unit installation, source image pinning, config and secrets restoration, and per-mode verification and execution status.
+
 ## 2026-09-29 (v5.92.0)
 
 ### Added
