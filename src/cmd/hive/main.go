@@ -652,17 +652,10 @@ func initGitHubAuth(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		// the very first token this process mints is scoped to the right org
 		// rather than 403ing on every write until the self-heal tick runs.
 		healGitHubAppInstallation(ctx, out.AppAuth, cfg, logger)
+		// Hooks (hold labels, #6203 repo pause, #6204 agent scope, and the
+		// rest) are installed by bootGitHub through configureGitHubClient, the
+		// same function every rebuild path uses (#9614).
 		out.Client = github.NewClientFromAppWithBotLogin(out.AppAuth, cfg.Project.Org, cfg.Project.Repos, logger, cfg.GitHub.BotLogin())
-		out.Client.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(cfg.HiveID)})
-		// Per-repo pause (#6203). A live predicate over the shared config, so a
-		// pause taken in the dashboard narrows the very next enumeration and
-		// automerge sweep without a restart.
-		out.Client.SetRepoPausedFunc(cfg.IsRepoPaused)
-		// Per-repo custom agents (#6204). A live predicate over the shared
-		// config, so the hive-open-pr / hive-merge / hive-open-issue relays
-		// refuse an out-of-scope request without a restart.
-		out.Client.SetAgentRepoScopeFunc(cfg.AgentServesRepo)
-		out.Client.SetWriteAllowlistFunc(cfg.AgentMayWrite) // #9587: lane write allowlist, same live-config contract
 		startDocsTokenRefresh(ctx, cfg, appKeyFile, logger)
 		return out
 	}
@@ -673,11 +666,7 @@ func initGitHubAuth(ctx context.Context, cfg *config.Config, logger *slog.Logger
 	}
 	switch {
 	case ghToken != "":
-		out.Client = github.NewClient(ghToken, cfg.Project.Org, cfg.Project.Repos, logger, cfg.GitHub.ResolvedAPIURL())
-		out.Client.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(cfg.HiveID)})
-		out.Client.SetRepoPausedFunc(cfg.IsRepoPaused)        // #6203, see the App branch above
-		out.Client.SetAgentRepoScopeFunc(cfg.AgentServesRepo) // #6204, see the App branch above
-		out.Client.SetWriteAllowlistFunc(cfg.AgentMayWrite)   // #9587: lane write allowlist, same live-config contract
+		out.Client = github.NewClient(ghToken, cfg.Project.Org, cfg.Project.Repos, logger, cfg.GitHub.ResolvedAPIURL()) // hooks: see the App branch above
 		// PAT path only: introspect the token's granted scopes ONCE, here, so a
 		// too-narrow token is named at boot instead of surfacing hours later as
 		// a generic 403 inside an agent — or, worse, as an empty backlog that
@@ -1411,13 +1400,6 @@ func (b *boot) wireBootClosures() {
 		return fmt.Sprintf("http://localhost:%d", b.cfg.Dashboard.Port)
 	}
 
-	b.installMutationBoundary = func(client interface{ SetMutationBoundary(effects.Boundary) }) {
-		if client == nil {
-			return
-		}
-		client.SetMutationBoundary(b.mutationBoundary)
-	}
-
 	b.dashboardDependencies = func() *dashboard.Dependencies {
 		var auditLedger *mutation.Ledger
 		var auditJournal *mutation.Journal
@@ -1657,24 +1639,9 @@ func (b *boot) wireBootClosures() {
 				if err != nil {
 					return fmt.Errorf("initializing app auth: %w", err)
 				}
-				newClient := github.NewClientFromAppWithBotLogin(newAppAuth, b.cfg.Project.Org, b.cfg.Project.Repos, b.logger, b.cfg.GitHub.BotLogin())
-				newClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
-				if len(b.cfg.Governor.Labels.Exempt) > 0 {
-					newClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
-					newClient.SetAutoMergeLabel(normalizedAutoMergeLabel(b.cfg.Governor.Labels.AutoMerge))
-				}
-				newClient.SetIssueFilter(b.cfg.Project.IssueFilter)
-				installReviewBots(newClient, b.cfg, b.logger)
-				newClient.SetRepoPausedFunc(b.cfg.IsRepoPaused)        // #6203: a client rebuild must not un-pause repos
-				newClient.SetAgentRepoScopeFunc(b.cfg.AgentServesRepo) // #6204: a client rebuild must not un-scope agents
-				newClient.SetWriteAllowlistFunc(b.cfg.AgentMayWrite)   // #9587: lane write allowlist, same live-config contract
-				installReviewRelaySettings(newClient, b.cfg, b.logger)
-				syncAutoMergePolicyToGitHubClient(b.cfg, newClient)
-				if b.dashSrv != nil {
-					newClient.SetMergeFailureAlertSink(b.dashSrv)
-				}
+				// #9614: every boot-time hook, not a hand-kept subset.
+				newClient := b.newConfiguredGitHubAppClient(newAppAuth)
 				b.ghClient = newClient
-				b.installMutationBoundary(b.ghClient)
 				b.appAuth = newAppAuth
 				b.agentMgr.SetAppAuth(newAppAuth)
 				// Deliver fresh per-agent scoped tokens to already-running agents
@@ -1773,18 +1740,10 @@ func (b *boot) bootGitHubWith(deps bootGitHubDeps) {
 	// nudges can tell an operator-side fault (no key was ever delivered) from a
 	// user-actionable one (the App is not installed).
 	b.appAuthState = b.ghAuth.State
-	if b.ghClient != nil && len(b.cfg.Governor.Labels.Exempt) > 0 {
-		b.ghClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
-		b.ghClient.SetAutoMergeLabel(normalizedAutoMergeLabel(b.cfg.Governor.Labels.AutoMerge))
-	}
-	if b.ghClient != nil {
-		b.ghClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
-	}
-	// Unconditional (nil-safe, zero value = no filtering): the issue filter
-	// gates which issues become actionable at all, so it must be installed
-	// even when no exempt labels are configured.
-	b.ghClient.SetIssueFilter(b.cfg.Project.IssueFilter)
-	installReviewBots(b.ghClient, b.cfg, b.logger)
+	// The same function every rebuild path uses (#9614). Only the tiers whose
+	// dependencies exist yet apply here; bootAdvisory, bootAgents and
+	// bootDashboard apply the rest as those dependencies come up.
+	b.configureGitHubClient(b.ghClient)
 	b.resolveProxyInjectGHAuth(deps)
 }
 
@@ -2005,19 +1964,10 @@ func (b *boot) bootAdvisoryWith(deps bootAdvisoryDeps) bool {
 			" has no installation for this org — install it (the spoke adopts the installation automatically)"
 	}
 
-	// Invocation-attribution trail (pkg/github/attribution.go): stamp hive-
-	// created PRs/issues with what the hive invoked, and audit every such
-	// creation. Wired in stages as dependencies come up: the trailer gate now
-	// (cfg exists, and the advisory-issue ensure just below must respect the
-	// toggle), the per-agent resolver after the agent manager exists, and the
-	// audit sink after the dashboard server exists. cfg is the live pointer
-	// (the config watcher swaps contents in place), so the toggle is read
-	// fresh per creation — a dashboard flip takes effect immediately.
-	if b.ghClient != nil {
-		b.ghClient.SetAttributionHooks(github.AttributionHooks{
-			TrailerEnabled: func() bool { return b.cfg.Governor.AttributionTrailerEnabled() },
-		})
-	}
+	// Invocation-attribution trail (pkg/github/attribution.go): the trailer
+	// gate was installed by bootGitHub (configureGitHubClient), before the
+	// advisory-issue ensure below; the per-agent resolver and the audit sink
+	// follow in bootAgents and bootDashboard as their dependencies come up.
 
 	if b.cfg == nil {
 		return false
@@ -2044,9 +1994,7 @@ func (b *boot) bootAdvisoryWith(deps bootAdvisoryDeps) bool {
 		Mode:     b.cfg.ConvergenceMode,
 	}
 	b.mutationBoundary = boundary
-	if b.ghClient != nil {
-		b.ghClient.SetMutationBoundary(boundary)
-	}
+	b.applyGitHubClientMutationBoundary(b.ghClient)
 	b.logger.Info("mutation convergence boundary wired", "mode", mode, "state_dir", mutationStateDir)
 
 	// Find or create the pinned advisory issue. Any level can have advisory
@@ -2290,35 +2238,13 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// pkg/github/request_dirs_test.go pins by regexp.
 	cfg := b.cfg
 	if b.ghClient != nil && cfg.GitHub.HasUsableApp() {
-		// Attribution resolver: effective backend/model from the manager
-		// (runtime overrides included), falling back to the configured values
-		// for an agent the manager does not know; tool version resolved
-		// lazily per backend and cached. Only launch descriptors flow here —
-		// never tokens, keys, or prompt content.
-		b.ghClient.SetAttributionResolver(func(agentName string) github.InvocationMeta {
-			backend, model, effort, known := b.agentMgr.InvocationMetadata(agentName)
-			if !known {
-				if ac, inCfg := b.cfg.Agents[agentName]; inCfg {
-					backend, model = ac.Backend, ac.Model
-					// Same resolver the Manager uses, not a second copy of the
-					// rule: a hardcoded default here would drift silently the
-					// moment agy's default effort changed.
-					effort = agent.ResolveReasoningEffort(backend, model, ac.ReasoningEffort)
-				}
-			}
-			tool, toolVersion := github.ResolveToolVersion(backend)
-			return github.InvocationMeta{
-				Agent:   agentName,
-				Backend: backend,
-				// bob self-selects (no catalog): requested model is honestly
-				// "auto" — see github.RequestedModel for the known follow-up
-				// on discovering bob's internal routing.
-				Model:       github.RequestedModel(backend, model),
-				Effort:      effort,
-				Tool:        tool,
-				ToolVersion: toolVersion,
-			}
-		})
+		// The agent-manager tier of configureGitHubClient (#9614): the
+		// attribution resolver, the self-authorization hold predicate and the
+		// merge re-engage hook. The App policy hooks (hive identity, the PR
+		// repo policy gate, signed commits, PR prechecks) and the review-relay
+		// settings were installed by bootGitHub; every rebuild path applies
+		// all of them through the same function.
+		b.applyGitHubClientAgentHooks(b.ghClient)
 		// authz enforces the SAME per-agent ACMM write-gate + forge-resistance as
 		// the direct `gh pr create` path — the request-file route grants no extra
 		// privilege. A denied request is quarantined, never opened.
@@ -2334,52 +2260,7 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		holdLabel := func(agentName string) bool {
 			return shouldHoldAgentPR(agentName, b.agentMgr.GetACMMLevel())
 		}
-		selfAuthorizationHoldEnabled := func(repo string) bool {
-			level := b.agentMgr.GetACMMLevel()
-			return b.cfg.SelfAuthorizationHoldEnabledForRepoAtLevel(repo, level)
-		}
-		// #5117: tell the client which accounts are ours, so the
-		// self-authorization gate recognises an issue filed under
-		// project.ai_author's plain user account as hive-filed rather than
-		// mistaking it for a human's. The App bot is recognised without this;
-		// hiveIdentity() is the same resolver the duplicate-PR guard uses.
-		b.ghClient.SetHiveIdentity(hiveIdentity(b.cfg))
-		b.ghClient.SetSelfAuthorizationHoldEnabled(selfAuthorizationHoldEnabled)
-		b.ghClient.SetPRRepoPolicyGate(func(agentName, repo string) error {
-			level := b.cfg.EffectiveACMMLevelForRepo(repo)
-			if level <= 0 {
-				level = b.cfg.ACMMLevelOrZero()
-			}
-			if !agent.DefaultAgentMode(agentName, level).CanPush() {
-				return fmt.Errorf("repo %s effective ACMM L%d does not allow %s to open PRs", repo, level, agentName)
-			}
-			return nil
-		})
-		installReviewRelaySettings(b.ghClient, b.cfg, b.logger)
-		// github.app_signed_commits: re-author each agent branch through
-		// createCommitOnBranch before the PR opens, so its commit is
-		// GitHub-signed and authored by the App bot. Read through a func so a
-		// config reload takes effect on the next request.
-		b.ghClient.SetSignedCommits(func() bool { return b.cfg.GitHub.AppSignedCommitsEnabled() })
-		prPrecheckDataRoot := filepath.Dir(b.cfg.Data.MetricsDir)
-		b.ghClient.SetPRPrecheckOptions(&github.PRPrecheckOptions{
-			DocsEnabled:    func() bool { return b.cfg.GitHub.PRPrecheck.DocsEnabled() },
-			GoTestsEnabled: func() bool { return b.cfg.GitHub.PRPrecheck.GoTestsEnabled() },
-			Timeout:        func() time.Duration { return b.cfg.GitHub.PRPrecheck.EffectiveTimeout() },
-			MaxConcurrent:  func() int { return b.cfg.GitHub.PRPrecheck.EffectiveMaxConcurrent() },
-			CacheDir:       b.cfg.GitHub.PRPrecheck.EffectiveCacheDir(prPrecheckDataRoot),
-			WorkRoot:       filepath.Join(prPrecheckDataRoot, "pr-precheck", "checkouts"),
-			CloneBaseURL:   b.cfg.GitHub.ResolvedBaseURL(),
-		})
-		// Fix #2: on a terminal merge failure caused by a failing REQUIRED check,
-		// re-engage the fix loop instead of abandoning the PR. The hook records a
-		// re-engagement under the escalation store's per-red-SHA cap (shared with
-		// the reaper so a PR is never double-dispatched beyond its budget) and
-		// returns whether the cap still allowed a dispatch. The PR is already
-		// surfaced into CI_FAILING by writeMergeEligible each eval tick; the hook
-		// is the loop-safety authority that decides when to STOP nudging.
-		b.ghClient.SetMergeReEngageHook(mergeReEngageHook(b.cfg, agentKicker{mgr: b.agentMgr},
-			agentAvailability(b.cfg, b.agentMgr), b.logger))
+		selfAuthorizationHoldEnabled := b.selfAuthorizationHoldEnabled
 
 		// SECURITY (audit F3): re-verify the merger tier inside the sweep. The
 		// dashboard's queue endpoint gates on requireMergerOrOwnerRole, but the
@@ -2402,7 +2283,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		// allowlist. Unset/empty leaves the API/allowlist fallback chain
 		// intact (SetRequiredChecks(nil) is a safe no-op).
 		logDeprecatedAllowUnprotectedBase(b.cfg, b.logger)
-		if set, ok := syncAutoMergePolicyToGitHubClient(b.cfg, b.ghClient); ok {
+		// The same set configureGitHubClient installed on the client via
+		// syncAutoMergePolicyToGitHubClient.
+		if set, ok := b.cfg.AutoMerge.RequiredCheckSet(); ok {
 			autoMergeOpts.RequiredChecks = set
 		}
 
@@ -2583,7 +2466,7 @@ func (b *boot) bootStateWith(deps bootStateDeps) {
 		if b.saved.ConfigOverrides != nil {
 			applyConfigOverrides(b.cfg, b.saved.ConfigOverrides)
 			b.ghClient.SetRepos(b.cfg.Project.Repos)
-			b.ghClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
+			b.ghClient.SetHoldLabels(b.githubHoldLabels())
 			if len(b.cfg.Governor.Labels.Exempt) > 0 {
 				b.ghClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
 				b.ghClient.SetAutoMergeLabel(normalizedAutoMergeLabel(b.cfg.Governor.Labels.AutoMerge))
@@ -2622,9 +2505,6 @@ func (b *boot) bootDashboard() { b.bootDashboardWith(defaultBootDashboardDeps())
 // persistence enables injected; see bootDashboardDeps.
 func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 	b.dashSrv = deps.newServer(b.cfg.Dashboard.Port, b.cfg.Dashboard.AuthToken, b.logger)
-	if b.ghClient != nil {
-		b.ghClient.SetMergeFailureAlertSink(b.dashSrv)
-	}
 	worksource.SetRunStageAccessor(b.dashSrv.RunStageAccessor())
 	b.dashSrv.SetMutationStats(func() interface{} {
 		if b.mutationStats == nil {
@@ -2747,14 +2627,11 @@ func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 	// feeds the lifecycle timeline: agent_pr_created → pr_opened and
 	// pr_merged → merged (both automerge sweep paths, MergePR from the
 	// dashboard queue and the merge watcher), see recordLifecycleFromAudit.
-	if b.ghClient != nil {
-		// Typed sink (#9587): repo and target land as first-class audit
-		// fields alongside the legacy repo=/number= detail pairs.
-		b.ghClient.SetAttributionAuditRecord(func(rec github.AuditRecord) {
-			b.dashSrv.AuditLogRecord("system", rec.Action, rec.Detail, rec.Agent, rec.Repo, rec.Target)
-			recordLifecycleFromAudit(b.dashSrv, b.cfg.Project.Org, rec.Action, rec.Detail, rec.Agent)
-		})
-	}
+	// Installed with the rest of configureGitHubClient's dashboard tier (the
+	// merge-failure alert sink, the PR-opened hook and the canary scanner),
+	// here, after lifecycle persistence is enabled, so every producer records
+	// into a persisted store (#9614).
+	b.applyGitHubClientDashboardHooks(b.ghClient)
 
 	// Seed token sparkline history now that the dashboard server exists
 	if len(b.pendingTokenSeed) > 0 {
@@ -3453,20 +3330,10 @@ func (b *boot) bootSupervision() {
 		claimsInflightLookup(b.issueClaims, b.cfg.Project.Org)))
 	// #9584: close answered question issues unless the author objects (default off).
 	wireQuestionAutoclose(b.ctx, b.cfg, b.sched, func() *github.Client { return b.ghClient }, b.logger)
-	if b.ghClient != nil {
-		b.ghClient.SetPROpenedHook(func(agentName, repo string, number int, url string) {
-			b.dashSrv.LinearAgentPROpened(agentName, repo, number, url)
-			// Same typed hook feeds the lifecycle timeline: the watcher fires
-			// it on the exact path that opened the PR, with the agent name the
-			// audit stream attributes to the governor flow (#5656). The store
-			// dedupes with the audit-sink bridge by (ref, kind).
-			recordPROpened(b.dashSrv, b.cfg.Project.Org, agentName, repo, number, url)
-			// PR follow-up session resume (#9583, default off): remember
-			// which live CLI session authored this PR so its follow-ups can
-			// resume that conversation instead of a /clear'd fresh kick.
-			recordPRFollowUpPointer(b.cfg, b.agentMgr, agentName, repo, number, url, time.Now(), b.logger)
-		})
-	}
+	// The pr-request watcher's PR-opened hook (Linear session narration, the
+	// lifecycle timeline and the #9583 follow-up session pointer) is installed
+	// by configureGitHubClient's dashboard tier (#9614), so a rebuilt client
+	// keeps it.
 }
 
 func attachReviewLinksForDashboard(payload *dashboard.StatusPayload, logger *slog.Logger) {
@@ -3889,24 +3756,9 @@ func (b *boot) bootWatchersWith(deps bootWatchersDeps) {
 				if appErr != nil {
 					b.logger.Error("github app auth rebuild after config reload failed", "error", appErr)
 				} else {
-					newClient := github.NewClientFromAppWithBotLogin(newAppAuth, b.cfg.Project.Org, b.cfg.Project.Repos, b.logger, b.cfg.GitHub.BotLogin())
-					newClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
-					if len(b.cfg.Governor.Labels.Exempt) > 0 {
-						newClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
-						newClient.SetAutoMergeLabel(normalizedAutoMergeLabel(b.cfg.Governor.Labels.AutoMerge))
-					}
-					newClient.SetIssueFilter(b.cfg.Project.IssueFilter)
-					installReviewBots(newClient, b.cfg, b.logger)
-					newClient.SetRepoPausedFunc(b.cfg.IsRepoPaused)        // #6203: a client rebuild must not un-pause repos
-					newClient.SetAgentRepoScopeFunc(b.cfg.AgentServesRepo) // #6204: a client rebuild must not un-scope agents
-					newClient.SetWriteAllowlistFunc(b.cfg.AgentMayWrite)   // #9587: lane write allowlist, same live-config contract
-					installReviewRelaySettings(newClient, b.cfg, b.logger)
-					syncAutoMergePolicyToGitHubClient(b.cfg, newClient)
-					if b.dashSrv != nil {
-						newClient.SetMergeFailureAlertSink(b.dashSrv)
-					}
+					// #9614: every boot-time hook, not a hand-kept subset.
+					newClient := b.newConfiguredGitHubAppClient(newAppAuth)
 					b.ghClient = newClient
-					b.installMutationBoundary(b.ghClient)
 					b.appAuth = newAppAuth
 					b.agentMgr.SetAppAuth(newAppAuth)
 					// Immediate per-agent token delivery — see #4072.
@@ -4030,19 +3882,10 @@ func (b *boot) bootProxy() { b.bootProxyWith(defaultBootProxyDeps()) }
 func (b *boot) bootProxyWith(deps bootProxyDeps) {
 	var err error
 
-	canaryLeakHandler := func(leak ioscan.CanaryLeak) {
-		detail := fmt.Sprintf("rule=%s, agent=%s, source=%s", ioscan.CanaryLeakRule, leak.Agent, leak.Source)
-		b.dashSrv.AuditLog(leak.Agent, "ioscan_canary_leak", detail, leak.Agent)
-		if store, ok := b.beadStores[leak.Agent]; ok && store != nil {
-			if b, berr := store.Create("Canary token leaked via "+leak.Source, beads.TypeAdvisory, beads.PriorityCritical, leak.Agent, ""); berr == nil {
-				_ = store.SetMetadata(b.ID, "rule", ioscan.CanaryLeakRule)
-				_ = store.SetMetadata(b.ID, "source", leak.Source)
-			}
-		}
-	}
-	if b.ghClient != nil {
-		b.ghClient.SetCanaryScanner(b.cfg.Ioscan.IsEnabled() && b.cfg.Ioscan.CanariesEnabled(), b.cfg.Ioscan.FailClosedAtLevel(b.cfg.ACMMLevelOrZero()), ioscan.DefaultCanaries, canaryLeakHandler)
-	}
+	// The GitHub client's canary scanner is installed by
+	// configureGitHubClient's dashboard tier (#9614); the proxy shares its
+	// leak handler.
+	canaryLeakHandler := b.handleCanaryLeak
 
 	b.githubProxy, err = deps.newGitHubProxy(b.logger, b.cfg.Project.Org, b.cfg.Project.Repos)
 	if err != nil {
@@ -5252,24 +5095,10 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 					// easily as a hand-edited config; correct (and persist) it
 					// before building a client that would 403 on every write.
 					healGitHubAppInstallation(b.ctx, newAppAuth, b.cfg, b.logger)
-					newClient := github.NewClientFromAppWithBotLogin(newAppAuth, b.cfg.Project.Org, b.cfg.Project.Repos, b.logger, b.cfg.GitHub.BotLogin())
-					newClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
-					if len(b.cfg.Governor.Labels.Exempt) > 0 {
-						newClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
-						newClient.SetAutoMergeLabel(normalizedAutoMergeLabel(b.cfg.Governor.Labels.AutoMerge))
-					}
-					newClient.SetIssueFilter(b.cfg.Project.IssueFilter)
-					installReviewBots(newClient, b.cfg, b.logger)
-					newClient.SetRepoPausedFunc(b.cfg.IsRepoPaused)        // #6203: a client rebuild must not un-pause repos
-					newClient.SetAgentRepoScopeFunc(b.cfg.AgentServesRepo) // #6204: a client rebuild must not un-scope agents
-					newClient.SetWriteAllowlistFunc(b.cfg.AgentMayWrite)   // #9587: lane write allowlist, same live-config contract
-					syncAutoMergePolicyToGitHubClient(b.cfg, newClient)
-					if b.dashSrv != nil {
-						newClient.SetMergeFailureAlertSink(b.dashSrv)
-					}
+					// #9614: every boot-time hook, not a hand-kept subset.
+					newClient := b.newConfiguredGitHubAppClient(newAppAuth)
 
 					b.ghClient = newClient
-					b.installMutationBoundary(b.ghClient)
 					b.appAuth = newAppAuth
 					b.agentMgr.SetAppAuth(newAppAuth)
 					// Immediate per-agent token delivery: hosted spokes get their
@@ -5477,7 +5306,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// way, so re-install it too — a hub-delivered filter must take
 				// effect on the next enumeration, not the next restart.
 				b.ghClient.SetRepos(b.cfg.Project.Repos)
-				b.ghClient.SetHoldLabels([]string{github.CanonicalHiveHoldLabel(b.cfg.HiveID)})
+				b.ghClient.SetHoldLabels(b.githubHoldLabels())
 				b.ghClient.SetIssueFilter(b.cfg.Project.IssueFilter)
 				syncAutoMergePolicyToGitHubClient(b.cfg, b.ghClient)
 
@@ -5736,18 +5565,24 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			HiveID: b.cfg.HiveID,
 			Logger: b.logger,
 		}); err != nil {
-			// Fail closed: if the migration cannot prove/carry ambiguous or
-			// audit-backed holds, keep the old provenance spelling in the hold
-			// set for this process rather than silently releasing work.
-			b.ghClient.SetHoldLabels([]string{
-				github.CanonicalHiveHoldLabel(b.cfg.HiveID),
-				github.HiveProvenanceLabel(b.cfg.HiveID),
-			})
+			// No fail-closed fallback is possible here: the legacy hold label
+			// hive/<id> IS the provenance label on every claimed item, and
+			// github.HasHoldLabelWith never treats provenance labels as holds
+			// (#9371 - treating it as one parked every claimed item). Items
+			// still carrying only the legacy label are therefore NOT held.
+			// Say so loudly, in the log and on the dashboard, instead of
+			// pretending to fail closed (#9614).
 			reportPath := ""
 			if report != nil {
 				reportPath = report.ReportPath
 			}
-			b.logger.Error("hive hold label migration failed; keeping legacy hive provenance label as a hold until next restart", "error", err, "report", reportPath)
+			b.logger.Error("hive hold label migration failed; items still carrying only the legacy "+
+				github.HiveProvenanceLabel(b.cfg.HiveID)+" label are NOT treated as held (#9371) - re-apply "+
+				github.CanonicalHiveHoldLabel(b.cfg.HiveID)+" by hand or restart to retry the migration",
+				"error", err, "report", reportPath)
+			if b.dashSrv != nil {
+				b.dashSrv.AddSystemAlert(holdMigrationFailedAlertID, "warning", holdMigrationFailedAlertMessage(b.cfg.HiveID, reportPath))
+			}
 		}
 	}
 	deps.runEval(b, nil)

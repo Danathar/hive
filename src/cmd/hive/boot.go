@@ -119,7 +119,6 @@ type boot struct {
 	leaderboardForHeartbeat       func() []spoke.LeaderboardEntry
 	ownerForHeartbeat             func() string
 	dashboardURLForHeartbeat      func() string
-	installMutationBoundary       func(client interface{ SetMutationBoundary(effects.Boundary) })
 	dashboardDependencies         func() *dashboard.Dependencies
 	wireSessionPrune              func()
 
