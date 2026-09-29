@@ -1,1 +1,0 @@
-- Guide kicks now include cached flow-health signals and a surge-coach lens for ranked, advisory recommendations on prolonged SURGE, slow merges, and aging actionable work, without extra polling or write permissions.
