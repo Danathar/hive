@@ -178,7 +178,14 @@ func (b *slackBackend) Send(content string) error {
 }
 
 func (b *slackBackend) SetTopic(topic string) error {
-	err := b.postJSON("/conversations.setTopic", map[string]string{"channel": b.channelID, "topic": topic})
+	data, err := json.Marshal(map[string]string{"channel": b.channelID, "topic": topic})
+	if err != nil {
+		return err
+	}
+	parsed, err := b.callSlack(context.Background(), "/conversations.setTopic", bytes.NewReader(data), b.botToken)
+	if parsed.Error == "missing_scope" || parsed.Error == "not_allowed_token_type" {
+		err = chat.ErrTopicUnsupported
+	}
 	if errors.Is(err, chat.ErrTopicUnsupported) {
 		b.logger.Debug("slack topic update unsupported", "error", err)
 	}
@@ -518,13 +525,17 @@ func (b *slackBackend) callSlack(ctx context.Context, path string, body io.Reade
 		}
 	}
 	if !parsed.OK {
-		if parsed.Error == "missing_scope" || parsed.Error == "not_allowed_token_type" {
-			return parsed, chat.ErrTopicUnsupported
-		}
 		if parsed.Error == "" {
 			parsed.Error = "not_ok"
 		}
-		return parsed, fmt.Errorf("slack API error: %s", parsed.Error)
+		message := fmt.Sprintf("slack API error: %s", parsed.Error)
+		switch parsed.Error {
+		case "missing_scope":
+			message += " (check the token has the required Slack scope)"
+		case "not_allowed_token_type":
+			message += " (check app_token is xapp-… and bot_token is xoxb-…)"
+		}
+		return parsed, errors.New(message)
 	}
 	return parsed, nil
 }

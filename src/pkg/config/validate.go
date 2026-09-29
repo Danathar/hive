@@ -128,8 +128,14 @@ func (c *Config) ValidateWithOptions(opts ValidateOptions) error {
 		if strings.TrimSpace(c.Notifications.Slack.AppToken) == "" {
 			return fmt.Errorf("notifications.slack.app_token is required when slack.enabled is true")
 		}
+		if !strings.HasPrefix(strings.TrimSpace(c.Notifications.Slack.AppToken), "xapp-") {
+			return fmt.Errorf("notifications.slack.app_token must start with xapp- when slack.enabled is true")
+		}
 		if strings.TrimSpace(c.Notifications.Slack.BotToken) == "" {
 			return fmt.Errorf("notifications.slack.bot_token is required when slack.enabled is true")
+		}
+		if !strings.HasPrefix(strings.TrimSpace(c.Notifications.Slack.BotToken), "xoxb-") {
+			return fmt.Errorf("notifications.slack.bot_token must start with xoxb- when slack.enabled is true")
 		}
 		if strings.TrimSpace(c.Notifications.Slack.ChannelID) == "" {
 			return fmt.Errorf("notifications.slack.channel_id is required when slack.enabled is true")

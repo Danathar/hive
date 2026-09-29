@@ -21,9 +21,11 @@ func TestSlackConfigValidation(t *testing.T) {
 	}{
 		{name: "disabled empty ok", slack: &SlackConfig{}},
 		{name: "enabled app token required", slack: &SlackConfig{Enabled: true, BotToken: "xoxb", ChannelID: "C1"}, want: "app_token"},
-		{name: "enabled bot token required", slack: &SlackConfig{Enabled: true, AppToken: "xapp", ChannelID: "C1"}, want: "bot_token"},
-		{name: "enabled channel required", slack: &SlackConfig{Enabled: true, AppToken: "xapp", BotToken: "xoxb"}, want: "channel_id"},
-		{name: "enabled complete ok", slack: &SlackConfig{Enabled: true, AppToken: "xapp", BotToken: "xoxb", ChannelID: "C1", AllowedUsers: []string{"U1"}}},
+		{name: "enabled bot token required", slack: &SlackConfig{Enabled: true, AppToken: "xapp-test", ChannelID: "C1"}, want: "bot_token"},
+		{name: "enabled channel required", slack: &SlackConfig{Enabled: true, AppToken: "xapp-test", BotToken: "xoxb-test"}, want: "channel_id"},
+		{name: "enabled app token prefix required", slack: &SlackConfig{Enabled: true, AppToken: "xoxb-test", BotToken: "xoxb-test", ChannelID: "C1"}, want: "must start with xapp-"},
+		{name: "enabled bot token prefix required", slack: &SlackConfig{Enabled: true, AppToken: "xapp-test", BotToken: "xapp-test", ChannelID: "C1"}, want: "must start with xoxb-"},
+		{name: "enabled complete ok", slack: &SlackConfig{Enabled: true, AppToken: "xapp-test", BotToken: "xoxb-test", ChannelID: "C1", AllowedUsers: []string{"U1"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
