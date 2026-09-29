@@ -268,3 +268,7 @@ func (c *Config) ApplyAgentDefaults(name string) {
 	applyKnownAgentDefaults(name, &agent)
 	c.Agents[name] = agent
 }
+
+// DefaultAgentOverlayDir is the directory Load falls back to for per-agent overlays.
+// It is a var so tests and hermetic binaries can redirect the host-local path.
+var DefaultAgentOverlayDir = "/data/agent-configs"

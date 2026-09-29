@@ -3,6 +3,7 @@ package config
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"fmt"
 
@@ -220,12 +221,17 @@ type AgentConfig struct {
 	// would otherwise join.
 	ReposOwner string `yaml:"repos_owner,omitempty" json:"repos_owner,omitempty"`
 
-	StaleTimeout    int    `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
-	RestartStrategy string `yaml:"restart_strategy" json:"restart_strategy,omitempty"`
-	LaunchCmd       string `yaml:"launch_cmd" json:"launch_cmd,omitempty"`
-	AgentSpec       string `yaml:"agent_spec" json:"agent_spec,omitempty"`
-	DisplayName     string `yaml:"display_name" json:"display_name,omitempty"`
-	Description     string `yaml:"description" json:"description,omitempty"`
+	StaleTimeout int `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
+	// BusyNoActivityThreshold is how long a Working pane may go without any visible activity
+	// before dashboards surface it as possibly stuck. Zero uses DefaultBusyNoActivityThreshold.
+	BusyNoActivityThreshold time.Duration `yaml:"busy_no_activity_threshold,omitempty" json:"busy_no_activity_threshold,omitempty"`
+	// MaxTurnDuration is an optional visibility-only ceiling for a Working turn.
+	MaxTurnDuration time.Duration `yaml:"max_turn_duration,omitempty" json:"max_turn_duration,omitempty"`
+	RestartStrategy string        `yaml:"restart_strategy" json:"restart_strategy,omitempty"`
+	LaunchCmd       string        `yaml:"launch_cmd" json:"launch_cmd,omitempty"`
+	AgentSpec       string        `yaml:"agent_spec" json:"agent_spec,omitempty"`
+	DisplayName     string        `yaml:"display_name" json:"display_name,omitempty"`
+	Description     string        `yaml:"description" json:"description,omitempty"`
 
 	// Phase 2: config-driven agent behavior fields
 	Role           string              `yaml:"role" json:"role,omitempty"`
@@ -361,6 +367,17 @@ type AgentConfig struct {
 	enabledSet bool
 	// name is the YAML map key, set during config load
 	name string
+}
+
+const DefaultBusyNoActivityThreshold = 30 * time.Minute
+
+// EffectiveBusyNoActivityThreshold returns the silence threshold for surfacing
+// busy-but-quiet agents. A zero value keeps the fleet default.
+func (a AgentConfig) EffectiveBusyNoActivityThreshold() time.Duration {
+	if a.BusyNoActivityThreshold > 0 {
+		return a.BusyNoActivityThreshold
+	}
+	return DefaultBusyNoActivityThreshold
 }
 
 // SourceFile returns the per-agent overlay file this entry was loaded from, or

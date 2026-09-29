@@ -111,6 +111,10 @@ type HubConfig struct {
 	ContributeDenyAuthors         []string `yaml:"contribute_deny_authors"`
 	ContributeAllowModels         []string `yaml:"contribute_allow_models"`
 	ContributeRejectUnknownModels bool     `yaml:"contribute_reject_unknown_models"`
+	// ContributeMinReasoningEffort is the contributor reasoning-effort floor.
+	ContributeMinReasoningEffort string `yaml:"contribute_min_reasoning_effort,omitempty"`
+	// ContributeRejectUnknownEffort rejects relays whose effort cannot be ordered against the floor.
+	ContributeRejectUnknownEffort bool `yaml:"contribute_reject_unknown_effort,omitempty"`
 	// ContributeRepoFilters are optional, full owner/name keyed admission
 	// filters layered on top of the hive-wide title/author/label filters.
 	ContributeRepoFilters map[string]ContributeRepoFilter `yaml:"contribute_repo_filters,omitempty" json:"contribute_repo_filters,omitempty"`
