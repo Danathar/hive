@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.89.0)
+
+### Added
+
+- PR follow-ups can now resume the agent session that opened the PR ([#9583](https://github.com/hivecommons/hive/issues/9583)). Enable it with `turn.pr_follow_up.enabled` or `HIVE_PR_FOLLOWUP_RESUME=true`; it is off by default. When the watcher opens a PR for an agent, the hive saves a pointer to the agent's live CLI session as a `pkg/turn` envelope under `/data/turn/pr-followups`. When that PR then gets a settled CI failure, a changes-requested review or a new review-bot thread, the hive delivers it to the same session without `/clear`, so the agent keeps the reasoning behind the PR. This only happens while that session is still live and within `turn.pr_follow_up.max_age` (default `24h`). Only PRs this hive opened are eligible. Every delivery is journaled before it happens, so a restart re-queues it rather than dropping it. When the session cannot be resumed, the follow-up goes through the existing fix-before-new path as before.
+- **PR review queue: one ranked list across agent and contributor PRs** ([#9590](https://github.com/hivecommons/hive/issues/9590)). `GET /api/review/queue?limit=N&offset=M` returns every open PR in the governed repos (actionable and held, whoever opened it) in one deterministic order - triage class, then the review swarm's confidence band for the current head (an unreviewed PR ranks as "needs attention", never "safe"), then CI (green before red), then age - with human-readable `reasons` for each position, paged. `last-actionable.json` PRs now carry `review_rank`, `review_priority` and `review_rank_reasons`. Contributor PRs without an agent lane label are now classified from their title prefix, labels, and (when the duplicate sweep has fingerprinted them) changed paths, so they get a triage class instead of none; agent PRs classify exactly as before. New default-off `review.priority_labels` (Governor -> Features -> Review Gate) mirrors the rank onto exactly one existing `review-priority/high|normal|low` label per PR, applied by the hive, never by the authoring agent (option 2 of `src/docs/review-queue-triage.md`).
+
+### Fixed
+
+- The "resume-kick held" dashboard banner no longer sticks forever on agents that are idle by design ([#9612](https://github.com/hivecommons/hive/issues/9612)). The governor's resume-kick gate now reports why it refused a crash-restarted agent, and only an interval throttle (a kick really is coming at the next slot) raises the per-agent banner; agents paused or unscheduled in the current mode, on-demand, or on a time-of-day schedule are logged at info, and budget refusals are left to the existing budget-exhausted banner. Existing banners are reconciled every eval cycle and clear when the agent is kicked, paused, disabled or removed, working again, no longer expected to run in the current mode, or after two cadence intervals (6h fallback). The banner text now names the actual reason and only suggests waiting for the next scheduled slot when there is one.
+
+### Security
+
+- Existing hosted spokes that authenticate with a GitHub App now turn proxy-side GitHub credential injection ON by default ([#9586](https://github.com/hivecommons/hive/issues/9586)): an unset `HIVE_PROXY_INJECT_GH_AUTH` resolves at boot to on for a hosted spoke with live App auth outside advisory mode, and stays off for self-hosted installs, PAT spokes, advisory mode and the hub. The spoke logs `proxy GitHub auth injection: on|off (<reason>)` at boot and the dashboard Security tab shows the resolved state. The change reaches spokes through the release channels (`candidate` first, `stable` after its 24h soak); roll back by setting `HIVE_PROXY_INJECT_GH_AUTH=false` on a spoke or holding the stable promotion. Also fixed: with injection on, the proxy rewrote the Copilot CLI's `/copilot_internal/` session-token exchange to the App token, cutting copilot-backend agents off from their model; those requests now keep the agent's own Copilot credential.
+
 ## 2026-09-29 (v5.88.0)
 
 ### Added
