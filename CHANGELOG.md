@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-29 (v5.81.3)
+
+### Fixed
+
+- The dashboard no longer lists autonomous L6 agent-filed issues as needing human triage when the repo's self-authorization hold is off, so Overview bands, exports, and status payloads match the scheduler's actionable queue ([#9443](https://github.com/hivecommons/hive/issues/9443)).
+- **gh wrapper: agent comments no longer render their last paragraph as a bold heading.** The identity footer the wrapper appends to every issue/PR body opens with a `---` rule, and it was joined to the agent's text with a single newline — in Markdown a `---` directly under a paragraph is a setext underline, so the final paragraph of nearly every agent comment became an `<h2>`. The wrapper now separates body and footer with exactly one blank line, and normalises the agent's own text the same way: any dash rule written directly under text (`*Filed by …*\n---`) gets a blank line so it renders as the intended thematic break, while `##` headings, already-separated rules and `---` inside fenced code blocks are left untouched. Covered by `bin/gh-wrapper.test.sh` (#9454).
+
 ## 2026-09-29 (v5.81.2)
 
 ### Fixed
