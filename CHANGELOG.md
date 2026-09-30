@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.94.1)
+
+### Fixed
+
+- Hub and spoke dashboard HTML responses now send `Cache-Control: no-cache` with a strong ETag derived from the exact embedded bytes, so a browser revalidates on every load instead of applying heuristic caching; an unchanged page now costs only a 304, and a hub or spoke upgrade's new UI shows up on a normal reload instead of requiring a hard reload ([#9674](https://github.com/hivecommons/hive/issues/9674)).
+- CI: the apt-retry installer self-test's timeout scenario no longer fails on slow runners — its network-phase budget now leaves headroom for fork/exec overhead the per-attempt slice does not bound.
+- CI: the contributor-agent multi-hub token test no longer fails when the random test port contains "401" — the auth-rejection guard now matches "HTTP 401" instead of any "401" substring.
+
+### Security
+
+- Proxy-side GitHub credential injection is back to **opt-in only** ([#9586](https://github.com/hivecommons/hive/issues/9586)): the default-on from [#9597](https://github.com/hivecommons/hive/pull/9597) and [#9625](https://github.com/hivecommons/hive/pull/9625) is reverted. Injection is on only when a spoke sets `HIVE_PROXY_INJECT_GH_AUTH=true`; unset is off on every hive, hosted or self-hosted, App or PAT. Existing hosted App spokes no longer turn it on at boot, the hub no longer renders `HIVE_PROXY_INJECT_GH_AUTH` onto newly provisioned spokes, and the hub-wide `HIVE_HOSTED_PROXY_INJECT_GH_AUTH` switch is removed. Kept: the proxy rewrites `Authorization` only on GitHub hosts (no GitHub token reaches Linear), the Copilot `/copilot_internal/` auth exchange passes through under injection, a spoke still refuses to start on `HIVE_PROXY_INJECT_GH_AUTH=true` with `HIVE_PROXY_ADVISORY_OK=true`, an unrecognized value is still logged at ERROR, and the dashboard Security tab now reports `off (opt-in: set HIVE_PROXY_INJECT_GH_AUTH=true)` by default.
+
 ## 2026-09-29 (v5.94.0)
 
 ### Added
