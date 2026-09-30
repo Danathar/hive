@@ -820,16 +820,26 @@ func ValidateWritingGuide(v string) error {
 // issue body, PR body and review comment the agent writes in this session —
 // the variable appears once per template, ahead of the first body template, and
 // the later ones in the same policy are covered by this sentence) and its
-// limit: it governs how the body reads, never what the policy requires it to
-// contain. The quality policy demands evidence and a guide may ask for evidence
-// under a fold; the limit is what keeps those from reading as a contradiction.
+// limit: it governs how the body reads (wording, plainness, length, tone),
+// never what the policy requires it to contain or the order the template puts
+// it in. The body template stays authoritative: every section, field and piece
+// of evidence appears in the template's order, and the guide never drops,
+// renames or reorders a section. The one structural thing a guide may do is
+// ask for a high-level summary, which goes above the template's first section
+// as an addition. The earlier wording listed "structure" as the guide's while
+// also pinning every template section, so an agent given a summary-first guide
+// could not tell whether a summary was allowed and left it out
+// (hivecommons/hive#9747). The quality policy demands evidence and a guide may
+// ask for evidence under a fold; the limit is what keeps those from reading as
+// a contradiction.
 func (p *ProjectConfig) WritingGuideSection() string {
 	guide := strings.TrimSpace(p.WritingGuide)
 	if guide == "" {
 		return ""
 	}
 	return "WRITING GUIDE (set by this hive's owner in project.writing_guide). Every issue body, PR body and review comment you write in this session MUST follow it. " +
-		"It governs how the body reads — length, structure, wording — not what it contains: keep every section, field and piece of evidence the template below asks for, and apply the guide to how you write them.\n\n" +
+		"It governs how the body reads — wording, plainness, length, tone — not what it contains or the order the template puts it in: keep every section, field and piece of evidence the template below asks for, in the template's order, and never drop, rename or reorder a template section. " +
+		"If the guide asks for a summary or overview, write it at the top, before the template's first section, as an addition; the template's sections still follow in full below it.\n\n" +
 		guide + "\n"
 }
 
