@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.99.0)
+
+### Added
+
+- Agents can now ask users and teams to review a pull request through the audited write surface instead of a direct `gh pr edit --add-reviewer` ([#9587](https://github.com/hivecommons/hive/issues/9587)). `hive-open-issue request-review --repo <r> <number> [--reviewer a,b] [--team-reviewer t]` drops a request the hive fulfils with the App token under the same file-UID authorizer, lane allowlist (new `request_review` operation), repo pause and repo scope as the other relays, and audits it as `agent_review_requested` with typed `repo`/`target`. Logins and team slugs are validated, and more than 15 reviewers is refused, before any GitHub call.
+- PR follow-up handoffs now capture a resume id for gemini agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). Claude, copilot and codex already had one. When a gemini agent opens a PR, the hive reads the full session id from the newest transcript in the agent's own `~/.gemini/tmp/<project>/chats/` directory. It then shows `gemini --resume <id>` and the transcript path in the `PR HANDOFF` section, next to the existing note. `~/.gemini` is shared across the fleet, so capture only looks at the project directory for the agent's own working directory, and it skips any id that is not a plain `[A-Za-z0-9_-]` token. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+
+### Fixed
+
+- The #9673 CI-poll nudge now also fires on wall-clock time: a single blocking `gh run watch` that has run past 10 minutes this kick nudges the agent to stop polling even though it is only one command, instead of requiring more than 3 poll commands to have been observed.
+- The entrypoint FATAL hint and `src/docs/net-admin-requirement.md` now list `xt_mark`, `xt_REDIRECT` and `xt_owner` for the `/etc/modules-load.d/` drop-in ([#9758](https://github.com/hivecommons/hive/issues/9758)). They named only `xt_owner` and `xt_REDIRECT`, which left out the required `xt_mark`.
+
 ## 2026-09-30 (v5.98.0)
 
 ### Added
