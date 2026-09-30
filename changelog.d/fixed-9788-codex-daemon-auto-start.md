@@ -1,1 +1,0 @@
-- Disable Codex daemon auto-start on the hub launch path so Codex panes no longer restart-loop when ps is unavailable.
