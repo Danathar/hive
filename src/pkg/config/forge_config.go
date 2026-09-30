@@ -115,6 +115,16 @@ type GitHubConfig struct {
 	// and intentionally never serialized: process env must remain the effective
 	// override even if the dashboard updates the persisted YAML field at runtime.
 	selfAuthorizationHoldEnvOverride *bool `yaml:"-" json:"-"`
+	// ReporterTrustHold controls the #9665 reporter-trust hold: when active, an
+	// App-authored PR whose rationale traces only to an issue reporter that
+	// project.issue_filter.reporter_trust does not trust receives `hold` at
+	// every ACMM level. Default nil follows reporter_trust.enabled so switching
+	// the gate on covers both admission and merge; an explicit value or
+	// HIVE_REPORTER_TRUST_HOLD decides on its own.
+	ReporterTrustHold *bool `yaml:"reporter_trust_hold,omitempty" json:"reporter_trust_hold,omitempty"`
+	// reporterTrustHoldEnvOverride is set by HIVE_REPORTER_TRUST_HOLD and never
+	// serialized; process env remains the effective override at runtime.
+	reporterTrustHoldEnvOverride *bool `yaml:"-" json:"-"`
 	// OAuthBaseURLOverride and OAuthAPIURLOverride redirect the DEVICE-FLOW LOGIN
 	// endpoints away from public github.com. They are a TEST SEAM ONLY — see the
 	// comment on OAuthBaseURL(). They carry the `-` yaml tag so they can never be
@@ -718,4 +728,25 @@ func (g GitHubConfig) AppInstallURL() string {
 		return base + "/github-apps/" + slug + "/installations/new"
 	}
 	return base + "/apps/" + g.ResolvedAppSlug() + "/installations/new"
+}
+
+// ReporterTrustHoldEnabled reports whether the #9665 reporter-trust hold is
+// active hive-wide. Env wins, then an explicit config value, then the gate's
+// own enabled flag: switching reporter_trust on covers both admission and
+// merge unless the operator says otherwise. It never depends on ACMM level —
+// holding a stranger's request for a human is the point at L6.
+func (g GitHubConfig) ReporterTrustHoldEnabled(gateEnabled bool) bool {
+	if g.reporterTrustHoldEnvOverride != nil {
+		return *g.reporterTrustHoldEnvOverride
+	}
+	if g.ReporterTrustHold == nil {
+		return gateEnabled
+	}
+	return *g.ReporterTrustHold
+}
+
+// ReporterTrustHoldEnvOverrideSet reports whether HIVE_REPORTER_TRUST_HOLD is
+// currently forcing the effective value.
+func (g GitHubConfig) ReporterTrustHoldEnvOverrideSet() bool {
+	return g.reporterTrustHoldEnvOverride != nil
 }

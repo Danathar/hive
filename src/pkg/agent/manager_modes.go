@@ -200,11 +200,44 @@ func (m *Manager) AuthorizePROpen(agentName string, fileUID int) error {
 	return nil
 }
 
+// AuthorizePushBranch enforces the policy for the push-branch relay,
+// mirroring AuthorizePROpen exactly: pushing a branch is the same write tier
+// as opening a PR (the CanPush() ACMM gate that governs a direct `git push`),
+// with the same file-UID forge-resistance. Returns nil to authorize, so the
+// request-file route grants no extra privilege over the direct push it stands
+// in for.
+func (m *Manager) AuthorizePushBranch(agentName string, fileUID int) error {
+	if strings.TrimSpace(agentName) == "" {
+		return fmt.Errorf("no agent named in the request")
+	}
+	if m.uidMap != nil && fileUID > 0 {
+		owner := m.uidMap.LookupByUID(fileUID)
+		if owner == "" {
+			return fmt.Errorf("request file owned by unknown uid %d (not a registered agent)", fileUID)
+		}
+		if owner != agentName {
+			return fmt.Errorf("request claims agent %q but file is owned by agent %q (uid %d)", agentName, owner, fileUID)
+		}
+	}
+	m.mu.RLock()
+	agent := m.agents[agentName]
+	m.mu.RUnlock()
+	if agent == nil {
+		return fmt.Errorf("unknown agent %q", agentName)
+	}
+	if !m.agentMode(agent).CanPush() {
+		return fmt.Errorf("agent %q is not push-capable at this ACMM level (mode %s) — advisory agents may not push branches",
+			agentName, m.agentMode(agent).String())
+	}
+	return nil
+}
+
 // AuthorizeIssueOpen enforces the policy for the issue-request watcher,
 // mirroring AuthorizePROpen with the mode gates that govern the direct gh
 // paths: "issue" requests need CanCreateIssues() (mode >= ISSUES_ONLY);
-// "comment" and "claim" requests need the same (commenting and claiming an
-// issue are both issue-writes under the same tier). The same UID
+// "comment", "claim", "close", "label" and "request_review" requests need the
+// same (commenting on, claiming, closing, labeling and requesting review on an
+// issue or PR are all issue-writes under the same tier). The same UID
 // forge-resistance applies: the request file's owner must BE the claimed
 // agent. A nil manager or unknown agent is denied.
 func (m *Manager) AuthorizeIssueOpen(agentName string, fileUID int, kind string) error {

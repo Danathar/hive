@@ -108,6 +108,11 @@ model endpoint out of the box. See the overlay and its README here:
   [github.com/hivecommons/hive/tree/v4/src/deploy/kustomize/overlays/standalone/example-joe-spyre](https://github.com/hivecommons/hive/tree/v4/src/deploy/kustomize/overlays/standalone/example-joe-spyre).
   Every value there is a placeholder — copy the shape, don't apply it verbatim.
 
+Both flows need the Gateway API Inference Extension CRDs on the cluster first.
+The inference base ships an `InferencePool` (`inference.networking.k8s.io/v1`),
+and without the CRDs `kubectl apply -k` creates everything else and then fails
+with `no matches for kind "InferencePool"`.
+
 There are two flows. Pick based on whether you just want to *see it run* or
 you're doing a *real* deployment.
 
@@ -514,7 +519,7 @@ kubectl kustomize overlays/spyre | less
 # Create the secret first (Option 1 above), then apply:
 kubectl apply -k overlays/spyre/
 kubectl -n hive rollout status deploy/hive     # wait for Ready
-kubectl -n hive rollout status deploy/vllm     # inference backend
+kubectl -n hive-inference rollout status deploy/vllm     # inference backend
 ```
 
 **Changing a config value** — e.g. adding an authorized user or changing the

@@ -11,6 +11,7 @@ import (
 type RepoPolicy struct {
 	Repo                  string               `yaml:"repo" json:"repo"`
 	SelfAuthorizationHold *bool                `yaml:"self_authorization_hold,omitempty" json:"self_authorization_hold,omitempty"`
+	ReporterTrustHold     *bool                `yaml:"reporter_trust_hold,omitempty" json:"reporter_trust_hold,omitempty"`
 	AutoMerge             *bool                `yaml:"auto_merge,omitempty" json:"auto_merge,omitempty"`
 	ACMMLevel             *int                 `yaml:"acmm_level,omitempty" json:"acmm_level,omitempty"`
 	ACMMPinned            bool                 `yaml:"acmm_pinned,omitempty" json:"acmm_pinned,omitempty"`
@@ -239,7 +240,64 @@ func (c *Config) SetSelfAuthorizationHoldForRepoAndSave(repo string, enabled *bo
 }
 
 func repoPolicyHasNoOverrides(rp RepoPolicy) bool {
-	return rp.SelfAuthorizationHold == nil && rp.AutoMerge == nil && rp.ACMMLevel == nil && !rp.ACMMPinned && rp.ACMMLastAutomatic == nil
+	return rp.SelfAuthorizationHold == nil && rp.ReporterTrustHold == nil && rp.AutoMerge == nil && rp.ACMMLevel == nil && !rp.ACMMPinned && rp.ACMMLastAutomatic == nil
+}
+
+// ReporterTrustHoldEnabledForRepo resolves the #9665 reporter-trust hold for
+// one repository: env override, then the repo's own override, then the
+// hive-wide value (which itself follows reporter_trust.enabled when unset).
+func (c *Config) ReporterTrustHoldEnabledForRepo(repo string) bool {
+	if c == nil {
+		return false
+	}
+	if c.GitHub.reporterTrustHoldEnvOverride != nil {
+		return *c.GitHub.reporterTrustHoldEnvOverride
+	}
+	if rp, ok := c.RepoPolicyFor(repo); ok && rp.ReporterTrustHold != nil {
+		return *rp.ReporterTrustHold
+	}
+	return c.GitHub.ReporterTrustHoldEnabled(c.Project.IssueFilter.ReporterTrust.IsEnabled())
+}
+
+// SetReporterTrustHoldForRepos records per-repo #9665 overrides in memory:
+// a true/false value sets the override, nil clears it. Persistence is the
+// caller's job (the dashboard handler saves once for the whole request).
+func (c *Config) SetReporterTrustHoldForRepos(values map[string]*bool) {
+	if c == nil || len(values) == 0 {
+		return
+	}
+	repoPauseMu.Lock()
+	defer repoPauseMu.Unlock()
+	for repo, enabled := range values {
+		name := strings.TrimSpace(repo)
+		if name == "" {
+			continue
+		}
+		name, _ = NormalizeRepoForOrg(c.Project.Org, name)
+		key := repoPauseKey(c.Project.Org, name)
+		idx := -1
+		for i, rp := range c.Project.RepoPolicies {
+			if repoPauseKey(c.Project.Org, rp.Repo) == key {
+				idx = i
+				break
+			}
+		}
+		if enabled == nil {
+			if idx >= 0 {
+				c.Project.RepoPolicies[idx].ReporterTrustHold = nil
+				if repoPolicyHasNoOverrides(c.Project.RepoPolicies[idx]) {
+					c.Project.RepoPolicies = append(c.Project.RepoPolicies[:idx:idx], c.Project.RepoPolicies[idx+1:]...)
+				}
+			}
+			continue
+		}
+		v := *enabled
+		if idx >= 0 {
+			c.Project.RepoPolicies[idx].ReporterTrustHold = &v
+		} else {
+			c.Project.RepoPolicies = append(c.Project.RepoPolicies, RepoPolicy{Repo: name, ReporterTrustHold: &v})
+		}
+	}
 }
 
 // RepoAutoMergeEnabled resolves project.repo_policies[].auto_merge for repo.

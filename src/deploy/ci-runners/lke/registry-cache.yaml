@@ -1,0 +1,75 @@
+# Pull-through registry cache for the hive-ci cluster (docker.io by default).
+# dind in every runner pod is started with --registry-mirror pointing here, so
+# base-image pulls for `Build and Push Docker Image` and the smoke workflows hit
+# the node network once instead of once per job, and Docker Hub rate limits stop
+# mattering. Runs on the tainted `arc-system` pool on Linode Block Storage.
+#
+#   kubectl --context hive-ci -n arc-systems apply -f src/deploy/ci-runners/lke/registry-cache.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-cache
+  namespace: arc-systems
+  labels: { owner: hive, team: hive }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linode-block-storage-retain
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-cache
+  namespace: arc-systems
+  labels: { owner: hive, team: hive, app: registry-cache }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: registry-cache }
+  template:
+    metadata:
+      labels: { app: registry-cache, owner: hive, team: hive }
+    spec:
+      nodeSelector: { hive-role: system }
+      tolerations:
+        - key: hive-role
+          operator: Equal
+          value: system
+          effect: NoSchedule
+      containers:
+        - name: registry
+          image: registry:2.8.3
+          env:
+            - name: REGISTRY_PROXY_REMOTEURL
+              value: https://registry-1.docker.io
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 5000
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - mountPath: /var/lib/registry
+              name: data
+          readinessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-cache
+  namespace: arc-systems
+  labels: { owner: hive, team: hive }
+spec:
+  selector: { app: registry-cache }
+  ports:
+    - port: 5000
+      targetPort: 5000

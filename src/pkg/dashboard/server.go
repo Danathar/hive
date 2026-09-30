@@ -642,6 +642,7 @@ type FrontendAgent struct {
 	// the SPA renders this window as "starting" rather than down.
 	Starting               bool   `json:"starting,omitempty"`
 	Busy                   string `json:"busy"`
+	AwaitingCI             bool   `json:"awaitingCI,omitempty"`
 	Paused                 bool   `json:"paused"`
 	PausedAt               string `json:"pausedAt,omitempty"`
 	PausedReason           string `json:"pausedReason,omitempty"`
@@ -694,6 +695,7 @@ type FrontendAgent struct {
 	StallNudges            int    `json:"stallNudges,omitempty"`
 	ActionNudges           int    `json:"actionNudges,omitempty"`
 	TransientNudges        int    `json:"transientNudges,omitempty"`
+	CIPollNudges           int    `json:"ciPollNudges,omitempty"`
 	// KickOutcome is how the last kicked turn ENDED (#7421): "question" (asked
 	// the operator what to do — a defect), "stand-down" (policy refusal —
 	// blocked), "no-op" (reported nothing produced) or "ended". Empty while

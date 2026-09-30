@@ -20,6 +20,8 @@
 #   hive-open-issue comment --repo <owner/repo> <number|url> --body "<b>"
 #   hive-open-issue claim   --repo <owner/repo> <number|url>
 #   hive-open-issue close   --repo <owner/repo> <number|url> [--override-reason "..."]
+#   hive-open-issue label   --repo <owner/repo> <number|url> [--label a,b] [--remove-label c]
+#   hive-open-issue request-review --repo <owner/repo> <number|url> [--reviewer a,b] [--team-reviewer t]
 #
 # --parent <n> links the new issue as a GitHub sub-issue of issue <n> in the
 # same repo (hivecommons/hive#9435), so the parent shows it in a native
@@ -42,6 +44,19 @@
 # assignees, so a label is the visible, auditable ownership signal) and audits
 # it as agent_issue_claimed. No body/title needed.
 #
+# "label" adds and/or removes plain labels on an existing issue or PR through
+# the audited write surface (hivecommons/hive#9587) instead of a direct
+# `gh issue edit --add-label`. It refuses hive-controlled labels in both
+# directions — the merge-queue label, hold labels, the `hive/` namespace and
+# the human-decision labels — because those are inputs to hive automation or
+# records of a person's verdict, not descriptions of the item. Use
+# `hive-open-issue claim` for ownership.
+#
+# "request-review" asks users (--reviewer) and/or teams (--team-reviewer) to
+# review an existing PR through the audited write surface
+# (hivecommons/hive#9587) instead of a direct `gh pr edit --add-reviewer`.
+# The watcher audits it as agent_review_requested.
+#
 # "close" routes manual issue closes through the same reporter-confirmation gate
 # as PR-request closing keywords. Human-filed bug-family issues stay open unless
 # they carry the reporter-confirmed marker or the request includes an explicit
@@ -60,6 +75,8 @@ case "${1:-}" in
   comment) KIND="comment"; shift;;
   claim) KIND="claim"; shift;;
   close) KIND="close"; shift;;
+  label) KIND="label"; shift;;
+  request-review|request_review) KIND="request_review"; shift;;
 esac
 
 REPO=""; TITLE=""; BODY=""; BODY_FILE=""; NUMBER=""
@@ -67,14 +84,20 @@ OVERRIDE_REASON=""
 PARENT=""
 DRY_RUN=0
 LABELS=()
-SUPPORTED_FLAGS="--repo/-R, --title/-t, --body/-b, --body-file/-F, --label/-l, --number, --parent, --override-reason, --dry-run/-n (plus the ignored gh flags --assignee/-a, --milestone/-m, --project/-p, --template/-T, --web/-w, --editor/-e)"
+REMOVE_LABELS=()
+REVIEWERS=()
+TEAM_REVIEWERS=()
+SUPPORTED_FLAGS="--repo/-R, --title/-t, --body/-b, --body-file/-F, --label/-l, --remove-label, --reviewer, --team-reviewer, --number, --parent, --override-reason, --dry-run/-n (plus the ignored gh flags --assignee/-a, --milestone/-m, --project/-p, --template/-T, --web/-w, --editor/-e)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo|-R) REPO="$2"; shift 2;;
     --title|-t) TITLE="$2"; shift 2;;
     --body|-b) BODY="$2"; shift 2;;
     --body-file|-F) BODY_FILE="$2"; shift 2;;
-    --label|-l) LABELS+=("$2"); shift 2;;
+    --label|-l|--add-label) LABELS+=("$2"); shift 2;;
+    --remove-label) REMOVE_LABELS+=("$2"); shift 2;;
+    --reviewer|--add-reviewer) REVIEWERS+=("$2"); shift 2;;
+    --team-reviewer) TEAM_REVIEWERS+=("$2"); shift 2;;
     --number) NUMBER="$2"; shift 2;;
     --parent) PARENT="$2"; shift 2;;
     --override-reason) OVERRIDE_REASON="$2"; shift 2;;
@@ -82,7 +105,10 @@ while [ $# -gt 0 ]; do
     --title=*) TITLE="${1#*=}"; shift;;
     --body=*) BODY="${1#*=}"; shift;;
     --body-file=*) BODY_FILE="${1#*=}"; shift;;
-    --label=*) LABELS+=("${1#*=}"); shift;;
+    --label=*|--add-label=*) LABELS+=("${1#*=}"); shift;;
+    --remove-label=*) REMOVE_LABELS+=("${1#*=}"); shift;;
+    --reviewer=*|--add-reviewer=*) REVIEWERS+=("${1#*=}"); shift;;
+    --team-reviewer=*) TEAM_REVIEWERS+=("${1#*=}"); shift;;
     --number=*) NUMBER="${1#*=}"; shift;;
     --parent=*) PARENT="${1#*=}"; shift;;
     --override-reason=*) OVERRIDE_REASON="${1#*=}"; shift;;
@@ -105,7 +131,7 @@ while [ $# -gt 0 ]; do
       exit 2;;
     *)
       # A bare positional for a comment/claim is the issue/PR number or URL.
-      if { [ "$KIND" = "comment" ] || [ "$KIND" = "claim" ] || [ "$KIND" = "close" ]; } && [ -z "$NUMBER" ]; then
+      if { [ "$KIND" = "comment" ] || [ "$KIND" = "claim" ] || [ "$KIND" = "close" ] || [ "$KIND" = "label" ] || [ "$KIND" = "request_review" ]; } && [ -z "$NUMBER" ]; then
         case "$1" in
           http://*|https://*) NUMBER="$(printf '%s' "$1" | sed -n 's#.*/\(issues\|pull\)/\([0-9][0-9]*\).*#\2#p')";;
           [0-9]*) NUMBER="$1";;
@@ -132,6 +158,26 @@ if [ "$KIND" = "issue" ]; then
   # agent bug, and catching it here beats a watcher-side .bad quarantine.
   if [ -z "$REPO" ] || [ -z "$TITLE" ] || [ -z "$BODY" ]; then
     echo "hive-open-issue: --repo, --title, and --body are required" >&2
+    exit 2
+  fi
+elif [ "$KIND" = "label" ]; then
+  # A label request needs the item AND at least one label to change; the
+  # watcher would otherwise quarantine it as malformed.
+  if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+    echo "hive-open-issue: label requires --repo and a number (or URL)" >&2
+    exit 2
+  fi
+  if [ ${#LABELS[@]} -eq 0 ] && [ ${#REMOVE_LABELS[@]} -eq 0 ]; then
+    echo "hive-open-issue: label requires at least one --label or --remove-label" >&2
+    exit 2
+  fi
+elif [ "$KIND" = "request_review" ]; then
+  if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+    echo "hive-open-issue: request-review requires --repo and a PR number (or URL)" >&2
+    exit 2
+  fi
+  if [ ${#REVIEWERS[@]} -eq 0 ] && [ ${#TEAM_REVIEWERS[@]} -eq 0 ]; then
+    echo "hive-open-issue: request-review requires at least one --reviewer or --team-reviewer" >&2
     exit 2
   fi
 elif [ "$KIND" = "claim" ] || [ "$KIND" = "close" ]; then
@@ -175,11 +221,20 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 LABELS_JSON="$(printf '%s\n' "${LABELS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
-python3 - "$TEMP_FILE" "$REQ_FILE" "$KIND" "$REPO" "$TITLE" "${OVERRIDE_REASON:-$BODY}" "$AGENT" "$LABELS_JSON" "${NUMBER:-0}" "$DRY_RUN" "${PARENT:-0}" <<'PY'
+REMOVE_LABELS_JSON="$(printf '%s\n' "${REMOVE_LABELS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
+REVIEWERS_JSON="$(printf '%s\n' "${REVIEWERS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
+TEAM_REVIEWERS_JSON="$(printf '%s\n' "${TEAM_REVIEWERS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
+python3 - "$TEMP_FILE" "$REQ_FILE" "$KIND" "$REPO" "$TITLE" "${OVERRIDE_REASON:-$BODY}" "$AGENT" "$LABELS_JSON" "${NUMBER:-0}" "$DRY_RUN" "${PARENT:-0}" "$REMOVE_LABELS_JSON" "$REVIEWERS_JSON" "$TEAM_REVIEWERS_JSON" <<'PY'
 import json, os, sys
-temporary, path, kind, repo, title, body, agent, labels, number, dry_run, parent = sys.argv[1:12]
+temporary, path, kind, repo, title, body, agent, labels, number, dry_run, parent, remove_labels, reviewers, team_reviewers = sys.argv[1:15]
 labels = [part.strip() for value in json.loads(labels)
           for part in value.split(",") if part.strip()]
+remove_labels = [part.strip() for value in json.loads(remove_labels)
+                 for part in value.split(",") if part.strip()]
+reviewers = [part.strip() for value in json.loads(reviewers)
+             for part in value.split(",") if part.strip()]
+team_reviewers = [part.strip() for value in json.loads(team_reviewers)
+                  for part in value.split(",") if part.strip()]
 req = {"kind": kind, "repo": repo, "agent": agent}
 if kind == "comment":
     req["number"] = int(number)
@@ -188,6 +243,21 @@ elif kind == "claim":
     # The watcher applies the hive/claimed-by-<agent> label; number is all it
     # needs. No body/title/labels.
     req["number"] = int(number)
+elif kind == "label":
+    # Add and/or remove plain labels. The watcher refuses hive-controlled
+    # labels in both directions (hivecommons/hive#9587).
+    req["number"] = int(number)
+    if labels:
+        req["labels"] = labels
+    if remove_labels:
+        req["remove_labels"] = remove_labels
+elif kind == "request_review":
+    # Ask users and/or teams to review a PR (hivecommons/hive#9587).
+    req["number"] = int(number)
+    if reviewers:
+        req["reviewers"] = reviewers
+    if team_reviewers:
+        req["team_reviewers"] = team_reviewers
 elif kind == "close":
     req["number"] = int(number)
     if body:
@@ -222,6 +292,10 @@ elif [ "$KIND" = "claim" ]; then
   echo "hive-open-issue: requested claim of $REPO#$NUMBER (hive/claimed-by-$AGENT label)"
 elif [ "$KIND" = "close" ]; then
   echo "hive-open-issue: requested close of $REPO#$NUMBER as the App bot"
+elif [ "$KIND" = "label" ]; then
+  echo "hive-open-issue: requested label change on $REPO#$NUMBER as the App bot"
+elif [ "$KIND" = "request_review" ]; then
+  echo "hive-open-issue: requested reviewers on $REPO#$NUMBER as the App bot"
 else
   echo "hive-open-issue: requested issue on $REPO as the App bot: $TITLE"
   if [ -n "$PARENT" ] && [ "$PARENT" != "0" ]; then

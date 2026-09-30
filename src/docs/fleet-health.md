@@ -9,6 +9,9 @@ This page documents what each verdict state means, how the verdict is
 computed, every remediation hint an operator can see, and how to go from a
 symptom on the fleet page to a fix.
 
+For sustained congestion, [Guide flow-health diagnosis](guide-flow-health.md)
+adds ranked, advisory root-cause recommendations using existing queue signals.
+
 The verdict answers one question:
 
 > **Does this hive have recent output back to its work source, for the ACMM

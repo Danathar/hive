@@ -11,6 +11,270 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.104.2)
+
+### Fixed
+
+- The PR precheck no longer hard-rejects PRs on non-primary repos (rationguard, pluk, dibs, hotshot, promptargs, docs) that touch Markdown: the hive-only docs guards (`check-docs-links.py`, `check-docs-citations.py`, `check-api-reference-citations.sh`) are now skipped with a "script not present in target repo" note when absent from the target checkout, while scripts that exist and fail still reject (#9803).
+
+## 2026-09-30 (v5.104.1)
+
+### Changed
+
+- LKE CI runners request 1.5 CPU / 3 Gi / 15 Gi (runner) and 10 Gi eph (dind) instead of 3 CPU / 4 Gi / 25 Gi + 20 Gi, roughly doubling runners per 32-vCPU node; limits are unchanged.
+
+### Fixed
+
+- Scanner policy templates (`scanner*.md`) now instruct agents to leave a `hive/awaiting-ci` note as a PR comment before moving on after a push, so a human reading the PR directly — not just the dashboard's "Waiting on CI" state — can see the CI wait was deliberate rather than the agent stalling (#9673).
+- The merge CI gate no longer waits on checks from workflows whose only trigger is `pull_request: types: [closed]` (or another post-merge-only type), which could never start on the pre-merge head and permanently deadlocked `hive-merge` (#9794).
+
+## 2026-09-30 (v5.104.0)
+
+### Added
+
+- `write_surface.neutralize_mentions` lists the lanes whose relay-posted bodies have every GitHub `@mention` rewritten so it notifies no one ([#9587](https://github.com/hivecommons/hive/issues/9587)). For a listed lane, the `comment`, `create_issue`, `open_pr`, `review` and review-thread reply relays pass the agent's body through the same sanitizer the advisory and recommendations posts use: `@user` becomes `` `user` `` outside code, and only the `@` is dropped inside code. Email addresses, URLs and `#123` refs are left unchanged, and the hive's attribution trailer is appended afterwards, so the sanitizer never touches it. A replica follows its base agent, and `"*"` covers every lane. The list is empty by default, so bodies are posted as written (the reviewer prompt deliberately @-mentions the PR author) until an operator lists a lane.
+
+### Fixed
+
+- PR precheck clones now authenticate with Basic `x-access-token` instead of a Bearer header, which GitHub's git smart-HTTP rejects with 401 — prechecks had been silently skipping their checkout ("checkout skipped … per-agent scoped GitHub token not available") on every PR request.
+
+## 2026-09-30 (v5.103.0)
+
+### Added
+
+- `write_surface.enforce` now refuses a listed lane's direct GitHub writes inside the agent sandbox as well as at the GitHub proxy ([#9587](https://github.com/hivecommons/hive/issues/9587)). The hive publishes the resolved enforced lanes to `/var/run/hive-metrics/write-surface-enforce.json` at boot and on every config reload, and the `gh` wrapper refuses that lane's `gh api` writes and write verbs (`create`, `edit`, `comment`, `close`, `reopen`, `merge`, `review`, `ready`, `label create`) before they are sent, naming the relay that performs the same write under audit. This closes the gap where a sandbox with forced egress disabled never reached the proxy refusal. The relay redirects (`hive-open-pr`, `hive-open-issue`, `hive-review`, `hive-merge`, `hive-push-branch`) and every read keep working, and a hive that lists no lane — the default — publishes an empty list, so nothing changes until an operator opts a lane in.
+
+### Fixed
+
+- Disable Codex daemon auto-start on the hub launch path so Codex panes no longer restart-loop when ps is unavailable.
+
+## 2026-09-30 (v5.102.0)
+
+### Added
+
+- Added a per-lane `write_surface.enforce` opt-in (#9772, default off): for a lane an operator lists, the GitHub proxy refuses direct REST writes, GraphQL mutations and `git push` from the agent sandbox, so the audited relays (`hive-open-pr`, `hive-open-issue`, `hive-review`, `hive-merge`, `hive-push-branch`) are that lane's only write path. Each refusal is audited as `agent_write_refused` (`via=proxy`) with the typed `repo`. Reads, fetches and unlisted lanes are unaffected; nothing changes unless a lane is listed.
+
+## 2026-09-30 (v5.101.0)
+
+### Added
+
+- PR follow-up handoffs now capture a backend resume id for goose agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). goose keeps its conversations in a SQLite store rather than a transcript file named by id, so the hive reads the conversation id from the newest per-launch CLI log under `~/.local/state/goose/logs/cli/` (its `"session.id"` tracing attribute, verified against goose 1.52.0) and shows `goose session --resume --session-id <id>` with the log path in the `PR HANDOFF` section. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+- Added a `push_branch` relay to the audited GitHub write surface (#9771): agents can ask the hive to push a topic branch from their own checkout (`hive-push-branch`), with the same file-UID authorizer, CanPush ACMM gate, lane allowlist (`write_surface.allowlist`), repo pause/scope checks and redacted typed audit entry (`agent_branch_pushed`) as every other relay operation. A hive with no allowlist allows it, like every other operation.
+
+### Fixed
+
+- Fleet dashboard status now surfaces a `ciPollNudges` counter (and low-severity fleet-report evidence when it is nonzero) for each agent, mirroring the existing stall/transient-error nudge counters, so an operator can tell when an agent is still burning turns polling CI on its own PR despite the stop-polling nudge added for [#9673](https://github.com/hivecommons/hive/issues/9673).
+
+## 2026-09-30 (v5.100.0)
+
+### Added
+
+- PR follow-up handoffs now capture a resume id for pi and omp agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). When such an agent opens a PR, the hive names the newest session in the agent's own working-directory bucket under `~/.pi/agent/sessions/` or `~/.omp/agent/sessions/` and shows `pi --session <id>` or `omp --resume <id>` with the transcript path in the `PR HANDOFF` section. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+
+### Changed
+
+- The agent `gh` wrapper now routes pure `gh issue edit --add-label`/`--remove-label` and `gh pr edit --add-reviewer` edits through the audited `label` and `request_review` relays (same authorizer, lane allowlist, reserved-label refusal and redacted audit); edits the relays cannot express still fall through to the direct path, so an ACMM L6 hive loses nothing by default (hivecommons/hive#9773).
+
+### Security
+
+- With proxy-side GitHub auth injection on (`HIVE_PROXY_INJECT_GH_AUTH=true`), push-capable agents no longer inherit a real `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` from the hive process environment ([#9586](https://github.com/hivecommons/hive/issues/9586)). Before, an inherited `GH_TOKEN` outranked the injection placeholder in `gh`, so an opted-in agent could still hold a usable GitHub credential. Hives without injection are unchanged, apart from agents that cannot push, which now also lose the inherited enterprise token variables.
+
+## 2026-09-30 (v5.99.0)
+
+### Added
+
+- Agents can now ask users and teams to review a pull request through the audited write surface instead of a direct `gh pr edit --add-reviewer` ([#9587](https://github.com/hivecommons/hive/issues/9587)). `hive-open-issue request-review --repo <r> <number> [--reviewer a,b] [--team-reviewer t]` drops a request the hive fulfils with the App token under the same file-UID authorizer, lane allowlist (new `request_review` operation), repo pause and repo scope as the other relays, and audits it as `agent_review_requested` with typed `repo`/`target`. Logins and team slugs are validated, and more than 15 reviewers is refused, before any GitHub call.
+- PR follow-up handoffs now capture a resume id for gemini agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). Claude, copilot and codex already had one. When a gemini agent opens a PR, the hive reads the full session id from the newest transcript in the agent's own `~/.gemini/tmp/<project>/chats/` directory. It then shows `gemini --resume <id>` and the transcript path in the `PR HANDOFF` section, next to the existing note. `~/.gemini` is shared across the fleet, so capture only looks at the project directory for the agent's own working directory, and it skips any id that is not a plain `[A-Za-z0-9_-]` token. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+
+### Fixed
+
+- The #9673 CI-poll nudge now also fires on wall-clock time: a single blocking `gh run watch` that has run past 10 minutes this kick nudges the agent to stop polling even though it is only one command, instead of requiring more than 3 poll commands to have been observed.
+- The entrypoint FATAL hint and `src/docs/net-admin-requirement.md` now list `xt_mark`, `xt_REDIRECT` and `xt_owner` for the `/etc/modules-load.d/` drop-in ([#9758](https://github.com/hivecommons/hive/issues/9758)). They named only `xt_owner` and `xt_REDIRECT`, which left out the required `xt_mark`.
+
+## 2026-09-30 (v5.98.0)
+
+### Added
+
+- Agents can now add and remove labels through the audited write surface instead of a direct `gh issue edit --add-label` ([#9587](https://github.com/hivecommons/hive/issues/9587)). `hive-open-issue label --repo <r> <number> [--label a,b] [--remove-label c]` drops a request the hive fulfils with the App token under the same file-UID authorizer, lane allowlist (new `label` operation), repo pause and repo scope as the other relays, and audits it as `agent_label_applied` with typed `repo`/`target`. Hive-controlled labels are refused in both directions — the merge-queue label under its configured name, the hold labels, the whole `hive/` namespace, and `approved-direction`, `design-approved`, `needs-human`, `needs-decision` and `blocked` — so labeling cannot become a way to queue a merge, lift a hold or claim another agent's work; one reserved label refuses the whole request.
+- PR follow-up resume now captures a backend-native resume id when an agent opens a PR (claude, copilot and codex persist their transcripts on disk), and offers it back: the `PR HANDOFF` block in the next kick names the command that reopens the conversation that authored the PR, plus the transcript path, beside the existing handoff note. The hive never relaunches a backend itself, so an agent decides whether reopening the transcript is worth its tokens; a handle older than `turn.pr_follow_up.resume_id_max_age` (default 72h, `HIVE_PR_FOLLOWUP_RESUME_ID_MAX_AGE`), or whose transcript has been deleted, is silently dropped. Still behind `turn.pr_follow_up.enabled` (default off) ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)).
+
+### Fixed
+
+- Revalidate unversioned hub and spoke static assets and auxiliary HTML pages with content-based ETags so normal reloads pick up changed files after upgrades ([#9674](https://github.com/hivecommons/hive/issues/9674)).
+- The `standalone` overlay README and the standalone section of `src/docs/manual-provisioning.md` now list the Gateway API Inference Extension CRDs as a prerequisite ([#9756](https://github.com/hivecommons/hive/issues/9756)). The overlay ships an `InferencePool`, so `kubectl apply -k` on a cluster without the CRDs ended with `no matches for kind "InferencePool"`.
+- The node-prep DaemonSet (`src/deploy/k8s/node-prep/hive-netfilter-modules.yaml`) now also loads `xt_mark` ([#9757](https://github.com/hivecommons/hive/issues/9757)). The entrypoint requires `xt_mark` and `xt_REDIRECT`, but the DaemonSet loaded only `xt_REDIRECT` and the optional `xt_owner`, so a node missing `xt_mark` kept exiting 77.
+
+### Security
+
+- The LKE CI runner values now pin the privileged dind sidecar to `docker:29.8.1-dind` by digest instead of the floating `docker:dind` tag ([#9759](https://github.com/hivecommons/hive/issues/9759)).
+
+## 2026-09-30 (v5.97.1)
+
+### Fixed
+
+- Issues behind a merged PR are no longer frozen after the first kick: `hive/likely-done` / `hive/covered-by-pr` are written automatically and are not verification outcomes, and `hive/verified-open` now keeps the issue actionable with an "implement the rest" instruction instead of suppressing it (#9691 follow-up).
+
+## 2026-09-30 (v5.97.0)
+
+### Added
+
+- **An issue closes when its reporter or a maintainer confirms the fix in a comment** ([#9746](https://github.com/hivecommons/hive/issues/9746)). After a fix merges with a non-closing `Refs #N`, the issue used to sit open with `hive/likely-done` and the refs-sweep question until someone pressed Close; replying "yes, fixed" did nothing. The new `.github/workflows/issue-confirm-fixed.yml` accepts `/fixed` (alias `/close`) on any open issue, and a plain-language confirmation such as "confirmed fixed" only on an issue waiting on confirmation (`hive/likely-done` or the refs-sweep question). Negation or remaining-work wording ("not fixed yet", "fixed except…", a question) never closes and gets a reply asking for `/fixed`. Only the issue's author or users with write access can confirm, as for `/reopen`. An accepted confirmation applies the existing `hive: reporter-confirmed` label, removes `hive/likely-done`, comments naming the confirmer and merged PR(s), and closes the issue as completed. The refs-sweep question now tells readers how to reply.
+- Added `src/deploy/ci-runners/lke/`: Terraform, Helm values, registry pull-through cache and runbook for moving the self-hosted CI runners to a dedicated Linode LKE cluster (`hive-ci`) with node-local caches instead of the shared cephfs volume.
+
+## 2026-09-30 (v5.96.3)
+
+### Changed
+
+- Internal refactor: `src/pkg/dashboard/api.go` (7,351 lines, 221 functions) is split by pure code motion into concern-focused sibling files (`api_nous.go`, `api_agent_config.go`, `api_agent_control.go`, `api_beads.go`, `api_snapshot.go`, `api_config.go`, `api_budget.go`, `api_breaker.go`, and others) within the same `dashboard` package; no behavior or API change ([#9742](https://github.com/hivecommons/hive/issues/9742)).
+
+## 2026-09-30 (v5.96.2)
+
+### Fixed
+
+- The self-hosted Kubernetes Deployment now sets `HIVE_LLMD_ENDPOINT` to `hive-llm-d-epp.hive-inference`, the same as the code default ([#9726](https://github.com/hivecommons/hive/issues/9726)). It pointed at the retired `llm-d-epp` Service, so llm-d traffic from self-hosted and `standalone` installs went to a Service that no longer ships.
+- Comments in the `standalone` overlay configmap no longer say the base Deployment sets `HIVE_VLLM_ENDPOINT` ([#9727](https://github.com/hivecommons/hive/issues/9727)). They now name the `vllm-svc` Service and say that switching agents to `vllm` needs `HIVE_VLLM_ENDPOINT` set on the Deployment.
+- The GitOps example in `src/docs/manual-provisioning.md` now checks the `vllm` rollout in namespace `hive-inference` ([#9729](https://github.com/hivecommons/hive/issues/9729)). It used `-n hive` and failed with `deployments.apps "vllm" not found`.
+
+### Security
+
+- The node-prep DaemonSet (`src/deploy/k8s/node-prep/hive-netfilter-modules.yaml`) now pins `ubi9/ubi-minimal:9.8` by digest instead of `:latest` ([#9728](https://github.com/hivecommons/hive/issues/9728)). It runs privileged on every worker node, so a floating tag let new nodes pull an unreviewed image.
+
+## 2026-09-30 (v5.96.1)
+
+### Fixed
+
+- Fixed the dashboard "PRs by model" stat rows sharing a fixed column layout instead of per-row content-sized tracks, the topbar version badge wrapping into a vertical stack when an upgrade is queued, and the yellow shuffle pill button rendering taller/wider than its neighboring pills ([#9713](https://github.com/hivecommons/hive/issues/9713), [#9716](https://github.com/hivecommons/hive/issues/9716), [#9714](https://github.com/hivecommons/hive/issues/9714)).
+- The dashboard now renders "Waiting on CI" instead of "Working" for an agent whose recent tool calls are all CI polls (`gh run watch/view/list`, `gh pr checks`), reusing the harness's stop-polling nudge signal so the two states never disagree ([#9673](https://github.com/hivecommons/hive/issues/9673)).
+
+## 2026-09-30 (v5.96.0)
+
+### Added
+
+- PR follow-up session resume counters are now exported on `/metrics` as `hive_pr_followup_*` Prometheus series: resumed, fallback, skipped and pruned (by reason), deferred, and handoffs queued/delivered ([#9583](https://github.com/hivecommons/hive/issues/9583)). They read the existing `stats.json` in the pointer directory and appear only once that file exists.
+
+## 2026-09-30 (v5.95.0)
+
+### Added
+
+- `hive-open-pr` accepts `--handoff-why`, `--handoff-approach`, `--handoff-rejected`, `--handoff-repro` and the repeatable, comma-separated `--handoff-files`. They fill the PR request's optional `handoff` object, a short note on why the PR was made. The hive stores the note next to the PR's authoring-session pointer and gives it to the fresh session that handles review feedback after the original conversation is gone. Before this, agents using the wrapper only got a note built from their PR body's section headings. That fallback still fills any field left empty (#9583).
+- CI failures caused by the self-hosted runner pool are now told apart from code failures ([#9664](https://github.com/hivecommons/hive/issues/9664)). On 2026-09-29 about 160 of 371 failed jobs were runner infrastructure (a shared Go build cache, full disks, runner pods that died) and nothing said so, which sent agents to add tests for a broken workflow. A classifier (`.github/scripts/ci_infra_classify.py`, signatures in `ci-infra-signatures.tsv`, tested against real log excerpts from that day) labels each failed job `infra:<class>` or `code`; `ci-infra-rerun.yml` reruns a run's failed jobs once when every one of them is infra (never for code, never past the first attempt, never for forks; `HIVE_CI_INFRA_RERUN=off` disables it); and the hourly `ci-infra-rate.yml` keeps one tracking issue open while at least 15% of the last 100 CI runs hit an infra failure, with a class x runner breakdown, and closes it when the rate recovers. The scheduled coverage issue is also retitled when the gate failed before measuring anything, so its title no longer claims a coverage shortfall.
+- The spoke dashboard's user menu now has a "My hives ↗" entry, right under "GitHub profile ↗", that opens the hub's My Hives page so people with several hives can switch between their dashboards quickly ([#9696](https://github.com/hivecommons/hive/issues/9696), requested by castrojo). It appears only on hub-linked hives (`hub.enabled` with an http(s) `hub.url`) and stays hidden on standalone installs; `/api/config` carries the target as `my_hives_url`.
+- **Review swarm: COMMENT-only on contributor pull requests** ([#9590](https://github.com/hivecommons/hive/issues/9590), [#9608](https://github.com/hivecommons/hive/issues/9608)). The review relay now refuses to adjudicate work the hive did not open: when a PR's author is not one of this hive's accounts (`project.ai_author` or the App bot login), an `approve` or `request_changes` review request is rewritten to a `COMMENT` before it reaches GitHub, and the request's `.result.json` carries a `note` saying so. An `APPROVE` or `REQUEST_CHANGES` satisfies branch-protection approval counts and gates merge queues, so it belongs to the humans who own the repository; a comment the author can weigh and ignore does not. A PR whose author cannot be read is treated as a contributor's, so a flaky API call never resolves into approving someone else's work. The guard is in the relay rather than in the reviewer's prompt, and there is no setting to turn it off: `review.all_authors` widens what is reviewed, never what may be approved. Hive-authored PRs are unaffected, and a plain `comment` costs no extra API call. See `src/docs/github-write-surface.md`.
+
+### Changed
+
+- The lifecycle timeline now takes the work item for `agent_pr_created` and `pr_merged` audit entries from the typed `repo`/`target` audit fields, falling back to the legacy `repo=`/`number=` detail pairs only when a record has no typed target ([#9587](https://github.com/hivecommons/hive/issues/9587)).
+
+### Fixed
+
+- The watcher now nudges a CLI agent once per kick when it runs more than three CI-polling commands (`gh run watch/view/list`, `gh pr checks`), telling it to stop polling and move on ([#9673](https://github.com/hivecommons/hive/issues/9673)).
+- Every PR-opening lane template (architect, ci-maintainer, guide, quality, reviewer-queue, sec-check, strategist, outreach) now carries the no-CI-wait rule and forbids pushing retrigger commits to branches the lane did not create (#9673).
+- Kick lists no longer re-request verification of the same covered/likely-done issue every kick; verification state is persisted in the claim ledger and the issue is suppressed until its PR changes (#9691).
+- Added table-driven unit tests for previously-uncovered branches named by the #9632 coverage gate: `pkg/tracing`'s `TimelineSpanAttributes`/`parseIntAttr` (PR number/URL attrs and malformed-numeric-attr handling) and `pkg/retro`'s `AutonomyPolicyEngine` (`matchesDemoteOn`'s "either" mode and `boundedLevel`'s upper/lower ACMM clamps), lifting both packages toward their coverage floor (#9632).
+
+## 2026-09-30 (v5.94.2)
+
+### Fixed
+
+- The v5 coverage gates now treat Go 1.20+ tab-prefixed `-cover` output for packages without test files as `NO TEST FILES`, the newly exposed audit/git-identity packages have seed tests, and the PR coverage scorer bounds shard artifacts to packages that exist in the checked-out tree ([#9291](https://github.com/hivecommons/hive/issues/9291), [#9686](https://github.com/hivecommons/hive/issues/9686)).
+- FIX-BEFORE-NEW re-engagement kicks and the red-PR overlay now tell the agent to end the turn after pushing a repair instead of polling CI (#9673).
+- A spoke's first boot on a build with per-agent UIDs no longer crash-loops while it re-owns agent homes ([#9692](https://github.com/hivecommons/hive/issues/9692)). The entrypoint used to run a synchronous `chown -R` over each agent home before the server started, so a spoke with large homes outlasted its startup probe, was killed mid-migration, and started the whole walk over on every restart. The re-own is now incremental and resumable: it only changes entries not already owned by the agent's UID, walks post-order so the top-level entry flips last, and records a per-tree completion marker under `/data/.hive/reown` so later boots skip finished trees with a single `stat`. A pod killed mid-walk resumes with only the entries still mis-owned. Each re-owned tree now logs how many entries changed and how long it took. Newly provisioned hosted spokes also get a 10-minute startup probe budget (was about 160 seconds); existing hosted spokes keep their current probe and are fixed by the resumable re-own.
+
+## 2026-09-30 (v5.94.1)
+
+### Fixed
+
+- Hub and spoke dashboard HTML responses now send `Cache-Control: no-cache` with a strong ETag derived from the exact embedded bytes, so a browser revalidates on every load instead of applying heuristic caching; an unchanged page now costs only a 304, and a hub or spoke upgrade's new UI shows up on a normal reload instead of requiring a hard reload ([#9674](https://github.com/hivecommons/hive/issues/9674)).
+- CI: the apt-retry installer self-test's timeout scenario no longer fails on slow runners — its network-phase budget now leaves headroom for fork/exec overhead the per-attempt slice does not bound.
+- CI: the contributor-agent multi-hub token test no longer fails when the random test port contains "401" — the auth-rejection guard now matches "HTTP 401" instead of any "401" substring.
+
+### Security
+
+- Proxy-side GitHub credential injection is back to **opt-in only** ([#9586](https://github.com/hivecommons/hive/issues/9586)): the default-on from [#9597](https://github.com/hivecommons/hive/pull/9597) and [#9625](https://github.com/hivecommons/hive/pull/9625) is reverted. Injection is on only when a spoke sets `HIVE_PROXY_INJECT_GH_AUTH=true`; unset is off on every hive, hosted or self-hosted, App or PAT. Existing hosted App spokes no longer turn it on at boot, the hub no longer renders `HIVE_PROXY_INJECT_GH_AUTH` onto newly provisioned spokes, and the hub-wide `HIVE_HOSTED_PROXY_INJECT_GH_AUTH` switch is removed. Kept: the proxy rewrites `Authorization` only on GitHub hosts (no GitHub token reaches Linear), the Copilot `/copilot_internal/` auth exchange passes through under injection, a spoke still refuses to start on `HIVE_PROXY_INJECT_GH_AUTH=true` with `HIVE_PROXY_ADVISORY_OK=true`, an unrecognized value is still logged at ERROR, and the dashboard Security tab now reports `off (opt-in: set HIVE_PROXY_INJECT_GH_AUTH=true)` by default.
+
+## 2026-09-29 (v5.94.0)
+
+### Added
+
+- Standalone hives (no hub link) can send dashboard NPS responses to the hivecommons relay when the operator opts in (`HIVE_NPS_ENABLED=true`) and sets `hub.nps_relay_url` / `HIVE_NPS_RELAY_URL`; the hive generates and self-registers an Ed25519 install key (stored 0600 under `/data/secrets`) and signs every submission, so no per-install token is issued or configured. A hub with a pull secret (`hub.nps_relay_pull_secret` / `HIVE_NPS_RELAY_PULL_SECRET`) periodically pulls, deduplicates and acks those entries, which appear in `GET /api/admin/nps` tagged `source: relay` with their `install_id` and are labeled "unverified install" in the admin card. Everything defaults off; see `src/docs/nps.md` (#9619; v5 port of #9634).
+
+### Fixed
+
+- Scanner kick templates now tell the agent to move on after pushing a PR instead of polling CI; infra-red or queued checks are deferred to the automerge sweep (#9673).
+
+## 2026-09-29 (v5.93.0)
+
+### Added
+
+- The hive's own GitHub writes are now audited like agent relay writes, and the lane write allowlist can be edited from the dashboard ([#9587](https://github.com/hivecommons/hive/issues/9587)). The signed-commit reconciler, review backlog issues, human-decision and review-priority labels, the recommendations issue, fleet reports and the hold-label migration each write an audit entry (`signed_commit_reauthored`, `signed_commit_skip_noted`, `review_backlog_issue_filed`, `review_backlog_summary_posted`, `hive_label_applied`, `recommendations_posted`, `fleet_report_posted`, `fleet_report_recovered`, `hold_migration_label_added`) with typed `repo` and `target` fields and redacted detail. Every write site now passes the repository and number explicitly instead of the typed fields being parsed back out of `detail`; the `repo=`/`number=` pairs are still written. `write_surface.allowlist` can be viewed and edited under Settings > Security > Write Surface, backed by the owner-only `GET`/`PUT /api/config/write-surface`; an unknown operation or invalid lane name is refused before anything changes. An empty allowlist still restricts nothing, so no hive's behavior changes until an operator lists a lane.
+- Guide kicks now include cached flow-health signals and a surge-coach lens for ranked, advisory recommendations on prolonged SURGE, slow merges, and aging actionable work, without extra polling or write permissions.
+
+### Fixed
+
+- Include all hub subpackages in the pre-merge coverage gate and remove the unused `pkg/hub/wire` placeholder (#9662).
+
+## 2026-09-29 (v5.92.1)
+
+### Fixed
+
+- Rewrite the Podman host-move runbook with fresh-host unit installation, source image pinning, config and secrets restoration, and per-mode verification and execution status.
+
+## 2026-09-29 (v5.92.0)
+
+### Added
+
+- Added **reporter trust**, an opt-in gate on *who filed an issue* (#9665). With `project.issue_filter.reporter_trust.enabled: true`, issues from repository owners, members and collaborators (or an explicit login list) are worked as before, while issues from anyone else wait until a maintainer adds `triage/accepted` (configurable), and a PR whose rationale traces to such an issue is held with a marked notice at **every** ACMM level, L6 included — a human removes the hold and Hive never auto-releases it. Both halves are editable in the dashboard (Settings → Labels → Reporter trust; Settings → Repos for the hold, with per-repo overrides and the `HIVE_REPORTER_TRUST_HOLD` environment lock), the Repositories note states the active rule, repo cards count issues awaiting reporter triage, and the PR-created audit entry records the reporter and their GitHub association. Off by default: existing hives change nothing.
+
+### Fixed
+
+- The signed-commit reconciler's one-time "Signed commits" note on a PR it can't re-sign no longer claims the PR head is unverified: since [#9531](https://github.com/hivecommons/hive/issues/9531) it also fires when an unsigned agent commit sits under a person's Verified commit. The note now says a commit on the branch is not Verified and gives the manual fix: squash the unsigned commit into a commit the person signs, or drop the person's commit so the hive can re-sign and push it again, signed, on top. `src/docs/github-app-setup.md` now describes the any-unverified-commit rule instead of "the tail after the newest Verified commit".
+
+## 2026-09-29 (v5.91.0)
+
+### Added
+
+- PR follow-up resume ([#9583](https://github.com/hivecommons/hive/issues/9583), still off by default) now survives a pod restart and the agent's next regular kick: when the hive opens a PR it keeps a short handoff note (why, approach, rejected alternatives, repro, files touched) from the request's optional `handoff` object or the PR body's sections, and the agent's next fresh kick carries that note for every PR with open follow-ups. Comments from people with write access on the PR (conversation, review and inline comments) are now routed too, deduped per comment and never triggered by the hive's own replies or by bots. Pointers are deleted when the PR merges or closes, or after `turn.pr_follow_up.retention` (default 14 days); the feature has a toggle under Settings > Features, and resumed, fallback, skipped and handed-off counts go to the audit trail and `stats.json` in the pointer directory.
+- **Question auto-close dashboard follow-up** ([#9584](https://github.com/hivecommons/hive/issues/9584)). The Governor dialog's Features tab now has a Question Auto-Close section: a switch for `governor.question_autoclose.enabled` and an hours field, saved through the same owner-gated config API as the rest of the tab. A read-only live-schedule table underneath lists every answered question currently waiting out its objection window (repo/issue, answered-at, closes-at), backed by a new `GET /api/config/governor/question-autoclose/schedule` endpoint. `labels`/`human_label` are still YAML-only.
+
+### Fixed
+
+- The token-budget warning/exhausted banner is now level-triggered instead of edge-triggered, so it survives a pod restart mid-exhaustion: previously the banner was raised only on the threshold crossing, so a restart during an exhausted budget window left no banner even though kicks stayed suspended ([#9612](https://github.com/hivecommons/hive/issues/9612) follow-up to [#9615](https://github.com/hivecommons/hive/pull/9615)). The recovery/warn/exhausted clear behavior is unchanged. Also removed the duplicate `applyBudgetAlerts`/`applyNoCadenceAlert` copies in `cmd/hive/main.go` in favor of `spokealerts.ApplyBudget`/`spokealerts.ApplyNoCadence`.
+- Long-lived GitHub consumers now follow a GitHub client rebuild, and the agent request relays start as soon as a usable App arrives ([#9621](https://github.com/hivecommons/hive/issues/9621)). The PR, issue, review and merge request watchers and the self-authored merge sweep used to start once on the boot-time client: after an App credential change they kept minting with the old credentials, and on a hosted spoke that booted without an App (credentials delivered later over the heartbeat) they never started, so agent PR and issue requests sat in their queues until the pod restarted. They now run under a supervisor that starts them when a usable App first appears and hands them over to every rebuilt client, waiting for the previous run to finish so no request file is processed twice. All three rebuild paths (dashboard Set ID, config reload, heartbeat delivery) now also re-point the agent sandbox's PR client and push minter, and the metrics and fleet-stats collectors and the runs-triage commenter read the current client on every use instead of a captured one.
+- Fixed the hourly coverage gate failing on every run since #9338: the job checks out the measured ref (v4), which lacks `.github/scripts/go-cache-guard.sh`, so the guard step exited 127 before any test ran and filed a misleading "packages below 90% threshold" issue. The guard is now skipped when absent, and the filed issue says when the job failed before measuring anything. The hourly gate now also measures `v5`, the default branch, instead of the frozen `v4`, with per-package floors synced to the ones the pre-merge `coverage` job in `v2-tests.yml` already enforces on v5 (#9632).
+- CI on the self-hosted runner pool no longer shares one Go build cache across every runner pod. Jobs were failing with `open .../<id>-a: permission denied`, `can't find export data (bufio: buffer full)` and golangci-lint `no go files to analyze` while the shared cephfs cache volume still had hundreds of GB free: concurrent writers from many nodes on one network-filesystem build cache, which Go only supports on a local disk. `.github/scripts/go-cache-guard.sh` now moves GOCACHE to a job-local directory when it sits on the shared volume (the module cache stays shared); the repository variable `HIVE_GO_BUILD_CACHE=shared` restores the old behaviour without a code change.
+
+## 2026-09-29 (v5.90.0)
+
+### Added
+
+- Release sentinel phase 2 ([#9585](https://github.com/hivecommons/hive/issues/9585)): with the new, separately opt-in `release_sentinel.retag_enabled` (or `HIVE_RELEASE_SENTINEL_RETAG_ENABLED=true`), a repair round finishes on the same version - the agent's fix still goes through the normal PR path with a `Release-Sentinel: v<version>` line in the body, and once that PR is merged into the release branch the hive moves the tag to the merge commit with one `git push --atomic --force-with-lease` on the tag alone, then re-checks CI on the new commit. The hive never pushes a branch, and it refuses (and records why) when the move is not a fast-forward, the commit is not on the release branch, the tag was moved by someone else, or commits outside the fix PR would ride along (unless `retag_allow_intervening_commits` is set). New `release_sentinel.release_workflows` watches release workflows for failures before a tag exists (the #5875/#6804 shape): policy failures page a human once with nothing dispatched, fixable ones stay with the normal CI-failure path. Triggering stays poll-based because spokes receive no GitHub webhooks. See `src/docs/release-sentinel.md`.
+- Hive-mediated GitHub writes now carry typed `repo` and `target` fields in the audit log, and each agent lane can be limited to a fixed set of write operations ([#9587](https://github.com/hivecommons/hive/issues/9587)). Audit entries from the PR, issue, review and merge relays, and from the auto-merge, task-list, supersession and duplicate sweeps, record the repository and the issue or PR number as first-class fields. The `repo=`/`number=` pairs stay in `detail`, so existing parsers keep working. The activity collector and per-repo cost attribution ([#4836](https://github.com/hivecommons/hive/issues/4836)) read the typed field first. The new `write_surface.allowlist` config maps an agent to the relay operations it may request: `open_pr`, `create_issue`, `comment`, `claim`, `close_issue`, `review`, `resolve_thread`, `merge_pr`. An agent with no entry keeps every operation it has today. The relays check the list after authorizing the request's agent. A refused request is quarantined as `.denied`, gets a `.result.json` naming the operation, and is audited as `agent_write_refused`. Credential material (GitHub tokens, JWTs, `Bearer` values and any `Authorization` header value) is now masked in audit details before they are written. See `src/docs/github-write-surface.md` for the full write inventory.
+- **Dashboard: Review queue view** ([#9607](https://github.com/hivecommons/hive/issues/9607)). The spoke dashboard now has a "Review queue" section that consumes the `GET /api/review/queue` endpoint shipped in [#9598](https://github.com/hivecommons/hive/issues/9598) and renders the deterministic PR review queue for a maintainer: every open PR across the governed repos, agent- or contributor-authored, in one ranked order. Each entry shows its rank, its `review-priority/high|normal|low` band, the PR title (linked), repo/number, author, CI state, confidence band, age and held state, and the human-readable `reasons` that place it. Paging mirrors the API (`limit`/`offset`/`has_more`) with Prev/Next controls. UI-only: no new backend endpoint.
+- The dashboard can show signed-in users an occasional 4-point NPS feedback prompt (console-identical timing and backoff); responses are forwarded to the hub over the spoke's per-hive heartbeat bearer without the user's identity, stored in a rolling window, and readable only by hub admins at `GET /api/admin/nps` and on a new hub admin NPS card. On by default for hosted spokes, off for every other install (`hub.nps_enabled` / `HIVE_NPS_ENABLED`); see `src/docs/nps.md` (#9610; v5 port of #9617).
+
+### Fixed
+
+- Added hermetic unit tests for `pkg/convergence/mutation`'s `Boundary.Execute`, covering the previously-untested `Mode` override hook and the `effects.Recorder` stats counters (`IncDenied`, `IncFenced`, `IncJournaled`) and the shadow-mode fenced-denial logger warning, lifting the package toward its coverage floor (#9632).
+
+### Security
+
+- A GitHub client rebuilt after an App credential change now carries every hook the boot-time client had ([#9614](https://github.com/hivecommons/hive/issues/9614)). Hosted spokes routinely rebuild the client when the hub delivers or corrects App credentials over the heartbeat, and the three rebuild paths (the dashboard's Set ID, a config reload that changes the App identity, and heartbeat delivery) each re-applied only a hand-kept subset of the boot-time setters. After a rebuild the per-repo PR repo policy gate (the effective-ACMM check on whether an agent may open a PR), the self-authorization hold predicate, the hive identity, signed commits, PR prechecks, invocation attribution, merge re-engage, the mutation boundary, the canary scanner and the dashboard audit/alert sinks silently reverted to zero values until the pod restarted. A failed hive hold-label migration now says plainly (log and dashboard alert) that items carrying only the legacy `hive/<id>` label are not held, instead of claiming to fail closed: that label is the provenance label and is never matched as a hold ([#9371](https://github.com/hivecommons/hive/issues/9371)). Boot and every rebuild now configure the client through one function, and a parity test fails CI when a new `*github.Client` setter is not wired through it.
+
+## 2026-09-29 (v5.89.0)
+
+### Added
+
+- PR follow-ups can now resume the agent session that opened the PR ([#9583](https://github.com/hivecommons/hive/issues/9583)). Enable it with `turn.pr_follow_up.enabled` or `HIVE_PR_FOLLOWUP_RESUME=true`; it is off by default. When the watcher opens a PR for an agent, the hive saves a pointer to the agent's live CLI session as a `pkg/turn` envelope under `/data/turn/pr-followups`. When that PR then gets a settled CI failure, a changes-requested review or a new review-bot thread, the hive delivers it to the same session without `/clear`, so the agent keeps the reasoning behind the PR. This only happens while that session is still live and within `turn.pr_follow_up.max_age` (default `24h`). Only PRs this hive opened are eligible. Every delivery is journaled before it happens, so a restart re-queues it rather than dropping it. When the session cannot be resumed, the follow-up goes through the existing fix-before-new path as before.
+- **PR review queue: one ranked list across agent and contributor PRs** ([#9590](https://github.com/hivecommons/hive/issues/9590)). `GET /api/review/queue?limit=N&offset=M` returns every open PR in the governed repos (actionable and held, whoever opened it) in one deterministic order - triage class, then the review swarm's confidence band for the current head (an unreviewed PR ranks as "needs attention", never "safe"), then CI (green before red), then age - with human-readable `reasons` for each position, paged. `last-actionable.json` PRs now carry `review_rank`, `review_priority` and `review_rank_reasons`. Contributor PRs without an agent lane label are now classified from their title prefix, labels, and (when the duplicate sweep has fingerprinted them) changed paths, so they get a triage class instead of none; agent PRs classify exactly as before. New default-off `review.priority_labels` (Governor -> Features -> Review Gate) mirrors the rank onto exactly one existing `review-priority/high|normal|low` label per PR, applied by the hive, never by the authoring agent (option 2 of `src/docs/review-queue-triage.md`).
+
+### Fixed
+
+- The "resume-kick held" dashboard banner no longer sticks forever on agents that are idle by design ([#9612](https://github.com/hivecommons/hive/issues/9612)). The governor's resume-kick gate now reports why it refused a crash-restarted agent, and only an interval throttle (a kick really is coming at the next slot) raises the per-agent banner; agents paused or unscheduled in the current mode, on-demand, or on a time-of-day schedule are logged at info, and budget refusals are left to the existing budget-exhausted banner. Existing banners are reconciled every eval cycle and clear when the agent is kicked, paused, disabled or removed, working again, no longer expected to run in the current mode, or after two cadence intervals (6h fallback). The banner text now names the actual reason and only suggests waiting for the next scheduled slot when there is one.
+
+### Security
+
+- Existing hosted spokes that authenticate with a GitHub App now turn proxy-side GitHub credential injection ON by default ([#9586](https://github.com/hivecommons/hive/issues/9586)): an unset `HIVE_PROXY_INJECT_GH_AUTH` resolves at boot to on for a hosted spoke with live App auth outside advisory mode, and stays off for self-hosted installs, PAT spokes, advisory mode and the hub. The spoke logs `proxy GitHub auth injection: on|off (<reason>)` at boot and the dashboard Security tab shows the resolved state. The change reaches spokes through the release channels (`candidate` first, `stable` after its 24h soak); roll back by setting `HIVE_PROXY_INJECT_GH_AUTH=false` on a spoke or holding the stable promotion. Also fixed: with injection on, the proxy rewrote the Copilot CLI's `/copilot_internal/` session-token exchange to the App token, cutting copilot-backend agents off from their model; those requests now keep the agent's own Copilot credential.
+
 ## 2026-09-29 (v5.88.0)
 
 ### Added

@@ -424,6 +424,12 @@ func (c *Config) applyBootstrapEnv() {
 			c.GitHub.selfAuthorizationHoldEnvOverride = &b
 		}
 	}
+	if v := os.Getenv("HIVE_REPORTER_TRUST_HOLD"); strings.TrimSpace(v) != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			c.GitHub.ReporterTrustHold = &b
+			c.GitHub.reporterTrustHoldEnvOverride = &b
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv(ContributeSkipLabelsEnvVar)); v != "" {
 		c.Hub.ContributeSkipLabels = parseContributeSkipLabels(v)
 	}

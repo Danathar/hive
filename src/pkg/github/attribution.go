@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +70,22 @@ const (
 	// rather than an assignee). It is a countable "this agent took work" signal
 	// on the activity trail.
 	AuditActionIssueClaimed = "agent_issue_claimed"
+	// AuditActionAgentLabelApplied is recorded when the issue-request watcher
+	// adds or removes labels on an agent's behalf (kind "label", #9587). The
+	// detail carries the labels added and removed; hive-controlled labels are
+	// refused by the relay and never reach this entry. It is distinct from
+	// hive_label_applied, which is the hive labeling on its own initiative.
+	AuditActionAgentLabelApplied = "agent_label_applied"
+	// AuditActionAgentReviewRequested is recorded when the issue-request
+	// watcher asks users and/or teams to review a PR on an agent's behalf
+	// (kind "request_review", #9587). The detail carries who was asked.
+	AuditActionAgentReviewRequested = "agent_review_requested"
+	// AuditActionAgentBranchPushed is recorded when the push-branch-request
+	// watcher pushes an agent's local branch to GitHub on its behalf (op
+	// push_branch, #9587). The detail carries the branch and the pushed
+	// commit; a branch push has no issue or PR number, so the typed target
+	// is zero.
+	AuditActionAgentBranchPushed = "agent_branch_pushed"
 	// AuditActionIssueClosed is recorded when the issue-request watcher closes
 	// an issue on an agent's behalf after the reporter-confirmation gate passes
 	// or an explicit override reason has been posted.
@@ -486,6 +501,10 @@ type AttributionHooks struct {
 	// is still recorded in the hive log via slog so the trail never fully
 	// disappears (only the pre-dashboard startup window can hit this).
 	Audit func(action, detail, agent string)
+	// AuditRecord is the typed form of Audit (#9587): the same entry, plus
+	// first-class Repo and Target fields. When set it is called INSTEAD of
+	// Audit, so a sink wired to both never double-records.
+	AuditRecord func(AuditRecord)
 }
 
 // SetAttributionHooks installs the initial hook set. Safe to call before the
@@ -520,6 +539,17 @@ func (c *Client) SetAttributionAudit(fn func(action, detail, agent string)) {
 	c.attribMu.Lock()
 	defer c.attribMu.Unlock()
 	c.attribution.Audit = fn
+}
+
+// SetAttributionAuditRecord installs the typed audit sink (#9587). It takes
+// precedence over the untyped SetAttributionAudit sink.
+func (c *Client) SetAttributionAuditRecord(fn func(AuditRecord)) {
+	if c == nil {
+		return
+	}
+	c.attribMu.Lock()
+	defer c.attribMu.Unlock()
+	c.attribution.AuditRecord = fn
 }
 
 // attributionMeta resolves launch metadata for an agent name, degrading to
@@ -559,23 +589,45 @@ func (c *Client) attributionTrailerOn() bool {
 // recordCreationAudit writes the unconditional audit entry for a mediated
 // creation. With no sink wired yet (pre-dashboard startup window) it falls
 // back to the hive log so the event is still recorded somewhere durable.
+//
+// It derives the typed repo/target from the "repo" and "number" pairs in extra.
+// Write sites pass them explicitly through recordWriteAudit instead (#9587
+// phase 2); this form stays for callers that still build pairs.
 func (c *Client) recordCreationAudit(action string, m InvocationMeta, extra ...string) {
 	if c == nil {
 		return
 	}
-	detail := m.AuditDetail(extra...)
+	// Credential material is masked before the entry reaches ANY sink (#9587):
+	// details carry agent-supplied values, and the audit log is durable.
+	c.deliverAuditRecord(auditRecordFor(action, m, extra...))
+}
+
+// deliverAuditRecord hands one already-redacted record to the audit sink: the
+// typed sink when wired, else the legacy untyped sink, else the hive log. Every
+// audited GitHub write funnels through here, so the precedence (and the
+// never-double-record rule) lives in exactly one place.
+func (c *Client) deliverAuditRecord(rec AuditRecord) {
+	if c == nil {
+		return
+	}
 	c.attribMu.RLock()
+	auditRecord := c.attribution.AuditRecord
 	audit := c.attribution.Audit
 	c.attribMu.RUnlock()
+	if auditRecord != nil {
+		auditRecord(rec)
+		return
+	}
 	if audit != nil {
-		audit(action, detail, m.Agent)
+		audit(rec.Action, rec.Detail, rec.Agent)
 		return
 	}
 	if c.logger == nil {
 		return // no sink and no logger (e.g. a bare test client) — nothing to do
 	}
 	c.logger.Info("attribution audit (no audit sink wired yet)",
-		slog.String("action", action), slog.String("detail", detail), slog.String("agent", m.Agent))
+		slog.String("action", rec.Action), slog.String("detail", rec.Detail), slog.String("agent", rec.Agent),
+		slog.String("repo", rec.Repo), slog.Int("target", rec.Target))
 }
 
 // ReconcilePRAttribution ensures the PR at prURL carries an attribution trailer
@@ -623,9 +675,8 @@ func (c *Client) ReconcilePRAttribution(ctx context.Context, prURL string, meta 
 	if err != nil {
 		return fmt.Errorf("reconcile attribution: edit PR %s#%d: %w", ref.FullName(), ref.Number, err)
 	}
-	c.recordCreationAudit(AuditActionPRAttributionReconciled, meta,
-		"repo", ref.FullName(),
-		"number", strconv.Itoa(ref.Number),
+	c.recordWriteAudit(AuditActionPRAttributionReconciled, meta,
+		WriteTarget{Repo: ref.FullName(), Number: ref.Number},
 		"url", prURL,
 		"reconciled", "true",
 	)

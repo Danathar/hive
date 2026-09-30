@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -268,14 +269,28 @@ func (c *Client) runPRRequestExternalPrechecks(ctx context.Context, owner, repo,
 			docsSkipped = append(docsSkipped, "docs guards skipped (bash not found)")
 		}
 		if len(docsSkipped) == 0 {
-			commands = append(commands,
-				prPrecheckCommand{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "src/docs"}},
-				prPrecheckCommand{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "docs"}},
-				prPrecheckCommand{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", ".", "--no-recurse"}},
-				prPrecheckCommand{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "src/deploy/data/wiki", "--vault-root"}},
-				prPrecheckCommand{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-citations.py", "src/docs"}},
-				prPrecheckCommand{name: "bash", kind: "docs", dir: checkout, args: []string{"src/scripts/check-api-reference-citations.sh"}},
-			)
+			docsCommands := []prPrecheckCommand{
+				{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "src/docs"}},
+				{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "docs"}},
+				{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", ".", "--no-recurse"}},
+				{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-links.py", "src/deploy/data/wiki", "--vault-root"}},
+				{name: "python3", kind: "docs", dir: checkout, args: []string{"src/scripts/check-docs-citations.py", "src/docs"}},
+				{name: "bash", kind: "docs", dir: checkout, args: []string{"src/scripts/check-api-reference-citations.sh"}},
+			}
+			// The docs guards ship only in the primary repo; a script that is
+			// absent from the target checkout is skipped, not treated as a failure.
+			missing := map[string]bool{}
+			for _, command := range docsCommands {
+				script := command.args[0]
+				if _, err := os.Stat(filepath.Join(checkout, script)); err != nil {
+					if !missing[script] {
+						missing[script] = true
+						docsSkipped = append(docsSkipped, fmt.Sprintf("docs guard %s skipped (script not present in target repo)", script))
+					}
+					continue
+				}
+				commands = append(commands, command)
+			}
 		}
 		for _, skipped := range docsSkipped {
 			c.logPRPrecheckSkip(skipped)
@@ -480,6 +495,11 @@ func (c *Client) checkoutPRHeadForPrecheck(ctx context.Context, opts *PRPrecheck
 	return dir, cleanup, nil
 }
 
+// prPrecheckAuthHeader returns the extraHeader git needs to clone over HTTPS.
+// GitHub's git smart-HTTP endpoints only accept Basic auth
+// (`www-authenticate: Basic realm="GitHub"`); a Bearer token gets a 401, git
+// then falls through to the system credential helper, which refuses without a
+// per-agent token cache, and the precheck silently skips its checkout.
 func (c *Client) prPrecheckAuthHeader(ctx context.Context) (string, bool) {
 	if c == nil {
 		return "", false
@@ -487,14 +507,20 @@ func (c *Client) prPrecheckAuthHeader(ctx context.Context) (string, bool) {
 	if c.appAuth != nil {
 		token, err := c.appAuth.Token(ctx)
 		if err == nil && token != "" {
-			return "Authorization: Bearer " + token, true
+			return gitBasicAuthHeader(token), true
 		}
 		return "", false
 	}
 	if c.authToken != "" {
-		return "Authorization: Bearer " + c.authToken, true
+		return gitBasicAuthHeader(c.authToken), true
 	}
 	return "", false
+}
+
+// gitBasicAuthHeader encodes a GitHub token the way git-over-HTTPS expects it:
+// Basic auth with the conventional x-access-token username.
+func gitBasicAuthHeader(token string) string {
+	return "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
 }
 
 func prPrecheckCloneURL(opts *PRPrecheckOptions, owner, repo string) string {
