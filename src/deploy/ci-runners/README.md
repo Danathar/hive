@@ -14,6 +14,9 @@ silently lose it.
 | Controller | summerwind ARC (`actions.summerwind.dev/v1alpha1`) |
 | Runner labels | `["self-hosted","linux","openshift","hive"]` |
 
+> **Moving off vllm-d:** the dedicated Linode cluster that replaces this
+> arrangement is documented in [`lke/README.md`](lke/README.md).
+
 ## Incident: apt egress failure (#6648)
 
 Every job that installed a toolchain package (`gcc`, `libc6-dev`, `tmux`)

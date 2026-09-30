@@ -1,0 +1,161 @@
+# hivecommons/hive — gha-runner-scale-set values for the dedicated Linode
+# (LKE) CI cluster `hive-ci`. Mirrors the live vllm-d scale set
+# (autoscalingrunnerset/hive-runners, ns arc-v2-hive, chart gha-rs 0.14.2)
+# with the changes the README explains:
+#
+#   * no shared cephfs PVC — Go module cache is a per-node hostPath, build
+#     cache stays per-job (HIVE_GO_BUILD_CACHE=job, see ../README.md);
+#   * ephemeral-storage request == limit so the scheduler cannot overpack a
+#     node's disk (the "No space left on device" class, #9629);
+#   * topologySpread maxSkew 1 so losing one node costs 1/N of capacity;
+#   * a distinct runnerScaleSetName — scale-set names are unique per GitHub
+#     org, so this can run beside vllm-d's `hive-runners` during cut-over.
+#
+# Install:
+#   helm --kube-context hive-ci upgrade --install hive-runners-lke -n arc-hive --create-namespace \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set --version 0.14.2 \
+#     -f src/deploy/ci-runners/lke/hive-runners-lke-values.yaml
+githubConfigUrl: https://github.com/hivecommons/hive
+githubConfigSecret: hive-github-token
+
+runnerScaleSetName: hive-runners-lke
+minRunners: 4
+# 100 by request (3.25 CPU each) needs ~11 g8-dedicated-64-32 nodes; the pool
+# autoscaler tops out at 12 so this ceiling is reachable, not aspirational.
+maxRunners: 100
+
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-rs-controller
+
+template:
+  metadata:
+    labels:
+      owner: hive
+      team: hive
+  spec:
+    serviceAccountName: hive-runner
+    restartPolicy: Never
+    nodeSelector:
+      hive-ci-runner: "true"
+    topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            team: hive
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+    initContainers:
+      - name: stage-runner
+        image: ghcr.io/hivecommons/hive-ci-runner:v2.337.0-ubuntu-24.04-toolchain-1
+        command:
+          - bash
+          - -c
+          - >-
+            cp -r /runnertmp/. /home/runner/ &&
+            mv /home/runner/externalstmp /home/runner/externals &&
+            mkdir -p /home/runner/_work
+        volumeMounts:
+          - mountPath: /home/runner
+            name: runner-home
+      - name: gomod-local-perms
+        image: busybox:1.36
+        command: ["sh", "-c", "chown 1001:1001 /mnt/gomod-local /mnt/toolcache && chmod 0775 /mnt/gomod-local /mnt/toolcache"]
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        resources:
+          requests: { cpu: 10m, memory: 16Mi }
+          limits: { cpu: 100m, memory: 64Mi }
+        volumeMounts:
+          - mountPath: /mnt/gomod-local
+            name: gomod-local
+          - mountPath: /mnt/toolcache
+            name: toolcache
+    containers:
+      - name: runner
+        image: ghcr.io/hivecommons/hive-ci-runner:v2.337.0-ubuntu-24.04-toolchain-1
+        command: ["/home/runner/run.sh"]
+        workingDir: /home/runner
+        env:
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+          # Per-job build cache; go-cache-guard.sh relocates GOCACHE under
+          # $RUNNER_TEMP when HIVE_GO_BUILD_CACHE=job (the default).
+          - name: GOCACHE
+            value: /home/runner/_work/_temp/gocache
+          - name: GOMODCACHE
+            value: /mnt/gomod-local
+          - name: GOFLAGS
+            value: -modcacherw
+          - name: GOMAXPROCS
+            value: "6"
+          - name: RUNNER_TOOL_CACHE
+            value: /mnt/toolcache/hostedtoolcache
+          - name: ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE
+            value: /mnt/toolcache/actions-archive
+        resources:
+          requests:
+            cpu: "3"
+            memory: 4Gi
+            ephemeral-storage: 25Gi
+          limits:
+            cpu: "6"
+            memory: 16Gi
+            ephemeral-storage: 25Gi
+        volumeMounts:
+          - mountPath: /home/runner
+            name: runner-home
+          - mountPath: /var/run
+            name: dind-sock
+          - mountPath: /mnt/gomod-local
+            name: gomod-local
+          - mountPath: /mnt/toolcache
+            name: toolcache
+      - name: dind
+        image: docker:dind
+        command: ["sh", "-c"]
+        args:
+          - >-
+            for i in 1 2 3 4 5; do
+              dockerd --host=unix:///var/run/docker.sock --group=$(DOCKER_GROUP_GID)
+                --registry-mirror=http://registry-cache.arc-systems.svc.cluster.local:5000 && exit 0;
+              echo "dockerd exited, retry $i" >&2; sleep 5;
+            done; exit 1
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "121"
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+            ephemeral-storage: 20Gi
+        volumeMounts:
+          - mountPath: /home/runner
+            name: runner-home
+          - mountPath: /var/run
+            name: dind-sock
+    volumes:
+      - name: runner-home
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      # Node-local caches: Go module zips and the runner tool cache are
+      # content-addressed, so per-node duplication is safe and avoids every
+      # shared-RWX failure mode seen on cephfs (#9338, 2026-09-29 incident).
+      - name: gomod-local
+        hostPath:
+          path: /var/lib/hive-ci/gomod
+          type: DirectoryOrCreate
+      - name: toolcache
+        hostPath:
+          path: /var/lib/hive-ci/toolcache
+          type: DirectoryOrCreate

@@ -1,0 +1,51 @@
+# Bounds the node-local caches used by hive-runners-lke. Runs on every runner
+# node; once a day deletes module-cache download artefacts and tool-cache
+# entries untouched for MAX_AGE_DAYS. Module zips are content-addressed, so a
+# prune only costs a re-download on next use.
+#
+#   kubectl --context hive-ci -n arc-hive apply -f src/deploy/ci-runners/lke/cache-prune-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hive-ci-cache-prune
+  namespace: arc-hive
+  labels: { owner: hive, team: hive }
+spec:
+  selector:
+    matchLabels: { app: hive-ci-cache-prune }
+  template:
+    metadata:
+      labels: { app: hive-ci-cache-prune, owner: hive, team: hive }
+    spec:
+      nodeSelector: { hive-ci-runner: "true" }
+      containers:
+        - name: prune
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              MAX_AGE_DAYS="${MAX_AGE_DAYS:-14}"
+              while true; do
+                for d in /mnt/gomod/cache/download /mnt/toolcache; do
+                  [ -d "$d" ] || continue
+                  echo "prune: $d before: $(du -sh "$d" 2>/dev/null | cut -f1)"
+                  find "$d" -type f -mtime "+$MAX_AGE_DAYS" -delete 2>/dev/null
+                  find "$d" -mindepth 1 -type d -empty -delete 2>/dev/null
+                  echo "prune: $d after:  $(du -sh "$d" 2>/dev/null | cut -f1)"
+                done
+                sleep 86400
+              done
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - { mountPath: /mnt/gomod, name: gomod }
+            - { mountPath: /mnt/toolcache, name: toolcache }
+      volumes:
+        - name: gomod
+          hostPath: { path: /var/lib/hive-ci/gomod, type: DirectoryOrCreate }
+        - name: toolcache
+          hostPath: { path: /var/lib/hive-ci/toolcache, type: DirectoryOrCreate }
