@@ -348,11 +348,10 @@ func TestRequestRelayHandOverNeverDoubleProcesses(t *testing.T) {
 		if !s.switchTo(clients[i]) {
 			t.Fatalf("switch %d not scheduled", i)
 		}
-		// Wait for observable progress (two more requests fulfilled) so
-		// hand-overs land mid-queue rather than sleeping a fixed interval.
-		q.waitFulfilled(t, 2)
+		// Let the generation run briefly so hand-overs land mid-queue.
+		time.Sleep(fakeRelayWorkTime * 2)
 	}
-	q.waitFulfilled(t, handOverRequests-2*handOverClients)
+	q.waitFulfilled(t, handOverRequests)
 
 	cancel()
 	select {
