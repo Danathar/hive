@@ -15,10 +15,10 @@ repository touches it.
 | --- | --- |
 | Cluster | `hive-ci`, region `us-ord` (Chicago), Kubernetes 1.36, standard tier, **HA control plane** |
 | Pool `arc-system` | 3 × `g8-dedicated-8-4` (4 vCPU / 8 GB), label+taint `hive-role=system` |
-| Pool `runners` | 4 × `g8-dedicated-64-32` (32 vCPU / 64 GB / 655 GB NVMe), label `hive-ci-runner=true`, autoscaler 3–12 |
+| Pool `runners` | 3 × `g8-dedicated-64-32` (initial) (32 vCPU / 64 GB / 655 GB NVMe), label `hive-ci-runner=true`, autoscaler 3–12 |
 | ARC | `gha-runner-scale-set-controller` 0.14.2 in `arc-systems`; scale set `hive-runners-lke` in `arc-hive` |
 | Runner budget | `minRunners: 4`, `maxRunners: 100` (≈9 runners per node by request → 11–12 nodes at peak; 4 nodes ≈ 36) |
-| Cost | ≈ $3.4k/mo at 4 runner nodes, ≈ $2.6k/mo idling at 3, ≈ $9.6k/mo if pegged at 12 |
+| Cost | ≈ $2.8k/mo at the 3-node floor (matches the Cloud Manager estimate), ≈ $9.6k/mo if pegged at 12 |
 
 ## Design
 
@@ -51,7 +51,9 @@ repository touches it.
 ## 1. Create the cluster
 
 Either click through Cloud Manager (Kubernetes → Create: label `hive-ci`,
-Chicago, 1.36, HA control plane on, App Platform off, the two pools above) or:
+Chicago, 1.36, HA control plane on, App Platform off, the two pools above —
+the create wizard has no autoscaler control; enable it afterwards on the
+cluster page → `runners` pool → **Autoscale Pool** → min 3 / max 12) or:
 
 ```sh
 export LINODE_TOKEN=...

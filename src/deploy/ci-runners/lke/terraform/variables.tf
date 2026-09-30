@@ -32,7 +32,7 @@ variable "runner_pool_type" {
 
 variable "runner_pool_count" {
   type    = number
-  default = 4
+  default = 3 # initial count; the autoscaler (3-12) takes over from here
 }
 
 variable "runner_pool_min" {
