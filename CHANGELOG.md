@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.96.0)
+
+### Added
+
+- PR follow-up session resume counters are now exported on `/metrics` as `hive_pr_followup_*` Prometheus series: resumed, fallback, skipped and pruned (by reason), deferred, and handoffs queued/delivered ([#9583](https://github.com/hivecommons/hive/issues/9583)). They read the existing `stats.json` in the pointer directory and appear only once that file exists.
+
 ## 2026-09-30 (v5.95.0)
 
 ### Added
