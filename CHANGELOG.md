@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.97.0)
+
+### Added
+
+- **An issue closes when its reporter or a maintainer confirms the fix in a comment** ([#9746](https://github.com/hivecommons/hive/issues/9746)). After a fix merges with a non-closing `Refs #N`, the issue used to sit open with `hive/likely-done` and the refs-sweep question until someone pressed Close; replying "yes, fixed" did nothing. The new `.github/workflows/issue-confirm-fixed.yml` accepts `/fixed` (alias `/close`) on any open issue, and a plain-language confirmation such as "confirmed fixed" only on an issue waiting on confirmation (`hive/likely-done` or the refs-sweep question). Negation or remaining-work wording ("not fixed yet", "fixed except…", a question) never closes and gets a reply asking for `/fixed`. Only the issue's author or users with write access can confirm, as for `/reopen`. An accepted confirmation applies the existing `hive: reporter-confirmed` label, removes `hive/likely-done`, comments naming the confirmer and merged PR(s), and closes the issue as completed. The refs-sweep question now tells readers how to reply.
+- Added `src/deploy/ci-runners/lke/`: Terraform, Helm values, registry pull-through cache and runbook for moving the self-hosted CI runners to a dedicated Linode LKE cluster (`hive-ci`) with node-local caches instead of the shared cephfs volume.
+
 ## 2026-09-30 (v5.96.3)
 
 ### Changed

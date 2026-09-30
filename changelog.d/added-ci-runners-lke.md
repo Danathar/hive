@@ -1,1 +1,0 @@
-- Added `src/deploy/ci-runners/lke/`: Terraform, Helm values, registry pull-through cache and runbook for moving the self-hosted CI runners to a dedicated Linode LKE cluster (`hive-ci`) with node-local caches instead of the shared cephfs volume.
