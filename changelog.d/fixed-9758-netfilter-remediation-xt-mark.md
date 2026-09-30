@@ -1,1 +1,0 @@
-- The entrypoint FATAL hint and `src/docs/net-admin-requirement.md` now list `xt_mark`, `xt_REDIRECT` and `xt_owner` for the `/etc/modules-load.d/` drop-in ([#9758](https://github.com/hivecommons/hive/issues/9758)). They named only `xt_owner` and `xt_REDIRECT`, which left out the required `xt_mark`.
