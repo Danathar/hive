@@ -29753,7 +29753,6 @@ function burnAreaChart() {
           <div id="advisor-settings-panel">Loading…</div>
           <div class="advisor-set-actions"><button class="hv-btn btn-secondary btn" data-action="loadAdvisorSettings">Refresh</button></div>
         </div>
-        ${renderGovReplanSection((_configState.data || {}).replan || {})}`;
         ${renderGovReplanSection((_configState.data || {}).replan || {})}
         ${renderGovQuestionAutocloseSection((_configState.data || {}).question_autoclose || {})}`;
     }
@@ -33393,15 +33392,6 @@ function burnAreaChart() {
     async function initNPSSurvey() {
       const sessionCount = npsBumpSessionCount();
       if (sessionCount < 1) return; // storage blocked: no prompt
-
-    // initNPSSurvey decides whether this page load may show the prompt and,
-    // if so, waits for enough engaged time. At most once per page load.
-    async function initNPSSurvey() {
-      const t = npsTiming();
-      const sessionCount = npsBumpSessionCount();
-      if (sessionCount < t.MIN_SESSIONS_BEFORE_NPS) return;
-      const state = npsLoadState();
-      if (!state || !npsIsEligible(state, Date.now(), t)) return;
       let status = null;
       try {
         const resp = await fetch('/api/feedback/nps/status');
@@ -33467,11 +33457,6 @@ function burnAreaChart() {
       } catch (e) {
         showToast('Could not open the public issue: ' + (e && e.message ? e.message : 'network error'), 'error');
       }
-    }
-
-      const t = npsTiming();
-      npsSaveState(npsStateAfterDismiss(npsLoadState() || npsDefaultState(), Date.now(), t));
-      npsCloseCard();
     }
 
     function npsText(tag, cls, text) {
@@ -33563,11 +33548,6 @@ function burnAreaChart() {
         }
         submit.disabled = true;
         const t = npsActiveTiming();
-
-      submit.addEventListener('click', async () => {
-        if (selected === null) return;
-        submit.disabled = true;
-        const t = npsTiming();
         try {
           const ctrl = new AbortController();
           const timeout = setTimeout(() => ctrl.abort(), t.POST_TIMEOUT_MS);
@@ -33575,7 +33555,6 @@ function burnAreaChart() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ score: selected, feedback: feedbackText || undefined }),
-            body: JSON.stringify({ score: selected, feedback: text.value.trim() || undefined }),
             signal: ctrl.signal,
           });
           clearTimeout(timeout);
