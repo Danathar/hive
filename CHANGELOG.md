@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.101.0)
+
+### Added
+
+- PR follow-up handoffs now capture a backend resume id for goose agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). goose keeps its conversations in a SQLite store rather than a transcript file named by id, so the hive reads the conversation id from the newest per-launch CLI log under `~/.local/state/goose/logs/cli/` (its `"session.id"` tracing attribute, verified against goose 1.52.0) and shows `goose session --resume --session-id <id>` with the log path in the `PR HANDOFF` section. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+- Added a `push_branch` relay to the audited GitHub write surface (#9771): agents can ask the hive to push a topic branch from their own checkout (`hive-push-branch`), with the same file-UID authorizer, CanPush ACMM gate, lane allowlist (`write_surface.allowlist`), repo pause/scope checks and redacted typed audit entry (`agent_branch_pushed`) as every other relay operation. A hive with no allowlist allows it, like every other operation.
+
+### Fixed
+
+- Fleet dashboard status now surfaces a `ciPollNudges` counter (and low-severity fleet-report evidence when it is nonzero) for each agent, mirroring the existing stall/transient-error nudge counters, so an operator can tell when an agent is still burning turns polling CI on its own PR despite the stop-polling nudge added for [#9673](https://github.com/hivecommons/hive/issues/9673).
+
 ## 2026-09-30 (v5.100.0)
 
 ### Added
