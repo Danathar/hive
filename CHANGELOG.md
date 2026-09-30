@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.105.2)
+
+### Fixed
+
+- Hub PR precheck no longer rejects `pkg/agent` PRs on live hives: `NewManager` reads the durable Copilot login through a test seam so `agentEnvPairs` tests stay hermetic when `/data/copilot-user-token` exists, and precheck failure summaries now include the assertion lines under `--- FAIL`.
+
+## 2026-09-30 (v5.105.1)
+
+### Fixed
+
+- Fixed the dashboard so notices and warning banners stay pinned above reordered sections, and selecting an agent from the operations sidebar surfaces that agent's card first without saving a new card order.
+- Hosted spokes provisioned before the hub's public host changed served nginx 500 on `/terminal` because their `hive-terminal` Ingress still pointed `auth-url`/`auth-signin` at the old host (which 301s, and nginx treats a 301 auth answer as a 500). The hub's gated-Ingress sweep now reconciles `hive-terminal` alongside `hive-contribute`, repointing stale auth annotations at the current hub URL.
+- Opening an agent terminal on a hosted hive while signed in only through hub SSO no longer shows a spurious "Sign in to this hive before opening a terminal." toast: the best-effort assertion renewal now defers its verdict, and the dashboard surfaces it only when the terminal handoff also fails.
+
 ## 2026-09-30 (v5.105.0)
 
 ### Added
