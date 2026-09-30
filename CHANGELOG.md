@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.96.1)
+
+### Fixed
+
+- Fixed the dashboard "PRs by model" stat rows sharing a fixed column layout instead of per-row content-sized tracks, the topbar version badge wrapping into a vertical stack when an upgrade is queued, and the yellow shuffle pill button rendering taller/wider than its neighboring pills ([#9713](https://github.com/hivecommons/hive/issues/9713), [#9716](https://github.com/hivecommons/hive/issues/9716), [#9714](https://github.com/hivecommons/hive/issues/9714)).
+- The dashboard now renders "Waiting on CI" instead of "Working" for an agent whose recent tool calls are all CI polls (`gh run watch/view/list`, `gh pr checks`), reusing the harness's stop-polling nudge signal so the two states never disagree ([#9673](https://github.com/hivecommons/hive/issues/9673)).
+
 ## 2026-09-30 (v5.96.0)
 
 ### Added
