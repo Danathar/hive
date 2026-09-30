@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.104.2)
+
+### Fixed
+
+- The PR precheck no longer hard-rejects PRs on non-primary repos (rationguard, pluk, dibs, hotshot, promptargs, docs) that touch Markdown: the hive-only docs guards (`check-docs-links.py`, `check-docs-citations.py`, `check-api-reference-citations.sh`) are now skipped with a "script not present in target repo" note when absent from the target checkout, while scripts that exist and fail still reject (#9803).
+
 ## 2026-09-30 (v5.104.1)
 
 ### Changed
