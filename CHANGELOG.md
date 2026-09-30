@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.97.1)
+
+### Fixed
+
+- Issues behind a merged PR are no longer frozen after the first kick: `hive/likely-done` / `hive/covered-by-pr` are written automatically and are not verification outcomes, and `hive/verified-open` now keeps the issue actionable with an "implement the rest" instruction instead of suppressing it (#9691 follow-up).
+
 ## 2026-09-30 (v5.97.0)
 
 ### Added
