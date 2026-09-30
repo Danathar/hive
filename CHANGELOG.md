@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.100.0)
+
+### Added
+
+- PR follow-up handoffs now capture a resume id for pi and omp agents too ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)). When such an agent opens a PR, the hive names the newest session in the agent's own working-directory bucket under `~/.pi/agent/sessions/` or `~/.omp/agent/sessions/` and shows `pi --session <id>` or `omp --resume <id>` with the transcript path in the `PR HANDOFF` section. This still only applies when `turn.pr_follow_up.enabled` is on (default off).
+
+### Changed
+
+- The agent `gh` wrapper now routes pure `gh issue edit --add-label`/`--remove-label` and `gh pr edit --add-reviewer` edits through the audited `label` and `request_review` relays (same authorizer, lane allowlist, reserved-label refusal and redacted audit); edits the relays cannot express still fall through to the direct path, so an ACMM L6 hive loses nothing by default (hivecommons/hive#9773).
+
+### Security
+
+- With proxy-side GitHub auth injection on (`HIVE_PROXY_INJECT_GH_AUTH=true`), push-capable agents no longer inherit a real `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` from the hive process environment ([#9586](https://github.com/hivecommons/hive/issues/9586)). Before, an inherited `GH_TOKEN` outranked the injection placeholder in `gh`, so an opted-in agent could still hold a usable GitHub credential. Hives without injection are unchanged, apart from agents that cannot push, which now also lose the inherited enterprise token variables.
+
 ## 2026-09-30 (v5.99.0)
 
 ### Added
