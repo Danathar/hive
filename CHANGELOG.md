@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.96.3)
+
+### Changed
+
+- Internal refactor: `src/pkg/dashboard/api.go` (7,351 lines, 221 functions) is split by pure code motion into concern-focused sibling files (`api_nous.go`, `api_agent_config.go`, `api_agent_control.go`, `api_beads.go`, `api_snapshot.go`, `api_config.go`, `api_budget.go`, `api_breaker.go`, and others) within the same `dashboard` package; no behavior or API change ([#9742](https://github.com/hivecommons/hive/issues/9742)).
+
 ## 2026-09-30 (v5.96.2)
 
 ### Fixed
