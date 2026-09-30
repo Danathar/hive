@@ -1,1 +1,0 @@
-- CI: the apt-retry installer self-test's timeout scenario no longer fails on slow runners — its network-phase budget now leaves headroom for fork/exec overhead the per-attempt slice does not bound.
