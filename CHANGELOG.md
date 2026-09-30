@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.104.1)
+
+### Changed
+
+- LKE CI runners request 1.5 CPU / 3 Gi / 15 Gi (runner) and 10 Gi eph (dind) instead of 3 CPU / 4 Gi / 25 Gi + 20 Gi, roughly doubling runners per 32-vCPU node; limits are unchanged.
+
+### Fixed
+
+- Scanner policy templates (`scanner*.md`) now instruct agents to leave a `hive/awaiting-ci` note as a PR comment before moving on after a push, so a human reading the PR directly — not just the dashboard's "Waiting on CI" state — can see the CI wait was deliberate rather than the agent stalling (#9673).
+- The merge CI gate no longer waits on checks from workflows whose only trigger is `pull_request: types: [closed]` (or another post-merge-only type), which could never start on the pre-merge head and permanently deadlocked `hive-merge` (#9794).
+
 ## 2026-09-30 (v5.104.0)
 
 ### Added
