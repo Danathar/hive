@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.105.0)
+
+### Added
+
+- CLI pin bumps now check Hive's model lists against the new pin: `check-cli-model-lists.sh` flags a model the pinned CLI accepts but the allowlist lacks (the Claude Code 2.1.284 / `claude-sonnet-5-5` case) and stale version comments, bump PRs carry a manual checklist for allowlists, `index.html` and `pricing.go`, and Claude Code patch releases are now bumped automatically (#9805).
+
 ## 2026-09-30 (v5.104.2)
 
 ### Fixed
