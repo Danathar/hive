@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.105.3)
+
+### Fixed
+
+- `Config.Save` running inside a `go test` binary no longer writes the live `/data/hive.yaml.runtime` / `/data/hive.yaml.dashboard` unless a test redirected those paths; the hub's PR precheck running the suite in-pod had replaced r05x's config with testorg/testrepo and wiped its GitHub App.
+
 ## 2026-09-30 (v5.105.2)
 
 ### Fixed
