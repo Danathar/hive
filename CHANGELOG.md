@@ -11,6 +11,23 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.98.0)
+
+### Added
+
+- Agents can now add and remove labels through the audited write surface instead of a direct `gh issue edit --add-label` ([#9587](https://github.com/hivecommons/hive/issues/9587)). `hive-open-issue label --repo <r> <number> [--label a,b] [--remove-label c]` drops a request the hive fulfils with the App token under the same file-UID authorizer, lane allowlist (new `label` operation), repo pause and repo scope as the other relays, and audits it as `agent_label_applied` with typed `repo`/`target`. Hive-controlled labels are refused in both directions — the merge-queue label under its configured name, the hold labels, the whole `hive/` namespace, and `approved-direction`, `design-approved`, `needs-human`, `needs-decision` and `blocked` — so labeling cannot become a way to queue a merge, lift a hold or claim another agent's work; one reserved label refuses the whole request.
+- PR follow-up resume now captures a backend-native resume id when an agent opens a PR (claude, copilot and codex persist their transcripts on disk), and offers it back: the `PR HANDOFF` block in the next kick names the command that reopens the conversation that authored the PR, plus the transcript path, beside the existing handoff note. The hive never relaunches a backend itself, so an agent decides whether reopening the transcript is worth its tokens; a handle older than `turn.pr_follow_up.resume_id_max_age` (default 72h, `HIVE_PR_FOLLOWUP_RESUME_ID_MAX_AGE`), or whose transcript has been deleted, is silently dropped. Still behind `turn.pr_follow_up.enabled` (default off) ([#9606](https://github.com/hivecommons/hive/issues/9606), [#9583](https://github.com/hivecommons/hive/issues/9583)).
+
+### Fixed
+
+- Revalidate unversioned hub and spoke static assets and auxiliary HTML pages with content-based ETags so normal reloads pick up changed files after upgrades ([#9674](https://github.com/hivecommons/hive/issues/9674)).
+- The `standalone` overlay README and the standalone section of `src/docs/manual-provisioning.md` now list the Gateway API Inference Extension CRDs as a prerequisite ([#9756](https://github.com/hivecommons/hive/issues/9756)). The overlay ships an `InferencePool`, so `kubectl apply -k` on a cluster without the CRDs ended with `no matches for kind "InferencePool"`.
+- The node-prep DaemonSet (`src/deploy/k8s/node-prep/hive-netfilter-modules.yaml`) now also loads `xt_mark` ([#9757](https://github.com/hivecommons/hive/issues/9757)). The entrypoint requires `xt_mark` and `xt_REDIRECT`, but the DaemonSet loaded only `xt_REDIRECT` and the optional `xt_owner`, so a node missing `xt_mark` kept exiting 77.
+
+### Security
+
+- The LKE CI runner values now pin the privileged dind sidecar to `docker:29.8.1-dind` by digest instead of the floating `docker:dind` tag ([#9759](https://github.com/hivecommons/hive/issues/9759)).
+
 ## 2026-09-30 (v5.97.1)
 
 ### Fixed
