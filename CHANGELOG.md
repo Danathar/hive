@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.104.0)
+
+### Added
+
+- `write_surface.neutralize_mentions` lists the lanes whose relay-posted bodies have every GitHub `@mention` rewritten so it notifies no one ([#9587](https://github.com/hivecommons/hive/issues/9587)). For a listed lane, the `comment`, `create_issue`, `open_pr`, `review` and review-thread reply relays pass the agent's body through the same sanitizer the advisory and recommendations posts use: `@user` becomes `` `user` `` outside code, and only the `@` is dropped inside code. Email addresses, URLs and `#123` refs are left unchanged, and the hive's attribution trailer is appended afterwards, so the sanitizer never touches it. A replica follows its base agent, and `"*"` covers every lane. The list is empty by default, so bodies are posted as written (the reviewer prompt deliberately @-mentions the PR author) until an operator lists a lane.
+
+### Fixed
+
+- PR precheck clones now authenticate with Basic `x-access-token` instead of a Bearer header, which GitHub's git smart-HTTP rejects with 401 — prechecks had been silently skipping their checkout ("checkout skipped … per-agent scoped GitHub token not available") on every PR request.
+
 ## 2026-09-30 (v5.103.0)
 
 ### Added
