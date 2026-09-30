@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.105.2)
+
+### Fixed
+
+- Hub PR precheck no longer rejects `pkg/agent` PRs on live hives: `NewManager` reads the durable Copilot login through a test seam so `agentEnvPairs` tests stay hermetic when `/data/copilot-user-token` exists, and precheck failure summaries now include the assertion lines under `--- FAIL`.
+
 ## 2026-09-30 (v5.105.1)
 
 ### Fixed
