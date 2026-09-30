@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-30 (v5.96.2)
+
+### Fixed
+
+- The self-hosted Kubernetes Deployment now sets `HIVE_LLMD_ENDPOINT` to `hive-llm-d-epp.hive-inference`, the same as the code default ([#9726](https://github.com/hivecommons/hive/issues/9726)). It pointed at the retired `llm-d-epp` Service, so llm-d traffic from self-hosted and `standalone` installs went to a Service that no longer ships.
+- Comments in the `standalone` overlay configmap no longer say the base Deployment sets `HIVE_VLLM_ENDPOINT` ([#9727](https://github.com/hivecommons/hive/issues/9727)). They now name the `vllm-svc` Service and say that switching agents to `vllm` needs `HIVE_VLLM_ENDPOINT` set on the Deployment.
+- The GitOps example in `src/docs/manual-provisioning.md` now checks the `vllm` rollout in namespace `hive-inference` ([#9729](https://github.com/hivecommons/hive/issues/9729)). It used `-n hive` and failed with `deployments.apps "vllm" not found`.
+
+### Security
+
+- The node-prep DaemonSet (`src/deploy/k8s/node-prep/hive-netfilter-modules.yaml`) now pins `ubi9/ubi-minimal:9.8` by digest instead of `:latest` ([#9728](https://github.com/hivecommons/hive/issues/9728)). It runs privileged on every worker node, so a floating tag let new nodes pull an unreviewed image.
+
 ## 2026-09-30 (v5.96.1)
 
 ### Fixed
