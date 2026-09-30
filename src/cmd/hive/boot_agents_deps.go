@@ -30,26 +30,31 @@ type bootAgentsDeps struct {
 	prepareRequestDirs    func(logger *slog.Logger)
 	startTokenAccessAudit func(ctx context.Context, logger *slog.Logger)
 	// startRequestRelays starts the PR/issue/review/merge request watchers
-	// on the App client. Only called inside the usable-App gate.
-	startRequestRelays func(ctx context.Context, c *github.Client, r requestRelays)
-	// startSelfAuthoredSweep is automerge.StartSelfAuthoredAutoMergeSweep.
-	startSelfAuthoredSweep func(ctx context.Context, c *github.Client, maxMerges int, acmmAllowed bool, acmmLevel *int, opts automerge.Options)
+	// on the App client. Only reached through armRequestRelays, the
+	// usable-App gate. The returned channel closes once every watcher loop
+	// has exited after ctx is cancelled, so the relay supervisor can hand
+	// over to a rebuilt client without two watchers overlapping (#9621).
+	startRequestRelays func(ctx context.Context, c *github.Client, r requestRelays) <-chan struct{}
+	// startSelfAuthoredSweep is automerge.StartSelfAuthoredAutoMergeSweep;
+	// its channel closes once the sweep loop has exited.
+	startSelfAuthoredSweep func(ctx context.Context, c *github.Client, maxMerges int, acmmAllowed bool, acmmLevel *int, opts automerge.Options) <-chan struct{}
 	// buildMinter is buildAgentMinter; only consulted when mint.enabled.
 	buildMinter func(cfg *config.Config, logger *slog.Logger) (agent.AgentMintIssuer, error)
 	// startPermissionsWatcher is agent.StartPermissionsWatcher.
 	startPermissionsWatcher func(logger *slog.Logger)
 }
 
-// requestRelays is the authorization the four request watchers are started
+// requestRelays is the authorization the five request watchers are started
 // with. Kept as a struct so a fake can assert every relay was armed with the
 // manager's own gate rather than a permissive stand-in.
 type requestRelays struct {
-	prOpen    github.PRRequestAuthorizer
-	holdLabel func(agentName string) bool
-	issueOpen github.IssueRequestAuthorizer
-	review    github.ReviewRequestAuthorizer
-	merge     github.MergeRequestAuthorizer
-	logger    *slog.Logger
+	prOpen     github.PRRequestAuthorizer
+	holdLabel  func(agentName string) bool
+	issueOpen  github.IssueRequestAuthorizer
+	review     github.ReviewRequestAuthorizer
+	merge      github.MergeRequestAuthorizer
+	pushBranch github.PushBranchRequestAuthorizer
+	logger     *slog.Logger
 }
 
 func defaultBootAgentsDeps() bootAgentsDeps {
@@ -63,13 +68,16 @@ func defaultBootAgentsDeps() bootAgentsDeps {
 		startTokenAccessAudit: func(ctx context.Context, logger *slog.Logger) {
 			github.StartTokenAccessAuditWatcher(ctx, logger)
 		},
-		startRequestRelays: func(ctx context.Context, c *github.Client, r requestRelays) {
-			startRequestWatchers(ctx, requestwatch.New(c, r.prOpen, r.issueOpen, r.holdLabel, nil), r.logger)
-			c.StartReviewRequestWatcher(ctx, r.review, nil)
-			c.StartMergeRequestWatcher(ctx, r.merge, nil)
+		startRequestRelays: func(ctx context.Context, c *github.Client, r requestRelays) <-chan struct{} {
+			return joinDone(
+				startRequestWatchers(ctx, requestwatch.New(c, r.prOpen, r.issueOpen, r.holdLabel, nil), r.logger),
+				c.StartReviewRequestWatcher(ctx, r.review, nil),
+				c.StartMergeRequestWatcher(ctx, r.merge, nil),
+				c.StartPushBranchRequestWatcher(ctx, r.pushBranch, nil),
+			)
 		},
-		startSelfAuthoredSweep: func(ctx context.Context, c *github.Client, maxMerges int, acmmAllowed bool, acmmLevel *int, opts automerge.Options) {
-			automerge.StartSelfAuthoredAutoMergeSweep(ctx, c, maxMerges, acmmAllowed, acmmLevel, opts)
+		startSelfAuthoredSweep: func(ctx context.Context, c *github.Client, maxMerges int, acmmAllowed bool, acmmLevel *int, opts automerge.Options) <-chan struct{} {
+			return automerge.StartSelfAuthoredAutoMergeSweep(ctx, c, maxMerges, acmmAllowed, acmmLevel, opts)
 		},
 		buildMinter: func(cfg *config.Config, logger *slog.Logger) (agent.AgentMintIssuer, error) {
 			m, err := buildAgentMinter(cfg, logger)

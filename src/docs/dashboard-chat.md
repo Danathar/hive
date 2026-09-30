@@ -31,7 +31,7 @@ operator's `!runs reject …` never shows up in another's panel as their own wor
 
 `GET /api/chat/messages?since=<seq>` returns an envelope, not a bare list
 (`Poll`, `src/pkg/dashchat/bot.go:50`; `handleChatMessages`,
-`src/pkg/dashboard/api.go:6669`):
+`src/pkg/dashboard/api_chat.go:104`):
 
 ```json
 {"messages":[…], "next": 42, "epoch": "<per-process id>", "gap": false, "viewer": "alice"}

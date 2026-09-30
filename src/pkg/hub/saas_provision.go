@@ -2252,6 +2252,30 @@ func provisionAdditionalAppKeys(fleetKeys map[int64]fleetAppKey, primaryAppID st
 	return out
 }
 
+// Hosted spoke startup probe (#9692). The probe gates the container until
+// /api/health answers, and everything the entrypoint does before the server
+// binds counts against it. The old budget (10s + 30 x 5s, about 160s) was
+// smaller than the first-boot per-agent UID re-own on spokes with large agent
+// homes, so kubelet killed the container mid-migration and the rollout
+// stalled. The re-own is now incremental and resumable, and this budget is
+// sized so a first boot has room to finish it in one go. The liveness probe
+// only starts after the startup probe succeeds, so a longer startup budget
+// does not delay detection of a spoke that wedges later.
+const (
+	// hostedStartupBudget is the total time a new container gets to answer
+	// /api/health before kubelet restarts it.
+	hostedStartupBudget = 10 * time.Minute
+
+	// hostedStartupProbeInitialDelaySeconds and hostedStartupProbePeriodSeconds
+	// keep their pre-#9692 values; only the failure threshold grows.
+	hostedStartupProbeInitialDelaySeconds = 10
+	hostedStartupProbePeriodSeconds       = 5
+
+	// hostedStartupProbeFailureThreshold is derived from the budget so the two
+	// can never disagree: (600s - 10s) / 5s = 118 probes.
+	hostedStartupProbeFailureThreshold = (int(hostedStartupBudget/time.Second) - hostedStartupProbeInitialDelaySeconds) / hostedStartupProbePeriodSeconds
+)
+
 // spokeSecretsMountPrefix is where the hive-secrets Secret is projected in the
 // spoke pod. A key_file under this prefix can only resolve to an entry the same
 // manifest puts in that Secret — nothing else ever writes there, because the
@@ -2481,11 +2505,6 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		"Token":           req.GitHubToken,
 		"UseApp":          useApp,
 		"UseAppFull":      useAppFull,
-		// #9586: new hosted App spokes are born with proxy-side GitHub
-		// credential injection ON, so agents hold only the inert
-		// placeholder; PAT spokes and a hub-level opt-out render the
-		// explicit off value. See provision_proxy_inject.go.
-		"ProxyInjectGHAuth": provisionProxyInjectGHAuthFromEnv(useApp, logger),
 		// AppID / AppSlug follow the hive's GitHub HOST (the App may be on
 		// github.com OR github.ibm.com, per the repos). A GHE hive must get the
 		// cluster's GitHub Enterprise App — not the public github.com App
@@ -2639,6 +2658,11 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		// per cluster: a host outside the wildcard's single-label scope keeps its
 		// own certificate on a cluster where every other host does not.
 		"UseWildcardTLS": cluster.servesHostFromWildcard(dashboardHost),
+
+		// #9692: startup budget for the hive container, see hostedStartupBudget.
+		"StartupProbeInitialDelaySeconds": hostedStartupProbeInitialDelaySeconds,
+		"StartupProbePeriodSeconds":       hostedStartupProbePeriodSeconds,
+		"StartupProbeFailureThreshold":    hostedStartupProbeFailureThreshold,
 	}
 
 	// For NFS storage: auto-create OCI File System + NFS export.
@@ -3387,12 +3411,15 @@ spec:
           periodSeconds: 5
           failureThreshold: 3
         startupProbe:
+          # #9692: budget comes from hostedStartupBudget. The first boot of a
+          # build that changes per-agent ownership re-owns agent homes before
+          # the server binds; too small a budget crash-loops that migration.
           httpGet:
             path: /api/health
             port: {{.DashboardPort}}
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 30
+          initialDelaySeconds: {{.StartupProbeInitialDelaySeconds}}
+          periodSeconds: {{.StartupProbePeriodSeconds}}
+          failureThreshold: {{.StartupProbeFailureThreshold}}
         livenessProbe:
           # /api/livez (not /api/health) so a heartbeat goroutine that dies
           # silently while the HTTP server stays up still gets caught and the
@@ -3421,18 +3448,6 @@ spec:
             secretKeyRef:
               name: hive-secrets
               key: github-token
-{{- end}}
-{{- if .ProxyInjectGHAuth}}
-        # #9586: proxy-side GitHub credential injection (#1861). "true" on a
-        # fresh App spoke: the hub keeps each agent's scoped token in memory,
-        # the MITM proxy attaches it per UID-identified agent, and the agent's
-        # readable token cache holds only hive-proxy-injected-<agent>. "false"
-        # is the explicit opt-out (PAT spokes, or HIVE_HOSTED_PROXY_INJECT_GH_AUTH
-        # on the hub). Rendered once at provisioning; existing spokes are not
-        # reconciled. The spoke refuses to boot if this is combined with
-        # HIVE_PROXY_ADVISORY_OK=true (config.ValidateProxyInjectGHAuth).
-        - name: HIVE_PROXY_INJECT_GH_AUTH
-          value: "{{.ProxyInjectGHAuth}}"
 {{- end}}
         - name: DASHBOARD_AUTH_TOKEN
           valueFrom:

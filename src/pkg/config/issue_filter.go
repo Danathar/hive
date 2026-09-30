@@ -39,11 +39,16 @@ import (
 // does not change them.
 type IssueFilterConfig struct {
 	RequireLabels []string `yaml:"require_labels,omitempty" json:"require_labels,omitempty"`
+	// ReporterTrust gates admission on who filed the issue (#9665): a trusted
+	// reporter's issue passes; anyone else's must carry a triage label. It
+	// runs BEFORE RequireLabels, which still applies to everything afterwards,
+	// so "everyone needs triage" stays expressible exactly as before.
+	ReporterTrust ReporterTrustConfig `yaml:"reporter_trust,omitempty" json:"reporter_trust,omitempty"`
 }
 
 // IsZero reports whether the filter is absent/empty — i.e. no filtering at all.
 func (f IssueFilterConfig) IsZero() bool {
-	return len(f.RequireLabels) == 0
+	return len(f.RequireLabels) == 0 && f.ReporterTrust.IsZero()
 }
 
 // Equal reports whether two filters are identical (order-sensitive, exact).
@@ -57,7 +62,7 @@ func (f IssueFilterConfig) Equal(o IssueFilterConfig) bool {
 			return false
 		}
 	}
-	return true
+	return f.ReporterTrust.Equal(o.ReporterTrust)
 }
 
 // labelMatches reports a case-insensitive exact match, ignoring surrounding
@@ -76,8 +81,33 @@ func (f IssueFilterConfig) Admits(labels []string) bool {
 	if len(f.RequireLabels) == 0 {
 		return true
 	}
+	return anyLabelMatches(f.RequireLabels, labels)
+}
+
+// AdmitsReporter is the reporter-trust half of admission (#9665). With the
+// gate off it admits everyone; with it on, a trusted reporter passes and any
+// other reporter's issue must carry one of the untrusted-require labels. The
+// caller (github.Client.fetchIssues) applies this BEFORE Admits, so the
+// ordinary require_labels allow-list still applies to trusted reporters too.
+func (f IssueFilterConfig) AdmitsReporter(labels []string, login, association string) bool {
+	if !f.ReporterTrust.IsEnabled() {
+		return true
+	}
+	if f.ReporterTrust.Trusted(login, association) {
+		return true
+	}
+	return anyLabelMatches(f.ReporterTrust.EffectiveUntrustedRequireLabels(), labels)
+}
+
+// ReporterTrustEnabled satisfies github.ReporterAdmitter so the client can
+// count triage-pending issues separately from ordinary filter refusals.
+func (f IssueFilterConfig) ReporterTrustEnabled() bool {
+	return f.ReporterTrust.IsEnabled()
+}
+
+func anyLabelMatches(required, labels []string) bool {
 	for _, l := range labels {
-		for _, req := range f.RequireLabels {
+		for _, req := range required {
 			if labelMatches(req, l) {
 				return true
 			}

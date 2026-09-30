@@ -138,6 +138,8 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 		ClaimsEnabled *bool `json:"claimsEnabled"`
 		ClaimsTTLS    *int  `json:"claimsTtlS"`
 
+		PRFollowUpEnabled *bool `json:"prFollowUpEnabled"`
+
 		AutonomyAutoPromote  *bool   `json:"autonomyAutoPromote"`
 		AutonomyAutoDemote   *bool   `json:"autonomyAutoDemote"`
 		AutonomyPromoteAfter *int    `json:"autonomyPromoteAfter"`
@@ -380,6 +382,9 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 	if body.ClaimsTTLS != nil {
 		cfg.Governor.Claims.TTLS = *body.ClaimsTTLS
 	}
+	if body.PRFollowUpEnabled != nil {
+		cfg.Turn.PRFollowUp.Enabled = *body.PRFollowUpEnabled
+	}
 	if body.SpektacularEnabled != nil {
 		cfg.Runs.Spektacular.Enabled = *body.SpektacularEnabled
 		if *body.SpektacularEnabled {
@@ -621,6 +626,8 @@ func featuresSectionResponse(cfg *config.Config) map[string]interface{} {
 		"runWaitSeverity":                     cfg.Runs.EffectiveWaitSeverity(),
 		"claimsEnabled":                       cfg.Governor.Claims.Enabled,
 		"claimsTtlS":                          int(cfg.Governor.Claims.EffectiveTTL().Seconds()),
+		"prFollowUpEnabled":                   cfg.Turn.PRFollowUp.Enabled,
+		"prFollowUpEffective":                 cfg.PRFollowUpResumeEnabled(),
 		"publicationEnabled":                  cfg.Publication.Enabled,
 		"publicationPrivateChannel":           cfg.Publication.PrivateChannel,
 		"publicationOwner":                    cfg.Publication.Owner,

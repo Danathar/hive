@@ -99,7 +99,7 @@
     }
     .status-stale[hidden] { display: none; }
     .git-version { font-size: 0.65rem; color: var(--muted); margin-left: 10px; font-weight: 400; font-family: var(--font-mono); }
-    .git-version .git-behind { color: var(--yellow); font-weight: 600; }
+    .git-version .git-behind { color: var(--yellow); font-weight: 600; white-space: nowrap; }
     /* Release channel + last upgrade attempt panel (#7092). */
     .release-status { margin: 6px 0 10px; padding: var(--sp-4) var(--sp-5); border: 1px solid var(--border); border-radius: var(--r); background: color-mix(in srgb, var(--border) 12%, transparent); font-size: var(--fs-base); line-height: 1.5; }
     .release-status-row { display: block; }
@@ -288,6 +288,12 @@
     }
     .oc-topbar-left { font-size: 0.85rem; color: var(--muted); display: flex; align-items: center; gap: var(--sp-2); min-width: 0; flex: 1 1 auto; overflow: hidden; }
     #oc-project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* #oc-project-name is the one topbar-left piece that shrinks/ellipsizes;
+       the version badge stays fixed-width and single-line so its hash, channel
+       pill, tracking label, "N behind" and upgrade action never wrap into a
+       vertical stack (#9716). */
+    #oc-git-version { flex: 0 0 auto; white-space: nowrap; }
+    #oc-git-version #spoke-upgrade-btn { white-space: nowrap; }
     /* Drawer toggle. Hidden on desktop; the ≤768px block flips it to
        inline-flex. Lives in .oc-topbar-left because that is the shortest
        topbar group — putting it in center/right would risk wrapping the
@@ -1231,7 +1237,7 @@
     .gov-pr-models-toggle button { border:1px solid var(--border); border-radius:var(--r-pill); background:var(--bg); color:var(--muted); padding:3px 8px; font-size:var(--fs-xs); cursor:pointer; }
     .gov-pr-models-toggle button.active { color:var(--text); border-color:var(--amber); background:color-mix(in srgb, var(--amber) 14%, transparent); }
     .gov-pr-models-empty { color:var(--muted); font-size:var(--fs-base); padding:var(--sp-4) var(--sp-0); }
-    .gov-pr-model-row { display:grid; grid-template-columns:minmax(120px, 1.2fr) minmax(140px, 2fr) minmax(240px, 2fr) auto; gap:10px; align-items:center; margin:7px 0; font-size:0.78rem; }
+    .gov-pr-model-row { display:grid; grid-template-columns:minmax(120px, 1.2fr) minmax(140px, 2fr) minmax(240px, 2fr) 92px; gap:10px; align-items:center; margin:7px 0; font-size:0.78rem; }
     .gov-pr-model-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font-weight:600; }
     .gov-pr-model-sub { color:var(--muted); font-size:var(--fs-xs); font-weight:400; }
     .gov-pr-model-sub-spaced { margin-top:var(--sp-2); }
@@ -1243,7 +1249,7 @@
     .gov-pr-model-metrics { display:grid; grid-template-columns:repeat(5, minmax(42px, 1fr)); gap:5px; }
     .gov-pr-model-metric { color:var(--text); font-variant-numeric:tabular-nums; text-align:right; }
     .gov-pr-model-metric span { display:block; color:var(--muted); font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:0.06em; }
-    .gov-pr-model-share { color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .gov-pr-model-share { color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; text-align:right; }
     .gov-pr-model-table { width:100%; border-collapse:collapse; margin-top:10px; font-size:0.72rem; }
     .gov-pr-model-table th, .gov-pr-model-table td { padding:5px 6px; border-bottom:1px solid var(--border); text-align:right; font-variant-numeric:tabular-nums; }
     .gov-pr-model-table th:first-child, .gov-pr-model-table td:first-child { text-align:left; }
@@ -1468,7 +1474,7 @@
     .repo-issue-plan.plan-active { --pill-c: var(--blue); }
     .repo-issue-plan.plan-done { --pill-c: var(--green); }
     .repo-issue-plan.plan-queued { --pill-c: var(--muted); }
-    .repo-pr-pill.pill-icon, .repo-issue-pill.pill-icon, .repo-issue-plan.pill-icon { flex: 0 0 auto; padding: 3px 5px; min-width: 1.45rem; justify-content: center; white-space: nowrap; font-size: var(--fs-xs); line-height: 1; }
+    .repo-pr-pill.pill-icon, .repo-issue-pill.pill-icon, .repo-issue-plan.pill-icon { flex: 0 0 auto; padding: 3px 5px; min-width: 1.45rem; min-height: 0; justify-content: center; white-space: nowrap; font-size: var(--fs-xs); line-height: 1; }
     .repo-issue-pill-wrap:hover .repo-issue-plan { opacity: 1; }
     .repo-issue-plan:hover { background: color-mix(in srgb, var(--pill-c) 26%, transparent); }
     .repo-issue-plan:disabled { opacity: 0.5; cursor: default; }
@@ -2372,6 +2378,17 @@
     .config-toggle-switch.on::before { transform: translateX(16px); }
     .config-toggle-switch.on.danger { background: var(--red); }
     .config-toggle-label { font-size: 0.8rem; color: var(--text); }
+    /* Reporter trust (#9665) — Settings → Labels block and Repos rows. */
+    .rt-h4 { margin: 18px 0 6px; }
+    .rt-toggle { margin: 0 0 var(--sp-4); }
+    .rt-toggle-lg { margin: 0 0 var(--sp-5); }
+    .rt-sub { color: var(--muted); font-weight: 400; }
+    .rt-subhead { font-weight: 600; }
+    .rt-dim { opacity: 0.55; }
+    .rt-assoc-grid { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6); margin-bottom: var(--sp-5); }
+    .rt-assoc { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); white-space: nowrap; }
+    .rt-check { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+    .rt-inherit { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
     .config-toggle-label.danger { color: var(--red); font-weight: 600; }
     .config-section-rule { border: none; border-top: 1px solid var(--border); margin: var(--sp-6) var(--sp-0); }
     .smart-classifier-section { display: grid; gap: var(--sp-6); }
@@ -2405,6 +2422,19 @@
        features instead of one feature with parts, so the rule stays reserved
        for the section boundary and keeps meaning what it means. */
     .config-subgroup { font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; opacity: 0.75; margin: var(--sp-7) var(--sp-0) var(--sp-4); }
+    /* Question auto-close section and its live schedule table (#9584). */
+    .qa-section { margin: var(--sp-7) var(--sp-0); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+    .qa-section-title { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: var(--sp-3); }
+    .qa-hours { margin-top: var(--sp-5); }
+    .qa-schedule { margin-top: var(--sp-5); }
+    .qa-schedule-label { font-size: var(--fs-2xs); color: var(--muted); margin-bottom: var(--sp-3); }
+    .qa-note { font-size: var(--fs-2xs); color: var(--muted); }
+    .qa-note.warn { color: var(--yellow); }
+    .qa-table { width: 100%; border-collapse: collapse; font-size: var(--fs-2xs); }
+    .qa-table thead tr { text-align: left; color: var(--muted); border-bottom: 1px solid var(--border); }
+    .qa-table th, .qa-table td { padding: var(--sp-2) var(--sp-5); }
+    .qa-table th:first-child, .qa-table td:first-child { padding-left: var(--sp-0); }
+    .qa-table th:last-child, .qa-table td:last-child { padding-right: var(--sp-0); }
     .config-subgroup:first-of-type { margin-top: var(--sp-2); }
 
     .config-stat-row { padding: var(--sp-3) var(--sp-0); border-bottom: 1px solid var(--border); }
@@ -3463,6 +3493,26 @@
     .campaign-jam-live-pill { border: 1px solid var(--border); border-radius: var(--r-full); padding: var(--sp-1) var(--sp-2); background: var(--bg); color: var(--fg); }
     @media (max-width: 1100px) { .campaign-jam-grid { grid-template-columns: 1fr; } }
     @media (max-width: 900px) { .campaigns-filters { grid-template-columns: 1fr 1fr; } .campaign-row { grid-template-columns: 1fr; } }
+    /* Review queue (#9607) */
+    .review-queue-count { font-size: var(--fs-xs); color: var(--muted); margin-left: var(--sp-4); }
+    .review-queue-desc { font-size: var(--fs-sm); color: var(--muted); margin-bottom: var(--sp-4); }
+    .review-queue-panel { padding: var(--sp-4); max-height: 520px; overflow-y: auto; }
+    .review-queue-paging { display: none; align-items: center; gap: var(--sp-4); margin-top: var(--sp-4); }
+    .review-queue-range { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+    .review-queue-entry { padding: var(--sp-4) 0; border-bottom: 1px solid var(--terminal-line); }
+    .review-queue-head { display: flex; align-items: baseline; gap: var(--sp-4); }
+    .review-queue-rank { font-weight: 700; color: var(--muted); min-width: 2.2em; }
+    .review-queue-body { flex: 1; min-width: 0; }
+    .review-queue-titlerow { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+    .review-queue-title { font-weight: 600; }
+    a.review-queue-title { color: var(--text); }
+    .review-queue-meta { font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-1); }
+    .review-queue-reasons { margin: var(--sp-2) 0 0; padding-left: var(--sp-6); color: var(--muted); font-size: var(--fs-xs); }
+    .review-queue-noreasons { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-2); }
+    .review-queue-empty { color: var(--terminal-muted); font-size: var(--fs-base); padding: var(--sp-4); }
+    .review-priority { display: inline-block; padding: var(--sp-1) var(--sp-4); border-radius: var(--r-sm); font-size: var(--fs-2xs); color: var(--muted); border: 1px solid var(--blue); }
+    .review-priority-high { border-color: var(--red); }
+    .review-priority-low { border-color: var(--muted); }
   </style>
   <link rel="stylesheet" href="/api/theme.css" id="hive-theme-css">
 </head>
@@ -3801,6 +3851,7 @@
       <div class="oc-nav-label">Admin</div>
       <a class="oc-nav-item" data-section="token-panel" data-action="ocNavigate" data-arg0="token-panel"><span class="oc-nav-emoji">🪙</span><span class="oc-nav-text">Tokens</span></a>
       <a class="oc-nav-item" data-section="cost-panel" data-action="ocNavigate" data-arg0="cost-panel"><span class="oc-nav-emoji">💵</span><span class="oc-nav-text">Cost</span></a>
+      <a class="oc-nav-item" data-section="review-queue-section" data-action="ocNavigate" data-arg0="review-queue-section"><span class="oc-nav-emoji">🔎</span><span class="oc-nav-text">Review Queue</span></a>
       <a class="oc-nav-item" data-section="audit-section" data-action="ocNavigate" data-arg0="audit-section"><span class="oc-nav-emoji">📋</span><span class="oc-nav-text">Audit Log</span></a>
     </div>
     <div class="oc-nav-group">
@@ -3887,6 +3938,11 @@
                profile gets a menu entry instead, populated by showGHAuthState()
                once the signed-in login is known. -->
           <a href="#" id="oc-gh-menu-profile" class="avatar-menu-item" target="_blank" rel="noopener noreferrer" hidden>GitHub profile ↗</a>
+          <!-- Shortcut back to the hub's My Hives list (#9696), for users who
+               switch between several hives. Hidden until /api/config reports a
+               my_hives_url, which the server leaves empty on a standalone hive
+               with no hub link; renderMyHivesMenuItem() wires it up. -->
+          <a href="#" id="oc-gh-menu-my-hives" class="avatar-menu-item" target="_blank" rel="noopener noreferrer" hidden>My hives ↗</a>
           <a href="/api/docs" target="_blank" class="avatar-menu-item">API Docs ↗</a>
           <div class="avatar-menu-divider"></div>
           <div id="oc-gh-menu-export-label" class="avatar-menu-label" hidden>Export</div>
@@ -4163,6 +4219,21 @@
       </div>
       <div id="audit-panel" style="padding:var(--sp-5);max-height:320px;overflow-y:auto">
         <div class="loading">Loading audit log...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mt-6 mb-8" id="review-queue-section" data-dashboard-section="review-queue-section">
+    <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="review-queue-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Review Queue section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 🔎 Review Queue <span id="review-queue-count" class="review-queue-count"></span></h2>
+    <div class="section-body">
+      <div class="review-queue-desc">Every open PR across the governed repos in one deterministic rank order (<code>GET /api/review/queue</code>), agent- or contributor-authored, with the reasons for each position.</div>
+      <div id="review-queue-panel" class="review-queue-panel">
+        <div class="loading">Loading review queue…</div>
+      </div>
+      <div id="review-queue-paging" class="review-queue-paging">
+        <button class="hv-btn btn-secondary btn-sm" id="review-queue-prev" data-action="reviewQueuePrevPage" title="Previous page">← Prev</button>
+        <span id="review-queue-range" class="review-queue-range"></span>
+        <button class="hv-btn btn-secondary btn-sm" id="review-queue-next" data-action="reviewQueueNextPage" title="Next page">Next →</button>
       </div>
     </div>
   </div>
@@ -4705,7 +4776,7 @@
     var DASHBOARD_LAYOUT_KEY='hive.dashboard.layout';
     var DASHBOARD_LAYOUT_VERSION=1;
     var DASHBOARD_LAYOUT_REGIONS=['main'];
-    var DASHBOARD_LAYOUT_TEMPLATE={main:['runs-section','overview-section','governor','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','platform-section','audit-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
+    var DASHBOARD_LAYOUT_TEMPLATE={main:['runs-section','overview-section','governor','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','platform-section','audit-section','review-queue-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
     var DASHBOARD_LAYOUT_GRIP_SELECTOR='[data-dashboard-grip]';
     var DASHBOARD_LAYOUT_CARD_SELECTOR='[data-dashboard-section]';
     var dashboardDragState=null;
@@ -5357,7 +5428,7 @@
       /* 'disabled' outranks 'down': both reach here with state!=='running',
          but a switched-off agent is not a fault, and labelling it "down" sent
          operators looking for a crash that never happened. */
-      const stateLabel = agentSessionUnavailable(a) ? 'disabled' : needsLoginDown ? 'needs login' : isStopped ? 'down' : isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? agentCadenceOffLabel() : isRunning ? 'working' : 'idle';
+      const stateLabel = agentSessionUnavailable(a) ? 'disabled' : needsLoginDown ? 'needs login' : isStopped ? 'down' : isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? agentCadenceOffLabel() : isRunning ? (a.awaitingCI ? 'Waiting on CI' : 'working') : 'idle';
 
       const kickId = `oc-kick-${a.name}`;
       const prevInput = document.getElementById(kickId);
@@ -7952,7 +8023,7 @@
           <span class="working-indicator"></span>
           <div class="agent-name"><span class="dot ${dotState}" data-status="${statusAttr(dotState)}"${isOff ? ` title="${esc(agentOffTitle(a))}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' ' + statusBadgeHTML('ready', 'sandboxed', 'Sandboxed runner active', 'done') : ''}${disabledBadge}${replicaBadge} ${agentPowerSwitchHtml(a)} ${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="hv-btn btn-secondary btn-sm" data-action="showAdvisorRecords" data-arg0="${esc(a.name)}" data-stop="1" title="Advisor reviews of this agent's finished turns — severity and text, newest first">🗣 advisor</button> <button class="hv-btn btn-danger btn-sm restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
           ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence)}
-          <div class="agent-state ${isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? agentCadenceOffLabel() : a.busy}${pauseInfoIcon(a)}${(() => {
+          <div class="agent-state ${isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? agentCadenceOffLabel() : (a.busy === 'working' && a.awaitingCI) ? 'Waiting on CI' : a.busy}${pauseInfoIcon(a)}${(() => {
             if (a.structuredStatus === 'BLOCKED') return statusBadgeHTML('blocked', 'blocked', a.statusEvidence, 'blocked');
             if (a.structuredStatus === 'NEEDS_CONTEXT') return statusBadgeHTML('needs_context', 'needs context', a.statusEvidence, 'needs-context');
             if (a.structuredStatus === 'DONE_WITH_CONCERNS') return statusBadgeHTML('needs_attention', 'concerns', a.statusEvidence, 'done-concerns');
@@ -9988,6 +10059,7 @@
           hive_advisory: 'Issues that belong to the Hive advisory/backlog lane, not the ordinary work lane',
           dependency_dashboard: 'Dependency-dashboard issues grouped separately from ordinary actionable work',
           filtered: 'Open issues skipped by the configured project.issue_filter label policy',
+          reporter_triage: 'Open issues from reporters this hive does not trust (not an owner, member or collaborator) that are waiting for a maintainer to add the triage label (#9665)',
           other: 'Open issues that did not land in an actionable, held, advisory, dependency dashboard or filtered bucket'
         },
         prs: {
@@ -10012,6 +10084,7 @@
             ['hive_advisory', 'advisory'],
             ['dependency_dashboard', 'dependency dashboard'],
             ['filtered', 'filtered'],
+            ['reporter_triage', 'awaiting reporter triage'],
             ['other', 'other']
           ]
         : [
@@ -17084,6 +17157,125 @@ function burnAreaChart() {
     }
     // fetchAuditLog() — deferred to _deferredInit
 
+    // --- Review queue (GET /api/review/queue) — #9607 ---
+    // UI-only view over the deterministic PR review queue backend (#9598,
+    // #9590): every open PR across the governed repos in one ranked order with
+    // the reasons for each position, paged like the API (limit/offset/has_more).
+    const REVIEW_QUEUE_POLL_MS = 30000;
+    const REVIEW_QUEUE_PAGE_SIZE = 25;
+    var _reviewQueueOffset = 0;
+    var _reviewQueueLimit = REVIEW_QUEUE_PAGE_SIZE;
+    var _reviewQueueTotal = 0;
+    var _reviewQueueHasMore = false;
+
+    // reviewQueuePriorityMeta maps the API's priority (high|normal|low) to the
+    // review-priority/* label family the backend mirrors onto PRs; the badge
+    // colour comes from the .review-priority-<key> CSS class. Unknown values
+    // fall back to normal so a new band still renders.
+    function reviewQueuePriorityMeta(priority) {
+      var p = String(priority || '').toLowerCase();
+      if (p === 'high') return { key: 'high', label: 'review-priority/high' };
+      if (p === 'low') return { key: 'low', label: 'review-priority/low' };
+      return { key: 'normal', label: 'review-priority/normal' };
+    }
+
+    function reviewQueueAgeLabel(hours) {
+      var h = Number(hours) || 0;
+      if (h < 24) return h + 'h';
+      return Math.floor(h / 24) + 'd';
+    }
+
+    function renderReviewQueueEntry(e) {
+      var meta = reviewQueuePriorityMeta(e.priority);
+      var title = String(e.title || '');
+      var titleHtml = e.url
+        ? '<a href="' + esc(String(e.url)) + '" target="_blank" rel="noopener noreferrer" class="review-queue-title">' + esc(title) + '</a>'
+        : '<span class="review-queue-title">' + esc(title) + '</span>';
+      var repoRef = esc(String(e.repo || '')) + '#' + esc(String(e.number || ''));
+      var priorityBadge = '<span class="review-priority review-priority-' + meta.key + '" data-priority="' + meta.key + '" title="' + esc(meta.label) + '">' + esc(meta.label) + '</span>';
+      var metaBits = [];
+      if (e.author) metaBits.push('@' + esc(String(e.author)));
+      metaBits.push(e.hive_authored ? 'agent' : 'contributor');
+      if (e.ci_state) metaBits.push('CI ' + esc(String(e.ci_state)));
+      if (e.confidence_band) metaBits.push(esc(String(e.confidence_band)));
+      metaBits.push(reviewQueueAgeLabel(e.age_hours) + ' old');
+      if (e.held) metaBits.push('held');
+      var reasons = Array.isArray(e.reasons) ? e.reasons : [];
+      var reasonsHtml = reasons.length
+        ? '<ul class="review-queue-reasons">' + reasons.map(function(r) { return '<li>' + esc(String(r)) + '</li>'; }).join('') + '</ul>'
+        : '<div class="review-queue-noreasons">no ranking reasons recorded</div>';
+      return '<div class="review-queue-entry">' +
+        '<div class="review-queue-head">' +
+          '<span class="review-queue-rank">#' + esc(String(e.position || '')) + '</span>' +
+          '<div class="review-queue-body">' +
+            '<div class="review-queue-titlerow">' + priorityBadge + titleHtml + '</div>' +
+            '<div class="review-queue-meta">' + repoRef + ' · ' + metaBits.join(' · ') + '</div>' +
+            reasonsHtml +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function renderReviewQueue(data) {
+      var panel = document.getElementById('review-queue-panel');
+      if (!panel) return;
+      var items = (data && Array.isArray(data.items)) ? data.items : [];
+      _reviewQueueTotal = Number(data && data.total) || 0;
+      _reviewQueueLimit = Number(data && data.limit) || REVIEW_QUEUE_PAGE_SIZE;
+      _reviewQueueOffset = Number(data && data.offset) || 0;
+      _reviewQueueHasMore = !!(data && data.has_more);
+      var countEl = document.getElementById('review-queue-count');
+      if (countEl) countEl.textContent = _reviewQueueTotal ? _reviewQueueTotal + ' PR' + (_reviewQueueTotal === 1 ? '' : 's') : '';
+      if (!items.length) {
+        panel.innerHTML = '<div class="review-queue-empty">Review queue is empty — no open PRs to rank.</div>';
+      } else {
+        panel.innerHTML = items.map(renderReviewQueueEntry).join('');
+      }
+      var paging = document.getElementById('review-queue-paging');
+      if (paging) {
+        var multiPage = _reviewQueueHasMore || _reviewQueueOffset > 0;
+        paging.style.display = multiPage ? 'flex' : 'none';
+        var prev = document.getElementById('review-queue-prev');
+        var next = document.getElementById('review-queue-next');
+        if (prev) prev.disabled = _reviewQueueOffset <= 0;
+        if (next) next.disabled = !_reviewQueueHasMore;
+        var range = document.getElementById('review-queue-range');
+        if (range) {
+          var first = items.length ? _reviewQueueOffset + 1 : 0;
+          var last = _reviewQueueOffset + items.length;
+          range.textContent = first + '–' + last + ' of ' + _reviewQueueTotal;
+        }
+      }
+    }
+
+    async function fetchReviewQueue() {
+      var panel = document.getElementById('review-queue-panel');
+      try {
+        var resp = await fetch('/api/review/queue?limit=' + REVIEW_QUEUE_PAGE_SIZE + '&offset=' + _reviewQueueOffset);
+        if (!resp.ok) {
+          if (panel && !panel.querySelector('.review-queue-entry')) {
+            panel.innerHTML = '<div class="review-queue-empty">Review queue unavailable.</div>';
+          }
+          return;
+        }
+        var data = await resp.json();
+        renderReviewQueue(data);
+      } catch (e) {}
+    }
+
+    function reviewQueuePrevPage() {
+      if (_reviewQueueOffset <= 0) return;
+      _reviewQueueOffset = Math.max(0, _reviewQueueOffset - REVIEW_QUEUE_PAGE_SIZE);
+      fetchReviewQueue();
+    }
+
+    function reviewQueueNextPage() {
+      if (!_reviewQueueHasMore) return;
+      _reviewQueueOffset += REVIEW_QUEUE_PAGE_SIZE;
+      fetchReviewQueue();
+    }
+    // fetchReviewQueue() — deferred to _deferredInit
+
     // --- Contributors & Leaderboard ---
     const CONTRIBUTOR_POLL_MS = 10000;
     const LEADERBOARD_POLL_MS = 30000;
@@ -17910,6 +18102,8 @@ function burnAreaChart() {
         'advisory-section', 'hive-advice-section', 'acmm-reco-section', 'lifecycle-section', 'pr-throughput-section',
         'runs-section', 'overview-section', 'repos-section', 'beads-section', 'acmm-eval-section',
         'platform-section', 'fleet-report-section', 'audit-section', 'nous-section', 'inception-section',
+        'overview-section', 'repos-section', 'beads-section', 'acmm-eval-section',
+        'platform-section', 'fleet-report-section', 'audit-section', 'review-queue-section', 'nous-section', 'inception-section',
         'knowledge-section', 'contributors-section', 'debug-section', 'logs-section',
         'agents-section', 'faq-section'
       ];
@@ -21787,10 +21981,10 @@ function burnAreaChart() {
           const pillTitle = v.channel
             ? 'Tracking release channel ' + v.channel + (v.branch && v.branch !== 'unknown' ? ' (currently a ' + v.branch + ' build)' : '')
             : 'Built from branch ' + v.branch;
-          html += ` <span title="${escapeHtml(pillTitle)}" style="display:inline-block;padding:1px 7px;margin-left:var(--sp-3);border-radius:var(--r-pill);font-size:var(--fs-2xs);font-weight:600;background:color-mix(in srgb, var(--accent) 16%, transparent);border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);color:var(--accent);vertical-align:middle">${escapeHtml(deliveryLabel)}</span>`;
+          html += ` <span title="${escapeHtml(pillTitle)}" style="display:inline-block;padding:1px 7px;margin-left:var(--sp-3);border-radius:var(--r-pill);font-size:var(--fs-2xs);font-weight:600;background:color-mix(in srgb, var(--accent) 16%, transparent);border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);color:var(--accent);vertical-align:middle;white-space:nowrap">${escapeHtml(deliveryLabel)}</span>`;
         }
         const trackingLabel = versionTrackingLabel(v);
-        html += ` <span title="${escapeHtml(versionTrackingTooltip(v))}" style="display:inline-block;margin-left:var(--sp-3);font-size:0.66rem;color:var(--muted);vertical-align:middle">· ${escapeHtml(trackingLabel)}</span>`;
+        html += ` <span title="${escapeHtml(versionTrackingTooltip(v))}" style="display:inline-block;margin-left:var(--sp-3);font-size:0.66rem;color:var(--muted);vertical-align:middle;white-space:nowrap">· ${escapeHtml(trackingLabel)}</span>`;
         if (v.dirty) html += ' <span class="git-dirty">*</span>';
         // Auto-update health (#6765). The server exposes the spoke's persisted
         // self-upgrade marker; present means an instructed upgrade has NOT
@@ -22160,6 +22354,10 @@ function burnAreaChart() {
       // else empty). Don't fall back to a raw ai_author — an App-less hive has
       // no author and should render "—", not a stale personal value.
       window._aiAuthor = cfg.ai_author_effective || '';
+      // Hub My Hives page for the user-menu shortcut (#9696). Empty on a
+      // standalone hive, which keeps the entry hidden.
+      window._myHivesURL = cfg.my_hives_url || '';
+      renderMyHivesMenuItem();
       const repoDisplay = cfg.org && cfg.primaryRepo && !cfg.primaryRepo.includes('/')
         ? cfg.org + '/' + cfg.primaryRepo
         : (cfg.primaryRepo || '');
@@ -22177,10 +22375,23 @@ function burnAreaChart() {
       // innerHTML) because label names are repo-controlled text.
       const iflt = cfg.issue_filter || null;
       const ifltReq = (iflt && iflt.require_labels) || [];
+      const rt = (iflt && iflt.reporter_trust) || null;
+      const rtOn = !!(rt && rt.enabled);
+      const noteParts = [];
       if (ifltReq.length) {
+        noteParts.push('🏷️ Issue filter active — agents only work issues labeled: ' + ifltReq.join(', '));
+      }
+      if (rtOn) {
+        // #9665: say the reporter rule in one line. Lists fall back to the
+        // server defaults when the operator has not overridden them.
+        const trusted = (rt.trusted_associations && rt.trusted_associations.length) ? rt.trusted_associations : ['OWNER', 'MEMBER', 'COLLABORATOR'];
+        const triage = (rt.untrusted_require_labels && rt.untrusted_require_labels.length) ? rt.untrusted_require_labels : ['triage/accepted'];
+        noteParts.push('👤 Reporter trust active — issues from ' + trusted.map(a => String(a).toLowerCase()).join('/') + ' reporters are worked as-is; anyone else\'s need a maintainer to add ' + triage.join(' or ') + ' first, and their PRs are held for a maintainer at every level');
+      }
+      if (noteParts.length) {
         const note = document.getElementById('repos-issue-filter');
         if (note) {
-          note.textContent = '🏷️ Issue filter active — agents only work issues labeled: ' + ifltReq.join(', ');
+          note.textContent = noteParts.join('  ·  ');
           note.style.display = '';
         }
       }
@@ -27165,6 +27376,7 @@ function burnAreaChart() {
             <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="require" data-arg2="cfg-require-label-input" title="Add this label to the required (allow) list">+ Add</button>
           </div>
         </div>
+        ${renderReporterTrustBlock()}
         <h4>Writing guide</h4>
         <div class="config-field">
           <label for="cfg-writing-guide">Project writing guide</label>
@@ -27172,6 +27384,109 @@ function burnAreaChart() {
           <div class="fs-xs text-muted mt-2">
             Lands as <code>${'${WRITING_GUIDE}'}</code> before the body template in every issue/PR-filing kick and now in review-swarm comments.
             See <a class="text-accent" href="https://github.com/hivecommons/hive/blob/v5/src/docs/agent-configuration.md#writing-guide-how-issues-and-prs-should-read-projectwriting_guide" target="_blank" rel="noopener">Writing guide docs ↗</a>.
+          </div>
+        </div>`;
+    }
+
+    // Reporter trust (hivecommons/hive#9665): gate agent work on WHO filed the
+    // issue. Trusted reporters (by GitHub association or explicit login) are
+    // admitted by the ordinary rules; anyone else's issue needs a triage label
+    // first. The merge-side hold for the same reporters lives on the Repos tab.
+    // State: _configState.data.reporterTrust as served by GET /api/config/governor;
+    // every edit re-stages the WHOLE block under dirty.labels.reporter_trust,
+    // because the server merges absent fields as "unchanged" and we want one
+    // coherent save.
+    const REPORTER_ASSOCIATION_HELP = {
+      OWNER: 'Repository or organization owner',
+      MEMBER: 'Member of the organization that owns the repo',
+      COLLABORATOR: 'Invited as a collaborator on the repo',
+      CONTRIBUTOR: 'Has had a commit merged before — one typo fix counts, so this is NOT trusted by default',
+      FIRST_TIME_CONTRIBUTOR: 'Opening their first contribution to this repo',
+      FIRST_TIMER: 'Opening their first contribution on GitHub at all',
+      NONE: 'No relationship to the repo'
+    };
+
+    function reporterTrustState() {
+      const d = _configState.data.reporterTrust || {};
+      return {
+        enabled: !!d.enabled,
+        trustedAssociations: Array.isArray(d.trustedAssociations) ? d.trustedAssociations : ['OWNER', 'MEMBER', 'COLLABORATOR'],
+        trustedLogins: Array.isArray(d.trustedLogins) ? d.trustedLogins : [],
+        untrustedRequireLabels: Array.isArray(d.untrustedRequireLabels) ? d.untrustedRequireLabels : ['triage/accepted'],
+        knownAssociations: Array.isArray(d.knownAssociations) && d.knownAssociations.length
+          ? d.knownAssociations
+          : ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE']
+      };
+    }
+
+    function stageReporterTrust(next) {
+      _configState.data.reporterTrust = Object.assign({}, _configState.data.reporterTrust || {}, next);
+      const st = reporterTrustState();
+      markDirty('labels', 'reporter_trust', {
+        enabled: st.enabled,
+        trusted_associations: st.trustedAssociations,
+        trusted_logins: st.trustedLogins,
+        untrusted_require_labels: st.untrustedRequireLabels
+      });
+    }
+
+    function toggleReporterTrustEnabled(el) {
+      const isOn = el.classList.toggle('on');
+      stageReporterTrust({ enabled: isOn });
+      renderConfigTab('Labels');
+    }
+
+    function toggleReporterTrustAssociation(assoc, checked) {
+      const st = reporterTrustState();
+      const set = new Set(st.trustedAssociations.map(a => String(a).toUpperCase()));
+      if (checked) set.add(String(assoc).toUpperCase()); else set.delete(String(assoc).toUpperCase());
+      // Keep GitHub's order so the saved list is stable across edits.
+      stageReporterTrust({ trustedAssociations: st.knownAssociations.filter(a => set.has(a)) });
+      renderConfigTab('Labels');
+    }
+
+    function renderReporterTrustBlock() {
+      const st = reporterTrustState();
+      const trusted = new Set(st.trustedAssociations.map(a => String(a).toUpperCase()));
+      const assocRows = st.knownAssociations.map(a => `
+            <label class="rt-assoc" title="${esc(REPORTER_ASSOCIATION_HELP[a] || a)}">
+              <input type="checkbox" ${trusted.has(a) ? 'checked' : ''} ${st.enabled ? '' : 'disabled'} data-change-action="toggleReporterTrustAssociation" data-arg0="${esc(a)}" data-arg-types="s,c"> <code>${esc(a)}</code>
+            </label>`).join('');
+      const loginList = st.trustedLogins.map((l, i) =>
+        `<div class="config-list-item"><span>@${esc(l)}</span><button class="remove-item" data-action="removeListItem" data-arg0="labels" data-arg1="reporter_login" data-arg2="${i}" data-arg-types="s,s,j">✕</button></div>`
+      ).join('');
+      const labelList = st.untrustedRequireLabels.map((l, i) =>
+        `<div class="config-list-item"><span>${esc(l)}</span><button class="remove-item" data-action="removeListItem" data-arg0="labels" data-arg1="reporter_label" data-arg2="${i}" data-arg-types="s,s,j">✕</button></div>`
+      ).join('');
+      const dim = st.enabled ? '' : ' rt-dim';
+      return `
+        <h4 class="rt-h4">Reporter trust</h4>
+        <p class="fs-sm text-muted mb-4">Gate work on <b>who filed the issue</b>, not only on its labels. Issues from trusted reporters are worked under the rules above. Issues from anyone else wait until a maintainer adds one of the triage labels below — and the PR that follows is held for a maintainer at every autonomy level (see the Repos tab). Off by default; existing hives change nothing until you switch it on. <a class="text-accent" href="https://github.com/hivecommons/hive/issues/9665" target="_blank" rel="noopener">#9665 ↗</a></p>
+        <div class="config-toggle rt-toggle">
+          <div class="config-toggle-switch ${st.enabled ? 'on' : ''}" data-action="toggleReporterTrustEnabled" data-arg-types="t" title="Require maintainer triage for issues from untrusted reporters"></div>
+          <span class="config-toggle-label">Require triage for issues from untrusted reporters</span>
+        </div>
+        <div class="rt-body${dim}">
+          <div class="fs-sm mb-2 rt-subhead">Trusted GitHub associations</div>
+          <p class="fs-xs text-muted mb-3">GitHub reports one of these for every issue author. Checked = trusted. The default trusts owners, members and collaborators; <code>CONTRIBUTOR</code> means "had a commit merged once" and is deliberately not trusted.</p>
+          <div class="rt-assoc-grid">${assocRows}</div>
+          <div class="fs-sm mb-2 rt-subhead">Always-trusted logins</div>
+          <p class="fs-xs text-muted mb-3">People to trust whatever GitHub says about them — an external maintainer of a dependency, for example.</p>
+          <div class="config-list">
+            ${loginList || '<div class="fs-sm text-muted mb-3">No extra logins</div>'}
+            <div class="config-list-add">
+              <input type="text" id="cfg-reporter-login-input" placeholder="github login" ${st.enabled ? '' : 'disabled'} title="GitHub login to trust as a reporter regardless of association">
+              <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="reporter_login" data-arg2="cfg-reporter-login-input" ${st.enabled ? '' : 'disabled'} title="Trust this login">+ Add</button>
+            </div>
+          </div>
+          <div class="fs-sm mb-2 rt-subhead">Triage labels for everyone else</div>
+          <p class="fs-xs text-muted mb-3">An issue from an untrusted reporter becomes actionable once it carries at least one of these. Exact, case-insensitive match. The ordinary required-labels list above still applies afterwards.</p>
+          <div class="config-list">
+            ${labelList || '<div class="fs-sm text-muted mb-3">No triage labels — untrusted reporters can never be admitted</div>'}
+            <div class="config-list-add">
+              <input type="text" id="cfg-reporter-label-input" placeholder="label name" ${st.enabled ? '' : 'disabled'} title="Label a maintainer adds to admit an untrusted reporter's issue">
+              <button class="hv-btn btn-primary" data-action="addListItem" data-arg0="labels" data-arg1="reporter_label" data-arg2="cfg-reporter-label-input" ${st.enabled ? '' : 'disabled'} title="Add this triage label">+ Add</button>
+            </div>
           </div>
         </div>`;
     }
@@ -27188,6 +27503,12 @@ function burnAreaChart() {
       const selfAuthDefault = _configState.data.selfAuthorizationHold !== false;
       const selfAuthEnvLocked = !!_configState.data.selfAuthorizationHoldEnvLocked;
       const repoSelfAuth = _configState.data.repoSelfAuthorizationHold || {};
+      // #9665 reporter-trust merge hold: same three-way shape as #5117
+      // (all-repos default, per-repo override, env lock).
+      const rtHoldDefault = !!_configState.data.reporterTrustHold;
+      const rtHoldEnvLocked = !!_configState.data.reporterTrustHoldEnvLocked;
+      const repoRtHold = _configState.data.repoReporterTrustHold || {};
+      const rtGateOn = !!((_configState.data.reporterTrust || {}).enabled);
       // The API sends EFFECTIVE caps (defaults already resolved), so these
       // boxes always show the number actually in force rather than a blank.
       // Dirty edits win so a value the operator just typed survives a re-render
@@ -27242,9 +27563,19 @@ function burnAreaChart() {
         const inheritButton = hasOverride
           ? '<button class="remove-item" data-action="clearRepoSelfAuthHoldOverride" data-arg0="' + esc(r) + '" data-arg-types="s" title="Clear this repo override and inherit the all-repos default">inherit</button>'
           : '<span style="font-size:var(--fs-xs);color:var(--muted);white-space:nowrap">inherits</span>';
+        const rtPolicy = repoRtHold[r] || {};
+        const rtHasOverride = Object.prototype.hasOwnProperty.call(rtPolicy, 'value');
+        const rtEffective = rtHoldEnvLocked && Object.prototype.hasOwnProperty.call(rtPolicy, 'effective') ? !!rtPolicy.effective : (rtHasOverride ? !!rtPolicy.value : rtHoldDefault);
+        const rtTitle = rtHasOverride
+          ? 'This repo has an explicit #9665 reporter-trust hold override.'
+          : 'Inherits the all-repos #9665 reporter-trust hold default.';
+        const rtInherit = rtHasOverride
+          ? '<button class="remove-item" data-action="clearRepoReporterTrustHoldOverride" data-arg0="' + esc(r) + '" data-arg-types="s" title="Clear this repo override and inherit the all-repos default">inherit</button>'
+          : '<span class="rt-inherit">inherits</span>';
+        const rtRow = '<label title="' + rtTitle + '" class="rt-check"><input type="checkbox" ' + (rtEffective ? 'checked' : '') + ' ' + (rtHoldEnvLocked ? 'disabled' : '') + ' data-change-action="toggleRepoReporterTrustHold" data-arg0="' + esc(r) + '" data-arg-types="s,c"> Hold PRs for untrusted reporters (#9665)</label>' + rtInherit;
         // Fully forge-qualified so the row is unambiguous: github.ibm.com/org/repo.
         const displayName = ghHost + '/' + r;
-        return `<div class="config-list-item" style="align-items:center;gap:var(--sp-3)"><span data-action="setDefaultRepo" data-arg0="${esc(r)}" style="${starStyle}" title="${starTitle}">${isDefault ? '★' : '☆'}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(displayName)}">${esc(displayName)}</span><label title="${holdTitle}" style="display:flex;align-items:center;gap:5px;font-size:0.7rem;color:var(--muted);white-space:nowrap"><input type="checkbox" ${effectiveHold ? 'checked' : ''} ${selfAuthEnvLocked ? 'disabled' : ''} data-change-action="toggleRepoSelfAuthHold" data-arg0="${esc(r)}" data-arg-types="s,c"> Hold hive-authored PRs for human sign-off (#5117)</label>${inheritButton}<span style="${pillBase}" title="${pillTitle}">${pillLabel}</span><button class="remove-item" data-action="removeListItem" data-arg0="repos" data-arg1="list" data-arg2="${i}" data-arg-types="s,s,j">&#x2715;</button></div>`;
+        return `<div class="config-list-item" style="align-items:center;gap:var(--sp-3)"><span data-action="setDefaultRepo" data-arg0="${esc(r)}" style="${starStyle}" title="${starTitle}">${isDefault ? '★' : '☆'}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(displayName)}">${esc(displayName)}</span><label title="${holdTitle}" style="display:flex;align-items:center;gap:5px;font-size:0.7rem;color:var(--muted);white-space:nowrap"><input type="checkbox" ${effectiveHold ? 'checked' : ''} ${selfAuthEnvLocked ? 'disabled' : ''} data-change-action="toggleRepoSelfAuthHold" data-arg0="${esc(r)}" data-arg-types="s,c"> Hold hive-authored PRs for human sign-off (#5117)</label>${inheritButton}${rtRow}<span style="${pillBase}" title="${pillTitle}">${pillLabel}</span><button class="remove-item" data-action="removeListItem" data-arg0="repos" data-arg1="list" data-arg2="${i}" data-arg-types="s,s,j">&#x2715;</button></div>`;
       }).join('');
       const hostNote = isGHE
         ? ` on <strong style="color:var(--indigo)">${esc(ghHost)}</strong> (GitHub Enterprise)`
@@ -27267,6 +27598,10 @@ function burnAreaChart() {
         <div class="config-toggle" style="margin:var(--sp-0) var(--sp-0) var(--sp-5)">
           <div class="config-toggle-switch ${selfAuthDefault ? 'on' : ''} ${selfAuthEnvLocked ? 'disabled' : ''}" data-action="${selfAuthEnvLocked ? '' : 'toggleSelfAuthDefault'}" data-arg-types="t" title="${selfAuthEnvLocked ? 'HIVE_SELF_AUTHORIZATION_HOLD is set, so the process environment controls this value.' : 'All-repos default for the #5117 self-authorization hold.'}"></div>
           <span class="config-toggle-label">All repos: hold hive-authored PRs for human sign-off (#5117) <span style="color:var(--muted);font-weight:400">— repo rows can override or inherit this default</span></span>
+        </div>
+        <div class="config-toggle rt-toggle-lg">
+          <div class="config-toggle-switch ${rtHoldDefault ? 'on' : ''} ${rtHoldEnvLocked ? 'disabled' : ''}" data-action="${rtHoldEnvLocked ? '' : 'toggleReporterTrustHoldDefault'}" data-arg-types="t" title="${rtHoldEnvLocked ? 'HIVE_REPORTER_TRUST_HOLD is set; the environment controls this value.' : 'Hold, at every ACMM level, any PR whose rationale traces to an issue from a reporter this hive does not trust'}"></div>
+          <span class="config-toggle-label">All repos: hold PRs for untrusted reporters at every level (#9665) <span class="rt-sub">— follows the Labels tab's reporter-trust switch${rtGateOn ? '' : ' (currently off)'} unless set here; a human removes the hold, Hive never does</span></span>
         </div>
         <div class="config-list">
           ${list || '<div class="fs-sm text-muted mb-3">No repos configured</div>'}
@@ -27332,6 +27667,46 @@ function burnAreaChart() {
       if (!_configState.data.repoSelfAuthorizationHold) _configState.data.repoSelfAuthorizationHold = {};
       _configState.data.repoSelfAuthorizationHold[repo] = { value: !!checked, effective: !!checked };
       markDirty('repos', 'repoSelfAuthorizationHold', Object.fromEntries(Object.entries(_configState.data.repoSelfAuthorizationHold).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(v, 'value') ? v.value : null])));
+      renderConfigTab('Repos');
+    }
+
+    function toggleReporterTrustHoldDefault(el) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; the environment controls this value.', 'error');
+        return;
+      }
+      const isOn = el.classList.toggle('on');
+      _configState.data.reporterTrustHold = isOn;
+      markDirty('repos', 'reporterTrustHold', isOn);
+      renderConfigTab('Repos');
+    }
+
+    function repoReporterTrustHoldPayload() {
+      return Object.fromEntries(Object.entries(_configState.data.repoReporterTrustHold || {}).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(v, 'value') ? v.value : null]));
+    }
+
+    function toggleRepoReporterTrustHold(repo, checked) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; repo overrides are disabled.', 'error');
+        renderConfigTab('Repos');
+        return;
+      }
+      if (!_configState.data.repoReporterTrustHold) _configState.data.repoReporterTrustHold = {};
+      _configState.data.repoReporterTrustHold[repo] = { value: !!checked, effective: !!checked };
+      markDirty('repos', 'repoReporterTrustHold', repoReporterTrustHoldPayload());
+      renderConfigTab('Repos');
+    }
+
+    function clearRepoReporterTrustHoldOverride(repo) {
+      if (_configState.data.reporterTrustHoldEnvLocked) {
+        showToast('HIVE_REPORTER_TRUST_HOLD is set; repo overrides are disabled.', 'error');
+        return;
+      }
+      if (!_configState.data.repoReporterTrustHold) _configState.data.repoReporterTrustHold = {};
+      _configState.data.repoReporterTrustHold[repo] = { effective: !!_configState.data.reporterTrustHold };
+      const payload = repoReporterTrustHoldPayload();
+      payload[repo] = null;
+      markDirty('repos', 'repoReporterTrustHold', payload);
       renderConfigTab('Repos');
     }
 
@@ -28103,7 +28478,15 @@ function burnAreaChart() {
         (sec.ioscanCanaries ? 'canaries on' : 'canaries off'),
         'sandbox ' + (sec.sandboxedAgents || 0) + '/' + (sec.totalAgents || 0) + ' agents',
       ];
-      return '<div style="display:inline-flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-pill);background:var(--surface);font-size:0.72rem;color:var(--muted)" title="Effective security posture from the dashboard overlay and running config">' + esc(parts.join(' · ')) + '</div>';
+      // #9586: proxy GitHub auth injection (opt-in: on only when explicitly
+      // set; unset is off) - the reason rides in the tooltip.
+      const inj = sec.credentialInjection;
+      let title = 'Effective security posture from the dashboard overlay and running config';
+      if (inj && inj.source) {
+        parts.push('GitHub auth ' + (inj.enabled ? 'proxy-injected' : 'agent-held'));
+        title += '\nProxy GitHub auth injection: ' + (inj.enabled ? 'on' : 'off') + ' (' + (inj.reason || inj.source) + ')';
+      }
+      return '<div style="display:inline-flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-pill);background:var(--surface);font-size:0.72rem;color:var(--muted)" title="' + esc(title) + '">' + esc(parts.join(' · ')) + '</div>';
     }
 
     function securityWarningsHtml(sec) {
@@ -28421,6 +28804,12 @@ function burnAreaChart() {
       const backupKey = `
         <div id="gov-backup-key-host"><div style="color:var(--muted);font-size:0.8rem">Loading…</div></div>`;
 
+      /* Lane write allowlist (#9587): painted asynchronously from its own
+         owner-only endpoint, like the Backup panel. */
+      loadWriteSurfaceAllowlist();
+      const writeSurface = `
+        <div id="gov-write-surface-host"><div style="color:var(--muted);font-size:var(--fs-base)">Loading…</div></div>`;
+
       return `
         ${securityModelDatalistHtml()}${agentList}
         <p style="font-size:var(--fs-sm);color:var(--muted);margin-bottom:10px">Security posture and access controls saved through the dashboard overlay.</p>
@@ -28430,7 +28819,131 @@ function burnAreaChart() {
         ${renderSecuritySection('Input Defense', inputDefense)}
         ${renderSecuritySection('Merge Gates', mergeGates)}
         ${renderSecuritySection('Isolation', isolation)}
+        ${renderSecuritySection('Write Surface', writeSurface)}
         ${renderSecuritySection('Backup', backupKey)}`;
+    }
+
+    /* Lane write allowlist editor (#9587): write_surface.allowlist, loaded
+       from and saved to the owner-only /api/config/write-surface endpoint.
+       Everything is rendered with DOM nodes and textContent only, so a lane
+       or operation name from hive.yaml is never parsed as markup. The editor
+       is plain text, one lane per line: "scanner: create_issue, comment".
+       An empty editor clears the allowlist, which restricts nothing. */
+    async function loadWriteSurfaceAllowlist() {
+      let host = null;
+      try {
+        const r = await fetch('/api/config/write-surface');
+        host = document.getElementById('gov-write-surface-host');
+        if (!host) return;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        renderWriteSurfacePanel(host, await r.json());
+      } catch (e) {
+        host = host || document.getElementById('gov-write-surface-host');
+        if (!host) return;
+        host.textContent = '';
+        host.appendChild(writeSurfaceNode('div', 'color:var(--red);font-size:0.8rem',
+          'Failed to load the write allowlist: ' + e.message));
+      }
+    }
+
+    /* writeSurfaceNode builds one element whose content is plain text. */
+    function writeSurfaceNode(tag, style, text) {
+      const node = document.createElement(tag);
+      if (style) node.style.cssText = style;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    /* writeSurfaceAllowlistToText renders {lane: [ops]} as editor text. */
+    function writeSurfaceAllowlistToText(allowlist) {
+      allowlist = allowlist || {};
+      return Object.keys(allowlist).sort()
+        .map(lane => lane + ': ' + (allowlist[lane] || []).join(', '))
+        .join('\n');
+    }
+
+    /* parseWriteSurfaceText turns editor text into {lane: [ops]}. It only
+       splits lines; the server validates lane names and operations and its
+       error message says what is wrong. Blank lines and "#" comments are
+       skipped. "lane:" with nothing after it allows that lane nothing. */
+    function parseWriteSurfaceText(text) {
+      const allowlist = {};
+      const lines = String(text || '').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line || line.startsWith('#')) continue;
+        const colon = line.indexOf(':');
+        if (colon < 0) throw new Error('Line ' + (i + 1) + ': expected "lane: operation, operation"');
+        const lane = line.slice(0, colon).trim();
+        if (!lane) throw new Error('Line ' + (i + 1) + ': the lane name is empty');
+        if (Object.prototype.hasOwnProperty.call(allowlist, lane)) {
+          throw new Error('Line ' + (i + 1) + ': lane ' + lane + ' is listed twice');
+        }
+        allowlist[lane] = line.slice(colon + 1).split(',').map(op => op.trim()).filter(Boolean);
+      }
+      return allowlist;
+    }
+
+    /* renderWriteSurfacePanel paints the allowlist card and wires its Save. */
+    function renderWriteSurfacePanel(host, d) {
+      if (!host) return;
+      d = d || {};
+      host.textContent = '';
+      const card = writeSurfaceNode('div', 'border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--surface);max-width:640px');
+      card.appendChild(writeSurfaceNode('div', 'font-weight:600;font-size:0.9rem;margin-bottom:var(--sp-4)', 'Lane write allowlist'));
+      card.appendChild(writeSurfaceNode('div', 'font-size:0.74rem;color:var(--muted);line-height:1.5;margin-bottom:var(--sp-4)',
+        'Limits which GitHub writes each agent lane may ask the hive to perform (open a PR, comment, merge and so on). ' +
+        'A lane that is not listed is unrestricted, so an empty allowlist changes nothing. Listing a lane narrows it to the ' +
+        'listed operations; "lane:" with nothing after it allows nothing, and "*" allows everything. ' +
+        'One lane per line, for example "scanner: create_issue, comment, claim".'));
+      card.appendChild(writeSurfaceNode('div', 'font-size:0.72rem;color:var(--muted);margin-bottom:var(--sp-3)',
+        'Operations: ' + (d.ops || []).join(', ')));
+      const editor = writeSurfaceNode('textarea', 'width:100%;min-height:96px;padding:var(--sp-4);border:1px solid var(--border);border-radius:var(--r);background:var(--bg);color:var(--fg);font-family:var(--font-mono);font-size:var(--fs-sm)');
+      editor.id = 'gov-write-surface-editor';
+      editor.spellcheck = false;
+      editor.placeholder = 'scanner: create_issue, comment, claim';
+      editor.value = writeSurfaceAllowlistToText(d.allowlist);
+      card.appendChild(editor);
+      const warnings = d.warnings || [];
+      if (warnings.length) {
+        const list = writeSurfaceNode('ul', 'font-size:0.72rem;color:var(--yellow);margin:var(--sp-3) var(--sp-0) var(--sp-0);padding-left:18px');
+        warnings.forEach(w => list.appendChild(writeSurfaceNode('li', '', w)));
+        card.appendChild(list);
+      }
+      const row = writeSurfaceNode('div', 'display:flex;align-items:center;gap:10px;margin-top:var(--sp-4)');
+      const saveBtn = writeSurfaceNode('button', '', 'Save allowlist');
+      saveBtn.className = 'hv-btn btn-primary btn-sm';
+      const statusEl = writeSurfaceNode('div', 'font-size:0.74rem;min-height:18px');
+      row.appendChild(saveBtn);
+      row.appendChild(statusEl);
+      card.appendChild(row);
+      host.appendChild(card);
+
+      const setStatus = (msg, color) => { statusEl.textContent = msg; statusEl.style.color = color || 'var(--muted)'; };
+      saveBtn.addEventListener('click', async () => {
+        let allowlist;
+        try {
+          allowlist = parseWriteSurfaceText(editor.value);
+        } catch (e) {
+          setStatus(e.message, 'var(--red)');
+          return;
+        }
+        saveBtn.disabled = true;
+        setStatus('Saving…');
+        try {
+          const res = await fetch('/api/config/write-surface', {
+            method: 'PUT',
+            headers: _inceptionAuthHeaders(),
+            body: JSON.stringify({ allowlist })
+          });
+          if (!res.ok) throw new Error(await saveErrorMessage(res));
+          renderWriteSurfacePanel(host, await res.json());
+          showToast('Write allowlist saved', 'success');
+        } catch (e) {
+          saveBtn.disabled = false;
+          setStatus(e.message, 'var(--red)');
+        }
+      });
     }
 
     /* loadBackupKeyStatus fetches presence-only backup-key status and paints
@@ -29009,6 +29522,14 @@ function burnAreaChart() {
           </div>
         </div>
 
+        <div style="margin-top:18px;padding-top:var(--sp-6);border-top:1px solid var(--border)">
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.prFollowUpEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="prFollowUpEnabled"></div>
+            <span class="config-toggle-label">PR follow-up resume <span class="config-info">i<span class="config-tooltip">OFF by default. When an agent opens a PR, the hive remembers which live session wrote it and keeps a short handoff note (why, approach, rejected alternatives, repro, files touched). Later CI failures, changes-requested reviews, review-bot threads and comments from people with write access on that PR are sent to the same session without clearing it. When that session is gone (a restart or the agent&apos;s next regular kick), the follow-up takes the normal fix-before-new path and the agent&apos;s next kick carries the handoff note. The hive&apos;s own replies and bot comments never trigger a follow-up. Pointers are deleted when the PR merges or closes. See src/docs/design/pr-follow-up-resume.md.</span></span></span>
+          </div>
+          ${f.prFollowUpEffective !== f.prFollowUpEnabled ? `<p style="font-size:var(--fs-sm);color:var(--muted);margin:var(--sp-3) var(--sp-0) var(--sp-0)">HIVE_PR_FOLLOWUP_RESUME overrides this setting: the feature is currently <b>${f.prFollowUpEffective ? 'on' : 'off'}</b>.</p>` : ''}
+        </div>
+
         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
           <div class="config-toggle">
             <div class="config-toggle-switch ${f.claimsEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="claimsEnabled"></div>
@@ -29232,7 +29753,8 @@ function burnAreaChart() {
           <div id="advisor-settings-panel">Loading…</div>
           <div class="advisor-set-actions"><button class="hv-btn btn-secondary btn" data-action="loadAdvisorSettings">Refresh</button></div>
         </div>
-        ${renderGovReplanSection((_configState.data || {}).replan || {})}`;
+        ${renderGovReplanSection((_configState.data || {}).replan || {})}
+        ${renderGovQuestionAutocloseSection((_configState.data || {}).question_autoclose || {})}`;
     }
 
     // renderGovReplanSection renders the stall-replan lane settings: the
@@ -29256,6 +29778,82 @@ function burnAreaChart() {
           </div>
           <div class="config-field"><label>Max replans per plan <span class="config-info">i<span class="config-tooltip">Caps replans per plan before the lane stops and escalates to a human. 0 means the default (5).</span></span></label><input type="number" min="0" step="1" value="${rp.max_replans || 0}" placeholder="5" data-change-action="markDirty" data-arg0="replan" data-arg1="max_replans" data-arg-types="s,s,N"></div>
         </div>`;
+    }
+
+    // renderGovQuestionAutocloseSection renders the question auto-close
+    // toggle (hivecommons/hive#9584 dashboard follow-up): once the hive has
+    // answered a `question`-labelled issue, it closes automatically after
+    // an objection window unless the author reacts 👎. Values are marked
+    // dirty under the 'question-autoclose' section, which the generic Save
+    // dispatcher PUTs to /api/config/governor/question-autoclose. The live
+    // schedule table is loaded separately (read-only, its own endpoint) via
+    // loadQuestionAutocloseSchedule, scheduled with setTimeout the same way
+    // renderGovFeatures kicks off loadRotationHeadroom.
+    function renderGovQuestionAutocloseSection(qa) {
+      qa = qa || {};
+      const qaOn = qa.enabled === true;
+      setTimeout(() => { if (qaOn) loadQuestionAutocloseSchedule(); }, 0);
+      return `
+        <div class="qa-section">
+          <div class="qa-section-title">Question Auto-Close</div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${qaOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="question-autoclose" data-key="enabled"></div>
+            <span class="config-toggle-label">Auto-close answered questions <span class="config-info">i<span class="config-tooltip">Once the hive posts an answer on a question-labelled issue, it closes the issue after the window below unless the author reacts 👎 to the answer. Off by default.</span></span></span>
+          </div>
+          <div class="config-field qa-hours"><label>Objection window (hours) <span class="config-info">i<span class="config-tooltip">How long an answered question stays open for the author to object before it is closed. Minimum 1 hour; default 4.</span></span></label><input type="number" min="1" step="1" value="${qa.hours || 4}" placeholder="4" data-change-action="markDirty" data-arg0="question-autoclose" data-arg1="hours" data-arg-types="s,s,N"></div>
+          <div class="qa-schedule">
+            <div class="qa-schedule-label">Live schedule</div>
+            <div id="qa-schedule-host">${qaOn ? '<div class="qa-note">Loading…</div>' : '<div class="qa-note">Enable auto-close to see the live schedule.</div>'}</div>
+          </div>
+        </div>`;
+    }
+
+    // renderQuestionAutocloseScheduleTable renders the live schedule as a
+    // plain text-only table — every field comes from GitHub (repo name,
+    // issue number, timestamps) and is rendered through esc(), never as raw
+    // innerHTML, so an issue in a repo the hive watches cannot inject markup
+    // into the dashboard.
+    function renderQuestionAutocloseScheduleTable(entries) {
+      entries = entries || [];
+      if (entries.length === 0) {
+        return '<div class="qa-note">Nothing scheduled right now.</div>';
+      }
+      const rows = entries.map(e => `
+        <tr>
+          <td>${esc(e.repo || '')}#${esc(String(e.issue || ''))}</td>
+          <td>${esc(e.answered_at || '')}</td>
+          <td>${esc(e.closes_at || '')}</td>
+          <td>${esc(e.state || '')}</td>
+        </tr>`).join('');
+      return `
+        <table class="qa-table">
+          <thead>
+            <tr>
+              <th>Issue</th>
+              <th>Answered</th>
+              <th>Closes</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    // loadQuestionAutocloseSchedule fetches the live schedule and paints it
+    // into the placeholder renderGovQuestionAutocloseSection left behind.
+    // Errors render as plain text via esc(), matching loadRotationHeadroom's
+    // failure path.
+    async function loadQuestionAutocloseSchedule() {
+      const host = document.getElementById('qa-schedule-host');
+      if (!host) return;
+      try {
+        const resp = await fetch('/api/config/governor/question-autoclose/schedule');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
+        host.innerHTML = renderQuestionAutocloseScheduleTable(data.entries);
+      } catch (e) {
+        host.innerHTML = '<div class="qa-note warn">Schedule unavailable: ' + esc(e.message) + '</div>';
+      }
     }
 
     function projectObservabilityPlatformsChanged(el) {
@@ -30428,6 +31026,12 @@ function burnAreaChart() {
           if (!_configState.data.requireLabels) _configState.data.requireLabels = [];
           _configState.data.requireLabels.push(val);
           markDirty('labels', 'require_labels', _configState.data.requireLabels);
+        } else if (key === 'reporter_login') {
+          const st = reporterTrustState();
+          stageReporterTrust({ trustedLogins: st.trustedLogins.concat([val.replace(/^@/, '')]) });
+        } else if (key === 'reporter_label') {
+          const st = reporterTrustState();
+          stageReporterTrust({ untrustedRequireLabels: st.untrustedRequireLabels.concat([val]) });
         } else {
           if (!_configState.data.labels) _configState.data.labels = [];
           _configState.data.labels.push(val);
@@ -30452,6 +31056,12 @@ function burnAreaChart() {
         if (key === 'require') {
           _configState.data.requireLabels.splice(index, 1);
           markDirty('labels', 'require_labels', _configState.data.requireLabels);
+        } else if (key === 'reporter_login') {
+          const st = reporterTrustState();
+          stageReporterTrust({ trustedLogins: st.trustedLogins.filter((_, i) => i !== index) });
+        } else if (key === 'reporter_label') {
+          const st = reporterTrustState();
+          stageReporterTrust({ untrustedRequireLabels: st.untrustedRequireLabels.filter((_, i) => i !== index) });
         } else {
           _configState.data.labels.splice(index, 1);
           markDirty('labels', 'labels', _configState.data.labels);
@@ -31741,6 +32351,25 @@ function burnAreaChart() {
         banner.style.display = 'flex';
         if (topBtn) topBtn.style.display = '';
         if (avatarWrap) avatarWrap.hidden = true;
+      }
+    }
+
+    /* renderMyHivesMenuItem (#9696): point the user menu's "My hives" entry at
+       the hub's My Hives page, or hide it when this hive has no hub link. The
+       URL comes from our own /api/config (server-validated), is re-checked to
+       be http(s) here, and is assigned as a property, never interpolated into
+       markup. Called from the boot /api/config fetch; the entry sits in the
+       signed-in-only menu, so no auth state is needed here. */
+    function renderMyHivesMenuItem() {
+      const el = document.getElementById('oc-gh-menu-my-hives');
+      if (!el) return;
+      const url = String(window._myHivesURL || '');
+      if (/^https?:\/\//i.test(url)) {
+        el.href = url;
+        el.hidden = false;
+      } else {
+        el.removeAttribute('href');
+        el.hidden = true;
       }
     }
 
@@ -33589,6 +34218,7 @@ function burnAreaChart() {
           () => fetchNousStatus().then(() => { setInterval(fetchNousStatus, NOUS_POLL_MS); }),
           () => fetchKnowledgeStats().then(() => { setInterval(fetchKnowledgeStats, KB_POLL_MS); }),
           () => fetchAuditLog().then(() => { setInterval(fetchAuditLog, AUDIT_POLL_MS); }),
+          () => fetchReviewQueue().then(() => { setInterval(fetchReviewQueue, REVIEW_QUEUE_POLL_MS); }),
           () => fetchContributors().then(() => { setInterval(fetchContributors, CONTRIBUTOR_POLL_MS); }),
           () => fetchLeaderboard().then(() => { setInterval(fetchLeaderboard, LEADERBOARD_POLL_MS); }),
           () => fetchGitVersion().then(() => { setInterval(fetchGitVersion, GIT_VERSION_POLL_MS); }),

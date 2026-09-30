@@ -79,3 +79,41 @@ func TestProxyInjectGHAuthEnvNameMatchesConfig(t *testing.T) {
 		t.Fatalf("env name %q != config %q", proxyInjectGHAuthEnv, config.ProxyInjectGHAuthEnv)
 	}
 }
+
+// The relay operation vocabulary is duplicated in pkg/config (which cannot
+// import this package) so the allowlist can be validated at boot. The two
+// lists must match exactly, in order, or a valid allowlist entry would be
+// warned about as unknown (or a typo accepted as known).
+func TestWriteOpsMatchConfigKnownWriteOps(t *testing.T) {
+	got, want := WriteOps(), config.KnownWriteOps
+	if len(got) != len(want) {
+		t.Fatalf("WriteOps() = %v, config.KnownWriteOps = %v: these name the same relay operations and must not drift", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("WriteOps()[%d] = %q, config.KnownWriteOps[%d] = %q: must not drift", i, got[i], i, want[i])
+		}
+	}
+}
+
+// config.AgentMayWrite must keep satisfying the predicate every construction
+// site passes to SetWriteAllowlistFunc.
+func TestConfigAgentMayWriteSatisfiesAllowlistFunc(t *testing.T) {
+	cfg := &config.Config{}
+	c := &Client{}
+	c.SetWriteAllowlistFunc(cfg.AgentMayWrite)
+	if !c.AgentMayWrite("scanner", WriteOpOpenPR) {
+		t.Fatal("an empty config allowlist refused a write")
+	}
+}
+
+// config.WriteSurfaceNeutralizesMentions must keep satisfying the predicate
+// the construction site passes to SetMentionNeutralizeFunc.
+func TestConfigNeutralizeMentionsSatisfiesMentionFunc(t *testing.T) {
+	cfg := &config.Config{}
+	c := &Client{}
+	c.SetMentionNeutralizeFunc(cfg.WriteSurfaceNeutralizesMentions)
+	if got := c.relayBody("scanner", "cc @alice"); got != "cc @alice" {
+		t.Fatalf("an empty config rewrote a body: %q", got)
+	}
+}

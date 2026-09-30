@@ -101,6 +101,21 @@ func (c *Client) releaseLevelHoldIfEligible(ctx context.Context, owner, repo str
 	if c.prHoldLabel(agent) {
 		return false, "level-hold-still-required", nil
 	}
+	// #9665: a reporter-trust hold is a human's to lift, at every level. The
+	// notice is the durable marker; if the App held for that reason but the
+	// notice never landed, re-evaluate and post it now rather than release.
+	if hasReporterTrustNotice(comments, c.appBotLogin) {
+		return false, "reporter-trust-hold", nil
+	}
+	if c.reporterTrustHoldActive(owner + "/" + repo) {
+		reporter := c.EvaluateReporterTrust(ctx, owner+"/"+repo, pr.GetTitle(), pr.GetBody(), nil)
+		if reporter.Held {
+			if _, _, err := c.client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(reporterTrustNotice(reporter))}); err != nil {
+				return false, "reporter-trust-notice", fmt.Errorf("commenting on reporter-trust hold: %w", err)
+			}
+			return false, "reporter-trust-hold", nil
+		}
+	}
 	if c.selfAuthorizationHoldActive(owner + "/" + repo) {
 		selfAuth := c.EvaluateSelfAuthorization(ctx, owner+"/"+repo, pr.GetTitle(), pr.GetBody(), nil)
 		if selfAuth.Held {

@@ -80,6 +80,9 @@ type wireIssue struct {
 	Assignees []wireUser  `json:"assignees"`
 	CreatedAt string      `json:"created_at"`
 	HTMLURL   string      `json:"html_url,omitempty"`
+	// AuthorAssociation is GitHub's author_association (OWNER, MEMBER, ...);
+	// the #9665 reporter-trust gate reads it.
+	AuthorAssociation string `json:"author_association,omitempty"`
 	// Setting PullRequest makes IsPullRequest() return true.
 	PullRequest *struct{} `json:"pull_request,omitempty"`
 }

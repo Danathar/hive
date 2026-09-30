@@ -44,6 +44,10 @@ var reviewRequestPollInterval = 10 * time.Second
 // "resolve_thread". Body is required for request_changes/comment (GitHub
 // rejects an empty non-approve review) and optional for approve.
 //
+// On a pull request this hive did not open, "approve" and "request_changes"
+// are rewritten to a COMMENT before they reach GitHub
+// (review_contributor_guard.go, hivecommons/hive#9590).
+//
 // ThreadID (hivecommons/hive#7360) names one inline review thread — the
 // "PRRT_…" node id review-threads.json lists. With Event "comment" it turns
 // the request into an in-thread REPLY instead of a PR-level review; with
@@ -298,6 +302,15 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 		c.denyReviewRequest(path, req, err.Error(), nowFn)
 		return
 	}
+	// Lane write allowlist (#9587), keyed on the now-authorized agent name.
+	reviewOp := WriteOpReview
+	if resolveThread {
+		reviewOp = WriteOpResolveThread
+	}
+	if reason, refused := c.refuseWrite(req.Agent, reviewOp, req.Repo, req.Number); refused {
+		c.denyReviewRequest(path, req, reason, nowFn)
+		return
+	}
 
 	// Reviews use the hive's credentials and bypass the agent proxy, just like
 	// the other write relays. Pause applies to every review event.
@@ -308,6 +321,18 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	if resolveThread || threadReply {
 		c.handleReviewThreadRequest(ctx, path, req, threadID, resolveThread, nowFn)
 		return
+	}
+
+	// COMMENT-only on contributor PRs (hivecommons/hive#9590). The hive
+	// reviews everyone's work but adjudicates only its own: an APPROVE or
+	// REQUEST_CHANGES aimed at a PR this hive did not open becomes a COMMENT
+	// here, whatever the reviewer asked for. See review_contributor_guard.go.
+	commentOnlyNote := ""
+	apiEvent, state, commentOnlyNote = c.enforceCommentOnlyForContributorPR(ctx, req, apiEvent, state)
+	if commentOnlyNote != "" {
+		// COMMENT is the one review event GitHub refuses with an empty body,
+		// and a downgraded APPROVE may have had none.
+		req.Body = contributorCommentBody(req.Body)
 	}
 
 	// Per-head backstop. Everything above depends on the agent doing the
@@ -360,7 +385,7 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	}
 
 	meta := c.attributionMeta(req.Agent)
-	body := req.Body
+	body := c.relayBody(req.Agent, req.Body)
 	if c.confidenceScoreOn() {
 		body = appendConfidenceLine(body, req.Report, c.perspectives)
 	}
@@ -431,6 +456,9 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	resp.OK = true
 	resp.Number = req.Number
 	resp.State = state
+	if commentOnlyNote != "" {
+		resp.Note = commentOnlyNote
+	}
 
 	// Record where the review landed so the queue views can link to it. A
 	// failure here is logged and swallowed: the review is already posted, and
@@ -463,9 +491,8 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 			slog.String("error", err.Error()))
 	}
 
-	c.recordCreationAudit(AuditActionPRReviewed, meta,
-		"repo", req.Repo,
-		"number", strconv.Itoa(req.Number),
+	c.recordWriteAudit(AuditActionPRReviewed, meta,
+		WriteTarget{Repo: req.Repo, Number: req.Number},
 		"state", state)
 	c.writeReviewResult(path, resp)
 	_ = os.Remove(path)
@@ -545,7 +572,7 @@ func (c *Client) handleReviewThreadRequest(ctx context.Context, path string, req
 		err = c.resolveReviewThread(ctx, threadID)
 	} else {
 		state = reviewStateThreadReplied
-		body := req.Body
+		body := c.relayBody(req.Agent, req.Body)
 		if c.attributionTrailerOn() {
 			body = AppendTrailer(body, meta)
 		}
@@ -562,9 +589,8 @@ func (c *Client) handleReviewThreadRequest(ctx context.Context, path string, req
 		return
 	}
 
-	c.recordCreationAudit(AuditActionPRReviewed, meta,
-		"repo", req.Repo,
-		"number", strconv.Itoa(req.Number),
+	c.recordWriteAudit(AuditActionPRReviewed, meta,
+		WriteTarget{Repo: req.Repo, Number: req.Number},
 		"state", state,
 		"thread", threadID)
 	c.writeReviewResult(path, ReviewResponse{OK: true, Number: req.Number, State: state, ThreadID: threadID, At: nowFn().UTC().Format(time.RFC3339)})

@@ -59,6 +59,33 @@ type PRRequest struct {
 	// RunKey and PlanRef are long-running run trailers appended to implementation PR bodies.
 	RunKey  string `json:"run_key,omitempty"`
 	PlanRef string `json:"plan_ref,omitempty"`
+	// Handoff is an optional compact summary of the reasoning behind the PR
+	// (why, approach, rejected alternatives, repro, files touched). It is not
+	// published anywhere: the PR follow-up feature (hivecommons/hive#9583)
+	// keeps it beside the PR's session pointer and hands it to the fresh
+	// session that picks up a follow-up once the authoring conversation is
+	// gone. When absent, the hive extracts the same fields from the body's
+	// section headings instead.
+	Handoff *PRHandoff `json:"handoff,omitempty"`
+}
+
+// PRHandoff is the structured reasoning an agent may attach to a PR request.
+// Every field is optional free text; consumers bound its size.
+type PRHandoff struct {
+	Why      string   `json:"why,omitempty"`
+	Approach string   `json:"approach,omitempty"`
+	Rejected string   `json:"rejected,omitempty"`
+	Repro    string   `json:"repro,omitempty"`
+	Files    []string `json:"files,omitempty"`
+}
+
+// IsZero reports whether h carries no content at all.
+func (h *PRHandoff) IsZero() bool {
+	if h == nil {
+		return true
+	}
+	return strings.TrimSpace(h.Why) == "" && strings.TrimSpace(h.Approach) == "" &&
+		strings.TrimSpace(h.Rejected) == "" && strings.TrimSpace(h.Repro) == "" && len(h.Files) == 0
 }
 
 // PRResponse is written back next to a consumed request (as <name>.result.json)
@@ -85,6 +112,10 @@ type PRResponse struct {
 	// handleOnePRRequest. A duplicate request opened no PR, so there is nothing
 	// of this request's to have authorised.
 	SelfAuthorized bool `json:"self_authorized,omitempty"`
+	// ReporterTrustHeld is true when the #9665 reporter-trust gate held the
+	// PR: its rationale traces to an issue filed by a reporter this hive does
+	// not trust. Applied at every ACMM level, released only by a human.
+	ReporterTrustHeld bool `json:"reporter_trust_held,omitempty"`
 	// SignedCommit is the oid of the GitHub-signed commit the watcher re-authored
 	// the head branch to before opening the PR (github.app_signed_commits). The
 	// agent's own commits are no longer on the branch: this one carries their
@@ -151,6 +182,35 @@ type PRRequestAuthorizer func(agent string, fileUID int) error
 type PROpenedHook func(agent, repo string, number int, url string)
 type PRRepoPolicyGate func(agent, repo string) error
 
+// PROpenedDetail is everything the watcher knows about a PR it just opened
+// for an agent: the PROpenedHook arguments plus the body it published and the
+// request's optional handoff summary.
+type PROpenedDetail struct {
+	Agent   string
+	Repo    string
+	Number  int
+	URL     string
+	Body    string
+	Handoff *PRHandoff
+}
+
+// PROpenedDetailHook is notified, like PROpenedHook, when the watcher opens a
+// NEW PR for an agent, with the full PROpenedDetail.
+type PROpenedDetailHook func(PROpenedDetail)
+
+// SetPROpenedDetailHook installs (or with nil, removes) the detail hook. Safe
+// to call before or after the watcher starts.
+func (c *Client) SetPROpenedDetailHook(fn PROpenedDetailHook) {
+	if c == nil {
+		return
+	}
+	if fn == nil {
+		c.prOpenedDetailHook.Store(nil)
+		return
+	}
+	c.prOpenedDetailHook.Store(&fn)
+}
+
 // SetPROpenedHook installs (or with nil, removes) the PR-opened hook. Safe
 // to call before or after the watcher starts.
 func (c *Client) SetPROpenedHook(fn PROpenedHook) {
@@ -173,6 +233,22 @@ func (c *Client) SetPRRepoPolicyGate(fn PRRepoPolicyGate) {
 		return
 	}
 	c.prRepoPolicyGate.Store(&fn)
+}
+
+// CheckPRRepoPolicy runs the installed PR repo policy gate (the per-repo
+// effective-ACMM check on whether agent may open a PR on repo) and returns its
+// refusal. It is the exact check the pr-request watcher applies before opening
+// anything; exported so the wiring that installs the gate can prove a client
+// (including one rebuilt after an App credential change, #9614) enforces it.
+// Returns nil when no gate is installed or the client is nil.
+func (c *Client) CheckPRRepoPolicy(agent, repo string) error {
+	if c == nil {
+		return nil
+	}
+	if gate := c.prRepoPolicyGate.Load(); gate != nil && *gate != nil {
+		return (*gate)(agent, repo)
+	}
+	return nil
 }
 
 func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func(agent string) bool, nowFn func() time.Time) <-chan struct{} {
@@ -302,11 +378,15 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		c.denyPRRequest(path, req, err.Error(), nowFn)
 		return
 	}
-	if gate := c.prRepoPolicyGate.Load(); gate != nil && *gate != nil {
-		if err := (*gate)(req.Agent, req.Repo); err != nil {
-			c.denyPRRequest(path, req, err.Error(), nowFn)
-			return
-		}
+	if err := c.CheckPRRepoPolicy(req.Agent, req.Repo); err != nil {
+		c.denyPRRequest(path, req, err.Error(), nowFn)
+		return
+	}
+	// Lane write allowlist (#9587). After the authorizer, which is what makes
+	// req.Agent trustworthy; before any GitHub call. Audited as a refusal.
+	if reason, refused := c.refuseWrite(req.Agent, WriteOpOpenPR, req.Repo, 0); refused {
+		c.denyPRRequest(path, req, reason, nowFn)
+		return
 	}
 
 	// Per-repo pause (#6203). Checked here, immediately after authorization and
@@ -412,6 +492,7 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	meta := c.attributionMeta(req.Agent)
 	meta.RequestedBy = c.resolveRequestedBy(ctx, req.Repo, title, body, req.IssueN)
 	body = AppendRunTrailers(body, req.RunKey, req.PlanRef)
+	body = c.relayBody(req.Agent, body)
 	if c.attributionTrailerOn() {
 		body = AppendTrailer(body, meta)
 	}
@@ -492,7 +573,18 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 			resp.SelfAuthorized = selfAuth.Held
 		}
 	}
-	if !res.DuplicateTree && (holdByLevel || selfAuth.Held) {
+	// #9665 adds a third, level-independent reason to hold: the rationale
+	// traces to an issue filed by a reporter this hive does not trust. Unlike
+	// #5117 it IS evaluated at hold-gated levels too, because its notice is
+	// what stops the level-hold release from lifting the label on promotion
+	// to L6 — the whole point is that a stranger's request waits for a human
+	// at every level. Same duplicate-tree precedence as the other two.
+	var reporter ReporterTrust
+	if !res.DuplicateTree && c.reporterTrustHoldActive(req.Repo) {
+		reporter = c.EvaluateReporterTrust(ctx, req.Repo, title, body, req.IssueN)
+		resp.ReporterTrustHeld = reporter.Held
+	}
+	if !res.DuplicateTree && (holdByLevel || selfAuth.Held || reporter.Held) {
 		if lerr := c.AddLabels(ctx, req.Repo, res.Number, []string{"hold"}); lerr != nil {
 			// A missing hold label is a policy failure, not a cosmetic one. Keep
 			// the request queued: the next bounded retry deduplicates the existing
@@ -506,6 +598,12 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 				slog.String("repo", req.Repo), slog.Int("number", res.Number),
 				slog.String("rationale_repo", selfAuth.Repo), slog.Int("rationale_issue", selfAuth.Issue),
 				slog.String("reason", selfAuth.Reason), slog.String("agent", req.Agent))
+		} else if reporter.Held && !holdByLevel {
+			c.logger.Info("pr-request watcher: held PR — its rationale traces to an issue from a reporter this hive does not trust",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number),
+				slog.String("rationale_repo", reporter.Repo), slog.Int("rationale_issue", reporter.Issue),
+				slog.String("reporter", reporter.Reporter), slog.String("association", reporter.Association),
+				slog.String("agent", req.Agent))
 		} else {
 			c.logger.Info("pr-request watcher: applied hold label (hold-gated ACMM level)",
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("agent", req.Agent))
@@ -532,6 +630,18 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", cerr.Error()))
 		}
 	}
+	// The reporter-trust notice is posted whenever that gate held, even
+	// alongside a level notice: it is the release provenance that tells the
+	// L6 promotion path this hold is a human's to lift, so a level hold that
+	// also carried a reporter-trust reason must not shed the label on
+	// promotion. Best-effort like the #5117 notice — the label is the
+	// enforcement, and the release path re-evaluates and re-posts if needed.
+	if reporter.Held && !res.DuplicateTree && !res.AlreadyExisted {
+		if cerr := c.CreateIssueComment(ctx, req.Repo, res.Number, reporterTrustNotice(reporter)); cerr != nil {
+			c.logger.Warn("pr-request watcher: reporter-trust-held PR but could not post the explanation",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", cerr.Error()))
+		}
+	}
 
 	// Audit the creation UNCONDITIONALLY (not gated by the trailer toggle) —
 	// this is the durable answer to "which backend/model produced this PR?".
@@ -544,13 +654,18 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		// post to a tracker must never delay consuming the request file.
 		go (*hook)(req.Agent, req.Repo, res.Number, res.URL)
 	}
-	c.recordCreationAudit(AuditActionAgentPRCreated, meta,
-		"repo", req.Repo,
-		"number", strconv.Itoa(res.Number),
+	if hook := c.prOpenedDetailHook.Load(); hook != nil && *hook != nil && !res.AlreadyExisted {
+		go (*hook)(PROpenedDetail{Agent: req.Agent, Repo: req.Repo, Number: res.Number, URL: res.URL, Body: body, Handoff: req.Handoff})
+	}
+	c.recordWriteAudit(AuditActionAgentPRCreated, meta,
+		WriteTarget{Repo: req.Repo, Number: res.Number},
 		"author", res.Author,
 		"url", res.URL,
 		"reused", strconv.FormatBool(res.AlreadyExisted),
 		"self_authorized", strconv.FormatBool(selfAuth.Held),
+		"reporter_trust_held", strconv.FormatBool(reporter.Held),
+		"reporter_login", reporter.Reporter,
+		"reporter_association", reporter.Association,
 		"duplicate_tree", strconv.FormatBool(res.DuplicateTree))
 	c.writePRResult(path, resp)
 	// Success (or reuse of an existing PR) — consume the request so it isn't

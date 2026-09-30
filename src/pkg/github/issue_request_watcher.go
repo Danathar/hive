@@ -70,15 +70,28 @@ const issueRequestMaxAge = 24 * time.Hour
 // rather than a GitHub assignee, because the hive authors as an App bot and App
 // bots are not valid GitHub assignees (Issues.AddAssignees silently drops them);
 // "close" closes an issue only after the reporter-confirmation gate passes or
-// OverrideReason records an explicit maintainer override.
+// OverrideReason records an explicit maintainer override; "label" adds and/or
+// removes plain labels on an existing issue or PR (Number required), refusing
+// the hive-controlled labels listed in issue_request_label.go;
+// "request_review" asks users and/or teams to review an existing PR (Number
+// required), validated in issue_request_review.go.
 type IssueRequest struct {
-	Kind   string   `json:"kind,omitempty"` // "issue" (default) | "comment" | "claim" | "close"
+	Kind   string   `json:"kind,omitempty"` // "issue" (default) | "comment" | "claim" | "close" | "label" | "request_review"
 	Repo   string   `json:"repo"`
 	Title  string   `json:"title,omitempty"` // issue only
 	Body   string   `json:"body,omitempty"`
-	Labels []string `json:"labels,omitempty"` // issue only
-	Number int      `json:"number,omitempty"` // comment/claim/close: issue/PR number
+	Labels []string `json:"labels,omitempty"` // issue: labels to create with; label: labels to add
+	Number int      `json:"number,omitempty"` // comment/claim/close/label/request_review: issue/PR number
 	Agent  string   `json:"agent,omitempty"`
+	// RemoveLabels are the labels a "label" request takes OFF the item. It may
+	// be combined with Labels in one request (an add and a remove of the same
+	// state change), and is ignored by every other kind.
+	RemoveLabels []string `json:"remove_labels,omitempty"` // label only
+	// Reviewers and TeamReviewers are the user logins and team slugs a
+	// "request_review" request asks to review the PR. At least one is
+	// required; both are ignored by every other kind.
+	Reviewers     []string `json:"reviewers,omitempty"`      // request_review only
+	TeamReviewers []string `json:"team_reviewers,omitempty"` // request_review only
 	// OverrideReason is required to deliberately close a human-filed bug-family
 	// issue before reporter confirmation (duplicate, not-a-bug, reporter asked).
 	OverrideReason string `json:"override_reason,omitempty"` // close only
@@ -115,6 +128,15 @@ type IssueResponse struct {
 	RejectedDuplicate bool   `json:"rejected_duplicate,omitempty"`
 	Error             string `json:"error,omitempty"`
 	At                string `json:"at"`
+	// LabelsAdded and LabelsRemoved report what a "label" request changed, in
+	// the order it was applied, so the agent can confirm the end state without
+	// re-reading the item.
+	LabelsAdded   []string `json:"labels_added,omitempty"`
+	LabelsRemoved []string `json:"labels_removed,omitempty"`
+	// ReviewersRequested and TeamReviewersRequested report who a
+	// "request_review" request asked, after normalization.
+	ReviewersRequested     []string `json:"reviewers_requested,omitempty"`
+	TeamReviewersRequested []string `json:"team_reviewers_requested,omitempty"`
 	// ParentLinked reports that the created issue was linked as a GitHub
 	// sub-issue of req.Parent. ParentLinkError carries the (non-fatal) reason
 	// when a requested link did not succeed; the issue is still created OK.
@@ -325,6 +347,18 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Agent) == "" {
 			shapeErr = kind + " request requires repo, number, and agent"
 		}
+	case "label":
+		if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Agent) == "" {
+			shapeErr = "label request requires repo, number, and agent"
+		} else if len(normalizeLabelList(req.Labels)) == 0 && len(normalizeLabelList(req.RemoveLabels)) == 0 {
+			shapeErr = "label request requires at least one label in labels or remove_labels"
+		}
+	case "request_review":
+		if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Agent) == "" {
+			shapeErr = "request_review request requires repo, number, and agent"
+		} else {
+			shapeErr = reviewRequestShapeError(normalizeReviewers(req.Reviewers), normalizeTeamReviewers(req.TeamReviewers))
+		}
 	default:
 		shapeErr = "unknown kind " + strconv.Quote(kind)
 	}
@@ -349,6 +383,11 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		c.denyIssueRequest(path, req, err.Error(), nowFn)
 		return
 	}
+	// Lane write allowlist (#9587), keyed on the now-authorized agent name.
+	if reason, refused := c.refuseWrite(req.Agent, issueRequestWriteOp(kind), req.Repo, req.Number); refused {
+		c.denyIssueRequest(path, req, reason, nowFn)
+		return
+	}
 
 	// The hive fulfils issues, comments and claims with its own credentials,
 	// bypassing the agent proxy. Enforce pause before any of those API calls.
@@ -369,8 +408,19 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		return
 	}
 
+	// Content gate for the label relay: hive-controlled labels are refused in
+	// both directions, before any GitHub call (#9587).
+	addLabels := normalizeLabelList(req.Labels)
+	removeLabels := normalizeLabelList(req.RemoveLabels)
+	if kind == "label" {
+		if reason, refused := c.reservedLabelRefusal(addLabels, removeLabels); refused {
+			c.denyIssueRequest(path, req, reason, nowFn)
+			return
+		}
+	}
+
 	meta := c.attributionMeta(req.Agent)
-	body := req.Body
+	body := c.relayBody(req.Agent, req.Body)
 	if c.attributionTrailerOn() {
 		body = AppendTrailer(body, meta)
 	}
@@ -392,6 +442,36 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 			resp.OK = true
 			resp.Number = req.Number
 		}
+	case "label":
+		// Adds first, then removes: a request that both adds and removes ends
+		// in the state it asked for even when the same automation reads the
+		// item in between. A failure leaves the request on the retry path; the
+		// GitHub calls are idempotent (adding a present label and removing an
+		// absent one are both no-ops), so a retry converges.
+		err = c.AddLabels(ctx, req.Repo, req.Number, addLabels)
+		if err == nil {
+			resp.LabelsAdded = addLabels
+			for _, label := range removeLabels {
+				if err = c.RemoveLabel(ctx, req.Repo, req.Number, label); err != nil {
+					break
+				}
+				resp.LabelsRemoved = append(resp.LabelsRemoved, label)
+			}
+		}
+		if err == nil {
+			resp.OK = true
+			resp.Number = req.Number
+		}
+	case "request_review":
+		reviewers := normalizeReviewers(req.Reviewers)
+		teams := normalizeTeamReviewers(req.TeamReviewers)
+		err = c.RequestReviewers(ctx, req.Repo, req.Number, reviewers, teams)
+		if err == nil {
+			resp.OK = true
+			resp.Number = req.Number
+			resp.ReviewersRequested = reviewers
+			resp.TeamReviewersRequested = teams
+		}
 	case "close":
 		closedPR, err = c.closeIssue(ctx, req.Repo, req.Number, IssueCloseOptions{OverrideReason: req.OverrideReason})
 		if err == nil {
@@ -411,9 +491,8 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 			resp.Number = res.Number
 			resp.URL = res.URL
 			resp.Error = fmt.Sprintf("not filed: a maintainer closed issue #%d (%s) as %q over the same file references within the last 30 days; do not re-file this finding — read the closure rationale and record the rejection instead", res.Number, res.URL, res.RejectedReason)
-			c.recordCreationAudit(AuditActionAgentIssueRejectedDuplicate, meta,
-				"repo", req.Repo,
-				"number", strconv.Itoa(res.Number),
+			c.recordWriteAudit(AuditActionAgentIssueRejectedDuplicate, meta,
+				WriteTarget{Repo: req.Repo, Number: res.Number},
 				"url", res.URL)
 			c.writeIssueResult(path, resp)
 			_ = os.Remove(path)
@@ -472,14 +551,28 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		action = AuditActionIssueClaimed
 	case "close":
 		action = AuditActionIssueClosed
+	case "label":
+		action = AuditActionAgentLabelApplied
+	case "request_review":
+		action = AuditActionAgentReviewRequested
 	}
 	extra := []string{
-		"repo", req.Repo,
-		"number", strconv.Itoa(resp.Number),
 		"url", resp.URL,
 		"reused", strconv.FormatBool(resp.AlreadyExisted),
 		"consolidated", strconv.FormatBool(resp.Consolidated),
 		"override_reason", req.OverrideReason,
+	}
+	if kind == "label" {
+		extra = []string{
+			"added", strings.Join(resp.LabelsAdded, " "),
+			"removed", strings.Join(resp.LabelsRemoved, " "),
+		}
+	}
+	if kind == "request_review" {
+		extra = []string{
+			"reviewers", strings.Join(resp.ReviewersRequested, " "),
+			"team_reviewers", strings.Join(resp.TeamReviewersRequested, " "),
+		}
 	}
 	if closedPR {
 		// The number was a pull request: this is the hive closing a PR
@@ -487,7 +580,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		action = AuditActionPRClosed
 		extra = append(extra, "path", PRAuditPathRelay)
 	}
-	c.recordCreationAudit(action, meta, extra...)
+	c.recordWriteAudit(action, meta, WriteTarget{Repo: req.Repo, Number: resp.Number}, extra...)
 	c.writeIssueResult(path, resp)
 	_ = os.Remove(path)
 	c.issueClearRetry(path)
@@ -496,6 +589,25 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		slog.Int("number", resp.Number), slog.Bool("reused", resp.AlreadyExisted),
 		slog.Bool("consolidated", resp.Consolidated),
 		slog.String("agent", req.Agent))
+}
+
+// issueRequestWriteOp maps a validated issue-request kind to its write-surface
+// operation name (#9587).
+func issueRequestWriteOp(kind string) string {
+	switch kind {
+	case "comment":
+		return WriteOpComment
+	case "claim":
+		return WriteOpClaim
+	case "close":
+		return WriteOpCloseIssue
+	case "label":
+		return WriteOpLabel
+	case "request_review":
+		return WriteOpRequestReview
+	default:
+		return WriteOpCreateIssue
+	}
 }
 
 func issueUnsubstitutedTemplatePlaceholder(text string) (string, bool) {

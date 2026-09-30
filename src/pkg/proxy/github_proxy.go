@@ -188,6 +188,16 @@ type GitHubProxy struct {
 	scopeMu         sync.RWMutex
 	agentServesRepo func(agent, repo string) bool
 
+	// writeSurfaceEnforced reports whether an agent's lane is under
+	// write_surface.enforce (#9772): its direct GitHub writes are refused so
+	// the audited relays are its only write path. writeRefusedAudit records
+	// each such refusal as agent_write_refused. Both are live and guarded
+	// because config can change while request goroutines read them. Nil
+	// enforced (the default) refuses nothing.
+	writeSurfaceMu       sync.RWMutex
+	writeSurfaceEnforced func(agent string) bool
+	writeRefusedAudit    func(agent, kind, method, path, repo string)
+
 	// proxyAdvisoryOK mirrors entrypoint.sh's HIVE_PROXY_ADVISORY_OK — the SAME
 	// explicit, operator-set escape hatch that already governs whether a failed
 	// forced-egress iptables redirect is fatal. Read once at construction (it
@@ -540,6 +550,62 @@ func (p *GitHubProxy) agentRepoScopeRefusal(agentName, method, path string) (str
 	return AgentRepoScopeRefusal(serves, agentName, method, path)
 }
 
+// SetWriteSurfaceEnforceFunc installs the per-lane write_surface.enforce
+// predicate (#9772). The hive passes config's WriteSurfaceEnforced, so a lane
+// listed in config is enforced on the next request. Passing nil clears it,
+// which is the behaviour every hive had before: direct writes allowed.
+func (p *GitHubProxy) SetWriteSurfaceEnforceFunc(fn func(agent string) bool) {
+	p.writeSurfaceMu.Lock()
+	p.writeSurfaceEnforced = fn
+	p.writeSurfaceMu.Unlock()
+}
+
+// SetWriteRefusedAuditFunc installs the sink that records a direct write
+// refused under write_surface.enforce as an agent_write_refused audit entry.
+func (p *GitHubProxy) SetWriteRefusedAuditFunc(fn func(agent, kind, method, path, repo string)) {
+	p.writeSurfaceMu.Lock()
+	p.writeRefusedAudit = fn
+	p.writeSurfaceMu.Unlock()
+}
+
+func (p *GitHubProxy) writeSurfaceEnforcedFunc() func(agent string) bool {
+	p.writeSurfaceMu.RLock()
+	defer p.writeSurfaceMu.RUnlock()
+	return p.writeSurfaceEnforced
+}
+
+// laneWriteSurfaceEnforced reports whether agentName's lane is enforced.
+func (p *GitHubProxy) laneWriteSurfaceEnforced(agentName string) bool {
+	if agentName == "" || agentName == internalCallerName {
+		return false
+	}
+	enforced := p.writeSurfaceEnforcedFunc()
+	return enforced != nil && enforced(agentName)
+}
+
+// hostNeedsMITMFor is hostNeedsMITM for a known caller. A lane under
+// write_surface.enforce has every GitHub-family host intercepted, not only
+// api.github.com, because git push travels over github.com's smart HTTP and
+// an opaque tunnel could not refuse it. Other lanes are unaffected.
+func (p *GitHubProxy) hostNeedsMITMFor(host, agentName string) bool {
+	if p.hostNeedsMITM(host) {
+		return true
+	}
+	return IsGitHubHost(host) && p.laneWriteSurfaceEnforced(agentName)
+}
+
+// auditWriteRefused records one direct write refused under
+// write_surface.enforce.
+func (p *GitHubProxy) auditWriteRefused(agentName, kind, method, path string) {
+	p.writeSurfaceMu.RLock()
+	audit := p.writeRefusedAudit
+	p.writeSurfaceMu.RUnlock()
+	if audit == nil {
+		return
+	}
+	audit(agentName, kind, method, path, WriteSurfaceRepo(path))
+}
+
 // ListenAddr returns the proxy listen address.
 func (p *GitHubProxy) ListenAddr() string { return p.listenAddr }
 
@@ -675,7 +741,7 @@ func (p *GitHubProxy) handleTransparentTLS(conn net.Conn, peeked []byte) {
 		return
 	}
 
-	if !NeedsInspection(host) && !p.hostNeedsMITM(host) {
+	if !NeedsInspection(host) && !p.hostNeedsMITMFor(host, agentName) {
 		// Host we neither inspect nor (under #1861 injection) intercept:
 		// tunnel directly. SO_MARK the socket
 		// so the forced-egress redirect exempts this proxy-originated dial.
@@ -1095,7 +1161,7 @@ func (p *GitHubProxy) handleConnectDirect(conn net.Conn, r *http.Request) {
 	// however, every GitHub-family host is intercepted (see hostNeedsMITM),
 	// because the agent's credential helper now serves an inert placeholder
 	// that only the proxy can replace with the real scoped token.
-	if !NeedsInspection(host) && !p.hostNeedsMITM(host) {
+	if !NeedsInspection(host) && !p.hostNeedsMITMFor(host, agentName) {
 		p.tunnelDirect(conn, r)
 		return
 	}
@@ -1222,6 +1288,10 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 		// Pause is checked first, so a repo the operator has frozen is refused
 		// as paused even when the agent is also out of scope for it.
 		blockJSON := false
+		// A direct write from a lane under write_surface.enforce (#9772) is
+		// refused and audited as agent_write_refused. Checked after pause and
+		// scope so their more specific reasons win when both apply.
+		writeSurfaceKind := ""
 		if agentName != internalCallerName {
 			if reason, paused := p.repoPauseRefusal(req.Method, req.URL.Path); paused {
 				blocked = true
@@ -1233,6 +1303,12 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 				blocked = true
 				blockReason = reason
 				blockJSON = true
+			} else if !isLinear {
+				if reason, kind, refused := WriteSurfaceEnforceRefusal(p.writeSurfaceEnforcedFunc(), agentName, req.Method, req.URL.Path, req.URL.RawQuery); refused {
+					blocked = true
+					blockReason = reason
+					writeSurfaceKind = kind
+				}
 			}
 		}
 
@@ -1269,6 +1345,12 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 				blocked = true
 				blockReason = reason
 				blockJSON = true
+			} else if agentName != internalCallerName {
+				if reason, refused := WriteSurfaceGraphQLRefusal(p.writeSurfaceEnforcedFunc(), agentName, body); refused {
+					blocked = true
+					blockReason = reason
+					writeSurfaceKind = WriteSurfaceKindGraphQL
+				}
 			}
 			allowed, isMutation := GraphQLAllowedCaps(autonomyGraphQLMode(agentName, body, mode), caps, body)
 			if !blocked && !allowed {
@@ -1342,6 +1424,9 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 				detail = blockReason
 			}
 			p.recordViolation(agentName, req.Method, detail)
+			if writeSurfaceKind != "" {
+				p.auditWriteRefused(agentName, writeSurfaceKind, req.Method, req.URL.Path)
+			}
 
 			respBody := fmt.Sprintf("⛔ ACMM proxy: %s (%s) blocked %s %s\n", agentName, mode, req.Method, detail)
 			contentType := "text/plain"
@@ -1492,6 +1577,35 @@ const gitInjectBasicUser = "x-access-token"
 // get strip-only treatment.
 const loginPathPrefix = "/login/"
 
+// copilotInternalPathPrefix marks the Copilot CLI's auth-exchange endpoints on
+// the GitHub API host (/copilot_internal/v2/token, /copilot_internal/user).
+// The CLI calls them with the USER's Copilot OAuth token
+// (COPILOT_GITHUB_TOKEN / the /data/copilot-user-token device-flow token) to
+// obtain its short-lived Copilot session token and discover its completion
+// host. A GitHub App installation token cannot perform that exchange, so
+// rewriting these requests would cut every copilot-backend agent off from its
+// model the moment injection is on (#9586). They are passed through with the
+// agent's own Authorization untouched - nothing stripped, nothing injected.
+//
+// Residual (documented in security-model.md): the Copilot user OAuth token
+// stays agent-readable and spendable on these paths; moving it server-side too
+// is a follow-up. The hub-held App tokens injection protects are never
+// attached here.
+const copilotInternalPathPrefix = "/copilot_internal/"
+
+// gheAPIPathPrefix is the REST prefix GitHub Enterprise Server serves its API
+// under (https://<ghe-host>/api/v3/...), so the Copilot exchange on a GHE host
+// arrives as /api/v3/copilot_internal/...
+const gheAPIPathPrefix = "/api/v3"
+
+// isCopilotAuthExchangePath reports whether path is a Copilot CLI
+// auth-exchange endpoint that must keep the agent's own credential (see
+// copilotInternalPathPrefix), on api.github.com or a GHE /api/v3 host.
+func isCopilotAuthExchangePath(path string) bool {
+	return strings.HasPrefix(path, copilotInternalPathPrefix) ||
+		strings.HasPrefix(path, gheAPIPathPrefix+copilotInternalPathPrefix)
+}
+
 // rewriteGitHubAuth enforces #1861 on one MITM'd request: the proxy — not the
 // agent — decides what credential GitHub sees.
 //
@@ -1515,6 +1629,10 @@ const loginPathPrefix = "/login/"
 //     ride a real credential, recreating the pre-#3888 identity hole this
 //     design depends on having closed.
 //
+//   - COPILOT AUTH-EXCHANGE PASSTHROUGH: /copilot_internal/ on a GitHub
+//     host keeps the agent's own Authorization (the user's Copilot OAuth
+//     token); see copilotInternalPathPrefix for why and the residual.
+//
 //   - INTERNAL CALLER PASSTHROUGH: the hive's own control plane
 //     (internalCallerName) legitimately holds and sends its own App
 //     credentials (token mint, heartbeat, hive-open-pr fulfillment); its
@@ -1534,6 +1652,13 @@ func (p *GitHubProxy) rewriteGitHubAuth(req *http.Request, agentName string) {
 		return
 	}
 	if agentName == internalCallerName {
+		return
+	}
+	if isCopilotAuthExchangePath(req.URL.Path) {
+		// Before the strip: the Copilot session-token exchange needs the
+		// user's Copilot OAuth token, which no hub-held App token can stand in
+		// for (copilotInternalPathPrefix).
+		p.logger.Debug("proxy auth injection: Copilot auth-exchange endpoint - agent credential passed through", "agent", agentName, "injected", false)
 		return
 	}
 

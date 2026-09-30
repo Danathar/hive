@@ -3,11 +3,40 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 // TurnConfig groups opt-in gates for the RFC #4002 re-entrant turn rollout.
 type TurnConfig struct {
 	Reentrant ReentrantTurnConfig `yaml:"reentrant,omitempty" json:"reentrant,omitempty"`
+	// PRFollowUp routes follow-up events on an agent's own PR (CI failure,
+	// changes requested, new comments) back into the CLI session that opened
+	// the PR instead of a fresh, context-cleared kick (hivecommons/hive#9583).
+	PRFollowUp PRFollowUpConfig `yaml:"pr_follow_up,omitempty" json:"pr_follow_up,omitempty"`
+}
+
+// PRFollowUpConfig is the opt-in surface for PR follow-up session resume.
+type PRFollowUpConfig struct {
+	// Enabled turns the feature on. Default false: PR follow-ups reach the
+	// authoring agent only through the existing fix-before-new blocks, exactly
+	// as before.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// MaxAge bounds how long after a PR opens its authoring session may still
+	// be resumed (Go duration, e.g. "12h"). Empty or invalid means
+	// DefaultPRFollowUpMaxAge. Older follow-ups fall back to a fresh dispatch.
+	MaxAge string `yaml:"max_age,omitempty" json:"max_age,omitempty"`
+	// ResumeIDMaxAge bounds how long a captured backend-native resume id
+	// (hivecommons/hive#9606) is still offered to a later session (Go
+	// duration, e.g. "72h"). Empty or invalid means
+	// DefaultPRFollowUpResumeIDMaxAge. Past it the transcript is assumed
+	// gone or too old to be worth reopening, and only the handoff note is
+	// handed on.
+	ResumeIDMaxAge string `yaml:"resume_id_max_age,omitempty" json:"resume_id_max_age,omitempty"`
+	// Retention bounds how long a PR's pointer and handoff note are kept at
+	// all (Go duration, e.g. "336h"). Pointers are also deleted as soon as
+	// their PR merges or closes; this is the backstop for PRs whose end the
+	// hive never observes. Empty or invalid means DefaultPRFollowUpRetention.
+	Retention string `yaml:"retention,omitempty" json:"retention,omitempty"`
 }
 
 // ReentrantTurnConfig is the explicit opt-in surface for the pkg/turn envelope.
@@ -26,7 +55,88 @@ const (
 	// ReentrantTurnBackgroundFleetEnvVar extends the opt-in to the background
 	// fleet for one process.
 	ReentrantTurnBackgroundFleetEnvVar = "HIVE_REENTRANT_TURN_BACKGROUND_FLEET"
+	// PRFollowUpResumeEnvVar overrides turn.pr_follow_up.enabled for one
+	// process ("true"/"false"); the one-step rollback.
+	PRFollowUpResumeEnvVar = "HIVE_PR_FOLLOWUP_RESUME"
+	// PRFollowUpMaxAgeEnvVar overrides turn.pr_follow_up.max_age.
+	PRFollowUpMaxAgeEnvVar = "HIVE_PR_FOLLOWUP_MAX_AGE"
+	// DefaultPRFollowUpMaxAge is how long an authoring session stays eligible
+	// for resume after its PR opens. A day covers a normal CI + first-review
+	// round; past it the conversation is stale enough that a fresh dispatch
+	// rebuilding context from the PR is the better answer.
+	DefaultPRFollowUpMaxAge = 24 * time.Hour
+	// PRFollowUpRetentionEnvVar overrides turn.pr_follow_up.retention.
+	PRFollowUpRetentionEnvVar = "HIVE_PR_FOLLOWUP_RETENTION"
+	// DefaultPRFollowUpRetention is how long a pointer (and the handoff note
+	// it carries) may live before the sweep deletes it even if the PR's merge
+	// or close was never observed. Two weeks matches the audit window the
+	// fix-before-new blocks use to attribute a PR to its agent
+	// (auditPRAttributionWindow): past it the PR no longer reaches its
+	// author through those blocks either.
+	DefaultPRFollowUpRetention = 14 * 24 * time.Hour
+	// PRFollowUpResumeIDMaxAgeEnvVar overrides
+	// turn.pr_follow_up.resume_id_max_age.
+	PRFollowUpResumeIDMaxAgeEnvVar = "HIVE_PR_FOLLOWUP_RESUME_ID_MAX_AGE"
+	// DefaultPRFollowUpResumeIDMaxAge is how long a captured backend resume
+	// id stays worth offering. It is longer than DefaultPRFollowUpMaxAge on
+	// purpose: reopening a transcript is a suggestion the agent may decline,
+	// not a live session the hive types into, and a PR under review for a
+	// few days still benefits from the original reasoning. Three days also
+	// stays inside the window the backend CLIs keep their transcripts for.
+	DefaultPRFollowUpResumeIDMaxAge = 72 * time.Hour
 )
+
+// PRFollowUpResumeEnabled reports whether PR follow-ups should try to resume
+// the authoring session. Fail-safe: off unless explicitly enabled.
+func (c *Config) PRFollowUpResumeEnabled() bool {
+	if v, ok := parseBoolEnv(PRFollowUpResumeEnvVar); ok {
+		return v
+	}
+	if c == nil {
+		return false
+	}
+	return c.Turn.PRFollowUp.Enabled
+}
+
+// PRFollowUpMaxAge returns the resume window, falling back to
+// DefaultPRFollowUpMaxAge for an unset, unparsable, or non-positive value.
+func (c *Config) PRFollowUpMaxAge() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(PRFollowUpMaxAgeEnvVar))
+	if raw == "" && c != nil {
+		raw = strings.TrimSpace(c.Turn.PRFollowUp.MaxAge)
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return DefaultPRFollowUpMaxAge
+}
+
+// PRFollowUpRetention returns how long pointers are kept, falling back to
+// DefaultPRFollowUpRetention for an unset, unparsable, or non-positive value.
+func (c *Config) PRFollowUpRetention() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(PRFollowUpRetentionEnvVar))
+	if raw == "" && c != nil {
+		raw = strings.TrimSpace(c.Turn.PRFollowUp.Retention)
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return DefaultPRFollowUpRetention
+}
+
+// PRFollowUpResumeIDMaxAge returns how long a captured backend-native resume
+// id is offered, falling back to DefaultPRFollowUpResumeIDMaxAge for an
+// unset, unparsable, or non-positive value.
+func (c *Config) PRFollowUpResumeIDMaxAge() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(PRFollowUpResumeIDMaxAgeEnvVar))
+	if raw == "" && c != nil {
+		raw = strings.TrimSpace(c.Turn.PRFollowUp.ResumeIDMaxAge)
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return DefaultPRFollowUpResumeIDMaxAge
+}
 
 // ReentrantTurnEnabled reports whether agent is enrolled in the pkg/turn
 // envelope. It is fail-safe: the global gate must be on, and an individual

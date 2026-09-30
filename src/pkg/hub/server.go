@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/auth"
+	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/delegation"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 	"github.com/hivecommons/hive/pkg/openrouter"
@@ -1692,7 +1693,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	// unconfigured, which would leave the image 404ing and every unfurled Hive
 	// link showing a blank card.
 	s.mux.HandleFunc("GET /og-card.png", s.handleOGCard)
-	s.mux.Handle("GET /static/", http.FileServerFS(staticFS))
+	s.mux.Handle("GET /static/", webstatic.FileServer(staticFS))
 	s.mux.HandleFunc("GET /", s.handleHubNotFound)
 
 	s.registerOAuth()
@@ -4276,6 +4277,15 @@ func (s *HubServer) serveStatic(path string) http.HandlerFunc {
 			w.Header().Set("Content-Type", ct)
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		}
+		// These files are embedded in the binary (go:embed) with no build-SHA
+		// versioning, so a browser's heuristic caching can otherwise serve a
+		// pre-upgrade page or stylesheet indefinitely. no-cache forces
+		// revalidation on every load; the ETag (hashed from the exact served
+		// bytes) turns an unchanged file into a 304 with no body
+		// (hivecommons/hive#9674).
+		if webstatic.WriteCacheHeaders(w, r, webstatic.ETagFor(data)) {
+			return
 		}
 		_, _ = w.Write(data)
 	}

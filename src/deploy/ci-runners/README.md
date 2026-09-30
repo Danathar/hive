@@ -55,6 +55,9 @@ the live value of 120 can still exceed the pool's disk budget during bursts.
 Either reduce `maxRunners` to roughly 70-75 or add nodes/larger local disks
 before relying on the full 120-runner setting.
 
+> **Moving off vllm-d:** the dedicated Linode cluster that replaces this
+> arrangement is documented in [`lke/README.md`](lke/README.md).
+
 ## Incident: apt egress failure (#6648)
 
 Every job that installed a toolchain package (`gcc`, `libc6-dev`, `tmux`)
@@ -262,3 +265,80 @@ kubectl -n arc-v2-hive logs job/gocache-prune-now
 The PVC was grown 200Gi → 500Gi on 2026-09-28 (`allowVolumeExpansion: true` on
 `ocs-storagecluster-cephfs`; online, no pod restart). If usage still trends up
 week over week, lower `MAX_AGE_DAYS` before growing the volume again.
+
+## Shared Go build cache: per-job isolation (2026-09-29)
+
+Bounding the volume's size (above) did not stop Go jobs failing on it. On
+2026-09-29, with the PVC at ~238G of 500G (far from full), a sample of 371
+failed self-hosted jobs showed:
+
+| Symptom | Jobs | Where |
+| --- | --- | --- |
+| `open /mnt/gocache/build/<xx>/<id>-a: permission denied` | 73 | every runner node, 766 distinct cache files |
+| `can't find export data (bufio: buffer full)` | ~22 | every runner node |
+| golangci-lint `no go files to analyze` | 10 | follows from the two above (package load fails) |
+| `write /mnt/gocache/build/...: no space left on device` | 5 | while the volume had ~300G free |
+
+The `-a` error is Go failing to *reopen an existing index entry for write*
+(`os.OpenFile(O_WRONLY|O_CREATE)`), and the export-data error is a torn
+build output. Neither can be seen by `go-cache-guard.sh`'s writability probe,
+because the directory itself stays writable. Both come from up to
+`maxRunners` pods on several nodes writing one cephfs directory tree at once;
+Go only promises safe concurrent cache use on a local filesystem.
+
+`go-cache-guard.sh` now takes `GO_CACHE_GUARD_BUILD_CACHE`:
+
+| Value | Effect |
+| --- | --- |
+| `job` | GOCACHE under `/mnt/gocache` is moved to `$RUNNER_TEMP/go-cache-guard/gocache` for the job. GOMODCACHE stays shared. |
+| `shared` | Previous behaviour: shared GOCACHE, pruned / fallen back only when unwritable. |
+
+Every workflow that runs the guard sets it from the repository variable
+`HIVE_GO_BUILD_CACHE`, defaulting to `job`. To go back to the shared build
+cache without a code change:
+
+```sh
+gh variable set HIVE_GO_BUILD_CACHE --repo hivecommons/hive --body shared
+```
+
+Cost: each job compiles cold (~2 minutes for a `-race` shard, the same cost
+GitHub-hosted runners pay without a warm-cache hit) and holds its build cache
+in the pod's `runner-home` emptyDir (node disk, gone with the pod). A GOCACHE
+outside `/mnt/gocache` (GitHub-hosted runners) is never moved, so their
+Actions-cache warm restore keeps working. With `job` as the default the
+`build/` tree on the PVC stops growing; `hive-gocache-prune` ages it out.
+
+## Classifying infra failures, rerunning once, and alerting on the rate (#9664)
+
+The failures above were found by hand, after hours of reruns, and misled the
+fleet into "fixing" code. Three pieces now catch them automatically:
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Classifier | `.github/scripts/ci_infra_classify.py` + `ci-infra-signatures.tsv` | Sorts one failed job into `infra:<class>`, `derived` (a shard gate that only reports other jobs) or `code`, from the failing step's output and the job's annotations. Anything unrecognised is `code`. |
+| Rerun once | `.github/workflows/ci-infra-rerun.yml` | On every failed run of the watched CI workflows, classifies the failed jobs and reruns them once when all are infra. Never past attempt 1, never when any job is `code`, never for a fork. |
+| Rate alert | `.github/workflows/ci-infra-rate.yml` (hourly) | Share of the last 100 completed CI runs with at least one infra failure. At 15% or more it opens or updates one tracking issue with a class x runner breakdown; below that it closes it. |
+
+Classes shipped: `gocache-permission`, `build-cache-corrupt`, `disk-full`,
+`lint-no-go-files`, `lint-timeout`, `runner-lost` (the runner pod died; seen
+only as the job annotation "The self-hosted runner lost communication with the
+server") and `test-list-empty` (a `go test -list` step that exited without
+printing anything). To add one, append a row to `ci-infra-signatures.tsv` and a
+trimmed real log under `.github/scripts/testdata/ci-infra/`; the self-test
+(`python3 .github/scripts/test-ci-infra.py`, run in v2 CI) fails if a class has
+no fixture.
+
+Repository variables, all optional:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `HIVE_CI_INFRA_RERUN` | `on` | `off` keeps classifying (the rate still counts) but never reruns. |
+| `HIVE_CI_INFRA_ALERT` | on | `off` disables the rate workflow. |
+| `HIVE_CI_INFRA_WINDOW_RUNS` | `100` | Completed runs in the window. |
+| `HIVE_CI_INFRA_ALERT_THRESHOLD` | `0.15` | Alert fraction, 0-1, inclusive. |
+| `HIVE_CI_INFRA_MIN_RUNS` | `20` | Fewer runs than this: no open or close. |
+
+A run counts as infra-hit even when the automatic rerun turned it green: the
+rate measures the pool, not the final verdict. Runner pods are ephemeral and
+the Actions API does not expose the Kubernetes node, so the breakdown groups
+pods by scale set; map a pod to its node with `kubectl` while it is alive.

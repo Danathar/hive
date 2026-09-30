@@ -29,6 +29,7 @@ import (
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/promptsrc"
 	"github.com/hivecommons/hive/pkg/proxy"
+	"github.com/hivecommons/hive/pkg/questionclose"
 	"github.com/hivecommons/hive/pkg/retro"
 	"github.com/hivecommons/hive/pkg/rotation"
 	"github.com/hivecommons/hive/pkg/scheduler"
@@ -72,6 +73,14 @@ type boot struct {
 	// map read and map write" in buildConfiguredAgents.
 	cfgReloadMu sync.Mutex
 
+	// ghClientLive is the GitHub client provider that long-lived consumers
+	// (collectors, the scheduler's triage commenter) read on every use, and
+	// requestRelays runs the request watchers and the self-authored merge
+	// sweep on the current client. adoptGitHubClient swaps both on every
+	// rebuild (#9621); see github_client_provider.go.
+	ghClientLive  atomic.Pointer[githubClientRef]
+	requestRelays *requestRelaySupervisor
+
 	// bootConfig
 	startTime                     time.Time
 	configPath                    string
@@ -108,6 +117,7 @@ type boot struct {
 	nousState                     *dashboard.NousState
 	inceptionEngine               *knowledge.InceptionEngine
 	rotationMgr                   *rotation.Manager
+	questionAutoclose             atomic.Pointer[questionclose.Manager]
 	wd                            *watchdog.Reconciler
 	onDemandFromPack              map[string]bool
 	mentionWebhook                http.Handler
@@ -126,7 +136,6 @@ type boot struct {
 	leaderboardForHeartbeat       func() []spoke.LeaderboardEntry
 	ownerForHeartbeat             func() string
 	dashboardURLForHeartbeat      func() string
-	installMutationBoundary       func(client interface{ SetMutationBoundary(effects.Boundary) })
 	dashboardDependencies         func() *dashboard.Dependencies
 	wireSessionPrune              func()
 

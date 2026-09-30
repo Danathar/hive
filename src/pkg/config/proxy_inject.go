@@ -17,18 +17,17 @@ import (
 // agent that can be talked into printing it hands out a usable token. With
 // injection on, nothing an agent holds authenticates anywhere.
 //
-// Process default OFF: with the flag unset the token delivery and proxy
-// behavior are byte-identical to before this flag existed, so existing spokes
-// and self-hosted installs are unchanged. Newly provisioned hosted spokes are
-// born with the flag set explicitly (#9586): the hub's provisioning template
-// renders "true" for App-authenticated spokes and the explicit opt-out value
-// ProxyInjectGHAuthOffValue otherwise (see pkg/hub provisionProxyInjectGHAuth).
+// Injection is OPT-IN only: it is on ONLY when this variable is explicitly
+// ProxyInjectGHAuthOnValue. Unset (or any other value) is off everywhere -
+// hosted or self-hosted, App or PAT, spoke or hub - and the hub renders no
+// value for newly provisioned spokes. A brief default-on for hosted App spokes
+// (#9597/#9625) was reverted before any spoke ran it (#9586).
 const ProxyInjectGHAuthEnv = "HIVE_PROXY_INJECT_GH_AUTH"
 
 // ProxyInjectGHAuthOnValue is the only value that enables injection - the same
 // strict "true" match HIVE_PROXY_ADVISORY_OK uses. ProxyInjectGHAuthOffValue is
-// the explicit opt-out: it behaves exactly like unset, but says so on the pod
-// spec, so a spoke that deliberately runs without injection is visibly a
+// the explicit opt-out: it behaves exactly like unset (off) but says so on the
+// pod spec, so a spoke that deliberately runs without injection is visibly a
 // decision rather than an omission (#9586).
 const (
 	ProxyInjectGHAuthOnValue  = "true"
@@ -117,4 +116,73 @@ func ProxyInjectGHAuthWarnings(getenv func(string) string) []string {
 		ProxyInjectGHAuthEnv, raw,
 		ProxyInjectGHAuthEnv, ProxyInjectGHAuthOnValue,
 		ProxyInjectGHAuthEnv, ProxyInjectGHAuthOffValue)}
+}
+
+// HiveTypeHosted is the hub.hive_type value the hub's provisioning template
+// renders for hub-provisioned ("hosted") spokes (pkg/hub saas_provision.go,
+// `hive_type: {{.HiveType}}` with HiveType "hosted"). It is the spoke's own
+// signal that it runs on hub-managed infrastructure.
+const HiveTypeHosted = "hosted"
+
+// ProxyInjectGHAuthSource says WHY injection resolved the way it did (#9586).
+type ProxyInjectGHAuthSource string
+
+const (
+	// ProxyInjectGHAuthSourceExplicitOn: HIVE_PROXY_INJECT_GH_AUTH=true, the
+	// only way to turn injection on.
+	ProxyInjectGHAuthSourceExplicitOn ProxyInjectGHAuthSource = "explicit-on"
+	// ProxyInjectGHAuthSourceExplicitOff: HIVE_PROXY_INJECT_GH_AUTH=false,
+	// the explicit opt-out.
+	ProxyInjectGHAuthSourceExplicitOff ProxyInjectGHAuthSource = "explicit-off"
+	// ProxyInjectGHAuthSourceUnrecognized: a value other than true/false/unset;
+	// off, and reported by ProxyInjectGHAuthWarnings.
+	ProxyInjectGHAuthSourceUnrecognized ProxyInjectGHAuthSource = "unrecognized"
+	// ProxyInjectGHAuthSourceDefaultOff: unset - off, because injection is
+	// opt-in on every kind of hive.
+	ProxyInjectGHAuthSourceDefaultOff ProxyInjectGHAuthSource = "default-off"
+)
+
+// ProxyInjectGHAuthOptInReason is the reason an unset variable resolves off,
+// shown in the boot log and the dashboard Security tab.
+const ProxyInjectGHAuthOptInReason = "opt-in: set " + ProxyInjectGHAuthEnv + "=" + ProxyInjectGHAuthOnValue
+
+// ProxyInjectGHAuthDecision is the resolved injection state and its reason.
+type ProxyInjectGHAuthDecision struct {
+	Enabled bool                    `json:"enabled"`
+	Source  ProxyInjectGHAuthSource `json:"source"`
+	Reason  string                  `json:"reason"`
+}
+
+// LogLine is the one-line boot summary, e.g. "proxy GitHub auth injection:
+// off (opt-in: set HIVE_PROXY_INJECT_GH_AUTH=true)".
+func (d ProxyInjectGHAuthDecision) LogLine() string {
+	state := "off"
+	if d.Enabled {
+		state = "on"
+	}
+	return "proxy GitHub auth injection: " + state + " (" + d.Reason + ")"
+}
+
+// ResolveProxyInjectGHAuth reports this process's proxy-side GitHub credential
+// injection state and why (#9586). It is a pure reading of the env and agrees
+// with ProxyInjectGHAuth by construction: ProxyInjectGHAuthOnValue is on;
+// ProxyInjectGHAuthOffValue, unset and any unrecognized value are off. Nothing
+// about the hive (hosted or not, App or PAT) changes the answer, and it never
+// writes the env.
+func ResolveProxyInjectGHAuth(getenv func(string) string) ProxyInjectGHAuthDecision {
+	switch raw := strings.TrimSpace(getenv(ProxyInjectGHAuthEnv)); raw {
+	case ProxyInjectGHAuthOnValue:
+		return ProxyInjectGHAuthDecision{Enabled: true, Source: ProxyInjectGHAuthSourceExplicitOn,
+			Reason: ProxyInjectGHAuthEnv + "=" + ProxyInjectGHAuthOnValue}
+	case ProxyInjectGHAuthOffValue:
+		return ProxyInjectGHAuthDecision{Source: ProxyInjectGHAuthSourceExplicitOff,
+			Reason: ProxyInjectGHAuthEnv + "=" + ProxyInjectGHAuthOffValue + " (explicit opt-out)"}
+	case "":
+		return ProxyInjectGHAuthDecision{Source: ProxyInjectGHAuthSourceDefaultOff,
+			Reason: ProxyInjectGHAuthOptInReason}
+	default:
+		return ProxyInjectGHAuthDecision{Source: ProxyInjectGHAuthSourceUnrecognized,
+			Reason: fmt.Sprintf("unrecognized %s=%q; only %s and %s are accepted",
+				ProxyInjectGHAuthEnv, raw, ProxyInjectGHAuthOnValue, ProxyInjectGHAuthOffValue)}
+	}
 }

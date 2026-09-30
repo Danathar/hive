@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -258,7 +259,7 @@ func (c *Client) reconcileSignedPR(ctx context.Context, owner, repo string, pr *
 
 	if reason := c.signedTailBlocker(tail); reason != "" {
 		reason = fmt.Sprintf("commit %s is unverified; %s", shortSHA(commits[firstUnverified].GetSHA()), reason)
-		c.warn("signed-commit reconciler: skipped; the PR head stays unsigned", append(logArgs, "reason", reason)...)
+		c.warn("signed-commit reconciler: skipped; the PR keeps an unsigned commit", append(logArgs, "reason", reason)...)
 		c.noteSignedSkip(ctx, owner, repo, number, reason)
 		return headSHA
 	}
@@ -273,6 +274,10 @@ func (c *Client) reconcileSignedPR(ctx context.Context, owner, repo string, pr *
 		c.noteSignedSkip(ctx, owner, repo, number, err.Error())
 		return headSHA
 	}
+	c.recordWriteAudit(AuditActionSignedCommitReauthored, hiveWriteMeta(),
+		WriteTarget{Repo: owner + "/" + repo, Number: number},
+		"branch", head, "base", base, "commit", oid,
+		"replaced_commits", strconv.Itoa(replaced))
 	c.info("signed-commit reconciler: unsigned tail re-authored as one GitHub-signed commit by the App bot",
 		append(logArgs, "base", base, "commit", oid, "replaced_commits", replaced)...)
 	return oid
@@ -349,15 +354,21 @@ func (c *Client) noteSignedSkip(ctx context.Context, owner, repo string, number 
 		}
 	}
 	body := signedReconcileMarker + "\n" +
-		"**Signed commits:** the hive could not re-sign the newest commits on this branch, so the PR head is not Verified. " +
-		"If the base branch requires signed commits, this PR cannot merge until that is resolved.\n\n" +
+		"**Signed commits:** this branch has a commit that is not Verified, and the hive could not re-sign it. " +
+		"If the base branch requires signed commits, this PR cannot merge until every commit on it is Verified, " +
+		"including any below a Verified head.\n\n" +
 		"Reason: " + reason + "\n\n" +
-		"The hive re-signs only its own agents' commits (`github.app_signed_commits`). To unblock it, sign the commits yourself, " +
-		"or drop them from the branch so the hive can re-sign the agent's work on a later pass. This note is posted once per PR."
+		"The hive re-signs only its own agents' commits (`github.app_signed_commits`) and never re-authors a person's work. " +
+		"To unblock it, either squash the unsigned commit into a commit you sign yourself " +
+		"(an interactive rebase marking it `fixup` into your commit, then force-push the signed result), " +
+		"or drop your own commit from the branch so the hive can re-sign the agent's work on a later pass, " +
+		"then push your change again, signed, on top. This note is posted once per PR."
 	if _, _, err := c.client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
 		c.warn("signed-commit reconciler: posting the skip note failed", "repo", owner+"/"+repo, "pr", number, "err", err)
 		return
 	}
 	c.signedReconcile.markNoted(key)
+	c.recordWriteAudit(AuditActionSignedCommitSkipNoted, hiveWriteMeta(),
+		WriteTarget{Repo: owner + "/" + repo, Number: number}, "reason", reason)
 	c.info("signed-commit reconciler: noted on the PR why it can't be signed", "repo", owner+"/"+repo, "pr", number)
 }

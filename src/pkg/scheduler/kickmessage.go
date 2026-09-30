@@ -96,14 +96,14 @@ func (s *Scheduler) formatIssueListWithPolicyForAgent(issues []github.Issue, ref
 				reason = "was claimed by an external author"
 			}
 			prRef := fmt.Sprintf("%s#%d", issue.ClaimContext.PRRepo, issue.ClaimContext.PRNumber)
-			b.WriteString(fmt.Sprintf("    ↳ merged PR context: %s %s; verify whether the merged work resolved this issue before implementing", prRef, reason))
-			if hasIssueLabel(issue.Labels, github.VerifiedOpenLabel) {
-				b.WriteString("; verified-open: an earlier verification found remaining work — implement the rest")
-			} else {
-				b.WriteString(fmt.Sprintf("; if work remains, label it `%s` (hive then stops re-marking it likely-done)", github.VerifiedOpenLabel))
-			}
+			b.WriteString(fmt.Sprintf("    ↳ merged in %s", prRef))
 			if issue.ClaimContext.PRURL != "" {
 				b.WriteString(fmt.Sprintf(" (%s)", issue.ClaimContext.PRURL))
+			}
+			if hasIssueLabel(issue.Labels, github.VerifiedOpenLabel) {
+				b.WriteString(fmt.Sprintf("; already verified (%s): remaining work is confirmed — do NOT re-verify, implement the rest", github.VerifiedOpenLabel))
+			} else {
+				b.WriteString(fmt.Sprintf("; verify once: close the issue if resolved, otherwise label it `%s` and implement the remainder (hive then stops asking); context: %s", github.VerifiedOpenLabel, reason))
 			}
 			b.WriteString("\n")
 		}
@@ -307,6 +307,7 @@ func (s *Scheduler) buildAgentMessage(agentName string, issues []github.Issue, a
 	// operator overrides vulnerable indefinitely (kubestellar/hive#4744).
 	defer func() {
 		message = s.addHeldPRCoordination(agentName, actionable, message)
+		message = s.addGuideFlow(agentName, actionable, message)
 		// Formal verification is an operator-enabled quality capability, not a
 		// property of one particular prompt file. Inject its contract after
 		// template resolution so local edits, remote prompts, replicas, scheduled
@@ -324,6 +325,10 @@ func (s *Scheduler) buildAgentMessage(agentName string, issues []github.Issue, a
 		// agent opened is stuck behind unresolved external review-bot threads
 		// and needs a push + in-thread replies before any new work.
 		message = s.addReviewThreadFixFirst(agentName, message)
+		// PR follow-up handoff (hivecommons/hive#9583, default off): the
+		// reasoning behind the agent's own PRs with open follow-ups, for the
+		// fresh session this kick starts.
+		message = s.addPRFollowUpHandoff(agentName, message)
 		// Non-GitHub work source: tell the agent how the tracker half of its
 		// policy maps onto Linear (identity, auth, filing, PR linking, hold).
 		// Same seam, same reason — a customized template cannot omit it.

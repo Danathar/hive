@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/mention"
 )
 
@@ -57,7 +58,7 @@ func (b *boot) syncMentionRuntime() {
 		},
 		Audit: func(action, detail, agentName string) {
 			b.dashSrv.AuditLog("system", action, detail, agentName)
-			recordLifecycleFromAudit(b.dashSrv, b.cfg.Project.Org, action, detail, agentName)
+			recordLifecycleFromAudit(b.dashSrv, b.cfg.Project.Org, github.AuditRecord{Action: action, Detail: detail, Agent: agentName})
 		},
 	})
 	poller := mention.NewPoller(nil, func() []string {

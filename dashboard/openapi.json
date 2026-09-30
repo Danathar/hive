@@ -10606,6 +10606,79 @@
         }
       }
     },
+    "/api/config/governor/question-autoclose": {
+      "get": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Get question autoclose settings",
+        "responses": {
+          "200": {
+            "description": "Settings"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Update question autoclose settings",
+        "responses": {
+          "200": {
+            "description": "Updated"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Owner access required"
+          }
+        }
+      }
+    },
+    "/api/config/governor/question-autoclose/schedule": {
+      "get": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Get scheduled question autoclose entries",
+        "responses": {
+          "200": {
+            "description": "Schedule"
+          }
+        }
+      }
+    },
+    "/api/config/write-surface": {
+      "get": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Get write-surface allowlist",
+        "responses": {
+          "200": {
+            "description": "Write-surface config"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Update write-surface allowlist",
+        "responses": {
+          "200": {
+            "description": "Updated"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Owner access required"
+          }
+        }
+      }
+    },
     "/api/config/governor/security": {
       "put": {
         "tags": [

@@ -253,6 +253,10 @@ func (m *Manager) kickChunkPauseUnlocked(agent *AgentProcess, epoch int, d time.
 }
 
 func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string) bool {
+	// Consume the one-shot resume flag first, before any early return, so a
+	// skipped delivery cannot leave it armed for an unrelated later kick.
+	skipClear := agent.resumeSkipClear
+	agent.resumeSkipClear = false
 	// Claim the pane for the whole of delivery so the pane poller does not
 	// mistake a kick-in-progress for a hung CLI and restart the session out
 	// from under the typist. See AgentProcess.kickDelivering.
@@ -299,7 +303,7 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 		time.Sleep(staleCheckDelay)
 	}
 
-	if agent.Config.ClearOnKick {
+	if agent.Config.ClearOnKick && !skipClear {
 		m.tmuxSendLiteralForAgent(agent, "/clear")
 		time.Sleep(textToEnterDelay)
 		m.tmuxSendEntersForAgent(agent)
@@ -416,6 +420,9 @@ func (m *Manager) recordDeliveredKickLocked(agent *AgentProcess, message, trigge
 	// fails immediately be recovered without waiting it out.
 	agent.transientNudgesThisKick = 0
 	agent.lastTransientNudge = time.Time{}
+	agent.ciPollBaseline = -1
+	agent.ciPollNudgeSent = false
+	agent.AwaitingCI = false
 
 	snippet := message
 	const maxSnippetLen = 120
@@ -1250,4 +1257,77 @@ func lineIsCLIChrome(line string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	// ciPollNudgeThreshold is how many CI-status commands a single kick may
+	// run before the agent is told to stop polling (#9673).
+	ciPollNudgeThreshold = 3
+	// ciPollNudgeWallClock is the other half of the #9673 ask: a single
+	// blocking `gh run watch` can sit under the count threshold (it is one
+	// command) while still burning the whole kick on a saturated runner
+	// pool. Once the kick has run this long AND at least one CI-poll command
+	// has been seen, treat it the same as crossing the count threshold.
+	ciPollNudgeWallClock = 10 * time.Minute
+	ciPollNudgeMessage   = "Stop polling CI. Do not run gh run watch/view or gh pr checks again this turn: leave the PR as is and move to the next work-list item. The automerge sweep handles green PRs."
+)
+
+var ciPollCommandRe = regexp.MustCompile(`\bgh (?:run (?:watch|view|list)|pr checks)\b`)
+
+func countCIPollCommands(pane string) int {
+	return len(ciPollCommandRe.FindAllStringIndex(stripExplainLines(pane), -1))
+}
+
+// nudgeIfPollingCI tells an agent that keeps polling CI within one kick to
+// move on. Policy templates already forbid it; this is the harness backstop.
+// Sends at most one nudge per kick, and only at an idle prompt so it never
+// splices into a running response.
+//
+// Two independent triggers count as "polling CI" (#9673's ask, item 2): more
+// than ciPollNudgeThreshold poll commands this kick, OR at least one poll
+// command with the kick already running longer than ciPollNudgeWallClock — a
+// single `gh run watch` blocks for the whole wait and would otherwise never
+// cross the count threshold.
+func (m *Manager) nudgeIfPollingCI(agent *AgentProcess, scrollback, visible string) {
+	if agent.kickDelivering.Load() || agent.LastKick == nil {
+		return
+	}
+	count := countCIPollCommands(scrollback)
+	m.mu.Lock()
+	if agent.ciPollBaseline < 0 {
+		agent.ciPollBaseline = count
+		m.mu.Unlock()
+		return
+	}
+	newPolls := count - agent.ciPollBaseline
+	overThreshold := newPolls > ciPollNudgeThreshold ||
+		(newPolls > 0 && time.Since(*agent.LastKick) > ciPollNudgeWallClock)
+	alreadyNudged := agent.ciPollNudgeSent
+	m.mu.Unlock()
+
+	// idlePrompt is the same idle-at-prompt gate the nudge below requires: the
+	// agent stopped producing new output after its polling ran. AwaitingCI
+	// (#9673 item 3) uses it too, so the dashboard's "Waiting on CI" state
+	// self-clears the instant the agent starts doing something else, rather
+	// than sticking until the next kick.
+	idlePrompt := !paneShowsActiveWork(visible) && paneShowsEmptyInputPrompt(visible)
+	m.mu.Lock()
+	agent.AwaitingCI = overThreshold && idlePrompt
+	m.mu.Unlock()
+
+	if alreadyNudged || !overThreshold || !idlePrompt {
+		return
+	}
+	if m.tmuxSessionHasAttachedClientForAgent(agent) {
+		return
+	}
+	m.mu.Lock()
+	agent.ciPollNudgeSent = true
+	agent.CIPollNudges++
+	m.mu.Unlock()
+
+	m.logger.Warn("agent is polling CI, sending stop-polling nudge", "name", agent.Name, "polls", count)
+	m.tmuxSendLiteralForAgent(agent, ciPollNudgeMessage)
+	time.Sleep(textToEnterDelay)
+	m.tmuxSendEntersForAgent(agent)
 }

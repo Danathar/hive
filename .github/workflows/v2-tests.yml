@@ -84,6 +84,12 @@ env:
   # observed 16-minute "Restore warm Go build cache" steps against a ~2-minute
   # cold compile. Abort a segment after 1 minute and let the job build instead.
   ACTIONS_CACHE_SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
+  # Build-cache isolation for the self-hosted pool (see
+  # .github/scripts/go-cache-guard.sh). `job` gives each job its own GOCACHE
+  # under RUNNER_TEMP instead of the cephfs volume every runner pod shares;
+  # GOMODCACHE stays shared. Set the repo variable HIVE_GO_BUILD_CACHE=shared
+  # to go back to the shared build cache without a code change.
+  GO_CACHE_GUARD_BUILD_CACHE: ${{ vars.HIVE_GO_BUILD_CACHE || 'job' }}
 
 
 # Cancel superseded PR runs only (#4623). A new push to a PR makes the
@@ -548,16 +554,15 @@ jobs:
         id: partition
         run: |
           R=5
-          # Anchored: drops the monolithic pkg/hub package (the hub job shards
-          # that package by test function) and legacy hub subpackages that were
-          # not part of the rest-bucket contract. Keep pkg/hub/spoke included so
-          # its package-level coverage floor applies going forward (#6066).
+          # Drop only the monolithic pkg/hub package: the hub job shards it
+          # by test function. All hub subpackages belong in the rest buckets
+          # so coverage floors and the no-test-files gate apply to them too.
           # pkg/hubbackup et al. stay here.
           # ./internal/... carries the shared test helpers (internal/testutil)
           # and their contract tests, such as the time.Sleep ratchet in
           # sleep_ratchet_test.go.
           go list ./pkg/... ./cmd/... ./internal/... \
-            | awk '$0 == "github.com/hivecommons/hive/pkg/hub" { next } $0 ~ /^github\.com\/hivecommons\/hive\/pkg\/hub\// && $0 != "github.com/hivecommons/hive/pkg/hub/spoke" { next } { print }' \
+            | awk '$0 == "github.com/hivecommons/hive/pkg/hub" { next } { print }' \
             | grep -Ev '^github\.com/hivecommons/hive/pkg/agent$' \
             | LC_ALL=C sort > rest-pkgs.txt
           if [ ! -s rest-pkgs.txt ]; then
@@ -1033,6 +1038,26 @@ jobs:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.HIVE_RUNNER_LABELS || '["ubuntu-latest"]') || 'ubuntu-latest' }}
     needs: [test-hub, test-agent, test-rest]
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: List packages present in checkout
+        working-directory: src
+        run: |
+          # The coverage scorer consumes shard artifacts, but the package set it
+          # scores must still be bounded by the checked-out tree for this run.
+          # This mirrors coverage-hourly.yml, whose `go test` command can only
+          # emit packages that exist in the checkout.
+          go list ./pkg/... ./cmd/... ./internal/... | LC_ALL=C sort -u > ../existing-pkgs.txt
+          if [ ! -s ../existing-pkgs.txt ]; then
+            echo "::error::go list produced no packages for coverage scoring"
+            exit 1
+          fi
+
       - name: Download shard coverage artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1101,6 +1126,7 @@ jobs:
             # parser fix can gate new packages (pkg/effects, pkg/hub/spoke)
             # without turning unrelated backlog into a blocker.
             [convergence/mutation]=86   # 86.7% on PR #6076
+            [convergence/audit]=6       # 6.6% on PR #9688; untested audit fixture exposed when Go 1.20+ no-test output started hard-failing (#9291)
             [dashboard/webstatic]=88  # 88.9% on PR #6076
             [github/automerge]=88   # 88.6% on PR #6076
             [mint]=89       # 89.1% on PR #6076
@@ -1216,13 +1242,26 @@ jobs:
           # without the gate noticing. The TOTAL line remains ./pkg/...-only
           # for trend continuity.
           cat test-*.log > cover-run.log
-          grep -E '^(ok|FAIL|\?)' cover-run.log \
-            | awk '
-                $2 ~ /\/(pkg|cmd)\// {
-                  seen[$2] = 1
-                  if ($1 == "ok") ok[$2] = 1
-                  else if ($1 == "FAIL") fail[$2] = 1
-                  else if ($1 == "?") no_tests[$2] = 1
+          awk '
+                NR == FNR {
+                  exists[$1] = 1
+                  next
+                }
+                $1 == "ok" || $1 == "FAIL" || $1 == "?" {
+                  if (!exists[$2]) next
+                  if ($2 ~ /\/(pkg|cmd)\//) {
+                    seen[$2] = 1
+                    if ($1 == "ok") ok[$2] = 1
+                    else if ($1 == "FAIL") fail[$2] = 1
+                    else if ($1 == "?") no_tests[$2] = 1
+                  }
+                  next
+                }
+                /^\t.*\t\tcoverage: 0\.0% of statements$/ {
+                  if (exists[$1] && $1 ~ /\/(pkg|cmd)\//) {
+                    seen[$1] = 1
+                    no_tests[$1] = 1
+                  }
                 }
                 END {
                   for (pkg in seen) {
@@ -1231,7 +1270,7 @@ jobs:
                     else if (no_tests[pkg]) print "?", pkg
                   }
                 }
-              ' \
+              ' ../existing-pkgs.txt cover-run.log \
             | LC_ALL=C sort -u > pkg-states.txt
 
           # Second fail-closed guard, for the same reason as the TOTAL one:

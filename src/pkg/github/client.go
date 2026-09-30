@@ -54,9 +54,19 @@ type Client struct {
 	// value, and what every test constructs) means no scoping, so the client
 	// behaves exactly as it did before.
 	agentServesRepo func(agent, repo string) bool
-	exemptLabels    []string
-	holdLabelsMu    sync.RWMutex
-	holdLabels      []string
+	// neutralizeMentions reports whether an agent's lane has opted in to
+	// write_surface.neutralize_mentions (hivecommons/hive#9587). Guarded by
+	// reposMu like agentMayWrite. Nil means no lane is covered, so bodies are
+	// posted as written.
+	neutralizeMentions func(agent string) bool
+	// agentMayWrite reports whether an agent's lane may perform a write
+	// operation through the request relays (hivecommons/hive#9587). Guarded
+	// by reposMu for the same reason as agentServesRepo. Nil means no
+	// allowlist, so every operation allowed today stays allowed.
+	agentMayWrite func(agent, op string) bool
+	exemptLabels  []string
+	holdLabelsMu  sync.RWMutex
+	holdLabels    []string
 	// issueFilter is the operator's project.issue_filter (require_labels
 	// allow-list) gating which issues become actionable at all. The exclude
 	// polarity is NOT here — it is exemptLabels above (governor.labels.exempt,
@@ -157,6 +167,13 @@ type Client struct {
 	selfAuthorizationHoldEnabled func(repo string) bool
 	selfAuthDisabledLoggedMu     sync.Mutex
 	selfAuthDisabledLogged       map[string]bool
+	// reporterTrustHoldEnabled and reporterTrusted are the live config seams
+	// for the #9665 reporter-trust hold (pr_reporter_trust.go). Both nil
+	// until the boot wiring installs them; nil means "off" and "nobody",
+	// respectively, so an unwired client never holds.
+	reporterTrustMu          sync.RWMutex
+	reporterTrustHoldEnabled func(repo string) bool
+	reporterTrusted          func(login, association string) bool
 	// prSignedCommits, when set and returning true, makes the PR-request watcher
 	// re-author each head branch through createCommitOnBranch before opening the
 	// PR, so the commit is GitHub-signed (Verified) and authored by the App bot.
@@ -179,14 +196,22 @@ type Client struct {
 	// opens (agent, repo, number, url) — the seam progress surfaces such as
 	// the Linear session emitter hook. atomic so SetPROpenedHook is safe
 	// while the watcher goroutine runs.
-	prOpenedHook     atomic.Pointer[PROpenedHook]
-	prRepoPolicyGate atomic.Pointer[PRRepoPolicyGate]
+	prOpenedHook atomic.Pointer[PROpenedHook]
+	// prOpenedDetailHook is the richer sibling of prOpenedHook (body and
+	// handoff summary included), used by PR follow-up resume (#9583).
+	prOpenedDetailHook atomic.Pointer[PROpenedDetailHook]
+	prRepoPolicyGate   atomic.Pointer[PRRepoPolicyGate]
 	// mergeAuthz gates merge requests from the merge-request watcher against the
 	// per-agent ACMM merge-policy (CanMerge) + forge-resistance AND the merge
 	// TARGET (pinned SHA + governor merge-eligible membership; see
 	// MergeRequestAuthorizer / F4). nil fails closed. Set by
 	// StartMergeRequestWatcher.
 	mergeAuthz MergeRequestAuthorizer
+	// pushBranchAuthz gates push-branch requests from the push-branch-request
+	// watcher against the per-agent ACMM write-policy (CanPush) +
+	// forge-resistance. nil fails closed. Set by
+	// StartPushBranchRequestWatcher.
+	pushBranchAuthz PushBranchRequestAuthorizer
 	// issueAuthz gates issue-create/comment/claim requests from the issue-request
 	// watcher against the per-agent mode policy (CanCreateIssues) +
 	// forge-resistance. nil fails closed. Set by StartIssueRequestWatcher.
@@ -1140,6 +1165,19 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		// exactly as before, and the EXCLUDE polarity stays the sole property
 		// of governor.labels.exempt (the dashboard Labels tab) — which
 		// therefore wins over the require gate by construction.
+		// #9665 reporter trust runs FIRST: a stranger's issue needs a triage
+		// label before anything else is asked of it. Counted apart from the
+		// generic filter bucket so the dashboard can name the reason. Hive-
+		// and bot-filed issues are not "reporters" in this sense; they go
+		// through #5117 on the PR side instead, so only human authors are
+		// judged here.
+		if ra, ok := issueFilter.(ReporterAdmitter); ok && ra.ReporterTrustEnabled() && c.isHumanAuthor(issue.GetUser()) {
+			if !ra.AdmitsReporter(labels, safeGetLogin(issue.GetUser()), issue.GetAuthorAssociation()) {
+				breakdown.ReporterTriage++
+				continue
+			}
+		}
+
 		if !issueFilter.Admits(labels) {
 			breakdown.Filtered++
 			continue
@@ -2024,8 +2062,8 @@ func (c *Client) QueuePRAutoMerge(ctx context.Context, repo string, number int, 
 	// Audit the review so it counts as activity on the trail. This is the hive's
 	// own auto-merge self-approval (a governor action); agent-authored reviews
 	// come through the review-request watcher, which audits separately.
-	c.recordCreationAudit(AuditActionPRReviewed, InvocationMeta{Agent: AttributionAgentGovernor},
-		"repo", owner+"/"+repoName, "number", strconv.Itoa(number),
+	c.recordWriteAudit(AuditActionPRReviewed, InvocationMeta{Agent: AttributionAgentGovernor},
+		WriteTarget{Repo: owner + "/" + repoName, Number: number},
 		"agent", queuedBy, "state", "approved")
 	if err := c.AddLabels(ctx, owner+"/"+repoName, number, []string{label}); err != nil {
 		return fmt.Errorf("adding %s label: %w", label, err)
@@ -3034,9 +3072,8 @@ func (c *Client) RecordPRMergedAudit(repo string, number int, method, sha, path 
 	if c == nil {
 		return
 	}
-	c.recordCreationAudit(AuditActionPRMerged, InvocationMeta{Agent: AttributionAgentGovernor},
-		"repo", repo,
-		"number", strconv.Itoa(number),
+	c.recordWriteAudit(AuditActionPRMerged, InvocationMeta{Agent: AttributionAgentGovernor},
+		WriteTarget{Repo: repo, Number: number},
 		"method", method,
 		"sha", sha,
 		"path", path)
@@ -3056,11 +3093,16 @@ type RepoIssueBreakdown struct {
 	HiveAdvisory        int `json:"hive_advisory"`
 	DependencyDashboard int `json:"dependency_dashboard"`
 	Filtered            int `json:"filtered"`
-	Other               int `json:"other"`
+	// ReporterTriage counts open issues from reporters the hive does not
+	// trust that are waiting for a maintainer's triage label (#9665). Kept
+	// apart from Filtered so the repo card can say "N awaiting reporter
+	// triage" rather than folding them into the generic filter bucket.
+	ReporterTriage int `json:"reporter_triage,omitempty"`
+	Other          int `json:"other"`
 }
 
 func (b RepoIssueBreakdown) Total() int {
-	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.Other
+	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.ReporterTriage + b.Other
 }
 
 type RepoPRBreakdown struct {

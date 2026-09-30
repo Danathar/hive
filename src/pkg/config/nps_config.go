@@ -12,9 +12,9 @@ import (
 // 0/false/no/off); anything else is ignored and the config value applies.
 const NPSEnabledEnvVar = "HIVE_NPS_ENABLED"
 
-// HiveTypeHosted is the hub.hive_type value the hub's provisioning template
-// stamps into every hosted spoke's config (pkg/hub saas_provision.go).
-const HiveTypeHosted = "hosted"
+// The hosted default below keys off HiveTypeHosted (proxy_inject.go), the
+// hub.hive_type value the hub's provisioning template stamps into every hosted
+// spoke's config (pkg/hub saas_provision.go).
 
 // NPSFeedbackEnabled reports whether the dashboard NPS prompt is enabled for
 // this hive and may forward responses to the hub.

@@ -62,9 +62,19 @@ chmod +x "$MOCK_GH"
 # Production deliberately has no environment-variable override for this trust
 # boundary (#3249). Redirect the marker only in the temporary test copy, via a
 # rewrite of the constant (portable across GNU/BSD sed).
-sed "s|CONTRIBUTOR_MODE_MARKER=\"/etc/hive/contributor-mode\"|CONTRIBUTOR_MODE_MARKER=\"${WORK_DIR}/contributor-marker\"|" "$WRAPPER" >"$TEST_WRAPPER"
+# The write-surface enforce list (#9587) is a constant for the same reason, and
+# is redirected the same way: the sandbox check must not be answerable by a
+# path the enforced agent chooses.
+WRITE_SURFACE_FILE="${WORK_DIR}/write-surface-enforce.json"
+sed -e "s|CONTRIBUTOR_MODE_MARKER=\"/etc/hive/contributor-mode\"|CONTRIBUTOR_MODE_MARKER=\"${WORK_DIR}/contributor-marker\"|" \
+    -e "s|WRITE_SURFACE_ENFORCE_FILE=\"/var/run/hive-metrics/write-surface-enforce.json\"|WRITE_SURFACE_ENFORCE_FILE=\"${WRITE_SURFACE_FILE}\"|" \
+    "$WRAPPER" >"$TEST_WRAPPER"
 if ! grep -q "CONTRIBUTOR_MODE_MARKER=\"${WORK_DIR}/contributor-marker\"" "$TEST_WRAPPER"; then
   echo "FATAL: failed to redirect CONTRIBUTOR_MODE_MARKER in the test copy — wrapper constant changed?" >&2
+  exit 1
+fi
+if ! grep -q "WRITE_SURFACE_ENFORCE_FILE=\"${WRITE_SURFACE_FILE}\"" "$TEST_WRAPPER"; then
+  echo "FATAL: failed to redirect WRITE_SURFACE_ENFORCE_FILE in the test copy — wrapper constant changed?" >&2
   exit 1
 fi
 chmod +x "$TEST_WRAPPER"
@@ -841,6 +851,327 @@ else
   _body_fail "pr create labels agent/<lane> even when the display name differs" \
     "no recorded 'gh pr create' invocation"
 fi
+
+echo ""
+echo "=== Label/reviewer edits route through the issue-request relays (#9773) ==="
+
+# A PURE `gh issue edit --add-label` / `gh pr edit --add-reviewer` must become
+# a label / request-review relay request instead of a direct gh call, with the
+# same fall-through-to-gh behavior as the other relay redirects when the edit
+# mixes in flags the relays cannot express, names no explicit item, or comes
+# from a contributor. These cases assert BOTH sides: the relay argv the stub
+# recorded, and whether the mock gh saw the edit at all.
+RELAY_AGENT="ghwrapper-test-9773-$$"
+RELAY_BIN="${WORK_DIR}/relay-bin"
+RELAY_LOG="${WORK_DIR}/relay-log"
+mkdir -p "$RELAY_BIN"
+cat >"${RELAY_BIN}/hive-open-issue" <<'STUB'
+#!/usr/bin/env bash
+# Record each relay invocation as one line of shell-quoted argv, so the
+# assertions can compare the exact request shape the wrapper built.
+python3 -c 'import shlex, sys; print(" ".join(shlex.quote(a) for a in sys.argv[1:]))' "$@" >>"$HIVE_OPEN_ISSUE_LOG"
+if [[ -n "${HIVE_OPEN_ISSUE_FAIL:-}" ]]; then
+  exit "$HIVE_OPEN_ISSUE_FAIL"
+fi
+exit 0
+STUB
+chmod +x "${RELAY_BIN}/hive-open-issue"
+
+RELAY_RC=0
+_relay_run() {
+  local marker="$1"
+  shift
+  : >"$RELAY_LOG"
+  CAPTURE_SEQ=$((CAPTURE_SEQ + 1))
+  CAPTURE_DIR="${WORK_DIR}/argv-${CAPTURE_SEQ}"
+  mkdir -p "$CAPTURE_DIR"
+  if [[ "$marker" == "contributor" ]]; then
+    touch "${WORK_DIR}/contributor-marker"
+  else
+    rm -f "${WORK_DIR}/contributor-marker"
+  fi
+  RELAY_RC=0
+  env \
+    PATH="${RELAY_BIN}:${PATH}" \
+    HIVE_OPEN_ISSUE_LOG="$RELAY_LOG" \
+    HIVE_OPEN_ISSUE_FAIL="${HIVE_OPEN_ISSUE_FAIL:-}" \
+    HIVE_AGENT="$RELAY_AGENT" \
+    HIVE_AGENT_DISPLAY_NAME="$RELAY_AGENT" \
+    HIVE_AGENT_ID="$RELAY_AGENT" \
+    HIVE_AGENT_MODE="" \
+    HIVE_ACMM_LEVEL="0" \
+    MOCK_GH_LOGIN="test-bot[bot]" \
+    GH_TOKEN="test-token-mock" \
+    MOCK_GH_ARGV_DIR="$CAPTURE_DIR" \
+    bash "$TEST_WRAPPER" "$@" >/dev/null 2>&1 || RELAY_RC=$?
+  rm -f "${WORK_DIR}/contributor-marker"
+}
+
+_relay_fail() {
+  echo "FAIL: $1"
+  shift
+  local line
+  for line in "$@"; do echo "  $line"; done
+  FAILED=$((FAILED + 1))
+}
+
+# Assert the stub recorded exactly the given relay invocation(s), in order,
+# and that the mock gh never saw the `<sub> edit` itself.
+_expect_relayed() {
+  local desc="$1" sub="$2"
+  shift 2
+  local got want
+  got="$(cat "$RELAY_LOG" 2>/dev/null || true)"
+  want="$(printf '%s\n' "$@")"
+  if [[ "$got" != "$want" ]]; then
+    _relay_fail "$desc" "relay argv mismatch" "want: ${want//$'\n'/ | }" "got:  ${got//$'\n'/ | }"
+    return 1
+  fi
+  if _capture_invocation "$sub" edit >/dev/null 2>&1; then
+    _relay_fail "$desc" "the edit ALSO reached gh directly — the relay must replace the direct call"
+    return 1
+  fi
+  if [[ "$RELAY_RC" != "0" ]]; then
+    _relay_fail "$desc" "expected exit 0, got ${RELAY_RC}"
+    return 1
+  fi
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+# Assert the relay was NOT used and the edit fell through to gh unchanged.
+_expect_fell_through() {
+  local desc="$1" sub="$2"
+  if [[ -s "$RELAY_LOG" ]]; then
+    _relay_fail "$desc" "unexpected relay call(s): $(cat "$RELAY_LOG")"
+    return 1
+  fi
+  if ! _capture_invocation "$sub" edit >/dev/null 2>&1; then
+    _relay_fail "$desc" "the edit never reached gh — fall-through must not lose the operation"
+    return 1
+  fi
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+_relay_run agent issue edit 42 --repo test/repo --add-label bug,docs
+_expect_relayed "issue edit --add-label relays through hive-open-issue label" issue \
+  'label --repo test/repo 42 --label bug,docs'
+
+_relay_run agent issue edit 42 -R test/repo --remove-label stale --add-label=triaged
+_expect_relayed "issue edit add+remove labels relay in one label request" issue \
+  'label --repo test/repo 42 --label triaged --remove-label stale'
+
+_relay_run agent pr edit 7 --repo test/repo --add-reviewer alice --add-reviewer bob
+_expect_relayed "pr edit --add-reviewer relays through hive-open-issue request-review" pr \
+  'request-review --repo test/repo 7 --reviewer alice,bob'
+
+_relay_run agent pr edit 7 --repo test/repo --add-label docs --add-reviewer alice
+_expect_relayed "pr edit with labels AND reviewers issues both relay requests" pr \
+  'label --repo test/repo 7 --label docs' \
+  'request-review --repo test/repo 7 --reviewer alice'
+
+_relay_run agent issue edit https://github.com/test/repo/issues/42 --repo test/repo --add-label bug
+_expect_relayed "issue edit by URL relays with the URL as the item" issue \
+  'label --repo test/repo https://github.com/test/repo/issues/42 --label bug'
+
+# Mixed edits carry state the relays cannot express — they must reach gh
+# whole, never be half-relayed (an L6 hive keeps its full direct surface).
+_relay_run agent issue edit 42 --repo test/repo --add-label bug --title 'new title'
+_expect_fell_through "issue edit mixing --add-label with --title falls through to gh" issue
+
+_relay_run agent pr edit 7 --repo test/repo --remove-reviewer alice
+_expect_fell_through "pr edit --remove-reviewer (no relay for it) falls through to gh" pr
+
+_relay_run agent pr edit 7 --repo test/repo --add-reviewer alice --milestone v9
+_expect_fell_through "pr edit mixing --add-reviewer with --milestone falls through to gh" pr
+
+# No explicit item: gh resolves the current branch's PR, which the wrapper
+# cannot, so the direct path keeps working.
+_relay_run agent pr edit --repo test/repo --add-reviewer alice
+_expect_fell_through "pr edit with no explicit number falls through to gh" pr
+
+_relay_run agent pr edit my-branch --repo test/repo --add-label docs
+_expect_fell_through "pr edit by branch name falls through to gh" pr
+
+# Contributors edit under their own identity — no relay, same as the other
+# relay redirects.
+_relay_run contributor issue edit 42 --repo test/repo --add-label bug
+_expect_fell_through "contributor issue edit --add-label is NOT relayed" issue
+
+# A refused relay request (reserved label, allowlist) must surface as a
+# non-zero exit, not read as success.
+HIVE_OPEN_ISSUE_FAIL=3 _relay_run agent issue edit 42 --repo test/repo --add-label lgtm
+if [[ "$RELAY_RC" == "3" ]]; then
+  echo "PASS: a failing relay request propagates its exit code to the caller"
+  PASSED=$((PASSED + 1))
+else
+  _relay_fail "a failing relay request propagates its exit code to the caller" \
+    "expected exit 3, got ${RELAY_RC}"
+fi
+
+echo ""
+echo "=== write_surface.enforce refuses direct writes in the sandbox (#9587) ==="
+
+# A lane the operator lists under write_surface.enforce has the audited relays
+# as its only write path. The GitHub proxy refuses its direct writes (#9772);
+# these cases assert the SAME refusal here in the sandbox, where the write is
+# stopped before it is sent — and, just as importantly, that nothing changes
+# for a lane that is not listed, that reads are never touched, and that the
+# relays themselves keep working.
+WS_AGENT="ghwrapper-test-9587-$$"
+WS_RELAY_BIN="${WORK_DIR}/ws-relay-bin"
+WS_OUTPUT=""
+WS_RC=0
+
+# _ws_publish writes the enforce list the hive would publish. "-" removes it,
+# which is what a hive that enforces nothing (the default) looks like.
+_ws_publish() {
+  if [[ "$1" == "-" ]]; then
+    rm -f "$WRITE_SURFACE_FILE"
+    return 0
+  fi
+  printf '%s\n' "$1" >"$WRITE_SURFACE_FILE"
+}
+
+# _ws_run runs the wrapper as WS_AGENT. PATH deliberately excludes the relay
+# stubs unless the caller puts them back, so a command with a relay redirect
+# reaches the direct path the gate guards.
+_ws_run() {
+  WS_RC=0
+  rm -f "${WORK_DIR}/contributor-marker"
+  WS_OUTPUT="$(env \
+    HIVE_AGENT="$WS_AGENT" \
+    HIVE_AGENT_DISPLAY_NAME="$WS_AGENT" \
+    HIVE_AGENT_ID="$WS_AGENT" \
+    HIVE_AGENT_MODE="" \
+    HIVE_ACMM_LEVEL="0" \
+    MOCK_GH_LOGIN="test-bot[bot]" \
+    GH_TOKEN="test-token-mock" \
+    bash "$TEST_WRAPPER" "$@" 2>&1)" || WS_RC=$?
+}
+
+# _ws_expect asserts the exit code and whether the refusal answered.
+# want_match / want_absent are grep -E patterns; pass "-" to skip either.
+_ws_expect() {
+  local expected_rc="$1" want_match="$2" want_absent="$3" desc="$4"
+  if [[ "$WS_RC" != "$expected_rc" ]]; then
+    echo "FAIL: $desc"
+    echo "  expected exit code $expected_rc, got $WS_RC"
+    echo "  output: $WS_OUTPUT"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  if [[ "$want_match" != "-" ]] && ! grep -qE "$want_match" <<<"$WS_OUTPUT"; then
+    echo "FAIL: $desc"
+    echo "  expected output to match /${want_match}/"
+    echo "  output: $WS_OUTPUT"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  if [[ "$want_absent" != "-" ]] && grep -qE "$want_absent" <<<"$WS_OUTPUT"; then
+    echo "FAIL: $desc"
+    echo "  expected output NOT to match /${want_absent}/"
+    echo "  output: $WS_OUTPUT"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+WS_ENFORCED="{\"version\":1,\"updated_at\":\"2026-09-30T00:00:00Z\",\"lanes\":[\"${WS_AGENT}\"]}"
+WS_OTHER_LANE="{\"version\":1,\"updated_at\":\"2026-09-30T00:00:00Z\",\"lanes\":[\"someone-else\"]}"
+WS_ALL_LANES="{\"version\":1,\"updated_at\":\"2026-09-30T00:00:00Z\",\"lanes\":[\"*\"]}"
+WS_EMPTY="{\"version\":1,\"updated_at\":\"2026-09-30T00:00:00Z\",\"lanes\":[]}"
+WS_FUTURE="{\"version\":99,\"updated_at\":\"2026-09-30T00:00:00Z\",\"lanes\":[\"${WS_AGENT}\"]}"
+
+# Default off: no published list at all, and an explicitly empty one, both
+# leave every direct write exactly as it was.
+_ws_publish -
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 0 "-" "write_surface.enforce" "no published enforce list leaves a direct gh api write alone"
+
+_ws_publish "$WS_EMPTY"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 0 "-" "write_surface.enforce" "an empty enforce list leaves a direct gh api write alone"
+
+_ws_publish "$WS_OTHER_LANE"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 0 "-" "write_surface.enforce" "a list naming another lane does not enforce this one"
+
+# An unrecognized schema version is not a licence to guess: the file is
+# ignored, which leaves the lane as it was (the proxy refusal is unaffected).
+_ws_publish "$WS_FUTURE"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 0 "-" "write_surface.enforce" "an unknown file version is ignored rather than guessed"
+
+# Listed: every direct write shape is refused, and the refusal names the relay.
+_ws_publish "$WS_ENFORCED"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane's direct gh api write is refused"
+
+_ws_run api graphql -f 'query=mutation { addComment { id } }'
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane's gh api POST to graphql is refused"
+
+_ws_run issue reopen 42 --repo test/repo
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane's gh issue reopen is refused"
+
+_ws_run pr ready 7 --repo test/repo
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane's gh pr ready is refused"
+
+_ws_run label create shiny --repo test/repo
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane's gh label create is refused"
+
+_ws_run issue close 42 --repo test/repo
+_ws_expect 1 "hive-open-issue close" "-" "a refused close names the relay that performs it"
+
+_ws_run pr review 7 --repo test/repo --approve --body ok
+_ws_expect 1 "hive-review" "-" "a refused review names hive-review"
+
+_ws_publish "$WS_ALL_LANES"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 1 "write_surface.enforce" "-" "a \"[*]\" list enforces every lane"
+
+# Names are matched without regard to case, the same as config does.
+_ws_publish "{\"version\":1,\"lanes\":[\"$(printf '%s' "$WS_AGENT" | tr '[:lower:]' '[:upper:]')\"]}"
+_ws_run api repos/test/repo/labels -X POST -f name=bug
+_ws_expect 1 "write_surface.enforce" "-" "an enforced lane is matched without regard to case"
+
+# Reads are never touched — that is the whole point of enforcing the WRITE
+# surface, and an agent that cannot read cannot work.
+_ws_publish "$WS_ENFORCED"
+_ws_run api repos/test/repo/labels
+_ws_expect 0 "-" "write_surface.enforce" "an enforced lane still reads through gh api"
+
+_ws_run issue view 42 --repo test/repo
+_ws_expect 0 "-" "write_surface.enforce" "an enforced lane still views an issue"
+
+_ws_run search issues --repo test/repo bug
+_ws_expect 0 "-" "write_surface.enforce" "an enforced lane still searches"
+
+# The relays are the point of the refusal, so they must keep working for an
+# enforced lane: a close with the relay on PATH is relayed, never refused.
+mkdir -p "$WS_RELAY_BIN"
+cat >"${WS_RELAY_BIN}/hive-open-issue" <<'STUB'
+#!/usr/bin/env bash
+echo "relayed: $*"
+exit 0
+STUB
+chmod +x "${WS_RELAY_BIN}/hive-open-issue"
+WS_RC=0
+WS_OUTPUT="$(env \
+  PATH="${WS_RELAY_BIN}:${PATH}" \
+  HIVE_AGENT="$WS_AGENT" \
+  HIVE_AGENT_DISPLAY_NAME="$WS_AGENT" \
+  HIVE_AGENT_ID="$WS_AGENT" \
+  HIVE_AGENT_MODE="" \
+  HIVE_ACMM_LEVEL="0" \
+  MOCK_GH_LOGIN="test-bot[bot]" \
+  GH_TOKEN="test-token-mock" \
+  bash "$TEST_WRAPPER" issue close 42 --repo test/repo 2>&1)" || WS_RC=$?
+_ws_expect 0 "relayed: close" "write_surface.enforce" \
+  "an enforced lane still closes an issue through the relay"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"

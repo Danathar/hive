@@ -735,6 +735,13 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 		if proc.State == agent.StateRunning && !proc.KickOutcome.Settled(proc.LastKick) {
 			busy = "working"
 		}
+		// awaitingCI (#9673 item 3): the manager's CI-poll guard already
+		// detects "the agent's recent tool calls are all CI polls" (it uses
+		// the same signal to decide whether to send the stop-polling nudge).
+		// A "working" agent stuck there reads exactly like one making
+		// progress, so the dashboard needs its own flag to render "Waiting on
+		// CI" instead — only meaningful while busy is "working".
+		awaitingCI := busy == "working" && proc.AwaitingCI
 
 		lastKick := ""
 		lastKickAt := ""
@@ -839,6 +846,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			State:                  string(proc.State),
 			Starting:               proc.Starting && proc.State != agent.StateRunning,
 			Busy:                   busy,
+			AwaitingCI:             awaitingCI,
 			Paused:                 proc.Paused,
 			PausedAt:               formatOptionalTime(proc.PausedAt),
 			PausedReason:           proc.PausedReason,
@@ -877,8 +885,12 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			// #4697: transient-API-error retry nudges, surfaced beside the
 			// other two nudge counters.
 			TransientNudges: proc.TransientNudges,
-			Conditions:      proc.WatchdogConditions,
-			WatchdogMode:    watchdogMode,
+			// #9673: CI-poll stop nudges, surfaced beside the other nudge
+			// counters so a fleet operator can spot an agent that keeps
+			// polling CI after the harness told it to stop.
+			CIPollNudges: proc.CIPollNudges,
+			Conditions:   proc.WatchdogConditions,
+			WatchdogMode: watchdogMode,
 
 			UnscheduledInMode: unscheduledInMode,
 			CadenceModes:      cadenceModes,
