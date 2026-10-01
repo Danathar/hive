@@ -1510,6 +1510,7 @@ func (b *boot) wireBootClosures() {
 			HookFire: func(ctx context.Context, p hooks.Payload) {
 				hookDispatcher().Fire(ctx, p)
 			},
+			OnACMMLevelChanged: b.onACMMLevelChanged,
 			RunBurndown: func(ctx context.Context, key string) (*dashboard.RunBurndown, error) {
 				w := b.cfg.Governor.WorkSource.Wavefront
 				if !w.Enabled {
@@ -1727,12 +1728,14 @@ func (b *boot) wireBootClosures() {
 		}
 
 		maxAge := time.Duration(retentionDays) * 24 * time.Hour
+		homeMaxAge := time.Duration(sessionprune.DefaultHomeRetentionDays) * 24 * time.Hour
 		stop := make(chan struct{})
 
 		go func() {
 			// Run once at startup rather than waiting a full interval. A spoke that
 			// restarts more often than the interval would otherwise never prune.
 			runSessionPrune(b.logger, dir, maxAge)
+			runAgentHomePrune(b.logger, agentHomesRoot, homeMaxAge)
 
 			ticker := time.NewTicker(sessionPruneInterval)
 			defer ticker.Stop()
@@ -1742,6 +1745,7 @@ func (b *boot) wireBootClosures() {
 					return
 				case <-ticker.C:
 					runSessionPrune(b.logger, dir, maxAge)
+					runAgentHomePrune(b.logger, agentHomesRoot, homeMaxAge)
 				}
 			}
 		}()
@@ -2445,8 +2449,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 			pushBranch: b.agentMgr.AuthorizePushBranch,
 			logger:     b.logger,
 		})
-		// The ACMM verdict is re-read on every (re)start, so a hand-over
-		// after a level change starts the sweep under the current level.
+		// The ACMM verdict is re-read on every (re)start; the dashboard's
+		// OnACMMLevelChanged hook restarts this generation when a runtime
+		// level change crosses the self-merge boundary.
 		sweepDone := deps.startSelfAuthoredSweep(ctx, client, b.cfg.AutoMerge.MaxMerges, b.cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(b.cfg.ACMMLevel), b.cfg.ACMMLevel, autoMergeOpts)
 		return joinDone(relaysDone, sweepDone)
 	}, b.logger)
@@ -3737,7 +3742,14 @@ func (b *boot) bootWatchersWith(deps bootWatchersDeps) {
 	// Watch hive.yaml for external changes and reload config when modified
 	b.configWatcher = deps.newConfigWatcher(b.configPath, func(newCfg *config.Config) {
 		b.cfgReloadMu.Lock()
-		defer b.cfgReloadMu.Unlock()
+		prevACMMLevel := b.cfg.ACMMLevelOrZero()
+		nextACMMLevel := prevACMMLevel
+		defer func() {
+			b.cfgReloadMu.Unlock()
+			if prevACMMLevel != nextACMMLevel {
+				b.onACMMLevelChanged(prevACMMLevel, nextACMMLevel)
+			}
+		}()
 
 		// Preserve runtime-only fields that are not in the YAML
 		newCfg.HiveID = b.cfg.HiveID
@@ -3777,6 +3789,7 @@ func (b *boot) bootWatchersWith(deps bootWatchersDeps) {
 
 		// Swap the in-memory config pointer contents
 		*b.cfg = *newCfg
+		nextACMMLevel = b.cfg.ACMMLevelOrZero()
 
 		// Re-sync subsystems that cache config values
 		b.ghClient.SetRepos(b.cfg.Project.Repos)
@@ -5642,6 +5655,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 						b.cfg.GitHub.APIURL = pc.GitHubAPIURL
 					}
 				}
+				prevLevel := b.cfg.ACMMLevelOrZero()
 				level := pc.ACMMLevel
 				b.cfg.ACMMLevel = &level
 
@@ -5658,6 +5672,9 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// (config save writes the overlay hive.yaml, same as level switches).
 				if err := b.cfg.Save(); err != nil {
 					b.logger.Error("failed to save claimed project config", "error", err)
+				}
+				if prevLevel != level {
+					b.onACMMLevelChanged(prevLevel, level)
 				}
 
 			}),
@@ -8782,6 +8799,54 @@ func runDuplicateSweepIfDue(ctx context.Context, cfg *config.Config, ghClient *g
 			"commented": strconv.Itoa(result.Commented),
 		},
 	})
+}
+
+// issueUnparkSweepInterval is the minimum spacing between un-park sweeps. A
+// maintainer who replies "/hive approve" is waiting for something to happen, so
+// this runs more often than the task-list sweep; it only reads the comments of
+// issues that are actually parked, which keeps the API cost proportional to the
+// backlog a person is waiting on.
+const issueUnparkSweepInterval = 5 * time.Minute
+
+// runIssueUnparkSweepIfDue re-queues parked issues a maintainer has answered
+// with a `/hive` command, and keeps the "What to reply" block current on every
+// parked issue (hivecommons/hive#9879). Every gate — human author, live write
+// permission, first-line command, recent unedited comment, per-tick cap — lives
+// inside SweepIssueUnparkCommands; this function is only the scheduler and the
+// dashboard audit sink, mirroring runTaskListSweepIfDue above.
+func runIssueUnparkSweepIfDue(ctx context.Context, ghClient *github.Client, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < issueUnparkSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepIssueUnparkCommands(ctx, github.IssueUnparkSweepOptions{
+		MaxActions: github.DefaultIssueUnparkSweepMaxActions,
+		Audit: func(event github.IssueUnparkEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, actor=%s, decision=%s",
+				event.Repo, event.Number, event.Actor, event.Decision)
+			dashSrv.AuditLogRecord("system", "issue-unparked-by-reply", detail, "", event.Repo, event.Number)
+		},
+	})
+	if err != nil {
+		logger.Warn("issue un-park sweep failed", "error", err)
+		return
+	}
+	if result == nil {
+		return
+	}
+	if len(result.Unparked) > 0 || result.Replies > 0 {
+		logger.Info("issue un-park sweep complete",
+			"seen", result.Seen, "unparked", len(result.Unparked), "replies", result.Replies, "skipped", result.Skipped)
+	}
 }
 
 var (

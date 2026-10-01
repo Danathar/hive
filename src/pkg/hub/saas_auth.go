@@ -782,13 +782,15 @@ func (s *HubServer) handleUserToken(w http.ResponseWriter, r *http.Request) {
 }
 
 var publicExactPaths = map[string]struct{}{
-	knowledgeExportPath: {},
-	"/api/style":        {},
-	"/api/theme.css":    {},
-	"/api/themes":       {},
-	"/components.css":   {},
-	ssoHandoffPath:      {},
-	"/tokens.css":       {},
+	knowledgeExportPath:        {},
+	"/api/gh-user-auth/status": {},
+	"/api/style":               {},
+	"/api/theme.css":           {},
+	"/api/themes":              {},
+	"/auth/return":             {},
+	"/components.css":          {},
+	ssoHandoffPath:             {},
+	"/tokens.css":              {},
 }
 
 var publicTreePaths = []string{"/api/contribute", "/api/leaderboard", "/contribute", "/leaderboard", "/snapshot"}
@@ -1072,7 +1074,10 @@ func (s *HubServer) handleSaaSAuthCheck(w http.ResponseWriter, r *http.Request) 
 		ok = true
 	}
 	if !ok {
-		http.Error(w, "no access to this hive", http.StatusForbidden)
+		// Return 401, not 403, so nginx uses auth-signin and sends the browser
+		// to /login. /login already knows the user is signed in and renders the
+		// branded "not authorized for this hive" page instead of bouncing back.
+		http.Error(w, "no access to this hive", http.StatusUnauthorized)
 		return
 	}
 
@@ -1087,8 +1092,36 @@ func (s *HubServer) handleSaaSAuthCheck(w http.ResponseWriter, r *http.Request) 
 	// open only until it is deployed — see the v3 spoke PR).
 	if proxyAuth := s.spokeProxyAuthToken(hiveID); proxyAuth != "" {
 		w.Header().Set(proxyAuthHeader, proxyAuth)
+	} else {
+		// A spoke running proxyProofRequired refuses every identified request
+		// that arrives without the proof, so from here on this user is signed
+		// in at the hub and locked out of the hive at once (#9785). Say so,
+		// once per hive per cache window, instead of failing silently.
+		s.logSpokeProxyAuthUnresolved(hiveID, username)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// logSpokeProxyAuthUnresolved warns that the auth-check could not resolve the
+// hive's dashboard token and therefore sent identity without proof. Throttled
+// to once per hive per spokeProxyAuthCacheTTL: the auth-check runs on every
+// proxied request, and the missing token is a per-hive condition, not a
+// per-request one.
+func (s *HubServer) logSpokeProxyAuthUnresolved(hiveID, username string) {
+	now := time.Now()
+	s.spokeProxyAuthMu.Lock()
+	last, seen := s.spokeProxyAuthUnresolvedLogged[hiveID]
+	if seen && now.Sub(last) < spokeProxyAuthCacheTTL {
+		s.spokeProxyAuthMu.Unlock()
+		return
+	}
+	if s.spokeProxyAuthUnresolvedLogged == nil {
+		s.spokeProxyAuthUnresolvedLogged = map[string]time.Time{}
+	}
+	s.spokeProxyAuthUnresolvedLogged[hiveID] = now
+	s.spokeProxyAuthMu.Unlock()
+	s.logger.Warn("auth-check: could not resolve the hive's dashboard token; identity sent without X-Hive-Proxy-Auth, a strict spoke will refuse it and the Ingress will bounce the user back to /login",
+		"hive", hiveID, "user", username)
 }
 
 // setPublicPathIdentity sets X-Hive-User / X-Hive-Role / X-Hive-Proxy-Auth on

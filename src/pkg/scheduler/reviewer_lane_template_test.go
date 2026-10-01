@@ -218,9 +218,7 @@ func TestReviewerLaneTemplate_ExtraVarsCannotShadowBuiltins(t *testing.T) {
 func writeOperatorTemplate(t *testing.T, s *Scheduler, body string) {
 	t.Helper()
 	dir := t.TempDir()
-	prev := userSavedPolicyDir
-	userSavedPolicyDir = dir
-	t.Cleanup(func() { userSavedPolicyDir = prev })
+	t.Cleanup(setPolicyDirsForTest("", dir, ""))
 	if err := os.WriteFile(filepath.Join(dir, reviewerLaneTemplate), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

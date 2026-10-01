@@ -8,13 +8,6 @@ package scheduler
 
 import "sync"
 
-// policyDirMu serialises SetPolicyDirsForTest against itself so two tests that
-// both install a seam cannot interleave their save/restore and leak a temp dir
-// into the package globals. It does NOT make the globals safe to mutate while
-// other goroutines read them — a test that installs the seam must not run in
-// parallel with one that resolves templates.
-var policyDirMu sync.Mutex
-
 // SetPolicyDirsForTest points userSavedPolicyDir and clonedPoliciesDir at the
 // given directories and returns a function that restores the previous values.
 //
@@ -34,16 +27,28 @@ var policyDirMu sync.Mutex
 //	restore := scheduler.SetPolicyDirsForTest(t.TempDir(), t.TempDir())
 //	t.Cleanup(restore)
 func SetPolicyDirsForTest(userSaved, cloned string) (restore func()) {
+	return setPolicyDirsForTest("", userSaved, cloned)
+}
+
+func setPolicyDirsForTest(agentHome, userSaved, cloned string) (restore func()) {
 	policyDirMu.Lock()
-	defer policyDirMu.Unlock()
-	prevUserSaved, prevCloned := userSavedPolicyDir, clonedPoliciesDir
-	userSavedPolicyDir, clonedPoliciesDir = userSaved, cloned
+	prevAgentHome, prevUserSaved, prevCloned := agentHomeDir, userSavedPolicyDir, clonedPoliciesDir
+	if agentHome != "" {
+		agentHomeDir = agentHome
+	}
+	if userSaved != "" {
+		userSavedPolicyDir = userSaved
+	}
+	if cloned != "" {
+		clonedPoliciesDir = cloned
+	}
+	policyDirMu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			policyDirMu.Lock()
 			defer policyDirMu.Unlock()
-			userSavedPolicyDir, clonedPoliciesDir = prevUserSaved, prevCloned
+			agentHomeDir, userSavedPolicyDir, clonedPoliciesDir = prevAgentHome, prevUserSaved, prevCloned
 		})
 	}
 }

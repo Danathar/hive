@@ -11,6 +11,55 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.109.0)
+
+### Added
+
+- Self-janitor now also reclaims dated `.local-pre-shared-*` migration snapshots and well-known regenerable caches (`.cache`, `.npm/_cacache`, `.copilot/cache`) under agent homes, age-bounded (14-day default) and symlink-safe, so a spoke no longer crash-loops on a full hive-data volume from this accumulated bulk ([#9869](https://github.com/hivecommons/hive/issues/9869)).
+
+### Fixed
+
+- automerge: restart the merge sweep on runtime ACMM level change, never auto-release level holds, and inform owners when L6 auto-merge becomes active (#9882)
+
+## 2026-10-01 (v5.108.1)
+
+### Fixed
+
+- Hosted contributor profile sign-in now lets grant-less signed-in users resolve their public contributor identity.
+- Hosted contributor profile sign-in now returns grant-less users to the public contributor page, while unauthorized dashboard visits show a clear access-needed page.
+- Align spoke dashboard upgrade offers with the hub-resolved release-channel target and keep heartbeat upgrade delivery latched until the target is actually satisfied.
+
+## 2026-10-01 (v5.108.0)
+
+### Added
+
+- A maintainer can now un-park a `needs-human` issue by replying `/hive approve` or `/hive decision <text>`: the hive clears `needs-human` and `needs-decision`, adds `approved-direction`, leaves any `hold` untouched, and keeps a "What to reply" block with the available commands on every parked issue.
+
+## 2026-10-01 (v5.107.0)
+
+### Added
+
+- A hive-filed issue that an agent split out of a human-filed (or human-acknowledged) parent now inherits that acknowledgement instead of needing `approved-direction` on every child ([#9840](https://github.com/hivecommons/hive/issues/9840)). The issue-request relay records each sub-issue link it makes in `/data/split-parents.json`; enumeration ranks such a child in the acknowledged tier and tags it `[hive-filed+parent-ack #N]` in the kick list, and the #5117 self-authorization gate lets a PR on it through, as long as the parent is still open, not held, and carries its own human signal. Only links the relay made count — a sub-issue link added later in the GitHub UI confers nothing — and inheritance is one level deep, so the hive still cannot approve work it invented.
+- `bin/kick-governor.sh` now pauses all agent kicks when `/data` reaches the same 95% critical threshold as the `data_disk` health check, instead of scheduling new work onto an already-full volume, and resumes automatically once usage recovers; a new [DiskPressure recovery runbook](https://github.com/hivecommons/hive/blob/v5/src/docs/diskpressure-recovery-runbook.md) documents diagnosis, safe cleanup, and volume migration ([#9869](https://github.com/hivecommons/hive/issues/9869)).
+
+### Fixed
+
+- Refuse no-op manual upgrades for release-channel spokes and keep heartbeat upgrade delivery latched until the target is actually satisfied.
+- CI flake coverage now isolates Copilot session refresh, scheduler template seams, campaign lifecycle state, and file-descriptor gauge assertions so v5 race/shuffle runs no longer depend on shared test process state.
+
+## 2026-10-01 (v5.106.0)
+
+### Added
+
+- `hive-open-issue --blocked-by <n[,n]>` records the order of split-out child issues as GitHub "blocked by" dependencies, and enumeration reads those links back so an issue with an open blocker is held out of the kick's actionable list (named in a footer with its blockers) until the blocker closes (#9839).
+- A filling `/data` volume now degrades the hive's health before kubelet evicts the pod ([#9869](https://github.com/hivecommons/hive/issues/9869)). A new `data_disk` check in both `HealthSummary` (the health the hub reads from each heartbeat) and `/api/health/deep` samples the data volume and reports `warn` at 75% and 85% used and `fail` at 95%, naming the mount, the percentage and the free space; the `fail` raises the hub's standing alert for the spoke. Previously the only signal was the pod SIGKILLed seconds after every start.
+
+### Fixed
+
+- A hosted hive no longer bounces a signed-in user back to the hub's `/login` when it rejects the hub's identity proof ([#9785](https://github.com/hivecommons/hive/issues/9785)). The spoke answered a request that carried `X-Hive-User` but a missing or mismatched `X-Hive-Proxy-Auth` with 401, which the hosted Ingress rewrites into its auth-signin redirect; the hub then found the session valid and sent the browser straight back, so the user was signed in at the hub and locked out of the hive at once, with nothing on the hub able to break the cycle. The spoke now answers 403 with a page (or JSON on `/api/`) naming the rejection — a hub↔spoke dashboard-token mismatch that signing in again cannot fix — and logs it; the hub's auth-check now warns, once per hive per cache window, when it could not resolve the hive's dashboard token and had to send identity without proof.
+- `/contribute` no longer paints with the operator's dashboard theme and then swaps in the viewer's contributor theme after load (visible colour and border-radius "settling" on every page load); the head now requests the viewer's theme up front and the deferred script no longer cache-busts and re-fetches the stylesheet it already has (#9847).
+- The push-branch relay now pins `core.hooksPath`, `core.fsmonitor`, and `credential.helper` through `GIT_CONFIG_*` on every git invocation it makes inside an agent's checkout, alongside the existing `safe.directory` and remote-scoped `extraHeader` pairs. Repo-local config in the agent-writable `.git` directory can otherwise make git spawn programs during a push; those overrides take command-line precedence so the relay only ever runs git itself.
+
 ## 2026-10-01 (v5.105.11)
 
 ### Fixed

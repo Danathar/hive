@@ -10,17 +10,17 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 |---|---|---|---|---|
 | `GET` | `/api/version` | Dashboard auth/session | Build/version metadata; includes `upgradeMarker` (`target`, `current`, `attempts`, `maxAttempts`, `failed`, `requestedAt`, `lastError`) while a self-upgrade is in flight or has failed ([#6765](https://github.com/hivecommons/hive/issues/6765)), and an `autoUpdate` object (`enabled`, `state` — one of `disabled`/`up_to_date`/`behind`/`retrying`/`failed`/`unknown` — `healthy`, `period`, `targetBranch`, `targetCommit`, `currentCommit`, `commitsBehind`, `lastAttemptAt`, `lastError`, `detail`) that never reports a failed or unknown update as healthy ([#6962](https://github.com/hivecommons/hive/issues/6962), [#6963](https://github.com/hivecommons/hive/issues/6963)) | `pkg/dashboard/api.go:36` |
 | `POST` | `/api/release-channel` | Owner only | Hosted spoke self-service release-channel selector; relays `stable`/`candidate`/`edge` to the hub's existing switch-branch endpoint with the spoke dashboard-token proof, and reports the requested channel as pending until the Deployment image lands | `pkg/dashboard/api.go:63` |
-| `GET` | `/api/health` | Public | Basic health probe | `pkg/dashboard/server.go:1208` |
-| `GET` | `/api/health/deep` | Public | Deep health probe | `pkg/dashboard/server.go:1209` |
-| `GET` | `/api/livez` | Public | Kubernetes liveness probe | `pkg/dashboard/server.go:1210` |
-| `GET` | `/metrics` | Registered only when `HIVE_METRICS_ENABLED`; requires `Authorization: ****** (403 if the token is unset) | Prometheus metrics | `pkg/dashboard/server.go:1216` |
-| `GET` | `/api/status` | Dashboard auth/session | Dashboard aggregate status; accepts `?fields=a,b` for top-level selection and `?omit=repos` to drop heavy sections, and honors `Accept-Encoding: gzip`; `agents[]` includes busy-pane visibility fields (`kicksUndeliverable`, `busySince`, `lastTranscriptActivity`, `condition`, `conditionMessage`) when a Working pane cannot accept kicks | `pkg/dashboard/server.go:1221` |
-| `GET` | `/api/status/summary` | Dashboard auth/session | Compact agent/governor/budget status summary for pollers; honors `Accept-Encoding: gzip` | `pkg/dashboard/server.go:1222` |
-| `GET` | `/api/overview/issues.csv` | Dashboard auth/session | Cached Overview issue-band export as browser-compatible CSV; filters `band`, `repo`, `stale`, and `held` are ANDed. | `pkg/dashboard/server.go:1225` |
-| `GET` | `/api/overview/issues.json` | Dashboard auth/session | Cached Overview issue-band export as typed JSON with `bands[]` metadata and row fields matching the CSV columns. | `pkg/dashboard/server.go:1226` |
-| `GET` | `/api/overview/prs.csv` | Dashboard auth/session | Cached Overview PR-band export as browser-compatible CSV; filters `band`, `repo`, `stale`, and `held` are ANDed. | `pkg/dashboard/server.go:1227` |
-| `GET` | `/api/overview/prs.json` | Dashboard auth/session | Cached Overview PR-band export as typed JSON with `bands[]` metadata and row fields matching the CSV columns. | `pkg/dashboard/server.go:1228` |
-| `GET` | `/api/events` | Dashboard auth/session | Server-sent event stream | `pkg/dashboard/server.go:1229` |
+| `GET` | `/api/health` | Public | Basic health probe | `pkg/dashboard/server.go:1209` |
+| `GET` | `/api/health/deep` | Public | Deep health probe | `pkg/dashboard/server.go:1210` |
+| `GET` | `/api/livez` | Public | Kubernetes liveness probe | `pkg/dashboard/server.go:1211` |
+| `GET` | `/metrics` | Registered only when `HIVE_METRICS_ENABLED`; requires `Authorization: ****** (403 if the token is unset) | Prometheus metrics | `pkg/dashboard/server.go:1217` |
+| `GET` | `/api/status` | Dashboard auth/session | Dashboard aggregate status; accepts `?fields=a,b` for top-level selection and `?omit=repos` to drop heavy sections, and honors `Accept-Encoding: gzip`; `agents[]` includes busy-pane visibility fields (`kicksUndeliverable`, `busySince`, `lastTranscriptActivity`, `condition`, `conditionMessage`) when a Working pane cannot accept kicks | `pkg/dashboard/server.go:1222` |
+| `GET` | `/api/status/summary` | Dashboard auth/session | Compact agent/governor/budget status summary for pollers; honors `Accept-Encoding: gzip` | `pkg/dashboard/server.go:1223` |
+| `GET` | `/api/overview/issues.csv` | Dashboard auth/session | Cached Overview issue-band export as browser-compatible CSV; filters `band`, `repo`, `stale`, and `held` are ANDed. | `pkg/dashboard/server.go:1226` |
+| `GET` | `/api/overview/issues.json` | Dashboard auth/session | Cached Overview issue-band export as typed JSON with `bands[]` metadata and row fields matching the CSV columns. | `pkg/dashboard/server.go:1227` |
+| `GET` | `/api/overview/prs.csv` | Dashboard auth/session | Cached Overview PR-band export as browser-compatible CSV; filters `band`, `repo`, `stale`, and `held` are ANDed. | `pkg/dashboard/server.go:1228` |
+| `GET` | `/api/overview/prs.json` | Dashboard auth/session | Cached Overview PR-band export as typed JSON with `bands[]` metadata and row fields matching the CSV columns. | `pkg/dashboard/server.go:1229` |
+| `GET` | `/api/events` | Dashboard auth/session | Server-sent event stream | `pkg/dashboard/server.go:1230` |
 | `GET` | `/api/swarm` | Dashboard auth/session | Current swarm status: display name, duration, active repo, expiry, persisted prep metrics when available, and idle-unlock fields. | `pkg/dashboard/swarm.go:310` |
 | `POST` | `/api/swarm` | Owner only | Start a 24h repo swarm for a configured repo, returning 409 when another swarm is active and 423 when a previous swarm keeps the next swarm locked until enough agents are idle unless body `{"repo":"owner/name","force":true}` is used; saves the active record before repo prep, persists prep metrics, and announces the start to Discord when configured. | `pkg/dashboard/swarm.go:311` |
 | `DELETE` | `/api/swarm` | Owner only | End the active swarm, score issues closed and PRs merged in the window, append it to history, and announce the result to Discord when configured. | `pkg/dashboard/swarm.go:312` |
@@ -61,7 +61,7 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
 | `GET` | `/api/style` | Public | Sanitized custom dashboard CSS | `pkg/dashboard/api.go:37` |
-| `GET` | `/branding/custom.css` | Dashboard auth/session | Operator branding stylesheet override, read per request (see [branding](branding.md)) | `pkg/dashboard/server.go:1290` |
+| `GET` | `/branding/custom.css` | Dashboard auth/session | Operator branding stylesheet override, read per request (see [branding](branding.md)) | `pkg/dashboard/server.go:1291` |
 | `GET` | `/api/snapshot/frame-ancestors` | Public | Snapshot framing allowlist | `pkg/dashboard/api.go:74` |
 | `GET` | `/api/snapshot` | Public | Snapshot data | `pkg/dashboard/api.go:75` |
 | `GET` | `/snapshot` | Public | Public read-only snapshot page | `pkg/dashboard/api.go:76` |
@@ -89,9 +89,9 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | `GET` | `/api/openrouter/models` | Dashboard auth/session | Open Router Models | `pkg/dashboard/openrouter.go:47` |
 | `GET` | `/api/openrouter/credit` | Dashboard auth/session | Open Router Credit | `pkg/dashboard/openrouter.go:48` |
 | `GET` | `/openrouter/callback` | Public | Open Router Callback | `pkg/dashboard/openrouter.go:49` |
-| `POST` | `/api/github-app/recheck` | Dashboard auth/session | GitHub App Recheck | `pkg/dashboard/server.go:1230` |
-| `POST` | `/api/github-app/install-clicked` | Dashboard auth/session | GitHub App Install Clicked | `pkg/dashboard/server.go:1231` |
-| `GET` | `/gh-setup` | Public | GitHub App Setup Callback | `pkg/dashboard/server.go:1232` |
+| `POST` | `/api/github-app/recheck` | Dashboard auth/session | GitHub App Recheck | `pkg/dashboard/server.go:1231` |
+| `POST` | `/api/github-app/install-clicked` | Dashboard auth/session | GitHub App Install Clicked | `pkg/dashboard/server.go:1232` |
+| `GET` | `/gh-setup` | Public | GitHub App Setup Callback | `pkg/dashboard/server.go:1233` |
 
 ## Configuration
 
@@ -325,49 +325,49 @@ Read the result from `GET /api/kick/{agent}/status`, which returns `status` of `
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
-| `GET` | `/contribute` | Public | Contribute Landing | `pkg/dashboard/api_contribute.go:118` |
-| `GET` | `/contribute/{tab}` | Public | Contribute Landing | `pkg/dashboard/api_contribute.go:124` |
-| `GET` | `/api/contribute/ws` | Public | s.contribute Hub.Handle WS | `pkg/dashboard/api_contribute.go:132` |
-| `POST` | `/api/contribute/register` | Public | Contribute Register | `pkg/dashboard/api_contribute.go:133` |
-| `POST` | `/api/contribute/invite` | Public | Contribute Invite | `pkg/dashboard/api_contribute.go:139` |
-| `POST` | `/api/contribute/reissue-token` | Public | Contribute Reissue Token | `pkg/dashboard/api_contribute.go:140` |
-| `GET` | `/api/contribute/status` | Public | Contribute Status | `pkg/dashboard/api_contribute.go:141` |
-| `GET` | `/api/contribute/activity` | Public | Contribute Activity | `pkg/dashboard/api_contribute.go:145` |
-| `GET` | `/api/contribute/fleet` | Public | Contribute Fleet | `pkg/dashboard/api_contribute.go:146` |
-| `GET` | `/api/contribute/events` | Public | Contribute Events (SSE). Every frame carries a monotonic `seq`; a connection whose channel filled gets a `gap` frame naming how many events it missed, so a long-lived client can tell "nothing happened" from "I missed events" ([#6218](https://github.com/hivecommons/hive/issues/6218)) | `pkg/dashboard/api_contribute.go:150` |
-| `GET` | `/api/contribute/queue` | Public | Contribute Queue | `pkg/dashboard/api_contribute.go:153` |
-| `GET` | `/api/contribute/opportunistic` | Public | Contribute Opportunistic | `pkg/dashboard/api_contribute.go:157` |
-| `GET` | `/api/contribute/limits` | Public | Contribute Limits | `pkg/dashboard/api_contribute.go:162` |
-| `GET` | `/api/contribute/metrics` | Public | Contribute Metrics | `pkg/dashboard/api_contribute.go:168` |
-| `GET` | `/api/contribute/me` | Public path; caller identity resolved server-side (401 anonymous, 403 without a profile) | The caller's OWN contribution stats — issues worked (24h and all-time), completions that produced a verified PR (24h and all-time, [#7894](https://github.com/hivecommons/hive/issues/7894)), and failures. No username parameter, so it only ever answers for its caller ([#6543](https://github.com/hivecommons/hive/issues/6543)) | `pkg/dashboard/api_contribute.go:178` |
+| `GET` | `/contribute` | Public | Contribute Landing | `pkg/dashboard/api_contribute.go:119` |
+| `GET` | `/contribute/{tab}` | Public | Contribute Landing | `pkg/dashboard/api_contribute.go:125` |
+| `GET` | `/api/contribute/ws` | Public | s.contribute Hub.Handle WS | `pkg/dashboard/api_contribute.go:133` |
+| `POST` | `/api/contribute/register` | Public | Contribute Register | `pkg/dashboard/api_contribute.go:134` |
+| `POST` | `/api/contribute/invite` | Public | Contribute Invite | `pkg/dashboard/api_contribute.go:140` |
+| `POST` | `/api/contribute/reissue-token` | Public | Contribute Reissue Token | `pkg/dashboard/api_contribute.go:141` |
+| `GET` | `/api/contribute/status` | Public | Contribute Status | `pkg/dashboard/api_contribute.go:142` |
+| `GET` | `/api/contribute/activity` | Public | Contribute Activity | `pkg/dashboard/api_contribute.go:146` |
+| `GET` | `/api/contribute/fleet` | Public | Contribute Fleet | `pkg/dashboard/api_contribute.go:147` |
+| `GET` | `/api/contribute/events` | Public | Contribute Events (SSE). Every frame carries a monotonic `seq`; a connection whose channel filled gets a `gap` frame naming how many events it missed, so a long-lived client can tell "nothing happened" from "I missed events" ([#6218](https://github.com/hivecommons/hive/issues/6218)) | `pkg/dashboard/api_contribute.go:151` |
+| `GET` | `/api/contribute/queue` | Public | Contribute Queue | `pkg/dashboard/api_contribute.go:154` |
+| `GET` | `/api/contribute/opportunistic` | Public | Contribute Opportunistic | `pkg/dashboard/api_contribute.go:158` |
+| `GET` | `/api/contribute/limits` | Public | Contribute Limits | `pkg/dashboard/api_contribute.go:163` |
+| `GET` | `/api/contribute/metrics` | Public | Contribute Metrics | `pkg/dashboard/api_contribute.go:169` |
+| `GET` | `/api/contribute/me` | Public path; caller identity resolved server-side (401 anonymous, 403 without a profile) | The caller's OWN contribution stats — issues worked (24h and all-time), completions that produced a verified PR (24h and all-time, [#7894](https://github.com/hivecommons/hive/issues/7894)), and failures. No username parameter, so it only ever answers for its caller ([#6543](https://github.com/hivecommons/hive/issues/6543)) | `pkg/dashboard/api_contribute.go:179` |
 | `GET` | `/api/contribute/run-stats/models` | Public | Per-model run evidence for the contributor wall: runs, verified-PR share, and failure rate over the selected window. | `pkg/dashboard/api_contribute.go` |
 | `GET` | `/api/contribute/wall` | Public | Contributor wall posts when the hive-wide wall switch is enabled; anonymous readers see visible posts, authors can still see their own hidden posts. | `pkg/dashboard/api_contribute.go` |
 | `POST` | `/api/contribute/wall` | Signed-in contributor | Create a 500-character plain-text wall post or one-level reply, with optional `model`, `backend`, and `repo` tags. Returns 401 anonymous, 403 when disabled/revoked/muted, and 429 when rate-limited. | `pkg/dashboard/api_contribute.go` |
 | `DELETE` | `/api/contribute/wall/{id}` | Post author | Author deletes their own wall post; action is audit logged. | `pkg/dashboard/api_contribute.go` |
 | `POST` | `/api/contribute/wall/{id}/hide` | Owner/read-write | Hide a wall post from public readers while leaving it visible to the author; action is audit logged and pushed over `/api/contribute/events`. | `pkg/dashboard/api_contribute.go` |
 | `POST` | `/api/contribute/wall/{id}/flag` | Signed-in contributor | Flag a wall post for Management review; action is audit logged. | `pkg/dashboard/api_contribute.go` |
-| `GET` | `/api/contribute/triage` | Public | Contribute Triage | `pkg/dashboard/api_contribute.go:204` |
-| `PUT` | `/api/contribute/queue/order` | Public | Contribute Queue Order | `pkg/dashboard/api_contribute.go:208` |
-| `POST` | `/api/contribute/queue/hold` | Public | Contribute Queue Hold | `pkg/dashboard/api_contribute.go:213` |
-| `POST` | `/api/contribute/queue/hold/clear` | Public | Contribute Queue Hold Clear | `pkg/dashboard/api_contribute.go:217` |
-| `GET` | `/api/contribute/interests` | Public | Contribute Interests | `pkg/dashboard/api_contribute.go:230` |
-| `PUT` | `/api/contribute/interests` | Public | Contribute Interests | `pkg/dashboard/api_contribute.go:231` |
-| `GET` | `/api/contributors` | Dashboard auth/session | Contributors List | `pkg/dashboard/api_contribute.go:237` |
-| `GET` | `/api/contributors/{id}` | Dashboard auth/session | Contributor Get | `pkg/dashboard/api_contribute.go:238` |
+| `GET` | `/api/contribute/triage` | Public | Contribute Triage | `pkg/dashboard/api_contribute.go:205` |
+| `PUT` | `/api/contribute/queue/order` | Public | Contribute Queue Order | `pkg/dashboard/api_contribute.go:209` |
+| `POST` | `/api/contribute/queue/hold` | Public | Contribute Queue Hold | `pkg/dashboard/api_contribute.go:214` |
+| `POST` | `/api/contribute/queue/hold/clear` | Public | Contribute Queue Hold Clear | `pkg/dashboard/api_contribute.go:218` |
+| `GET` | `/api/contribute/interests` | Public | Contribute Interests | `pkg/dashboard/api_contribute.go:231` |
+| `PUT` | `/api/contribute/interests` | Public | Contribute Interests | `pkg/dashboard/api_contribute.go:232` |
+| `GET` | `/api/contributors` | Dashboard auth/session | Contributors List | `pkg/dashboard/api_contribute.go:238` |
+| `GET` | `/api/contributors/{id}` | Dashboard auth/session | Contributor Get | `pkg/dashboard/api_contribute.go:239` |
 | `POST` | `/api/contributors/{id}/wall-mute` | Owner only | Mute or unmute a contributor from posting to the contributor wall; action is audit logged. | `pkg/dashboard/api_contribute.go` |
-| `PUT` | `/api/contributors/{id}/trust` | Owner only | Contributor Trust | `pkg/dashboard/api_contribute.go:240` |
-| `PUT` | `/api/contributors/{id}/agent-role` | Owner only | Contributor Agent Role | `pkg/dashboard/api_contribute.go:241` |
-| `PUT` | `/api/contributors/{id}/agent-role-grants` | Owner only | Contributor Agent Role Grants | `pkg/dashboard/api_contribute.go:242` |
-| `POST` | `/api/contributors/{id}/revoke` | Owner only | Contributor Revoke | `pkg/dashboard/api_contribute.go:243` |
-| `POST` | `/api/contributors/{id}/requeue` | Dashboard auth/session | Contributor Requeue | `pkg/dashboard/api_contribute.go:244` |
-| `DELETE` | `/api/contributors/{id}` | Owner only | Contributor Delete | `pkg/dashboard/api_contribute.go:245` |
-| `GET` | `/contribute/dossier/{username}` | Public | Contributor Dossier Page (HTML) | `pkg/dashboard/api_contribute.go:131` |
-| `GET` | `/api/contribute/run-stats` | Public | Contribute Run Stats | `pkg/dashboard/api_contribute.go:191` |
-| `GET` | `/api/contribute/runs` | Public | Contribute Per-Run History | `pkg/dashboard/api_contribute.go:286` |
-| `GET` | `/api/contribute/decisions` | Owner/read-write | Contribute Hub Decisions | `pkg/dashboard/api_contribute.go:296` |
-| `GET` | `/api/contribute/dossier` | Public | Contribute Dossier Get | `pkg/dashboard/api_contribute.go:235` |
-| `POST` | `/api/contribute/dossier` | Public | Contribute Dossier Update | `pkg/dashboard/api_contribute.go:236` |
-| `GET` | `/api/leaderboard/contributor/{username}/heraldry` | Public | Contributor Heraldry | `pkg/dashboard/api_contribute.go:266` |
+| `PUT` | `/api/contributors/{id}/trust` | Owner only | Contributor Trust | `pkg/dashboard/api_contribute.go:241` |
+| `PUT` | `/api/contributors/{id}/agent-role` | Owner only | Contributor Agent Role | `pkg/dashboard/api_contribute.go:242` |
+| `PUT` | `/api/contributors/{id}/agent-role-grants` | Owner only | Contributor Agent Role Grants | `pkg/dashboard/api_contribute.go:243` |
+| `POST` | `/api/contributors/{id}/revoke` | Owner only | Contributor Revoke | `pkg/dashboard/api_contribute.go:244` |
+| `POST` | `/api/contributors/{id}/requeue` | Dashboard auth/session | Contributor Requeue | `pkg/dashboard/api_contribute.go:245` |
+| `DELETE` | `/api/contributors/{id}` | Owner only | Contributor Delete | `pkg/dashboard/api_contribute.go:246` |
+| `GET` | `/contribute/dossier/{username}` | Public | Contributor Dossier Page (HTML) | `pkg/dashboard/api_contribute.go:132` |
+| `GET` | `/api/contribute/run-stats` | Public | Contribute Run Stats | `pkg/dashboard/api_contribute.go:192` |
+| `GET` | `/api/contribute/runs` | Public | Contribute Per-Run History | `pkg/dashboard/api_contribute.go:287` |
+| `GET` | `/api/contribute/decisions` | Owner/read-write | Contribute Hub Decisions | `pkg/dashboard/api_contribute.go:297` |
+| `GET` | `/api/contribute/dossier` | Public | Contribute Dossier Get | `pkg/dashboard/api_contribute.go:236` |
+| `POST` | `/api/contribute/dossier` | Public | Contribute Dossier Update | `pkg/dashboard/api_contribute.go:237` |
+| `GET` | `/api/leaderboard/contributor/{username}/heraldry` | Public | Contributor Heraldry | `pkg/dashboard/api_contribute.go:267` |
 | `GET` | `/api/cards/player/{asset}` | Public | OpenAPI alias for a cacheable contributor social-card SVG (`asset` is `<github-login>.svg`). | `pkg/dashboard/social_cards.go:112` |
 | `GET` | `/api/cards/achievement/{login}/{asset}` | Public | OpenAPI alias for a cacheable attained-achievement SVG (`asset` is `<achievement-id>.svg`). | `pkg/dashboard/social_cards.go:113` |
 | `GET` | `/api/cards/leaderboard/{asset}` | Public | OpenAPI alias for a cacheable leaderboard-summary SVG (`contributors.svg`, `teams.svg`, or `swarm.svg`). | `pkg/dashboard/social_cards.go:114` |
@@ -377,10 +377,10 @@ Read the result from `GET /api/kick/{agent}/status`, which returns `status` of `
 | `GET` | `/share/player/{login}` | Public | Share landing page with Open Graph/Twitter metadata for a contributor card and link to the public dossier. | `pkg/dashboard/social_cards.go:115` |
 | `GET` | `/share/achievement/{login}/{achievementID}` | Public | Share landing page with metadata for an unlocked achievement card and link to the public dossier. | `pkg/dashboard/social_cards.go:116` |
 | `GET` | `/share/leaderboard/{board}` | Public | Share landing page with metadata for a public leaderboard card and link to live standings. | `pkg/dashboard/social_cards.go:117` |
-| `PUT` | `/api/contribute/help-links` | Owner/read-write | Contribute Help Links | `pkg/dashboard/api_contribute.go:144` |
-| `GET` | `/api/contribute/operators/message` | Public path; caller identity resolved server-side (401 anonymous, 403 without a profile) | Returns only the signed-in contributor's unacknowledged operator messages; no username/body field can select another recipient ([#8461](https://github.com/hivecommons/hive/issues/8461)). | `pkg/dashboard/api_contribute.go:184` |
-| `POST` | `/api/contribute/operators/message` | Owner/read-write | Sends a sanitized, length-capped one-to-one operator note to a contributor profile, persists it until acknowledgement, and pushes it to matching live relay sockets only ([#8461](https://github.com/hivecommons/hive/issues/8461)). | `pkg/dashboard/api_contribute.go:185` |
-| `POST` | `/api/contribute/operators/message/ack` | Public path; caller identity resolved server-side | Acknowledges the signed-in contributor's own message, optionally recording a short sanitized reply for operators. | `pkg/dashboard/api_contribute.go:186` |
+| `PUT` | `/api/contribute/help-links` | Owner/read-write | Contribute Help Links | `pkg/dashboard/api_contribute.go:145` |
+| `GET` | `/api/contribute/operators/message` | Public path; caller identity resolved server-side (401 anonymous, 403 without a profile) | Returns only the signed-in contributor's unacknowledged operator messages; no username/body field can select another recipient ([#8461](https://github.com/hivecommons/hive/issues/8461)). | `pkg/dashboard/api_contribute.go:185` |
+| `POST` | `/api/contribute/operators/message` | Owner/read-write | Sends a sanitized, length-capped one-to-one operator note to a contributor profile, persists it until acknowledgement, and pushes it to matching live relay sockets only ([#8461](https://github.com/hivecommons/hive/issues/8461)). | `pkg/dashboard/api_contribute.go:186` |
+| `POST` | `/api/contribute/operators/message/ack` | Public path; caller identity resolved server-side | Acknowledges the signed-in contributor's own message, optionally recording a short sanitized reply for operators. | `pkg/dashboard/api_contribute.go:187` |
 
 ### Issue claims (hivecommons/hive#8380)
 
@@ -519,24 +519,24 @@ always resolved server-side from the validated token.
 | `PUT` | `/api/hive-id` | Owner only | Hive IDSet | `pkg/dashboard/api.go:370` |
 | `POST` | `/api/chat` | Dashboard auth/session | Chat | `pkg/dashboard/api.go:399` |
 | `GET` | `/api/auth/token` | Public | Auth Token | `pkg/dashboard/api.go:430` |
-| `GET` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:247` |
-| `POST` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:248` |
-| `GET` | `/api/docs` | Dashboard auth/session | APIDocs | `pkg/dashboard/api_contribute.go:249` |
-| `GET` | `/leaderboard` | Public | Leaderboard Page | `pkg/dashboard/api_contribute.go:251` |
-| `GET` | `/api/leaderboard` | Public | Leaderboard API | `pkg/dashboard/api_contribute.go:252` |
-| `GET` | `/api/leaderboard/teams` | Public | Team Leaderboards | `pkg/dashboard/api_contribute.go:253` |
-| `GET` | `/api/leaderboard/style` | Public | Leaderboard Style | `pkg/dashboard/api_contribute.go:254` |
+| `GET` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:248` |
+| `POST` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:249` |
+| `GET` | `/api/docs` | Dashboard auth/session | APIDocs | `pkg/dashboard/api_contribute.go:250` |
+| `GET` | `/leaderboard` | Public | Leaderboard Page | `pkg/dashboard/api_contribute.go:252` |
+| `GET` | `/api/leaderboard` | Public | Leaderboard API | `pkg/dashboard/api_contribute.go:253` |
+| `GET` | `/api/leaderboard/teams` | Public | Team Leaderboards | `pkg/dashboard/api_contribute.go:254` |
+| `GET` | `/api/leaderboard/style` | Public | Leaderboard Style | `pkg/dashboard/api_contribute.go:255` |
 | `GET` | `/api/leaderboard/battle-log` | Public | Scrubbed public Battle Log activity feed for leaderboard widgets. | `pkg/dashboard/battle_log.go:63` |
 | `GET` | `/api/leaderboard/hive-of-week` | Public | Featured weekly project metadata, video fallback URL, gource source URL, and embed snippets. | `pkg/dashboard/battle_log.go:64` |
 | `GET` | `/api/leaderboard/gource-log` | Public | Gource custom log source for a project/week, derived from public hive event data. | `pkg/dashboard/battle_log.go:65` |
 | `POST` | `/api/leaderboard/hive-of-week/archive` | Owner only | Archive the selected project's weekly gource source log into knowledge; stores source only, never rendered video. | `pkg/dashboard/battle_log.go:66` |
-| `GET` | `/api/leaderboard/contributor/{username}` | Public | Contributor Profile | `pkg/dashboard/api_contribute.go:261` |
-| `GET` | `/api/hives` | Dashboard auth/session | Hives List | `pkg/dashboard/api_contribute.go:272` |
-| `POST` | `/api/hives/register` | Dashboard auth/session | Hives Register | `pkg/dashboard/api_contribute.go:273` |
-| `POST` | `/api/hives/{id}/heartbeat` | Dashboard auth/session | Hives Heartbeat | `pkg/dashboard/api_contribute.go:274` |
-| `DELETE` | `/api/hives/{id}` | Owner only | Hives Delete | `pkg/dashboard/api_contribute.go:275` |
-| `POST` | `/api/hives/onboard` | Dashboard auth/session | Hives Onboard | `pkg/dashboard/api_contribute.go:276` |
-| `GET` | `/sso` | Public | SSO | `pkg/dashboard/server.go:1237` |
+| `GET` | `/api/leaderboard/contributor/{username}` | Public | Contributor Profile | `pkg/dashboard/api_contribute.go:262` |
+| `GET` | `/api/hives` | Dashboard auth/session | Hives List | `pkg/dashboard/api_contribute.go:273` |
+| `POST` | `/api/hives/register` | Dashboard auth/session | Hives Register | `pkg/dashboard/api_contribute.go:274` |
+| `POST` | `/api/hives/{id}/heartbeat` | Dashboard auth/session | Hives Heartbeat | `pkg/dashboard/api_contribute.go:275` |
+| `DELETE` | `/api/hives/{id}` | Owner only | Hives Delete | `pkg/dashboard/api_contribute.go:276` |
+| `POST` | `/api/hives/onboard` | Dashboard auth/session | Hives Onboard | `pkg/dashboard/api_contribute.go:277` |
+| `GET` | `/sso` | Public | SSO | `pkg/dashboard/server.go:1238` |
 
 ## Hub SaaS
 
@@ -561,88 +561,88 @@ always resolved server-side from the validated token.
 | `POST` | `/api/saas/hives/{id}/restart-spoke` | Hub auth | Restart Spoke | `pkg/hub/saas.go:425` |
 | `GET` | `/api/saas/hive-config/{hiveID}` | Hub auth | Proxy Hive Config | `pkg/hub/saas.go:426` |
 | `GET` | `/api/saas/latest-sha` | Hub handler-specific | Latest SHA | `pkg/hub/saas.go:427` |
-| `POST` | `/api/saas/hub/upgrade` | Hub handler-specific | Hub Self Upgrade | `pkg/hub/saas.go:428` |
-| `PUT` | `/api/saas/hub/auto-upgrade` | Hub handler-specific | Hub Auto Upgrade | `pkg/hub/saas.go:429` |
-| `GET` | `/api/saas/auth-check` | Hub handler-specific | Saa SAuth Check | `pkg/hub/saas.go:434` |
-| `POST` | `/api/saas/user-token` | Hub auth | User Token | `pkg/hub/saas.go:445` |
-| `GET` | `/api/saas/hives/{id}/access` | Hub auth | Access List | `pkg/hub/saas.go:446` |
-| `GET` | `/api/saas/grantable-users` | Hub auth | Grantable Users | `pkg/hub/saas.go:447` |
-| `POST` | `/api/saas/hives/{id}/access` | Hub auth | Access Add | `pkg/hub/saas.go:448` |
-| `DELETE` | `/api/saas/hives/{id}/access/{username}` | Hub auth | Access Remove | `pkg/hub/saas.go:449` |
-| `POST` | `/api/saas/hives/{id}/request-access` | Hub auth | Request Access | `pkg/hub/saas.go:450` |
-| `GET` | `/api/saas/hives/{id}/requests` | Hub auth | Get Requests | `pkg/hub/saas.go:451` |
-| `GET` | `/api/saas/hives/{id}/timeline` | Hub auth | Hive Timeline | `pkg/hub/saas.go:452` |
-| `POST` | `/api/saas/hives/{id}/requests/{username}/approve` | Hub auth | Approve Request | `pkg/hub/saas.go:454` |
-| `POST` | `/api/saas/hives/{id}/requests/{username}/deny` | Hub auth | Deny Request | `pkg/hub/saas.go:455` |
-| `PUT` | `/api/saas/hives/{id}/approve-access/{username}` | Hub auth | Approve Access | `pkg/hub/saas.go:456` |
-| `DELETE` | `/api/saas/hives/{id}/deny-access/{username}` | Hub auth | Deny Access | `pkg/hub/saas.go:457` |
-| `GET` | `/api/saas/access-status` | Hub handler-specific | Access Status | `pkg/hub/saas.go:458` |
-| `POST` | `/api/saas/request-provision` | Hub auth | Request Provision | `pkg/hub/saas.go:466` |
-| `PUT` | `/api/saas/approve-provision/{username}` | Hub handler-specific | Approve Provision | `pkg/hub/saas.go:467` |
-| `DELETE` | `/api/saas/deny-provision/{username}` | Hub handler-specific | Deny Provision | `pkg/hub/saas.go:468` |
-| `GET` | `/api/saas/admin/available-placeholders` | Hub handler-specific | Available Placeholders | `pkg/hub/saas.go:469` |
-| `GET` | `/api/saas/admin/users` | Hub handler-specific | Admin Users | `pkg/hub/saas.go:472` |
+| `POST` | `/api/saas/hub/upgrade` | Hub handler-specific | Hub Self Upgrade | `pkg/hub/saas.go:429` |
+| `PUT` | `/api/saas/hub/auto-upgrade` | Hub handler-specific | Hub Auto Upgrade | `pkg/hub/saas.go:430` |
+| `GET` | `/api/saas/auth-check` | Hub handler-specific | Saa SAuth Check | `pkg/hub/saas.go:436` |
+| `POST` | `/api/saas/user-token` | Hub auth | User Token | `pkg/hub/saas.go:447` |
+| `GET` | `/api/saas/hives/{id}/access` | Hub auth | Access List | `pkg/hub/saas.go:448` |
+| `GET` | `/api/saas/grantable-users` | Hub auth | Grantable Users | `pkg/hub/saas.go:449` |
+| `POST` | `/api/saas/hives/{id}/access` | Hub auth | Access Add | `pkg/hub/saas.go:450` |
+| `DELETE` | `/api/saas/hives/{id}/access/{username}` | Hub auth | Access Remove | `pkg/hub/saas.go:451` |
+| `POST` | `/api/saas/hives/{id}/request-access` | Hub auth | Request Access | `pkg/hub/saas.go:452` |
+| `GET` | `/api/saas/hives/{id}/requests` | Hub auth | Get Requests | `pkg/hub/saas.go:453` |
+| `GET` | `/api/saas/hives/{id}/timeline` | Hub auth | Hive Timeline | `pkg/hub/saas.go:454` |
+| `POST` | `/api/saas/hives/{id}/requests/{username}/approve` | Hub auth | Approve Request | `pkg/hub/saas.go:456` |
+| `POST` | `/api/saas/hives/{id}/requests/{username}/deny` | Hub auth | Deny Request | `pkg/hub/saas.go:457` |
+| `PUT` | `/api/saas/hives/{id}/approve-access/{username}` | Hub auth | Approve Access | `pkg/hub/saas.go:458` |
+| `DELETE` | `/api/saas/hives/{id}/deny-access/{username}` | Hub auth | Deny Access | `pkg/hub/saas.go:459` |
+| `GET` | `/api/saas/access-status` | Hub handler-specific | Access Status | `pkg/hub/saas.go:460` |
+| `POST` | `/api/saas/request-provision` | Hub auth | Request Provision | `pkg/hub/saas.go:468` |
+| `PUT` | `/api/saas/approve-provision/{username}` | Hub handler-specific | Approve Provision | `pkg/hub/saas.go:469` |
+| `DELETE` | `/api/saas/deny-provision/{username}` | Hub handler-specific | Deny Provision | `pkg/hub/saas.go:470` |
+| `GET` | `/api/saas/admin/available-placeholders` | Hub handler-specific | Available Placeholders | `pkg/hub/saas.go:471` |
+| `GET` | `/api/saas/admin/users` | Hub handler-specific | Admin Users | `pkg/hub/saas.go:474` |
 
 `GET /api/saas/admin/users` includes cached `affiliation`, `affiliation_source`, `profile_bio`, `profile_location`, `public_activity`, `top_repo`, and `top_repo_url` fields for the Hub Admin — Users **AFFILIATION** column. The cache identifies who a signup appears affiliated with from public GitHub/GHE footprint only, ranked as profile company, contributed-to repo owner/org (excluding the personal namespace), public org membership, then top-repo owner/independent fallback; bio/location are supporting tooltip context, and `public_activity` buckets recent public events as `quiet`, `active`, or `prolific`. Provider API refreshes are asynchronous and daily, so the table never blocks on GitHub/GHE and never requires Hive activity.
 
-| `PUT` | `/api/saas/admin/users/{username}` | Hub handler-specific | Admin Update User | `pkg/hub/saas.go:495` |
-| `DELETE` | `/api/saas/admin/users/{username}` | Hub handler-specific | Admin Delete User | `pkg/hub/saas.go:496` |
-| `POST` | `/api/saas/admin/impersonate/exit` | Hub handler-specific | Impersonate Exit | `pkg/hub/saas.go:502` |
-| `POST` | `/api/saas/admin/impersonate/{username}` | Hub handler-specific | Impersonate Start | `pkg/hub/saas.go:503` |
-| `GET` | `/api/saas/impersonation-status` | Hub auth | Impersonation Status | `pkg/hub/saas.go:504` |
-| `POST` | `/api/saas/hives/{id}/assign` | Hub auth | Assign Hive | `pkg/hub/saas.go:505` |
-| `POST` | `/api/saas/hives/{id}/reset-assignment` | Hub handler-specific | Reset Assignment | `pkg/hub/saas.go:509` |
-| `GET` | `/api/saas/cluster-health` | Hub handler-specific | Cluster Health | `pkg/hub/saas.go:510` |
-| `POST` | `/api/saas/admin/alert-ack` | Hub handler-specific | Alert Ack | `pkg/hub/saas.go:523` |
-| `GET` | `/api/saas/admin/cluster-app-keys` | Hub handler-specific | Get Cluster App Keys | `pkg/hub/saas.go:527` |
-| `PUT` | `/api/saas/admin/cluster-app-keys/{clusterID}` | Hub handler-specific | Put Cluster App Key | `pkg/hub/saas.go:528` |
-| `POST` | `/api/saas/admin/hub-banner` | Hub handler-specific | Send Hub Banner | `pkg/hub/saas.go:529` |
-| `DELETE` | `/api/saas/admin/hub-banner` | Hub handler-specific | Clear Hub Banner | `pkg/hub/saas.go:530` |
-| `GET` | `/api/saas/admin/hub-banner` | Hub handler-specific | Get Hub Banner | `pkg/hub/saas.go:531` |
-| `POST` | `/api/saas/slack/user/{username}` | Hub auth | Slack Message User | `pkg/hub/saas.go:538` |
-| `POST` | `/api/saas/hives/{id}/slack` | Hub auth | Slack Message Hive Owner | `pkg/hub/saas.go:539` |
-| `POST` | `/api/saas/admin/slack/broadcast` | Hub handler-specific | Slack Broadcast | `pkg/hub/saas.go:540` |
-| `POST` | `/api/saas/admin/journey-snooze` | Hub handler-specific | Journey Snooze | `pkg/hub/saas.go:541` |
-| `GET` | `/api/saas/admin/journey-status` | Hub handler-specific | Journey Status | `pkg/hub/saas.go:542` |
+| `PUT` | `/api/saas/admin/users/{username}` | Hub handler-specific | Admin Update User | `pkg/hub/saas.go:497` |
+| `DELETE` | `/api/saas/admin/users/{username}` | Hub handler-specific | Admin Delete User | `pkg/hub/saas.go:498` |
+| `POST` | `/api/saas/admin/impersonate/exit` | Hub handler-specific | Impersonate Exit | `pkg/hub/saas.go:504` |
+| `POST` | `/api/saas/admin/impersonate/{username}` | Hub handler-specific | Impersonate Start | `pkg/hub/saas.go:505` |
+| `GET` | `/api/saas/impersonation-status` | Hub auth | Impersonation Status | `pkg/hub/saas.go:506` |
+| `POST` | `/api/saas/hives/{id}/assign` | Hub auth | Assign Hive | `pkg/hub/saas.go:507` |
+| `POST` | `/api/saas/hives/{id}/reset-assignment` | Hub handler-specific | Reset Assignment | `pkg/hub/saas.go:511` |
+| `GET` | `/api/saas/cluster-health` | Hub handler-specific | Cluster Health | `pkg/hub/saas.go:512` |
+| `POST` | `/api/saas/admin/alert-ack` | Hub handler-specific | Alert Ack | `pkg/hub/saas.go:525` |
+| `GET` | `/api/saas/admin/cluster-app-keys` | Hub handler-specific | Get Cluster App Keys | `pkg/hub/saas.go:529` |
+| `PUT` | `/api/saas/admin/cluster-app-keys/{clusterID}` | Hub handler-specific | Put Cluster App Key | `pkg/hub/saas.go:530` |
+| `POST` | `/api/saas/admin/hub-banner` | Hub handler-specific | Send Hub Banner | `pkg/hub/saas.go:531` |
+| `DELETE` | `/api/saas/admin/hub-banner` | Hub handler-specific | Clear Hub Banner | `pkg/hub/saas.go:532` |
+| `GET` | `/api/saas/admin/hub-banner` | Hub handler-specific | Get Hub Banner | `pkg/hub/saas.go:533` |
+| `POST` | `/api/saas/slack/user/{username}` | Hub auth | Slack Message User | `pkg/hub/saas.go:540` |
+| `POST` | `/api/saas/hives/{id}/slack` | Hub auth | Slack Message Hive Owner | `pkg/hub/saas.go:541` |
+| `POST` | `/api/saas/admin/slack/broadcast` | Hub handler-specific | Slack Broadcast | `pkg/hub/saas.go:542` |
+| `POST` | `/api/saas/admin/journey-snooze` | Hub handler-specific | Journey Snooze | `pkg/hub/saas.go:543` |
+| `GET` | `/api/saas/admin/journey-status` | Hub handler-specific | Journey Status | `pkg/hub/saas.go:544` |
 | `GET` | `/api/saas/me/country` | Hub auth | My Country Get | `pkg/hub/saas.go:390` |
 | `PUT` | `/api/saas/me/country` | Hub auth | My Country Set (write blocked while impersonating) | `pkg/hub/saas.go:391` |
 | `POST` | `/api/saas/lite/enroll` | Hub auth | Hive Lite Enroll | `pkg/hub/saas.go:392` |
 | `PUT` | `/api/saas/hives/{id}/secondary-app` | Hub auth | Assign Secondary GitHub App | `pkg/hub/saas.go:424` |
 | `POST` | `/api/saas/hives/{id}/agents/{agent}/restarts/reset` | Hub auth | Reset Agent Restart Counter | `pkg/hub/saas.go:415` |
-| `GET` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch State | `pkg/hub/saas.go:432` |
-| `POST` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch Toggle (audit-logged) | `pkg/hub/saas.go:433` |
-| `GET` | `/api/saas/whoami` | Hub handler-specific | Session Identity (stable key + profile) | `pkg/hub/saas.go:440` |
-| `GET` | `/api/saas/dibs/repos` | Hub handler-specific | Dibs Repo/Owner List (public, short shared cache) | `pkg/hub/saas.go:444` |
-| `GET` | `/api/saas/hives/{id}/access-log` | Hub auth | Permission-Change Audit Log | `pkg/hub/saas.go:453` |
-| `GET` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Get | `pkg/hub/saas.go:470` |
-| `POST` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Set | `pkg/hub/saas.go:471` |
-| `GET` | `/api/saas/admin/user-countries` | Hub admin | User Country Rollup | `pkg/hub/saas.go:480` |
-| `GET` | `/api/saas/admin/auth-rollout` | Hub admin | Auth Rollout Readiness Summary | `pkg/hub/saas.go:485` |
-| `GET` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Get | `pkg/hub/saas.go:486` |
-| `PUT` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Update + hot reload | `pkg/hub/saas.go:487` |
-| `GET` | `/api/saas/admin/key-generations` | Hub admin | Token-Crypto Key Generations | `pkg/hub/saas.go:493` |
-| `POST` | `/api/saas/admin/rotate-master-key` | Hub admin | Rotate Token Master Key (double-call refused) | `pkg/hub/saas.go:494` |
-| `GET` | `/api/saas/admin/advisory-diagnostics` | Hub admin | Fleet Advisory/App-State Diagnostics | `pkg/hub/saas.go:520` |
+| `GET` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch State | `pkg/hub/saas.go:434` |
+| `POST` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch Toggle (audit-logged) | `pkg/hub/saas.go:435` |
+| `GET` | `/api/saas/whoami` | Hub handler-specific | Session Identity (stable key + profile) | `pkg/hub/saas.go:442` |
+| `GET` | `/api/saas/dibs/repos` | Hub handler-specific | Dibs Repo/Owner List (public, short shared cache) | `pkg/hub/saas.go:446` |
+| `GET` | `/api/saas/hives/{id}/access-log` | Hub auth | Permission-Change Audit Log | `pkg/hub/saas.go:455` |
+| `GET` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Get | `pkg/hub/saas.go:472` |
+| `POST` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Set | `pkg/hub/saas.go:473` |
+| `GET` | `/api/saas/admin/user-countries` | Hub admin | User Country Rollup | `pkg/hub/saas.go:482` |
+| `GET` | `/api/saas/admin/auth-rollout` | Hub admin | Auth Rollout Readiness Summary | `pkg/hub/saas.go:487` |
+| `GET` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Get | `pkg/hub/saas.go:488` |
+| `PUT` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Update + hot reload | `pkg/hub/saas.go:489` |
+| `GET` | `/api/saas/admin/key-generations` | Hub admin | Token-Crypto Key Generations | `pkg/hub/saas.go:495` |
+| `POST` | `/api/saas/admin/rotate-master-key` | Hub admin | Rotate Token Master Key (double-call refused) | `pkg/hub/saas.go:496` |
+| `GET` | `/api/saas/admin/advisory-diagnostics` | Hub admin | Fleet Advisory/App-State Diagnostics | `pkg/hub/saas.go:522` |
 | `POST` | `/api/saas/hives/bulk` | Hub auth | Bulk Hive Action | `pkg/hub/saas_bulk.go:89` |
 | `GET` | `/api/saas/me/country` | Hub auth | My Country Get | `pkg/hub/saas.go:390` |
 | `PUT` | `/api/saas/me/country` | Hub auth | My Country Set (write blocked while impersonating) | `pkg/hub/saas.go:391` |
 | `POST` | `/api/saas/lite/enroll` | Hub auth | Hive Lite Enroll | `pkg/hub/saas.go:392` |
 | `PUT` | `/api/saas/hives/{id}/secondary-app` | Hub auth | Assign Secondary GitHub App | `pkg/hub/saas.go:424` |
 | `POST` | `/api/saas/hives/{id}/agents/{agent}/restarts/reset` | Hub auth | Reset Agent Restart Counter | `pkg/hub/saas.go:415` |
-| `GET` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch State | `pkg/hub/saas.go:432` |
-| `POST` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch Toggle (audit-logged) | `pkg/hub/saas.go:433` |
-| `GET` | `/api/saas/whoami` | Hub handler-specific | Session Identity (stable key + profile) | `pkg/hub/saas.go:440` |
-| `GET` | `/api/saas/dibs/repos` | Hub handler-specific | Dibs Repo/Owner List (public, short shared cache) | `pkg/hub/saas.go:444` |
-| `GET` | `/api/saas/hives/{id}/access-log` | Hub auth | Permission-Change Audit Log | `pkg/hub/saas.go:453` |
-| `GET` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Get | `pkg/hub/saas.go:470` |
-| `POST` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Set | `pkg/hub/saas.go:471` |
-| `GET` | `/api/saas/admin/user-countries` | Hub admin | User Country Rollup | `pkg/hub/saas.go:480` |
-| `GET` | `/api/saas/admin/auth-rollout` | Hub admin | Auth Rollout Readiness Summary | `pkg/hub/saas.go:485` |
-| `GET` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Get | `pkg/hub/saas.go:486` |
-| `PUT` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Update + hot reload | `pkg/hub/saas.go:487` |
-| `GET` | `/api/saas/admin/key-generations` | Hub admin | Token-Crypto Key Generations | `pkg/hub/saas.go:493` |
-| `POST` | `/api/saas/admin/rotate-master-key` | Hub admin | Rotate Token Master Key (double-call refused) | `pkg/hub/saas.go:494` |
-| `GET` | `/api/saas/admin/advisory-diagnostics` | Hub admin | Fleet Advisory/App-State Diagnostics | `pkg/hub/saas.go:520` |
+| `GET` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch State | `pkg/hub/saas.go:434` |
+| `POST` | `/api/saas/upgrade-pause` | Hub admin | Upgrade Kill-Switch Toggle (audit-logged) | `pkg/hub/saas.go:435` |
+| `GET` | `/api/saas/whoami` | Hub handler-specific | Session Identity (stable key + profile) | `pkg/hub/saas.go:442` |
+| `GET` | `/api/saas/dibs/repos` | Hub handler-specific | Dibs Repo/Owner List (public, short shared cache) | `pkg/hub/saas.go:446` |
+| `GET` | `/api/saas/hives/{id}/access-log` | Hub auth | Permission-Change Audit Log | `pkg/hub/saas.go:455` |
+| `GET` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Get | `pkg/hub/saas.go:472` |
+| `POST` | `/api/saas/admin/scale-settings` | Hub admin | Placeholder Pool Scale Settings Set | `pkg/hub/saas.go:473` |
+| `GET` | `/api/saas/admin/user-countries` | Hub admin | User Country Rollup | `pkg/hub/saas.go:482` |
+| `GET` | `/api/saas/admin/auth-rollout` | Hub admin | Auth Rollout Readiness Summary | `pkg/hub/saas.go:487` |
+| `GET` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Get | `pkg/hub/saas.go:488` |
+| `PUT` | `/api/saas/admin/notifications` | Hub admin | Hub Notifications Update + hot reload | `pkg/hub/saas.go:489` |
+| `GET` | `/api/saas/admin/key-generations` | Hub admin | Token-Crypto Key Generations | `pkg/hub/saas.go:495` |
+| `POST` | `/api/saas/admin/rotate-master-key` | Hub admin | Rotate Token Master Key (double-call refused) | `pkg/hub/saas.go:496` |
+| `GET` | `/api/saas/admin/advisory-diagnostics` | Hub admin | Fleet Advisory/App-State Diagnostics | `pkg/hub/saas.go:522` |
 
 ## Hub server
 
@@ -660,32 +660,32 @@ always resolved server-side from the validated token.
 | `GET` | `/openrouter/callback` | Hub handler-specific | Hub Open Router Callback | `pkg/hub/openrouter.go:30` |
 | `GET` | `/dashboard` | Hub handler-specific | Dashboard | `pkg/hub/saas.go:369` |
 | `GET` | `/access-denied` | Hub handler-specific | Access Denied | `pkg/hub/saas.go:370` |
-| `GET` | `/api/hub/clusters` | Hub auth | List Clusters | `pkg/hub/saas.go:524` |
+| `GET` | `/api/hub/clusters` | Hub auth | List Clusters | `pkg/hub/saas.go:526` |
 | `GET` | `/api/hub/image-pulls` | Hub auth | Per-Release Image Pull Series | `pkg/hub/saas.go:376` |
-| `GET` | `/api/reach` | Hub admin | PR Reach Report (?pr=NNN or ?recent=K) | `pkg/hub/saas.go:515` |
-| `GET` | `/fleet` | Hub handler-specific | My-Hives Fleet Page (static; data via `/api/saas/my-hives`) | `pkg/hub/server.go:1682` |
-| `GET` | `/my-hives` | Hub handler-specific | 301 redirect to `/fleet` (query preserved) | `pkg/hub/server.go:1683` |
-| `POST` | `/api/heartbeat` | Hub handler-specific | Heartbeat | `pkg/hub/server.go:1632` |
-| `POST` | `/api/task-status` | Hub handler-specific | Task Status | `pkg/hub/server.go:1633` |
-| `GET` | `/api/registry` | Hub handler-specific | Registry | `pkg/hub/server.go:1638` |
-| `GET` | `/api/hub/leaderboard` | Hub handler-specific | Leaderboard | `pkg/hub/server.go:1639` |
-| `GET` | `/api/hub/stats` | Hub handler-specific | Stats | `pkg/hub/server.go:1640` |
-| `GET` | `/api/fleet-stats` | Hub handler-specific | Fleet Stats | `pkg/hub/server.go:1641` |
-| `GET` | `/api/hub/version` | Hub handler-specific | Hub Version | `pkg/hub/server.go:1642` |
-| `DELETE` | `/api/hub/registry/{id}` | Hub handler-specific | Registry Delete | `pkg/hub/server.go:1652` |
-| `POST` | `/api/contribute/register` | Hub handler-specific | Contribute Proxy | `pkg/hub/server.go:1653` |
-| `GET` | `/api/contribute/status` | Hub handler-specific | Contribute Status | `pkg/hub/server.go:1654` |
-| `GET` | `/api/contribute/ws` | Hub handler-specific | Contribute WSProxy | `pkg/hub/server.go:1655` |
-| `POST` | `/api/github/webhook` | Hub handler-specific | GitHub Webhook | `pkg/hub/server.go:1656` |
-| `GET` | `/gh-setup` | Hub handler-specific | GitHub App Setup Router | `pkg/hub/server.go:1657` |
-| `GET` | `/learn` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1658` |
-| `GET` | `/get-started` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1659` |
-| `GET` | `/api/docs` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1660` |
-| `GET` | `/api/reading-list` | Hub handler-specific | Reading List | `pkg/hub/server.go:1663` |
-| `GET` | `/reading` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1664` |
-| `GET` | `/cncf-reference-architecture` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1671` |
-| `GET` | `/cncf-reference-architecture/console` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1672` |
-| `GET` | `/cncf-reference-architecture/bluefin` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1673` |
-| `GET` | `/{$}` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1690` |
-| `GET` | `/og-card.png` | Hub handler-specific | OGCard | `pkg/hub/server.go:1695` |
-| `GET` | `/` | Public | Static asset fallback (`http.FileServerFS` over the embedded `static/` tree) for any path no other route claims | `pkg/hub/server.go:1697` |
+| `GET` | `/api/reach` | Hub admin | PR Reach Report (?pr=NNN or ?recent=K) | `pkg/hub/saas.go:517` |
+| `GET` | `/fleet` | Hub handler-specific | My-Hives Fleet Page (static; data via `/api/saas/my-hives`) | `pkg/hub/server.go:1686` |
+| `GET` | `/my-hives` | Hub handler-specific | 301 redirect to `/fleet` (query preserved) | `pkg/hub/server.go:1687` |
+| `POST` | `/api/heartbeat` | Hub handler-specific | Heartbeat | `pkg/hub/server.go:1636` |
+| `POST` | `/api/task-status` | Hub handler-specific | Task Status | `pkg/hub/server.go:1637` |
+| `GET` | `/api/registry` | Hub handler-specific | Registry | `pkg/hub/server.go:1642` |
+| `GET` | `/api/hub/leaderboard` | Hub handler-specific | Leaderboard | `pkg/hub/server.go:1643` |
+| `GET` | `/api/hub/stats` | Hub handler-specific | Stats | `pkg/hub/server.go:1644` |
+| `GET` | `/api/fleet-stats` | Hub handler-specific | Fleet Stats | `pkg/hub/server.go:1645` |
+| `GET` | `/api/hub/version` | Hub handler-specific | Hub Version | `pkg/hub/server.go:1646` |
+| `DELETE` | `/api/hub/registry/{id}` | Hub handler-specific | Registry Delete | `pkg/hub/server.go:1656` |
+| `POST` | `/api/contribute/register` | Hub handler-specific | Contribute Proxy | `pkg/hub/server.go:1657` |
+| `GET` | `/api/contribute/status` | Hub handler-specific | Contribute Status | `pkg/hub/server.go:1658` |
+| `GET` | `/api/contribute/ws` | Hub handler-specific | Contribute WSProxy | `pkg/hub/server.go:1659` |
+| `POST` | `/api/github/webhook` | Hub handler-specific | GitHub Webhook | `pkg/hub/server.go:1660` |
+| `GET` | `/gh-setup` | Hub handler-specific | GitHub App Setup Router | `pkg/hub/server.go:1661` |
+| `GET` | `/learn` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1662` |
+| `GET` | `/get-started` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1663` |
+| `GET` | `/api/docs` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1664` |
+| `GET` | `/api/reading-list` | Hub handler-specific | Reading List | `pkg/hub/server.go:1667` |
+| `GET` | `/reading` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1668` |
+| `GET` | `/cncf-reference-architecture` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1675` |
+| `GET` | `/cncf-reference-architecture/console` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1676` |
+| `GET` | `/cncf-reference-architecture/bluefin` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1677` |
+| `GET` | `/{$}` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1694` |
+| `GET` | `/og-card.png` | Hub handler-specific | OGCard | `pkg/hub/server.go:1699` |
+| `GET` | `/` | Public | Static asset fallback (`http.FileServerFS` over the embedded `static/` tree) for any path no other route claims | `pkg/hub/server.go:1701` |

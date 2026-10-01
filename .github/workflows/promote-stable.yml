@@ -54,12 +54,14 @@ env:
   IMAGE_NAMES: hive hive-contributor hive-hub
   BLOCKER_LABEL: release-blocker
   SMOKE_EVIDENCE: ${{ inputs.smoke-evidence || vars.STABLE_SMOKE_EVIDENCE || '' }}
+  STABLE_PROMOTION_URL: ${{ vars.STABLE_PROMOTION_URL || 'https://hive.hivecommons.dev/api/hub/release/stable-promotion' }}
   EMERGENCY_EXCEPTION_REASON: ${{ inputs.emergency-exception-reason || '' }}
   EMERGENCY_FOLLOWUP_ISSUE: ${{ inputs.emergency-followup-issue || '' }}
 
 jobs:
   promote:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout promotion scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

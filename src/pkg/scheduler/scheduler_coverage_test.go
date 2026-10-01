@@ -457,17 +457,7 @@ func TestSubstituteTemplate_TimestampPresent(t *testing.T) {
 // (#4585). Restores the originals via t.Cleanup.
 func redirectPolicySeams(t *testing.T) {
 	t.Helper()
-	prevAgentHome := agentHomeDir
-	prevUserSaved := userSavedPolicyDir
-	prevCloned := clonedPoliciesDir
-	agentHomeDir = t.TempDir()
-	userSavedPolicyDir = t.TempDir()
-	clonedPoliciesDir = t.TempDir()
-	t.Cleanup(func() {
-		agentHomeDir = prevAgentHome
-		userSavedPolicyDir = prevUserSaved
-		clonedPoliciesDir = prevCloned
-	})
+	t.Cleanup(setPolicyDirsForTest(t.TempDir(), t.TempDir(), t.TempDir()))
 }
 
 func TestLoadPromptTemplate_FromPoliciesDir(t *testing.T) {
@@ -721,5 +711,34 @@ func TestBuildGenericMessage_WithIssues(t *testing.T) {
 	}
 	if !strings.Contains(msg, "r#1") {
 		t.Error("expected issue reference")
+	}
+}
+
+// A hive-filed child the relay split out of an approved parent (#9840) ranks
+// in the acknowledged tier and the kick line names the parent, so a reader
+// can check the claim without opening the issue.
+func TestIssuePriorityMarker_ParentAcknowledgementIsNamed(t *testing.T) {
+	s := newScheduler()
+	issues := []github.Issue{
+		{Repo: "repo", Number: 1, Title: "untouched hive-filed", Author: "hive[bot]", AgeMinutes: 500},
+		{Repo: "repo", Number: 2, Title: "split child", Author: "hive[bot]", HumanAcknowledged: true, AckSource: "parent #9802", AgeMinutes: 5},
+		{Repo: "repo", Number: 3, Title: "labelled", Author: "hive[bot]", HumanAcknowledged: true, AgeMinutes: 5},
+	}
+	if got := issuePriorityMarker(issues[1]); got != "[hive-filed+parent-ack #9802]" {
+		t.Fatalf("marker = %q, want [hive-filed+parent-ack #9802]", got)
+	}
+	if got := issuePriorityMarker(issues[2]); got != "[hive-filed+ack]" {
+		t.Fatalf("marker = %q, want [hive-filed+ack]", got)
+	}
+	github.RankActionableIssues(issues)
+	result, _ := s.formatIssueListWithPolicy(issues)
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(result), "\n") {
+		if strings.HasPrefix(line, "  ") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 3 || strings.Contains(lines[0], "repo#1 ") || !strings.Contains(result, "[hive-filed+parent-ack #9802]") {
+		t.Fatalf("kick list should rank the split child above the untouched backlog and name its parent:\n%s", result)
 	}
 }
