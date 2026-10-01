@@ -200,9 +200,15 @@ Promoting or demoting a running hive between levels is a single operation — th
 hive reconciles its agent roster and per-agent modes to match the target level.
 
 **From the dashboard:** open the Governor config and set the ACMM level. This is
-the normal path.
+the normal path. When a change makes the L6 self-authored merge sweep eligible,
+the dashboard shows an informational modal listing held App-authored PRs and
+the watched repositories' auto-merge toggles; it does not release holds.
 
 **Over the API:** `PUT /api/packs/level` with `{"level": N}` where N is 1–6.
+Level-applied `hold` labels are never released automatically on a level change.
+For a deliberate one-off recovery, include `release_level_holds: true` on this
+PUT; Hive removes only its own level-applied `hold` labels whose latest hold
+event was by the App and comments on each PR with the operator and target level.
 
 What happens when the level changes (`handlePackSetLevel` → `ApplyPack`):
 
@@ -214,19 +220,27 @@ What happens when the level changes (`handlePackSetLevel` → `ApplyPack`):
    roster** — adding every agent the level introduces (for example
    architect/strategist at higher levels) and applying each agent's mode for
    that level (advisory → measured → holdgated → full).
+4. If the change crosses the L6 self-merge boundary, Hive restarts the request
+   relay generation so the self-authored auto-merge sweep starts or stops under
+   the new ACMM verdict without waiting for a pod restart or GitHub App re-save.
+   Existing level-applied holds remain held unless this `PUT /api/packs/level`
+   request explicitly included `release_level_holds: true`. When the sweep just
+   became eligible, the response includes `self_merge_sweep_active`,
+   `level_holds_pending`, `repos`, and `level_changed_at` so the dashboard can
+   inform the owner what remains held and which repos participate in L6
+   auto-merge.
 
 Notes:
 
 - **Promotion adds agents and capability; demotion narrows it.** Moving up to L6
   makes agents auto-merge on green CI; moving down returns them to holdgated or
   advisory. The per-level capability grid is the table at the top of this page.
-  Promotion also **releases the level holds the hive itself applied** to open App
-  PRs that the new level no longer requires, so you do not have to clean them up
-  by hand after a level bump. Release is fail-closed: it applies only to
-  App-authored PRs carrying the hive's own attributable level-hold notice, only
-  when the most recent `hold` label event was applied by the App, and never while
-  a self-authorization hold applies. A hold a human applied — or re-applied after
-  the hive removed one — is never touched.
+  Promotion does **not** release level holds the hive itself applied; a human
+  removes `hold`, or an operator makes the one-off API call above. The one-off
+  release is fail-closed: it applies only to PRs carrying the hive's own
+  attributable level-hold notice and only when the most recent `hold` label
+  event was applied by the App. A hold a human applied — or re-applied after the
+  hive removed one — is never touched.
 - **Operator-created agents are preserved.** `ApplyPack` reconciles pack agents;
   agents you created yourself are not removed by a level change (deletion is
   tombstoned separately — see agent configuration).
