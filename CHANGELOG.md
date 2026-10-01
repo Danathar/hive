@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.110.0)
+
+### Added
+
+- hub: stable channel auto-promotion with play/pause control (#9899)
+
+### Fixed
+
+- automerge: finish level-hold review follow-ups (#9901)
+
 ## 2026-10-01 (v5.109.0)
 
 ### Added
