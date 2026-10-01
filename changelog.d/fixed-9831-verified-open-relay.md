@@ -1,1 +1,0 @@
-- Allow the audited label relay to apply `hive/verified-open` so merged-claim verification can persist the not-done verdict and stop the repeat verify loop described in #9831.

@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.7)
+
+### Changed
+
+- The PR-request precheck no longer runs `go test` inside the live hive pod by default (`github.pr_precheck.go_tests` is now opt-in) and no longer demands a `changelog.d/` fragment from repos that have no `changelog.d/` directory: in-pod test runs had been reading and rewriting production state under `/data` (config overlays, the audit log, tmux sessions), which rejected correct agent PRs with false failures and clobbered the live config, while docs/pluk PRs were being refused for a convention that only the hive repo follows. CI remains the authority on tests; the precheck keeps DCO, docs guards and the fragment check where the convention applies.
+
+### Fixed
+
+- Fixed dashboard topbar overlap/spacing and moved the hive id, clock, and status-age indicator into the user menu for #9828 and #9816.
+- Allow the audited label relay to apply `hive/verified-open` so merged-claim verification can persist the not-done verdict and stop the repeat verify loop described in #9831.
+
 ## 2026-10-01 (v5.105.6)
 
 ### Fixed
