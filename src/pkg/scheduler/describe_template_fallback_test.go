@@ -12,7 +12,7 @@ import "testing"
 // acmmScheduler is danglingScheduler with the config pinned to an ACMM level.
 func acmmScheduler(t *testing.T, level int) *Scheduler {
 	t.Helper()
-	s, _ := danglingScheduler(t)
+	s, _, _ := danglingScheduler(t)
 	s.cfg.ACMMLevel = &level
 	return s
 }

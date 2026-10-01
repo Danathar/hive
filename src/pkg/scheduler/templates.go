@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -39,15 +40,24 @@ var agentHomeDir = "/data/agents"
 // uses /data/policies.
 var clonedPoliciesDir = "/data/policies"
 
+var policyDirMu sync.RWMutex
+
+func policyDirs() (agentHome, userSaved, cloned string) {
+	policyDirMu.RLock()
+	defer policyDirMu.RUnlock()
+	return agentHomeDir, userSavedPolicyDir, clonedPoliciesDir
+}
+
 // loadPromptTemplate searches standard paths for an agent's policy template.
 // It checks on-disk paths first, then falls back to embedded default policies.
 func (s *Scheduler) loadPromptTemplate(agentName string) string {
+	agentHome, userSaved, cloned := policyDirs()
 	paths := []string{
-		fmt.Sprintf("%s/%s/CLAUDE.md", agentHomeDir, agentName),
+		fmt.Sprintf("%s/%s/CLAUDE.md", agentHome, agentName),
 		// User-saved override from the dashboard prompt editor wins over the
 		// git-cloned examples copy and embedded defaults (#3239).
-		fmt.Sprintf("%s/%s.md", userSavedPolicyDir, agentName),
-		fmt.Sprintf("%s/examples/kubestellar/agents/%s.md", clonedPoliciesDir, agentName),
+		fmt.Sprintf("%s/%s.md", userSaved, agentName),
+		fmt.Sprintf("%s/examples/kubestellar/agents/%s.md", cloned, agentName),
 	}
 	if s.cfg.Policies.LocalDir != "" {
 		paths = append(paths,
@@ -86,14 +96,15 @@ const TemplateSourceEmbedded = "embedded default"
 // and an operator saw a blank prompt editor with a 404 repo link and no way
 // to tell a lost template from one that never existed.
 func (s *Scheduler) resolveNamedTemplate(templateName string) (content, source string, tried []string) {
+	_, userSaved, cloned := policyDirs()
 	paths := []string{
 		// User-saved override from the dashboard prompt editor wins over the
 		// git-cloned examples copy and embedded defaults (#3239). handleAgentPromptSave
 		// writes the edited template to /data/policies/<KickTemplate>, so when an
 		// agent has a kick_template set (e.g. quality-advisory.md at ACMM L2) the
 		// edit lands here and must be picked up on the next kick.
-		fmt.Sprintf("%s/%s", userSavedPolicyDir, templateName),
-		fmt.Sprintf("%s/examples/kubestellar/agents/%s", clonedPoliciesDir, templateName),
+		fmt.Sprintf("%s/%s", userSaved, templateName),
+		fmt.Sprintf("%s/examples/kubestellar/agents/%s", cloned, templateName),
 	}
 	if s.cfg.Policies.LocalDir != "" {
 		paths = append(paths,
