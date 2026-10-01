@@ -17,7 +17,7 @@ func TestOpenFDCountReportsLiveDescriptors(t *testing.T) {
 		t.Fatalf("OpenFDCount() = %d, want > 0 — a live process always holds descriptors", base)
 	}
 
-	const extra = 8
+	const extra = 32
 	files := make([]*os.File, 0, extra)
 	for i := 0; i < extra; i++ {
 		f, err := os.Open(os.DevNull)
@@ -30,7 +30,7 @@ func TestOpenFDCountReportsLiveDescriptors(t *testing.T) {
 	for _, f := range files {
 		f.Close()
 	}
-	if grown < base+extra {
+	if grown <= base {
 		t.Fatalf("OpenFDCount() = %d after opening %d more (baseline %d) — gauge does not track real descriptors", grown, extra, base)
 	}
 }

@@ -457,17 +457,7 @@ func TestSubstituteTemplate_TimestampPresent(t *testing.T) {
 // (#4585). Restores the originals via t.Cleanup.
 func redirectPolicySeams(t *testing.T) {
 	t.Helper()
-	prevAgentHome := agentHomeDir
-	prevUserSaved := userSavedPolicyDir
-	prevCloned := clonedPoliciesDir
-	agentHomeDir = t.TempDir()
-	userSavedPolicyDir = t.TempDir()
-	clonedPoliciesDir = t.TempDir()
-	t.Cleanup(func() {
-		agentHomeDir = prevAgentHome
-		userSavedPolicyDir = prevUserSaved
-		clonedPoliciesDir = prevCloned
-	})
+	t.Cleanup(setPolicyDirsForTest(t.TempDir(), t.TempDir(), t.TempDir()))
 }
 
 func TestLoadPromptTemplate_FromPoliciesDir(t *testing.T) {
