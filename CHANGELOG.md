@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.11)
+
+### Fixed
+
+- Route unaddressed human CHANGES_REQUESTED reviews on held hive PRs back to the owning agent, surface their review state on hold-gated dashboards, and reuse the shared addressed rule for #9802 #9809 #9810 #9811 #9812.
+- Claude fallback list (Go + UI) now offers `claude-sonnet-5-5`; the codex static list matches the pinned 0.159.0 catalog (drops retired `gpt-5.4`); token pricing adds Opus 5.5, Opus 5, Sonnet 5.5, GPT-6 Astra/Sol/Luna and the Gemini 3 previews (#9804).
+- Surface failed or stalled spoke dashboard upgrades after reload and precheck self-upgrade RBAC/image readiness before accepting manual upgrades (#9832).
+- `src/docs/move-kubernetes.md` now cites the right `src/deploy/entrypoint.sh` lines for the dashboard config overlay, the runtime config, the beads symlinks and `/data/home` ([#9860](https://github.com/hivecommons/hive/issues/9860)).
+- The storage prerequisite in `src/docs/move-kubernetes.md` no longer repeats the removed README advice that `ReadWriteMany` gives rolling upgrades ([#9861](https://github.com/hivecommons/hive/issues/9861)). It now says the shipped `ReadWriteOnce` PVC is enough because the Deployment is single-replica `Recreate`.
+- The `backup-exec-restriction` overlay README now describes `src/deploy/k8s` as the hive workload base instead of the hub, and says the backup CronJob is a hub component in `hive-hub` ([#9862](https://github.com/hivecommons/hive/issues/9862)).
+- The `openshift-netadmin` SCC comment now points at `src/deploy/test_manifest_caps_runtime.sh`, the test that checks the SCC mirrors the Deployment capabilities ([#9863](https://github.com/hivecommons/hive/issues/9863)). Its relative path did not resolve.
+
 ## 2026-10-01 (v5.105.10)
 
 ### Fixed
