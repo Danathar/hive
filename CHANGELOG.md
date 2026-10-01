@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.106.0)
+
+### Added
+
+- `hive-open-issue --blocked-by <n[,n]>` records the order of split-out child issues as GitHub "blocked by" dependencies, and enumeration reads those links back so an issue with an open blocker is held out of the kick's actionable list (named in a footer with its blockers) until the blocker closes (#9839).
+- A filling `/data` volume now degrades the hive's health before kubelet evicts the pod ([#9869](https://github.com/hivecommons/hive/issues/9869)). A new `data_disk` check in both `HealthSummary` (the health the hub reads from each heartbeat) and `/api/health/deep` samples the data volume and reports `warn` at 75% and 85% used and `fail` at 95%, naming the mount, the percentage and the free space; the `fail` raises the hub's standing alert for the spoke. Previously the only signal was the pod SIGKILLed seconds after every start.
+
+### Fixed
+
+- A hosted hive no longer bounces a signed-in user back to the hub's `/login` when it rejects the hub's identity proof ([#9785](https://github.com/hivecommons/hive/issues/9785)). The spoke answered a request that carried `X-Hive-User` but a missing or mismatched `X-Hive-Proxy-Auth` with 401, which the hosted Ingress rewrites into its auth-signin redirect; the hub then found the session valid and sent the browser straight back, so the user was signed in at the hub and locked out of the hive at once, with nothing on the hub able to break the cycle. The spoke now answers 403 with a page (or JSON on `/api/`) naming the rejection — a hub↔spoke dashboard-token mismatch that signing in again cannot fix — and logs it; the hub's auth-check now warns, once per hive per cache window, when it could not resolve the hive's dashboard token and had to send identity without proof.
+- `/contribute` no longer paints with the operator's dashboard theme and then swaps in the viewer's contributor theme after load (visible colour and border-radius "settling" on every page load); the head now requests the viewer's theme up front and the deferred script no longer cache-busts and re-fetches the stylesheet it already has (#9847).
+- The push-branch relay now pins `core.hooksPath`, `core.fsmonitor`, and `credential.helper` through `GIT_CONFIG_*` on every git invocation it makes inside an agent's checkout, alongside the existing `safe.directory` and remote-scoped `extraHeader` pairs. Repo-local config in the agent-writable `.git` directory can otherwise make git spawn programs during a push; those overrides take command-line precedence so the relay only ever runs git itself.
+
 ## 2026-10-01 (v5.105.11)
 
 ### Fixed
