@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.108.1)
+
+### Fixed
+
+- Hosted contributor profile sign-in now lets grant-less signed-in users resolve their public contributor identity.
+- Hosted contributor profile sign-in now returns grant-less users to the public contributor page, while unauthorized dashboard visits show a clear access-needed page.
+- Align spoke dashboard upgrade offers with the hub-resolved release-channel target and keep heartbeat upgrade delivery latched until the target is actually satisfied.
+
 ## 2026-10-01 (v5.108.0)
 
 ### Added
