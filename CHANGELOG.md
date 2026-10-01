@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.9)
+
+### Changed
+
+- Block hive agents from running in-pod `go test` and `go vet` by installing a Go toolchain shim that points them to CI instead.
+
+### Fixed
+
+- Defer generated manual kicks until the first governor scan has populated the scheduler work-list snapshot.
+- Suppress token-triggered login restarts while an agent is still producing pane output.
+
 ## 2026-10-01 (v5.105.8)
 
 ### Changed
