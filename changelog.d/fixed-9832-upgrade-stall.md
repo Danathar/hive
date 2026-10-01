@@ -1,1 +1,0 @@
-- Surface failed or stalled spoke dashboard upgrades after reload and precheck self-upgrade RBAC/image readiness before accepting manual upgrades (#9832).
