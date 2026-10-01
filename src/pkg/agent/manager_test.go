@@ -57,7 +57,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	tmuxDir, err := os.MkdirTemp(".", ".hive-agent-tmux-*")
+	// The tmux socket dir must live under the SYSTEM temp dir, not "." like
+	// the stub dir above: sockets are bound at TMUX_TMPDIR/tmux-<uid>/<name>,
+	// and sun_path caps the whole path at ~108 bytes. Deep checkout paths can
+	// push the socket path past the limit and fail every tmux-backed test with
+	// "error connecting ... (File name too long)" (#9673).
+	tmuxDir, err := os.MkdirTemp("", ".hive-agent-tmux-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: tmux MkdirTemp: %v\n", err)
 		_ = os.RemoveAll(dir)
@@ -72,8 +77,8 @@ func TestMain(m *testing.M) {
 	}
 
 	stubBinDir = dir
-	// Keep NewManager hermetic on hosts that are real hives (the hub's PR
-	// precheck runs this package inside the pod, where /data/copilot-user-token
+	// Keep NewManager hermetic on hosts that are real hives: this package can
+	// run inside the pod, where /data/copilot-user-token
 	// exists and would add COPILOT_GITHUB_TOKEN to every agentEnvPairs result).
 	copilotUserTokenLoadPath = filepath.Join(dir, "absent-copilot-user-token")
 

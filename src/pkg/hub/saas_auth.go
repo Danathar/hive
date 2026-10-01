@@ -474,6 +474,40 @@ func sessionCookieDomain(host string) string {
 	return ""
 }
 
+// sessionCookieReaches reports whether the hub session cookie minted for a
+// request served on hubHost is sent by the browser to target. Only a path
+// ("/dashboard") stays on the hub; a protocol-relative "//host/..." is another
+// origin to the browser, so it is judged by its host like an absolute URL —
+// loginRedirectTarget keeps "//localhost..." (isTrustedRedirectTarget trusts
+// localhost), and a production cookie never reaches localhost.
+func sessionCookieReaches(hubHost, target string) bool {
+	if strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "//") {
+		return true
+	}
+	host, ok := originHost(target)
+	if !ok || host == "" {
+		return false
+	}
+	if hp, _, err := net.SplitHostPort(hubHost); err == nil {
+		hubHost = hp
+	}
+	hubHost = strings.ToLower(hubHost)
+	return cookieDomainMatches(sessionCookieDomain(hubHost), hubHost, strings.ToLower(host))
+}
+
+// cookieDomainMatches reports whether a browser holding a cookie that was set
+// on setHost with Domain=cookieDomain sends it to host: RFC 6265 §5.1.3
+// domain-matching. An empty cookieDomain is a host-only cookie, which reaches
+// only the exact host that set it. Ports do not scope cookies, so callers pass
+// bare hostnames.
+func cookieDomainMatches(cookieDomain, setHost, host string) bool {
+	if cookieDomain == "" {
+		return host == setHost
+	}
+	d := strings.TrimPrefix(cookieDomain, ".")
+	return host == d || strings.HasSuffix(host, "."+d)
+}
+
 // hubSessionCookieValues returns every hive_hub_user value on the request, in
 // jar order. During the .kubestellar.io domain-widening rollout (#4171) a
 // browser may briefly hold TWO copies of the cookie — the legacy

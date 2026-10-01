@@ -351,6 +351,8 @@ func (ns *NousState) refreshStatus() {
 type SchedulerControl interface {
 	BuildAgentMessage(agentName string, issues []ghpkg.Issue, actionable *ghpkg.ActionableResult) string
 	BuildAgentMessageFromLastActionable(agentName string) string
+	FirstScanDone() bool
+	DeferKickUntilFirstScan(agentName string, deliver func(msg string))
 	GetLastActionable() *ghpkg.ActionableResult
 	GetLaneDepths() map[string]int
 	// ResolveTemplate / TemplateExists report kick_template provenance for
