@@ -80,11 +80,20 @@ type wireIssue struct {
 	Assignees []wireUser  `json:"assignees"`
 	CreatedAt string      `json:"created_at"`
 	HTMLURL   string      `json:"html_url,omitempty"`
+	// State is GitHub's open/closed; the #9840 parent check reads it.
+	State string `json:"state,omitempty"`
 	// AuthorAssociation is GitHub's author_association (OWNER, MEMBER, ...);
 	// the #9665 reporter-trust gate reads it.
 	AuthorAssociation string `json:"author_association,omitempty"`
 	// Setting PullRequest makes IsPullRequest() return true.
 	PullRequest *struct{} `json:"pull_request,omitempty"`
+	// IssueDependenciesSummary is GitHub's "blocked by" count block (#9839).
+	IssueDependenciesSummary *wireDepsSummary `json:"issue_dependencies_summary,omitempty"`
+}
+
+type wireDepsSummary struct {
+	BlockedBy      int `json:"blocked_by"`
+	TotalBlockedBy int `json:"total_blocked_by"`
 }
 
 func mustMarshal(t *testing.T, v any) []byte {

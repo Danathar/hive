@@ -424,18 +424,24 @@ type IssueLinkedPR struct {
 }
 
 type Issue struct {
-	Repo              string    `json:"repo"`
-	Number            int       `json:"number"`
-	Title             string    `json:"title"`
-	Body              string    `json:"body,omitempty"`
-	Author            string    `json:"author"`
-	AuthorIsHuman     bool      `json:"author_is_human,omitempty"`
-	HumanAcknowledged bool      `json:"human_acknowledged,omitempty"`
-	Labels            []string  `json:"labels"`
-	Assignees         []string  `json:"assignees"`
-	Priority          string    `json:"priority,omitempty"`
-	State             string    `json:"state,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
+	Repo              string `json:"repo"`
+	Number            int    `json:"number"`
+	Title             string `json:"title"`
+	Body              string `json:"body,omitempty"`
+	Author            string `json:"author"`
+	AuthorIsHuman     bool   `json:"author_is_human,omitempty"`
+	HumanAcknowledged bool   `json:"human_acknowledged,omitempty"`
+	// AckSource names where a hive-filed issue's acknowledgement came from
+	// when it was not given on the issue itself: "parent #N" for a child the
+	// relay split out of a human-filed or human-acknowledged parent
+	// (hivecommons/hive#9840). Empty when HumanAcknowledged was earned on the
+	// issue (label, assignee) or is false.
+	AckSource string    `json:"ack_source,omitempty"`
+	Labels    []string  `json:"labels"`
+	Assignees []string  `json:"assignees"`
+	Priority  string    `json:"priority,omitempty"`
+	State     string    `json:"state,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is GitHub's last-activity timestamp for the issue (new commits
 	// referencing it, comments, label/assignee changes, …). It is the
 	// invalidation signal for the contribute queue's no_work_needed verdict
@@ -1089,22 +1095,30 @@ func (c *Client) splitRepo(repo string) (owner, repoName string) {
 func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (actionable []Issue, held []HoldItem, totalIssues int, breakdown RepoIssueBreakdown, err error) {
 	issueFilter := c.getIssueFilter()
 	owner, repoName := c.splitRepo(repo)
-	opts := &gh.IssueListByRepoOptions{
-		State:       "open",
-		ListOptions: gh.ListOptions{PerPage: 100},
+
+	// #9839: the list call keeps GitHub's issue_dependencies_summary so only
+	// issues that report an open "blocked by" count pay for a per-issue
+	// dependency fetch below.
+	allIssues, blockedCounts, err := c.listOpenIssuesWithBlockedCounts(ctx, owner, repoName)
+	if err != nil {
+		return nil, nil, 0, RepoIssueBreakdown{}, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
 	}
 
-	var allIssues []*gh.Issue
-	for {
-		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repoName, opts)
-		if err != nil {
-			return nil, nil, 0, RepoIssueBreakdown{}, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
+	// #9840: a hive-filed child the relay split out of a human-filed (or
+	// human-acknowledged) parent inherits that acknowledgement. The parent is
+	// resolved from this same open-issue snapshot, so no extra call per child,
+	// and a closed parent (absent from the snapshot) confers nothing.
+	splitParents, splitErr := LoadSplitParents("")
+	if splitErr != nil {
+		c.logger.Warn("issue enumeration: split-parent ledger unreadable, no inherited acknowledgement this cycle",
+			slog.String("repo", repo), slog.String("error", splitErr.Error()))
+		splitParents = nil
+	}
+	openByNumber := make(map[int]*gh.Issue, len(allIssues))
+	for _, issue := range allIssues {
+		if !issue.IsPullRequest() {
+			openByNumber[issue.GetNumber()] = issue
 		}
-		allIssues = append(allIssues, issues...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.ListOptions.Page = resp.NextPage
 	}
 
 	for _, issue := range allIssues {
@@ -1184,6 +1198,30 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 
 		ageMinutes := int(now.Sub(issue.GetCreatedAt().Time).Minutes())
 
+		authorIsHuman := c.isHumanAuthor(issue.GetUser())
+		acknowledged := c.issueHasCheapHumanAcknowledgement(issue)
+		ackSource := ""
+		if !authorIsHuman && !acknowledged {
+			if parentNum, ok := c.inheritedAcknowledgement(splitParents, owner+"/"+repoName, issue, openByNumber); ok {
+				acknowledged = true
+				ackSource = ackSourceForParent(parentNum)
+			}
+		}
+
+		// #9839: GitHub "blocked by" links become DependsOn edges. An
+		// unreadable blocker list fails OPEN with a warning: hiding work
+		// behind an error nobody can see is worse than offering it.
+		var dependsOn []IssueDependency
+		if blockedCounts[issue.GetNumber()] > 0 {
+			deps, depErr := c.githubBlockedByDependencies(ctx, owner, repoName, repo, issue.GetNumber())
+			if depErr != nil {
+				c.logger.Warn("issue enumeration: could not read \"blocked by\" dependencies; treating the issue as unblocked this cycle",
+					slog.String("repo", repo), slog.Int("number", issue.GetNumber()), slog.String("error", depErr.Error()))
+			} else {
+				dependsOn = deps
+			}
+		}
+
 		breakdown.Actionable++
 		actionable = append(actionable, Issue{
 			Repo:              repo,
@@ -1191,8 +1229,9 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 			Title:             issue.GetTitle(),
 			Body:              issue.GetBody(),
 			Author:            safeGetLogin(issue.GetUser()),
-			AuthorIsHuman:     c.isHumanAuthor(issue.GetUser()),
-			HumanAcknowledged: c.issueHasCheapHumanAcknowledgement(issue),
+			AuthorIsHuman:     authorIsHuman,
+			HumanAcknowledged: acknowledged,
+			AckSource:         ackSource,
 			Labels:            labels,
 			Assignees:         extractAssignees(issue.Assignees),
 			CreatedAt:         issue.GetCreatedAt().Time,
@@ -1200,8 +1239,10 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 			AgeMinutes:        ageMinutes,
 			URL:               issue.GetHTMLURL(),
 			IsTracker:         isTracker(issue.GetTitle(), labels, issue.GetBody()),
+			DependsOn:         dependsOn,
 		})
 	}
+	dropMutualBlocks(actionable, c.logger)
 
 	// Keep an honest fallback if a future exclusion path is added without a
 	// dedicated category. This is the same enumeration snapshot, not a second

@@ -16,9 +16,7 @@ import (
 // editor (handleAgentPromptSave) writes to.
 func withUserSavedPolicyDir(t *testing.T, dir string) {
 	t.Helper()
-	prev := userSavedPolicyDir
-	userSavedPolicyDir = dir
-	t.Cleanup(func() { userSavedPolicyDir = prev })
+	t.Cleanup(setPolicyDirsForTest("", dir, ""))
 }
 
 // TestKickUsesLatestSavedTemplate is the regression test for issue #3239: after

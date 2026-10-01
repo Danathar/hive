@@ -10,6 +10,13 @@ Hive publishes three **release channels** — moving GHCR image tags an operator
 
 > **Promotion policy:** the channels diverge by release line and maturity. Every green merge to **`v5`** retags **`candidate`** (and `:latest`); **`stable`** advances later by digest through the scheduled/manual stable-promotion workflow after the [stable soak and promotion policy](stable-soak-policy.md) passes. Merges to **`v6`** retag **`edge`**, so `edge` is an active-development v6 build, not a synonym for `stable`. **`v4`** is a maintenance line: its builds publish only `v4-latest` and short-SHA tags, no channel (#7721 Phase 1).
 
+The hub's release-channel block also shows the stable auto-promotion state.
+Hub admins see a play/pause control on the `stable` row: play (the default)
+lets the hourly promotion workflow catch `stable` up to `candidate` after the
+24-hour soak and maintained-hive smoke evidence; pause records who paused and
+when, and the workflow skips without moving tags until resumed. Non-admins see
+a read-only badge.
+
 ## How channels are published
 
 Channels are **retags, not rebuilds**. Each release line's `docker.yml` workflow adds fast-moving channels as extra tags in the same `docker buildx imagetools create` call that publishes the branch's `-latest` and immutable short-SHA tags, so a channel always points at an already-built, multi-arch digest. Builds of branch `v5` publish `candidate`; the separate stable-promotion workflow later retags `stable` by candidate digest after the soak gate passes. Builds of branch `v6` publish `edge`. All three images get their line's channels in both published orgs:
@@ -97,7 +104,8 @@ For self-hosted Podman Quadlet spokes the selector is intentionally unavailable 
 ## Known limitations
 
 - **Bulk actions cannot set a channel.** The bulk *Switch branch* action validates against real branches only and rejects channel names (`unknown branch`); it also never writes the tracked channel. Switching to a channel is per-hive.
-- **A manual Upgrade on a channel-tracking hive transiently arms a branch-SHA target.** The manual upgrade handler still targets the tracked *branch*'s latest SHA (`getLatestSHAForBranch`, `pkg/hub/saas.go`); the heartbeat re-arm drags the hive back to the channel tag on the next non-upgrading beat. Expect a short window where the pill says `stable (v4)` while an upgrade converges on a SHA. This is now the exception — automatic targeting resolves through the channel tag (see below).
+- **A manual Upgrade on a channel-tracking hive resolves through the channel tag.** If `:stable`/`:candidate`/`:edge` already points at the commit the spoke is running, the hub refuses the click with a visible explanation instead of arming a no-op heartbeat upgrade. Operators who need a newer build must wait for the channel to advance or switch the hive to a newer channel/branch tag.
+- **The spoke dashboard offer uses that same target.** `/api/version` keeps reporting the branch tip for provenance, but the `behind` flag, behind count, and Upgrade button are measured against the hub-delivered upgrade policy when present. A `:stable` spoke therefore does not offer "Upgrade available → <branch tip>" while `:stable` itself still points at the running commit.
 
 ## Channel-aware upgrade targeting
 
@@ -105,7 +113,7 @@ Automatic upgrade targeting resolves **through the tag the spoke's Deployment tr
 
 The stable soak policy made this necessary: per-merge publishes move only `candidate`, while `stable` advances later by digest. A spoke's Deployment tracks one image tag, and rolling the pod re-pulls that tag — nothing the hub instructs can make a restart land on a digest the tag does not carry. A hub that targets branch HEAD is therefore asking a `:stable` spoke to reach a digest its own tag is deliberately withholding; before the fix this looped 41 spokes into permanent `UPGRADE FAILED` (hub instructs a SHA, spoke rolls, re-pulls `:stable`, reports the SHA it started on, hub re-sends the identical instruction).
 
-How targets are now resolved (`reachableUpgradeTarget`, used by the auto-upgrade sweep and the heartbeat spoke-managed path):
+How targets are now resolved (`reachableUpgradeTarget`, used by the manual upgrade handler, the auto-upgrade sweep, and the heartbeat spoke-managed path):
 
 - **Which channel a spoke is on:** the spoke's *reported image ref* leads, because it is what the kubelet will pull; the hub-side `tracked_channel` record is intent, and the two disagree exactly while a channel switch is still on the wire. `tracked_channel` remains the fallback only for spokes too old to report an image ref. Branch tags and SHA pins resolve to branch targeting, exactly as before.
 - **Channel → commit:** the hub walks GHCR from the channel tag to the image index, picks the `linux/amd64` platform manifest (buildx attaches `unknown/unknown` provenance descriptors to the same index, so position is not enough), and reads the `org.opencontainers.image.revision` OCI label from the config blob — the only commit identity that survives a retag. Answers are cached for 5 minutes (`channelDigestTTL`); when a refresh fails, the last good answer is served for up to 4× that (`channelRevisionStaleGrace`, 20 minutes) since a channel moves at most hourly, then resolution is treated as failed.

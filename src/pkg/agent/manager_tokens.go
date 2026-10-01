@@ -640,6 +640,13 @@ func copilotSessionRefreshInterval() time.Duration {
 // store is EMPTY (or absent) — it never overwrites a token the CLI itself wrote
 // and is still using, so it can't clobber a live session.
 func (m *Manager) StartCopilotSessionRefresh(ctx context.Context) {
+	configPath := sharedCopilotConfigPath
+	refresh := func() {
+		if !m.backendInUse("copilot") {
+			return
+		}
+		m.syncCopilotToken(configPath, CopilotUserTokenPath)
+	}
 	// Run once shortly after start rather than waiting a full interval for the
 	// first tick. Spokes that roll faster than the interval (ks/hive rolls every
 	// ~15-30m) would otherwise seldom reach the first tick before the pod dies,
@@ -651,7 +658,7 @@ func (m *Manager) StartCopilotSessionRefresh(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	case <-time.After(copilotSessionRefreshStartDelay()):
-		m.refreshCopilotSessionToken()
+		refresh()
 	}
 
 	ticker := time.NewTicker(copilotSessionRefreshInterval())
@@ -661,7 +668,7 @@ func (m *Manager) StartCopilotSessionRefresh(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.refreshCopilotSessionToken()
+			refresh()
 		}
 	}
 }

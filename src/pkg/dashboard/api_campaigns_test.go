@@ -97,6 +97,7 @@ func TestCampaignsArchiveInceptionOnResetAndResume(t *testing.T) {
 }
 
 func TestCampaignsArchiveCompletedInceptionBeforeStart(t *testing.T) {
+	resetLifecycleStore()
 	s := newMinimalServer(t)
 	s.deps.Inception = knowledge.NewInceptionEngine(t.TempDir(), nil, s.logger)
 	first, err := s.deps.Inception.Start("Completed campaign should stay resumable")

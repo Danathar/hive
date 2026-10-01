@@ -58,7 +58,15 @@ func (s *Scheduler) formatIssueListWithPolicyForAgent(issues []github.Issue, ref
 	var b strings.Builder
 	b.WriteString(notice)
 	failClosed := false
-	shown := fairShareByRepo(issues, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
+	// #9839: an issue with an open GitHub "blocked by" dependency is not
+	// ready work. It is kept out of the list an agent picks from, and named
+	// once at the end with its blockers so the deferral is visible and a
+	// reader can check it; when the blocker closes it is simply back.
+	ready, blocked := partitionBlockedIssues(issues)
+	if len(ready) == 0 && len(blocked) > 0 {
+		b.WriteString("(none ready)\n")
+	}
+	shown := fairShareByRepo(ready, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
 	if refsOnly {
 		for _, issue := range shown {
 			_, verdict := s.enforceIssueTextVerdict(issue.Title)
@@ -108,7 +116,45 @@ func (s *Scheduler) formatIssueListWithPolicyForAgent(issues []github.Issue, ref
 			b.WriteString("\n")
 		}
 	}
+	b.WriteString(formatBlockedIssuesNote(blocked))
 	return b.String(), failClosed
+}
+
+// partitionBlockedIssues splits the actionable issues into those ready to be
+// offered and those with an unresolved "blocked by" dependency (#9839),
+// preserving order within each.
+func partitionBlockedIssues(issues []github.Issue) (ready, blocked []github.Issue) {
+	for _, issue := range issues {
+		if issue.IsBlocked() {
+			blocked = append(blocked, issue)
+		} else {
+			ready = append(ready, issue)
+		}
+	}
+	return ready, blocked
+}
+
+// maxBlockedIssuesNamed caps the blocked footer so a repo with a long
+// dependency chain does not push the ready work out of the kick.
+const maxBlockedIssuesNamed = 10
+
+// formatBlockedIssuesNote renders the blocked issues as one footer line each,
+// titles omitted on purpose — they are not an offer, only the reason an issue
+// that exists on GitHub is missing from the list above.
+func formatBlockedIssuesNote(blocked []github.Issue) string {
+	if len(blocked) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\nBlocked by open dependencies (%d, not ready — do NOT start these; they return automatically when their blockers close):\n", len(blocked)))
+	for i, issue := range blocked {
+		if i >= maxBlockedIssuesNamed {
+			b.WriteString(fmt.Sprintf("  … and %d more\n", len(blocked)-i))
+			break
+		}
+		b.WriteString(fmt.Sprintf("  %s blocked by %s\n", issueDisplayRef(issue), strings.Join(issue.OpenBlockers(), ", ")))
+	}
+	return b.String()
 }
 
 func (s *Scheduler) formatPRList(actionable *github.ActionableResult) string {
@@ -501,6 +547,12 @@ func issuePriorityMarker(issue github.Issue) string {
 		return "[human]"
 	}
 	if issue.HumanAcknowledged {
+		if parent, ok := strings.CutPrefix(issue.AckSource, "parent "); ok {
+			// "[hive-filed+parent-ack #9802]": the relay split this child
+			// out of an approved parent (#9840); name it so the ranking is
+			// auditable from the kick line alone.
+			return "[hive-filed+parent-ack " + parent + "]"
+		}
 		return "[hive-filed+ack]"
 	}
 	return "[hive-filed]"

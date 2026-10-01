@@ -21,11 +21,10 @@ import (
 // danglingScheduler builds a scheduler whose "review" agent points at a
 // template that exists nowhere and whose "scanner" points at a shipped one,
 // with the policy dirs redirected to empty temp dirs and the log captured.
-func danglingScheduler(t *testing.T) (*Scheduler, *bytes.Buffer) {
+func danglingScheduler(t *testing.T) (*Scheduler, *bytes.Buffer, string) {
 	t.Helper()
-	prevUser, prevCloned := userSavedPolicyDir, clonedPoliciesDir
-	userSavedPolicyDir, clonedPoliciesDir = t.TempDir(), t.TempDir()
-	t.Cleanup(func() { userSavedPolicyDir, clonedPoliciesDir = prevUser, prevCloned })
+	userSaved, cloned := t.TempDir(), t.TempDir()
+	t.Cleanup(SetPolicyDirsForTest(userSaved, cloned))
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -37,11 +36,11 @@ func danglingScheduler(t *testing.T) (*Scheduler, *bytes.Buffer) {
 			"quality": {Backend: "claude", Mode: "ISSUES_AND_PRS"},
 		},
 	}
-	return New(cfg, logger), &buf
+	return New(cfg, logger), &buf, userSaved
 }
 
 func TestResolveNamedTemplate_Provenance(t *testing.T) {
-	s, _ := danglingScheduler(t)
+	s, _, userSaved := danglingScheduler(t)
 
 	content, source, tried := s.resolveNamedTemplate("scanner-holdgated.md")
 	if content == "" || source != TemplateSourceEmbedded {
@@ -55,22 +54,22 @@ func TestResolveNamedTemplate_Provenance(t *testing.T) {
 	if content != "" || source != "" {
 		t.Fatalf("dangling template resolved to something: source=%q", source)
 	}
-	if len(tried) < 3 || !strings.HasPrefix(tried[0], userSavedPolicyDir) {
+	if len(tried) < 3 || !strings.HasPrefix(tried[0], userSaved) {
 		t.Errorf("tried paths must start with the user override dir and list every location: %v", tried)
 	}
 
 	// A user override wins and is reported as the source.
-	if err := os.WriteFile(userSavedPolicyDir+"/review.md", []byte("# override"), 0o644); err != nil {
+	if err := os.WriteFile(userSaved+"/review.md", []byte("# override"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	content, source, _ = s.resolveNamedTemplate("review.md")
-	if content != "# override" || source != userSavedPolicyDir+"/review.md" {
+	if content != "# override" || source != userSaved+"/review.md" {
 		t.Errorf("override not reported: content=%q source=%q", content, source)
 	}
 }
 
 func TestResolveTemplate_ReportsDanglingAndFallback(t *testing.T) {
-	s, _ := danglingScheduler(t)
+	s, _, _ := danglingScheduler(t)
 
 	res := s.ResolveTemplate("review")
 	if res.KickTemplate != "review.md" || res.Resolved || res.Source != "" || res.EmbeddedDefaultExists {
@@ -113,7 +112,7 @@ func TestResolveTemplate_ReportsDanglingAndFallback(t *testing.T) {
 // same weight the success path already had. On the parent commit this kick
 // built without a single line about the missing template.
 func TestBuildAgentMessage_WarnsOnDanglingKickTemplate(t *testing.T) {
-	s, buf := danglingScheduler(t)
+	s, buf, _ := danglingScheduler(t)
 	msg := s.BuildAgentMessage("review", nil, &github.ActionableResult{})
 	if msg == "" {
 		t.Fatal("the kick must still be built from the fallback")
@@ -136,7 +135,7 @@ func TestBuildAgentMessage_WarnsOnDanglingKickTemplate(t *testing.T) {
 }
 
 func TestWarnDanglingKickTemplates_AtBoot(t *testing.T) {
-	s, buf := danglingScheduler(t)
+	s, buf, _ := danglingScheduler(t)
 	got := s.WarnDanglingKickTemplates()
 	if len(got) != 1 || got["review"] != "review.md" {
 		t.Fatalf("dangling = %v, want only review→review.md", got)
