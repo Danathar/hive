@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.108.0)
+
+### Added
+
+- A maintainer can now un-park a `needs-human` issue by replying `/hive approve` or `/hive decision <text>`: the hive clears `needs-human` and `needs-decision`, adds `approved-direction`, leaves any `hold` untouched, and keeps a "What to reply" block with the available commands on every parked issue.
+
 ## 2026-10-01 (v5.107.0)
 
 ### Added
