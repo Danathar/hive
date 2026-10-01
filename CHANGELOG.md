@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.109.0)
+
+### Added
+
+- Self-janitor now also reclaims dated `.local-pre-shared-*` migration snapshots and well-known regenerable caches (`.cache`, `.npm/_cacache`, `.copilot/cache`) under agent homes, age-bounded (14-day default) and symlink-safe, so a spoke no longer crash-loops on a full hive-data volume from this accumulated bulk ([#9869](https://github.com/hivecommons/hive/issues/9869)).
+
+### Fixed
+
+- automerge: restart the merge sweep on runtime ACMM level change, never auto-release level holds, and inform owners when L6 auto-merge becomes active (#9882)
+
 ## 2026-10-01 (v5.108.1)
 
 ### Fixed
