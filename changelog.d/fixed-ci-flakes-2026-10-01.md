@@ -1,1 +1,0 @@
-- CI flake coverage now isolates Copilot session refresh, scheduler template seams, campaign lifecycle state, and file-descriptor gauge assertions so v5 race/shuffle runs no longer depend on shared test process state.
