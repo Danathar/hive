@@ -105,6 +105,7 @@ func (m *Manager) startSandboxKickLocked(agent *AgentProcess, message, source st
 	if err != nil {
 		return err
 	}
+	repo := m.project.PrimaryRepo()
 	launcher := m.sandboxLauncher
 	if runtime == config.SandboxRuntimeJob {
 		job := agent.Config.SandboxJob(m.sandboxConfig)
