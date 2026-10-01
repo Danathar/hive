@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.8)
+
+### Changed
+
+- Removed the hub-side PR-open precheck gate (changelog fragment, DCO, docs guards, in-pod go test); the hive now always opens the requested PR and CI is the sole verdict (#9481, #9550).
+
 ## 2026-10-01 (v5.105.7)
 
 ### Changed
