@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.107.0)
+
+### Added
+
+- A hive-filed issue that an agent split out of a human-filed (or human-acknowledged) parent now inherits that acknowledgement instead of needing `approved-direction` on every child ([#9840](https://github.com/hivecommons/hive/issues/9840)). The issue-request relay records each sub-issue link it makes in `/data/split-parents.json`; enumeration ranks such a child in the acknowledged tier and tags it `[hive-filed+parent-ack #N]` in the kick list, and the #5117 self-authorization gate lets a PR on it through, as long as the parent is still open, not held, and carries its own human signal. Only links the relay made count — a sub-issue link added later in the GitHub UI confers nothing — and inheritance is one level deep, so the hive still cannot approve work it invented.
+- `bin/kick-governor.sh` now pauses all agent kicks when `/data` reaches the same 95% critical threshold as the `data_disk` health check, instead of scheduling new work onto an already-full volume, and resumes automatically once usage recovers; a new [DiskPressure recovery runbook](https://github.com/hivecommons/hive/blob/v5/src/docs/diskpressure-recovery-runbook.md) documents diagnosis, safe cleanup, and volume migration ([#9869](https://github.com/hivecommons/hive/issues/9869)).
+
+### Fixed
+
+- Refuse no-op manual upgrades for release-channel spokes and keep heartbeat upgrade delivery latched until the target is actually satisfied.
+- CI flake coverage now isolates Copilot session refresh, scheduler template seams, campaign lifecycle state, and file-descriptor gauge assertions so v5 race/shuffle runs no longer depend on shared test process state.
+
 ## 2026-10-01 (v5.106.0)
 
 ### Added
