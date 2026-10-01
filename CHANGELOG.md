@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.10)
+
+### Fixed
+
+- go-wrapper shim now recognises agents by HIVE_AGENT (the manager's direct-launch env), so in-sandbox go test is actually blocked
+
 ## 2026-10-01 (v5.105.9)
 
 ### Changed
