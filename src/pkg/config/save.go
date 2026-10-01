@@ -1,11 +1,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"sort"
 	"strings"
+	"testing"
 
 	"gopkg.in/yaml.v3"
 )
@@ -153,7 +155,9 @@ func (c *Config) saveLocked() error {
 	// github.token in PAT mode), and /data is world-traversable on hive
 	// hosts, so a group/world-readable runtime config hands the dashboard
 	// owner credential to every unprivileged agent user (#5331).
-	if err := os.WriteFile(runtimePath, data, 0o600); err != nil {
+	if guardLivePVCPathUnderTest(runtimePath, defaultRuntimeConfigFile, "RuntimeConfigFile") {
+		runtimeErr = errLivePVCPathGuarded
+	} else if err := os.WriteFile(runtimePath, data, 0o600); err != nil {
 		// Common cause: init container created the file as root, runtime user
 		// can't overwrite. Remove and retry so runtime state is not silently lost.
 		_ = os.Remove(runtimePath) // best-effort; the retry's own WriteFile error is what's recorded below
@@ -209,7 +213,9 @@ func (c *Config) saveLocked() error {
 // A package var (not const) only so tests can point it at a temp dir; it
 // never changes at runtime in production (same convention as
 // DashboardOverlayFile below).
-var RuntimeConfigFile = "/data/hive.yaml.runtime"
+var RuntimeConfigFile = defaultRuntimeConfigFile
+
+const defaultRuntimeConfigFile = "/data/hive.yaml.runtime"
 
 // RuntimeConfigFileLegacy is the pre-rename name of RuntimeConfigFile.
 //
@@ -233,7 +239,21 @@ const RuntimeConfigFileLegacy = "/data/hive.yaml.bak"
 //
 // A package var (not const) only so tests can point it at a temp dir; it
 // never changes at runtime in production.
-var DashboardOverlayFile = "/data/hive.yaml.dashboard"
+var DashboardOverlayFile = defaultDashboardOverlayFile
+
+const defaultDashboardOverlayFile = "/data/hive.yaml.dashboard"
+
+// guardLivePVCPathUnderTest prevents an in-pod `go test` run from writing
+// fixture config into the live PVC files that hive boots from.
+var errLivePVCPathGuarded = errors.New("live PVC config path not written from a test binary")
+
+func guardLivePVCPathUnderTest(current, production, label string) bool {
+	if !testing.Testing() || current != production {
+		return false
+	}
+	log.Printf("[config] test binary: refusing to write the live %s at %s — point config.%s at a temp dir to exercise it", label, current, label)
+	return true
+}
 
 // saTokenFile is the Kubernetes serviceaccount token path IsKubernetesPod
 // probes. It is a var (not a const) only so tests can point it at a
@@ -290,6 +310,9 @@ func (c *Config) saveDashboardOverlay() error {
 		// source of truth there, so dashboard saves persist without an
 		// overlay.
 		return nil
+	}
+	if guardLivePVCPathUnderTest(DashboardOverlayFile, defaultDashboardOverlayFile, "DashboardOverlayFile") {
+		return errLivePVCPathGuarded
 	}
 	data, err := c.dashboardOverlayBytes()
 	if err != nil {

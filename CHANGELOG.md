@@ -11,6 +11,70 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-01 (v5.105.10)
+
+### Fixed
+
+- go-wrapper shim now recognises agents by HIVE_AGENT (the manager's direct-launch env), so in-sandbox go test is actually blocked
+
+## 2026-10-01 (v5.105.9)
+
+### Changed
+
+- Block hive agents from running in-pod `go test` and `go vet` by installing a Go toolchain shim that points them to CI instead.
+
+### Fixed
+
+- Defer generated manual kicks until the first governor scan has populated the scheduler work-list snapshot.
+- Suppress token-triggered login restarts while an agent is still producing pane output.
+
+## 2026-10-01 (v5.105.8)
+
+### Changed
+
+- Removed the hub-side PR-open precheck gate (changelog fragment, DCO, docs guards, in-pod go test); the hive now always opens the requested PR and CI is the sole verdict (#9481, #9550).
+
+## 2026-10-01 (v5.105.7)
+
+### Changed
+
+- The PR-request precheck no longer runs `go test` inside the live hive pod by default (`github.pr_precheck.go_tests` is now opt-in) and no longer demands a `changelog.d/` fragment from repos that have no `changelog.d/` directory: in-pod test runs had been reading and rewriting production state under `/data` (config overlays, the audit log, tmux sessions), which rejected correct agent PRs with false failures and clobbered the live config, while docs/pluk PRs were being refused for a convention that only the hive repo follows. CI remains the authority on tests; the precheck keeps DCO, docs guards and the fragment check where the convention applies.
+
+### Fixed
+
+- Fixed dashboard topbar overlap/spacing and moved the hive id, clock, and status-age indicator into the user menu for #9828 and #9816.
+- Allow the audited label relay to apply `hive/verified-open` so merged-claim verification can persist the not-done verdict and stop the repeat verify loop described in #9831.
+
+## 2026-10-01 (v5.105.6)
+
+### Fixed
+
+- Signing in to a hosted hive no longer loops between the hive and the hub's `/login` until the browser reports a redirect loop ([#9785](https://github.com/hivecommons/hive/issues/9785)). When `/login` sends a signed-in user back to a hive, it now re-issues the session cookie at the scope hives receive, which fixes the case where the browser held a session only the hub could see. If the same hive keeps sending the user back, `/login` stops after two bounces and shows a page naming the hive instead of redirecting forever, and the hub logs a `stopped redirect loop` warning with the hive's host. The reporter's underlying cause is not confirmed yet; that log line is the evidence to look for.
+
+## 2026-10-01 (v5.105.5)
+
+### Fixed
+
+- Extended the #9673 CI-poll nudge guard to also detect `gh pr view --json
+  statusCheckRollup` and `gh pr status` as CI-status polling: only `gh run
+  watch/view/list` and `gh pr checks` were recognized before, so an agent
+  checking its own PR's checks via `gh pr view` could poll indefinitely
+  without tripping the stop-polling nudge or the dashboard's "Waiting on CI"
+  state. Ordinary `gh pr view` lookups (title, author, files, ...) are still
+  ignored.
+
+## 2026-09-30 (v5.105.4)
+
+### Fixed
+
+- A `project.writing_guide` that asks for a high-level summary now gets one: the kick preamble tells agents to write the summary at the top of the issue/PR body, before the template's first section, as an addition. The body template stays authoritative — every section, field and piece of evidence still appears in the template's order, and the guide never drops, renames or reorders a section; it governs wording, plainness, length and tone. The old preamble listed "structure" as the guide's while also pinning every template section, so agents left the summary out ([#9747](https://github.com/hivecommons/hive/issues/9747)).
+
+## 2026-09-30 (v5.105.3)
+
+### Fixed
+
+- `Config.Save` running inside a `go test` binary no longer writes the live `/data/hive.yaml.runtime` / `/data/hive.yaml.dashboard` unless a test redirected those paths; the hub's PR precheck running the suite in-pod had replaced r05x's config with testorg/testrepo and wiped its GitHub App.
+
 ## 2026-09-30 (v5.105.2)
 
 ### Fixed

@@ -93,7 +93,8 @@ func (p *ProjectConfig) WritingGuideSection() string {
 		return ""
 	}
 	return "WRITING GUIDE (set by this hive's owner in project.writing_guide). Every issue body, PR body and review comment you write in this session MUST follow it. " +
-		"It governs how the body reads — length, structure, wording — not what it contains: keep every section, field and piece of evidence the template below asks for, and apply the guide to how you write them.\n\n" +
+		"It governs how the body reads — length, structure, wording — not what it contains: keep every section, field and piece of evidence the template below asks for, in the template's order. " +
+		"never drop, rename or reorder a template section. If the guide asks for a summary or overview, write it at the top, before the template's first section, as an addition; the template's sections still follow in full below it.\n\n" +
 		guide + "\n"
 }
 

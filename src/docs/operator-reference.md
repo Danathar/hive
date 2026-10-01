@@ -8,6 +8,16 @@ For the full centralized environment variable table, including hub, backup,
 inference, deployment, contributor, and legacy helper-script variables, see
 [Environment variable reference](env-vars.md).
 
+## Agent Go toolchain shim
+
+Container images install `bin/go-wrapper.sh` as `go` in the runtime Go toolchain
+and keep the real compiler beside it as `go-real`. When `HIVE_AGENT` or
+`HIVE_AGENT_ID` is set, the shim blocks `go test`, `go vet`, and `go tool vet`
+inside the hive pod and points agents to CI instead, because those commands can
+read or mutate live `/data` state and have killed agent sessions. Human
+operators can debug inside the pod by setting `HIVE_ALLOW_LOCAL_GO_TEST=1`; all
+other Go subcommands pass through unchanged.
+
 ## Minimum required configuration
 
 Most of `hive.yaml.example` is optional. The smallest config the hive will start
@@ -98,27 +108,13 @@ Top-level YAML keys accepted by `config.Config`:
 | `data.claude_sessions_dir` | `/data/home/.claude/projects` | Where the dashboard reads Claude Code session JSONL for per-agent token/cost accounting. Point it at the agents' real session directory if you relocate `HOME`. |
 | `data.copilot_sessions_dir` | `/data/home/.copilot/session-state` | Same, for the Copilot CLI backend's session state. |
 
-### GitHub PR-request prechecks (`github.pr_precheck`)
+### GitHub PR-request creation
 
-The PR-request watcher can run deterministic checks before it opens an
-agent-authored PR. Tier A changelog/DCO checks are always enforced. The
-configurable Tier B/C checks default on:
-
-| Field | Default | Meaning |
-|---|---|---|
-| `github.pr_precheck.docs` | `true` | When a PR diff touches Markdown or a file cited by docs, run the docs link/citation guards used by CI. Checker reports reject the request as `precheck`. |
-| `github.pr_precheck.go_tests` | `true` | For touched Go packages, run full package `go test` plus the dashboard/testutil ratchets in a fresh checkout owned by the hive process, not in the agent pane. |
-| `github.pr_precheck.timeout` | `15m` | Per-run wall clock bound. A timeout is an infrastructure skip, not a rejection. |
-| `github.pr_precheck.cache_dir` | `<data>/pr-precheck/gocache` | Persistent Go build/module cache root for warm Tier C runs. Checkouts live alongside it under `<data>/pr-precheck/checkouts`, not in `/var/run`. |
-| `github.pr_precheck.max_concurrent` | `1` | Maximum concurrent Tier C Go precheck runs; extra requests queue until a slot is free or their timeout expires. |
-
-Only genuine findings reject a request: changelog/DCO failures, docs checker
-reports, and Go build/test failures. Infrastructure problems — checkout
-failure, missing `go`/`python3`/`bash`, missing C compiler for `-race`,
-download/network errors, exec-not-found, and timeout — are logged at WARN and
-listed in the successful request result as `precheck_skipped`. If no C compiler
-is available, Tier C records `race detector unavailable (no C compiler)` and
-runs non-race `CGO_ENABLED=0 go test -count=1` instead of rejecting.
+The PR-request watcher opens the requested PR after its safety gates pass. It no
+longer runs hub-side changelog, DCO, docs, or Go-test preflights and has no
+hub-side PR preflight configuration. CI is the sole verdict for repository rules;
+agents fix red checks on the open PR and push follow-up commits so the failure
+and repair stay visible in CI history.
 
 For runtime precedence and provenance, see [config-layering.md](config-layering.md).
 
@@ -298,6 +294,7 @@ To relate an image to source, compare the `<git-short-sha>` tag published by the
 ## Governor cadence and budget
 
 - Agent cadences are evaluated from persisted state: the last-kick map lives in `/data/hive-state.json` and is honored across pod restarts — a Deployment roll does **not** re-kick every cadenced agent at boot ([#3817](https://github.com/hivecommons/hive/pull/3817)). A fresh install (no persisted state) still kicks every cadenced agent on the first eval. There is no global default interval; a zero/absent interval means the agent is never cadence-kicked.
+- Manual dashboard/API kicks that rely on Hive's generated work list wait for the first governor scan after boot. Until that scan populates the scheduler snapshot, `POST /api/kick/{agent}` returns `202` with `status: "deferred"` and Hive delivers one deduplicated kick for that agent as soon as the first scan completes.
 - The governor token budget uses a rolling window of `governor.budget.period_days` (default 7 days), with a soft warning at `governor.budget.critical_pct` (default 90%). When spend reaches the limit, kicks are suppressed for all agents except those explicitly budget-exempt.
 - The Governor dashboard **PRs by model** panel includes rework evidence for 7d/30d/all windows: first-pass merge rate, average/worst review rounds, fix attempts, follow-up commits after first review, human change requests, median time to merge, and a top-10 **Most reworked PRs** list. The data is served by `/api/governor/pr-models` from the same cached PR snapshot as the model outcome counts.
 - The **provider** spending limit is a separate signal from the token budget above ([#4294](https://github.com/hivecommons/hive/issues/4294)): the token budget counts what the hive spends, while this is the inference gateway refusing to spend more money — a LiteLLM key past its daily dollar cap, a project out of quota, an account out of credit. It is detected from the gateway's own error body (never from a bare 429, which stays on the ordinary retry path), raises an error-level dashboard alert naming the limit that was hit, and withholds every agent kick while it is in force. It does **not** pause agents: pause state stays a human decision.
