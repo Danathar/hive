@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.6)
+
+### Fixed
+
+- The LiteLLM **Test Connection** probe no longer blames your API key for a rejection it never saw ([#9945](https://github.com/hivecommons/hive/issues/9945)). When an ingress, WAF or VPN proxy in front of the gateway answers `GET /v1/models` with an HTML error page (the classic nginx `403 Forbidden`), the dialog said "gateway rejected the configured key", sending operators to re-check a key that worked fine for `/v1/completions` from their laptop. The probe now recognises a non-JSON/empty auth-failure body as a proxy refusal and reports the exact URL it tried, the response content-type and `Server` header, and the body excerpt — and every probe error now names the probed `/v1/models` URL, so a path the gateway exposes but the edge blocks is visible at a glance.
+- The dashboard now surfaces it when the Copilot CLI's startup banner shows it rejected the configured `--model` id and silently substituted a different model ([#9927](https://github.com/hivecommons/hive/issues/9927)). `copilotPinnedCLIModels`/`copilotCLIAcceptedModels` (#9933, #9943) already keep the picker from offering an id the pinned CLI rejects, but a stale stored config, a hand-edited `hive.yaml`, or a future CLI pin dropping support for a currently-accepted id could still trigger the same silent substitution with no indication. The agent's `LastError` now reports the requested and actually-running model ids so the mismatch is visible instead of quietly running a different model than the one chosen.
+
 ## 2026-10-02 (v5.110.5)
 
 ### Fixed
