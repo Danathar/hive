@@ -1,0 +1,1 @@
+- dashboard: every section is a collapsible card with a collapsed summary, matching Cost (#9996)
