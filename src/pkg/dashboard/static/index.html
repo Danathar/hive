@@ -1364,6 +1364,21 @@
     .prt-breakdown { color: var(--muted); font-size: var(--fs-xs); }
     .prt-breakdown b { color: var(--text); display:block; margin-bottom: var(--sp-1); }
     .prt-breakdown ol { margin: 0; padding-left: 1.2rem; }
+    .prt-attribution { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(260px, 1fr); gap:var(--sp-3); margin:var(--sp-3) 0; }
+    .prt-matrix, .prt-trend { border:1px solid var(--border); border-radius:var(--r-sm); padding:var(--sp-3); background:color-mix(in srgb, var(--bg) 85%, transparent); }
+    .prt-matrix table { width:100%; border-collapse:collapse; font-size:var(--fs-xs); }
+    .prt-matrix th, .prt-matrix td { padding:var(--sp-2) var(--sp-2); border-top:1px solid var(--border); text-align:left; vertical-align:middle; }
+    .prt-matrix th { color:var(--muted); font-weight:600; border-top:0; }
+    .prt-stack { display:block; width:100%; height:5px; border-radius:var(--r-pill); background:var(--border); margin-top:var(--sp-1); }
+    .prt-legend .hive { background:var(--green); }
+    .prt-legend .human { background:var(--blue); }
+    .prt-legend .other { background:var(--muted); }
+    .prt-trend-head { display:flex; justify-content:space-between; gap:var(--sp-2); align-items:center; margin-bottom:var(--sp-2); }
+    .prt-role-select { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--r-sm); padding:var(--sp-1) var(--sp-3); font-size:var(--fs-xs); }
+    .prt-legend { display:flex; gap:var(--sp-3); font-size:var(--fs-2xs); color:var(--muted); align-items:center; margin-top:var(--sp-1); }
+    .prt-legend i { display:inline-block; width:8px; height:8px; border-radius:var(--r-pill); margin-right:var(--sp-1); vertical-align:middle; }
+    .prt-caption { color:var(--muted); font-size:var(--fs-xs); margin-top:var(--sp-2); }
+    @media (max-width: 800px) { .prt-attribution { grid-template-columns:1fr; } }
     .lc-journeys { list-style: none; margin: var(--sp-0); padding: var(--sp-0); display: flex; flex-direction: column; gap: var(--sp-2);
       max-height: 320px; overflow-y: auto; }
     .lc-journey { font-size: 0.78rem; border-radius: var(--r); background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
@@ -4913,6 +4928,7 @@
       'logs-section': { title: '📋 Agent Logs', summary: 'logs' },
       'agents-section': { title: '🤖 Agents', summary: '0 running / 0 total' },
       'faq-section': { title: '❓ FAQ', summary: 'questions' },
+      'pr-throughput-section': { title: '📬 Change Throughput', summary: '0 merged · 0% hive' },
     });
     function sectionCardHeader(opts) {
       opts = opts || {};
@@ -14463,6 +14479,7 @@ function burnAreaChart() {
     const PRT_WINDOWS = [[1, '1h'], [6, '6h'], [12, '12h'], [24, '24h'], [48, '48h'], [168, '7d'], [0, 'all']];
     const PRT_REPO_STORAGE_KEY = 'hive.prThroughput.repo';
     let prtHours = 24;
+    let prtRole = 'merged';
     let prtRepo = (() => { try { return localStorage.getItem(PRT_REPO_STORAGE_KEY) || ''; } catch { return ''; } })();
     let prtLast = null;
 
@@ -14528,6 +14545,53 @@ function burnAreaChart() {
       if (!Array.isArray(items) || !items.length) return '';
       return `<div class="prt-breakdown"><b>${escapeHtml(title)}</b><ol>${items.map(i => `<li>${escapeHtml(i.name)} · ${Number(i.count) || 0}</li>`).join('')}</ol></div>`;
     }
+    function prtActorCounts(dto, kind, role) {
+      const actors = (((dto.by_actor || {})[kind] || {})[role] || {});
+      return { hive: Number(actors.hive) || 0, human: Number(actors.human) || 0, other: Number(actors.other) || 0 };
+    }
+    function prtActorCell(c) {
+      const total = c.hive + c.human + c.other;
+      const w = k => total ? Math.max(2, Math.round((c[k] / total) * 100)) : 0;
+      const hw = w('hive'), uw = w('human'), ow = w('other');
+      return `<div>${c.hive} · ${c.human} · ${c.other}<svg class="prt-stack" viewBox="0 0 100 5" preserveAspectRatio="none" title="hive · human · other"><rect x="0" y="0" width="${hw}" height="5" fill="var(--green)"/><rect x="${hw}" y="0" width="${uw}" height="5" fill="var(--blue)"/><rect x="${hw+uw}" y="0" width="${ow}" height="5" fill="var(--muted)"/></svg></div>`;
+    }
+    function prtActorMatrix(dto) {
+      const rows = [
+        ['Created', 'created', 'created'],
+        ['Reviewed', 'reviewed', 'reviewed'],
+        ['Merged·Closed', 'merged', 'closed']
+      ];
+      const any = rows.some(r => ['pr','issue'].some(k => { const c = prtActorCounts(dto, k, r[k === 'pr' ? 1 : 2]); return c.hive + c.human + c.other; }));
+      if (!any) return '<div class="prt-matrix"><strong>Actor attribution</strong><p class="prt-caption">No attribution data yet — counters start now.</p></div>';
+      return `<div class="prt-matrix"><strong>Actor attribution</strong><table><thead><tr><th>Role</th><th>PRs<br><small>hive · human · other</small></th><th>Issues<br><small>hive · human · other</small></th></tr></thead><tbody>${rows.map(r => `<tr><th>${r[0]}</th><td>${prtActorCell(prtActorCounts(dto, 'pr', r[1]))}</td><td>${prtActorCell(prtActorCounts(dto, 'issue', r[2]))}</td></tr>`).join('')}</tbody></table></div>`;
+    }
+    function prtTrendSvg(series) {
+      if (!Array.isArray(series) || series.length < 2) return '';
+      const w = 360, h = 120, pad = 10;
+      const pts = series.map((p, i) => {
+        const total = (Number(p.hive)||0) + (Number(p.human)||0) + (Number(p.other)||0);
+        const x = pad + (i * (w - pad*2) / Math.max(1, series.length - 1));
+        return { x, hive: total ? (Number(p.hive)||0) / total : 0, human: total ? (Number(p.human)||0) / total : 0 };
+      });
+      const path = key => pts.map((p,i) => `${i?'L':'M'}${p.x.toFixed(1)},${(h-pad-(p[key]*(h-pad*2))).toFixed(1)}`).join(' ');
+      return `<svg class="prt-trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="hive versus human actor share trend"><path d="${path('hive')}" fill="none" stroke="var(--green)" stroke-width="2"/><path d="${path('human')}" fill="none" stroke="var(--blue)" stroke-width="2"/><line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="var(--border)"/></svg>`;
+    }
+    function prtTrendCaption(dto) {
+      const series = Array.isArray(dto.series) ? dto.series : [];
+      const totals = series.reduce((a,p) => ({ hive:a.hive+(Number(p.hive)||0), human:a.human+(Number(p.human)||0), other:a.other+(Number(p.other)||0) }), {hive:0,human:0,other:0});
+      const total = totals.hive + totals.human + totals.other;
+      if (!total) return 'No attribution data yet — counters start now.';
+      const cur = Math.round((totals.hive / total) * 100);
+      const half = Math.floor(series.length / 2);
+      const prev = series.slice(0, half).reduce((a,p) => ({ hive:a.hive+(Number(p.hive)||0), total:a.total+(Number(p.hive)||0)+(Number(p.human)||0)+(Number(p.other)||0) }), {hive:0,total:0});
+      const prevPct = prev.total ? Math.round((prev.hive / prev.total) * 100) : null;
+      const noun = prtRole === 'created' ? 'created changes' : prtRole === 'reviewed' ? 'reviews' : 'merges/closures';
+      return `hive ${cur}% of ${noun} this window${prevPct == null ? '' : `, ${cur >= prevPct ? 'up' : 'down'} from ${prevPct}%`}`;
+    }
+    function prtActorTrend(dto) {
+      const opts = [['created','Created'],['reviewed','Reviewed'],['merged','Merged']].map(([v,l]) => `<option value="${v}"${prtRole===v?' selected':''}>${l}</option>`).join('');
+      return `<div class="prt-trend"><div class="prt-trend-head"><strong>Hive vs human trend</strong><select class="prt-role-select" data-change-action="setPRThroughputRole" data-arg-types="v">${opts}</select></div>${prtTrendSvg(dto.series) || '<div class="prt-caption">No trend series yet.</div>'}<div class="prt-legend"><span><i class="hive"></i>hive</span><span><i class="human"></i>human</span><span><i class="other"></i>other automation</span></div><div class="prt-caption">${escapeHtml(prtTrendCaption(dto))}</div></div>`;
+    }
 
     function renderPRThroughput(dto) {
       const section = document.getElementById('pr-throughput-section');
@@ -14541,6 +14605,15 @@ function burnAreaChart() {
       const merged = Number(dto.merged) || 0;
       const closed = Number(dto.closed) || 0;
       const byPath = dto.merged_by_path || {};
+      const mergedActors = prtActorCounts(dto, 'pr', 'merged');
+      const mergedActorTotal = mergedActors.hive + mergedActors.human + mergedActors.other;
+      const hiveMergedPct = mergedActorTotal ? Math.round((mergedActors.hive / mergedActorTotal) * 100) : 0;
+      const summary = `${merged} merged · ${hiveMergedPct}% hive`;
+      const summaryEl = document.getElementById('pr-throughput-section-summary');
+      if (summaryEl) {
+        summaryEl.textContent = summary;
+        summaryEl.title = 'Merged PRs and hive-attributed share in the selected window';
+      }
       const pathLabels = { sweep: 'auto-merge sweep', queue: 'auto-merge sweep', relay: 'merge relay', human: 'human', other_automation: 'other automation', unknown: 'unrecorded path' };
       const pathParts = Object.keys(byPath).filter((k) => Number(byPath[k]) > 0).sort()
         .map((k) => `${Number(byPath[k])} ${escapeHtml(pathLabels[k] || k)}`);
@@ -14563,20 +14636,21 @@ function burnAreaChart() {
           <div class="lc-fleet-stat" title="Pull/merge requests opened by hive agents in the selected range"><div class="val opened">${opened}</div><div class="lbl">Opened</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'opened', 'var(--blue)')}</span></div>
           <div class="lc-fleet-stat" title="Pull/merge requests observed merged in the selected range"><div class="val merged">${merged}</div><div class="lbl">Merged</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'merged', 'var(--green)')}</span></div>
           <div class="lc-fleet-stat" title="Pull/merge requests observed closed without merging in the selected range"><div class="val closed">${closed}</div><div class="lbl">Closed without merging</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'closed', 'var(--red)')}</span></div>
-        </div>${metricsHtml}${pathsHtml}${breakdowns ? `<div class="prt-breakdowns">${breakdowns}</div>` : ''}`;
+        </div>${metricsHtml}<div class="prt-attribution">${prtActorMatrix(dto)}${prtActorTrend(dto)}</div>${pathsHtml}${breakdowns ? `<div class="prt-breakdowns">${breakdowns}</div>` : ''}`;
       applySectionCollapse('pr-throughput-section');
     }
 
     async function fetchPRThroughput() {
       const hours = prtHours;
       const repo = prtRepo;
+      const role = prtRole;
       try {
-        let url = `/api/pr-throughput?hours=${encodeURIComponent(hours)}`;
+        let url = `/api/pr-throughput?hours=${encodeURIComponent(hours)}&role=${encodeURIComponent(role)}`;
         if (repo) url += `&repo=${encodeURIComponent(repo)}`;
         const r = await fetch(url);
         if (!r.ok) return;
         const dto = await r.json();
-        if (hours !== prtHours || repo !== prtRepo) return; // a newer selection is in flight
+        if (hours !== prtHours || repo !== prtRepo || role !== prtRole) return; // a newer selection is in flight
         prtLast = dto;
         renderPRThroughput(dto);
       } catch (e) { /* transient — leave last render in place */ }
@@ -14594,6 +14668,10 @@ function burnAreaChart() {
       if (prtLast) renderPRThroughput(prtLast);
       return fetchPRThroughput();
     }
+    function setPRThroughputRole(role) {
+      prtRole = ['created','reviewed','merged'].includes(String(role)) ? String(role) : 'merged';
+      return fetchPRThroughput();
+    }
     function exportPRThroughputCSV() {
       const dto = prtLast || {};
       const rows = [['t','opened','merged','closed']].concat((dto.buckets || []).map(b => [b.t || '', b.opened || 0, b.merged || 0, b.closed || 0]));
@@ -14605,6 +14683,7 @@ function burnAreaChart() {
     }
     window.setPRThroughputHours = setPRThroughputHours;
     window.setPRThroughputRepo = setPRThroughputRepo;
+    window.setPRThroughputRole = setPRThroughputRole;
     window.exportPRThroughputCSV = exportPRThroughputCSV;
 
     // ---- Approvals desk (RFC #4000) -------------------------------------

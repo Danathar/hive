@@ -58,12 +58,15 @@ type PRThroughput struct {
 	// Closed counts PRs observed closed without merging (pr_closed).
 	Closed int `json:"closed"`
 
-	Buckets       []PRThroughputBucket `json:"buckets"`
-	BucketSeconds int                  `json:"bucket_seconds"`
-	Metrics       PRThroughputMetrics  `json:"metrics"`
-	MergedByAgent []PRThroughputTop    `json:"merged_by_agent,omitempty"`
-	TopRepos      []PRThroughputTop    `json:"top_repos,omitempty"`
-	ClosedReasons []PRThroughputTop    `json:"closed_reasons,omitempty"`
+	Buckets       []PRThroughputBucket     `json:"buckets"`
+	BucketSeconds int                      `json:"bucket_seconds"`
+	SelectedRole  string                   `json:"selected_role"`
+	ByActor       PRThroughputActorMatrix  `json:"by_actor"`
+	Series        []PRThroughputActorPoint `json:"series"`
+	Metrics       PRThroughputMetrics      `json:"metrics"`
+	MergedByAgent []PRThroughputTop        `json:"merged_by_agent,omitempty"`
+	TopRepos      []PRThroughputTop        `json:"top_repos,omitempty"`
+	ClosedReasons []PRThroughputTop        `json:"closed_reasons,omitempty"`
 }
 
 type PRThroughputBucket struct {
@@ -113,6 +116,7 @@ func (s *Server) handlePRThroughput(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "repo must be owner/name", http.StatusBadRequest)
 		return
 	}
+	role := prThroughputSelectedRole(r.URL.Query().Get("role"))
 
 	audit := s.audit
 	if audit == nil {
@@ -120,10 +124,10 @@ func (s *Server) handlePRThroughput(w http.ResponseWriter, r *http.Request) {
 	}
 	entries := prThroughputEntries(audit)
 	if hours == 0 {
-		jsonResponse(w, buildPRThroughputAllTime(audit.PRThroughputCounters(), entries, time.Now().UTC(), repo))
+		jsonResponse(w, buildPRThroughputAllTime(audit.PRThroughputCounters(), entries, time.Now().UTC(), repo, role))
 		return
 	}
-	jsonResponse(w, buildPRThroughputWindow(entries, time.Now().UTC(), hours, repo))
+	jsonResponse(w, buildPRThroughputWindow(entries, time.Now().UTC(), hours, repo, role))
 }
 
 func prThroughputEntries(audit *AuditLog) []AuditEntry {
@@ -144,8 +148,17 @@ func validPRThroughputRepo(repo string) bool {
 	return ok && owner != "" && name != "" && !strings.Contains(name, "/") && !strings.ContainsAny(repo, " \t\r\n")
 }
 
+func prThroughputSelectedRole(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case prThroughputRoleCreated, prThroughputRoleReviewed, prThroughputRoleClosed:
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return prThroughputRoleMerged
+	}
+}
+
 // buildPRThroughputWindow counts PR throughput entries at or after now-hours.
-func buildPRThroughputWindow(entries []AuditEntry, now time.Time, hours int, repo string) PRThroughput {
+func buildPRThroughputWindow(entries []AuditEntry, now time.Time, hours int, repo string, role string) PRThroughput {
 	since := now.Add(-time.Duration(hours) * time.Hour)
 	out := PRThroughput{
 		Hours:        hours,
@@ -153,6 +166,8 @@ func buildPRThroughputWindow(entries []AuditEntry, now time.Time, hours int, rep
 		Since:        since.Format(time.RFC3339),
 		Source:       prThroughputSourceAudit,
 		MergedByPath: map[string]int{},
+		SelectedRole: role,
+		ByActor:      PRThroughputActorMatrix{},
 	}
 	oldest := oldestPRThroughputEvent(entries, repo)
 	if !oldest.IsZero() {
@@ -164,7 +179,7 @@ func buildPRThroughputWindow(entries []AuditEntry, now time.Time, hours int, rep
 
 // buildPRThroughputAllTime renders durable counters for hours=0 and enriches
 // them with audit-derived series/velocity where retained audit history exists.
-func buildPRThroughputAllTime(c PRThroughputCounters, entries []AuditEntry, now time.Time, repo string) PRThroughput {
+func buildPRThroughputAllTime(c PRThroughputCounters, entries []AuditEntry, now time.Time, repo string, role string) PRThroughput {
 	out := PRThroughput{
 		AllTime:       true,
 		Repo:          repo,
@@ -172,6 +187,8 @@ func buildPRThroughputAllTime(c PRThroughputCounters, entries []AuditEntry, now 
 		RecordedSince: c.Since,
 		Source:        prThroughputSourceCounters,
 		MergedByPath:  map[string]int{},
+		SelectedRole:  role,
+		ByActor:       PRThroughputActorMatrix{},
 	}
 	if repo != "" {
 		fillPRThroughputCounts(&out, c.forRepo(repo))
@@ -188,6 +205,14 @@ func buildPRThroughputAllTime(c PRThroughputCounters, entries []AuditEntry, now 
 			fillPRThroughputCounts(&out, c)
 		}
 	}
+	if repo != "" {
+		rc := c.forRepo(repo)
+		out.ByActor = cloneActorMatrix(rc.ByActor)
+		out.Series = prThroughputActorSeriesFromBuckets(rc.ActorBuckets, role)
+	} else {
+		out.ByActor = cloneActorMatrix(c.ByActor)
+		out.Series = prThroughputActorSeriesFromBuckets(c.ActorBuckets, role)
+	}
 	return out
 }
 
@@ -198,6 +223,7 @@ func fillPRThroughputCounts(out *PRThroughput, c PRThroughputCounters) {
 	for k, v := range c.MergedByPath {
 		out.MergedByPath[k] = v
 	}
+	out.ByActor = cloneActorMatrix(c.ByActor)
 }
 
 func applyPRThroughputAnalytics(out *PRThroughput, entries []AuditEntry, since, until time.Time, repo string) {
@@ -207,6 +233,8 @@ func applyPRThroughputAnalytics(out *PRThroughput, entries []AuditEntry, since, 
 	counts, mergedByPath, mergedByAgent, topRepos, closedReasons, ttm := summarizePRThroughput(entries, since, until, repo)
 	out.Opened, out.Merged, out.Closed = counts.Opened, counts.Merged, counts.Closed
 	out.MergedByPath = mergedByPath
+	out.ByActor = counts.ByActor
+	out.Series = prThroughputActorSeries(entries, since, until, bucketSize, repo, out.SelectedRole)
 	out.Metrics = prThroughputMetrics(counts, ttm, since, until)
 
 	prevStart := since.Add(-until.Sub(since))
@@ -257,6 +285,7 @@ func prThroughputBuckets(entries []AuditEntry, since, until time.Time, bucketSiz
 	if !until.After(since) || bucketSize <= 0 {
 		return nil
 	}
+
 	start := since.Truncate(bucketSize)
 	var buckets []PRThroughputBucket
 	idx := map[int64]int{}
@@ -312,6 +341,71 @@ func prThroughputBuckets(entries []AuditEntry, since, until time.Time, bucketSiz
 		}
 	}
 	return buckets
+}
+
+func prThroughputActorSeries(entries []AuditEntry, since, until time.Time, bucketSize time.Duration, repo, role string) []PRThroughputActorPoint {
+	if !until.After(since) || bucketSize <= 0 {
+		return nil
+	}
+	start := since.Truncate(bucketSize)
+	points := []PRThroughputActorPoint{}
+	idx := map[int64]int{}
+	for t := start; !t.After(until); t = t.Add(bucketSize) {
+		idx[t.Unix()] = len(points)
+		points = append(points, PRThroughputActorPoint{T: t.UTC().Format(time.RFC3339)})
+		if len(points) >= prThroughputMaxBuckets {
+			break
+		}
+	}
+	sorted := append([]AuditEntry(nil), entries...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti, _ := prThroughputTime(sorted[i])
+		tj, _ := prThroughputTime(sorted[j])
+		return ti.Before(tj)
+	})
+	seenTerminal := map[string]bool{}
+	for _, e := range sorted {
+		t, ok := prThroughputTime(e)
+		if !ok || t.After(until) || !prThroughputEntryMatchesRepo(e, repo) {
+			continue
+		}
+		if prThroughputTerminalAction(e.Action) {
+			key := prThroughputPRKey(e)
+			if key != "" {
+				if seenTerminal[key] {
+					continue
+				}
+				seenTerminal[key] = true
+			}
+		}
+		if t.Before(since) {
+			continue
+		}
+		kind, gotRole, actor, ok := prThroughputActorAttribution(e)
+		if !ok || !prThroughputRoleMatchesSeries(kind, gotRole, role) {
+			continue
+		}
+		i, ok := idx[t.Truncate(bucketSize).Unix()]
+		if !ok {
+			continue
+		}
+		switch actor {
+		case prThroughputActorHive:
+			points[i].Hive++
+		case prThroughputActorHuman:
+			points[i].Human++
+		default:
+			points[i].Other++
+		}
+	}
+	return points
+}
+
+func prThroughputRoleMatchesSeries(kind, gotRole, selected string) bool {
+	if gotRole == selected {
+		return true
+	}
+	return selected == prThroughputRoleMerged && kind == prThroughputKindIssue && gotRole == prThroughputRoleClosed
 }
 
 func summarizePRThroughput(entries []AuditEntry, since, until time.Time, repo string) (PRThroughputCounters, map[string]int, map[string]int, map[string]int, map[string]int, []float64) {
