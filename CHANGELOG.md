@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.7)
+
+### Fixed
+
+- Copying text out of an agent's browser terminal now works ([#9941](https://github.com/hivecommons/hive/issues/9941)). The terminal is ttyd 1.7.7/xterm.js, which keeps its selection in its own model rather than in the page and only ever copied from an `execCommand('copy')` fired on selection *change* — a call Firefox refuses outside a user gesture and ttyd swallows, so ⌘C silently pasted whatever the clipboard already held instead of the selected pane text. The dashboard's terminal proxy now injects a small clipboard handler into ttyd's document, so ⌘C, Ctrl+Shift+C and the browser's Edit ▸ Copy all write the real selection (a plain Ctrl+C is untouched and still sends SIGINT). The keyboard hint on the agent card names the macOS keystroke too, and `src/docs/troubleshooting.md` documents the Shift-drag selection that tmux mouse mode otherwise swallows.
+
+### Security
+
+- The sandbox push broker now lists changed files with `git diff --name-only -z` and splits on NUL, so a path git would otherwise C-quote (non-ASCII bytes, tabs, `"` or `\` in the name) reaches the protected-path guard verbatim. Before, the surrounding quotes git added to such names made the `.github/workflows/`, `policies/`, `OWNERS` and `gh-wrapper.sh` prefix checks miss them and the push went through. [#9947](https://github.com/hivecommons/hive/issues/9947)
+
 ## 2026-10-02 (v5.110.6)
 
 ### Fixed
