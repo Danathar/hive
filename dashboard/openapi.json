@@ -20767,8 +20767,8 @@
         "tags": [
           "History"
         ],
-        "summary": "Get PR throughput counts",
-        "description": "Counts PRs the hive opened (agent_pr_created), merged (pr_merged, split by merge path) and closed without merging (pr_closed) over the last N hours from the audit log, or all time from the durable counters when hours=0. PRs a human closes directly on GitHub are not counted.",
+        "summary": "Get Change Throughput counts",
+        "description": "Counts PRs and issues the hive created/reviewed plus observed PR terminal states and issue closes over the last N hours from the audit log, or all time from durable counters when hours=0. Actor attribution is split into hive, human, and other automation.",
         "parameters": [
           {
             "name": "hours",
@@ -20779,6 +20779,29 @@
               "minimum": 0
             },
             "description": "Look-back window in hours; default 24, clamped to the audit log retention. 0 = all time from the durable counters."
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional exact owner/name repository filter."
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "created",
+                "reviewed",
+                "merged"
+              ]
+            },
+            "description": "Actor trend role. Defaults to merged; merged combines PR merges with issue closes."
           }
         ],
         "responses": {
@@ -20813,6 +20836,9 @@
                         "counters"
                       ]
                     },
+                    "selected_role": {
+                      "type": "string"
+                    },
                     "opened": {
                       "type": "integer"
                     },
@@ -20828,6 +20854,41 @@
                     },
                     "closed": {
                       "type": "integer"
+                    },
+                    "by_actor": {
+                      "type": "object",
+                      "description": "Actor matrix keyed by kind (pr/issue), role (created/reviewed/merged/closed), and actor (hive/human/other).",
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "series": {
+                      "type": "array",
+                      "description": "Per-bucket actor counts for selected_role.",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "t": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "hive": {
+                            "type": "integer"
+                          },
+                          "human": {
+                            "type": "integer"
+                          },
+                          "other": {
+                            "type": "integer"
+                          }
+                        }
+                      }
                     }
                   }
                 }

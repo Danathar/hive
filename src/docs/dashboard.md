@@ -65,12 +65,29 @@ count without changing the selected window.
 ## Change Throughput
 
 The **Change Throughput** section (`pr-throughput-section`) summarizes
-pull/merge requests across tracked forges. It reads `GET /api/pr-throughput`
-for selectable windows and repository filters, keeps the historical
-`/api/pr-throughput` path and `pr-throughput-*` element IDs for compatibility,
-and reports opened, observed merged, and observed closed-without-merging
-terminal states. Merge attribution is shown as merge relay, auto-merge sweep,
-human, other automation, or unrecorded path.
+pull/merge requests and issues across tracked forges. It reads
+`GET /api/pr-throughput` for selectable windows and repository filters, keeps
+the historical `/api/pr-throughput` path and `pr-throughput-*` element IDs for
+compatibility, and reports opened, observed merged, and observed
+closed-without-merging terminal states.
+
+Actor attribution splits created, reviewed, and merged/closed activity into:
+
+- `hive`: writes that went through this hive's audited relays or governor
+  paths (`agent_pr_created`, `agent_issue_created`, `agent_pr_reviewed`,
+  agent issue comments/claims, relay/sweep merges and issue closes). The hive
+  identities are the same ones used by the GitHub client: the configured GitHub
+  App bot login (`SetAppBotLogin`), review bot settings, and the visible
+  `— hive:` attribution trailer/agent metadata.
+- `human`: forge-observed PR terminal events attributed to a non-bot actor.
+- `other`: Dependabot, Renovate, other bot accounts, unknown terminal actors,
+  and other automation outside this hive.
+
+Issue data comes from the existing issue-request and claim-poller audit stream:
+agent-created issues, agent comments/claims as triage/review signals, and
+agent issue-close events. Historical human issue creation/review/closure is not
+backfilled; the actor matrix and trend chart start accumulating as new audited
+or observed events arrive.
 
 ## Hive Chat
 

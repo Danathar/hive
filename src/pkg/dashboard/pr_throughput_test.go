@@ -21,6 +21,28 @@ func loadedPRCounterLog(t *testing.T, countersPath, auditPath string) *AuditLog 
 	return a
 }
 
+func TestPRThroughputCountersActorBackCompat(t *testing.T) {
+	dir := t.TempDir()
+	countersPath := filepath.Join(dir, "pr-throughput-counters.json")
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(countersPath, []byte(`{"opened":2,"merged":1,"merged_by_path":{"sweep":1},"closed":0,"since":"2026-01-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := loadedPRCounterLog(t, countersPath, auditPath)
+	before := a.PRThroughputCounters()
+	if before.Opened != 2 || before.Merged != 1 {
+		t.Fatalf("loaded legacy counters = %+v", before)
+	}
+	a.LogRecordAt("2026-01-02T00:30:00Z", "system", ghpkg.AuditActionPRMerged, "repo=o/r, number=9, path=human, actor=alice", "governor", "o/r", 9)
+	got := loadedPRCounterLog(t, countersPath, auditPath).PRThroughputCounters()
+	if got.Version != prThroughputCounterVersion || got.ByActor[prThroughputKindPR][prThroughputRoleMerged][prThroughputActorHuman] != 1 {
+		t.Fatalf("upgraded counters = %+v, want version and human merge actor count", got)
+	}
+	if len(got.ActorBuckets) == 0 {
+		t.Fatal("actor buckets must persist for all-time series")
+	}
+}
+
 func TestPRThroughputCountersBumpOnlyOnPRActions(t *testing.T) {
 	a := &AuditLog{} // no persistence path: in-memory only
 	a.Log("system", ghpkg.AuditActionAgentPRCreated, "repo=o/r, number=1", "scanner")
@@ -169,6 +191,32 @@ func TestPRThroughputMergePath(t *testing.T) {
 	}
 }
 
+func TestPRThroughputActorAttribution(t *testing.T) {
+	tests := []struct {
+		name               string
+		entry              AuditEntry
+		wantKind, wantRole string
+		wantActor          string
+	}{
+		{"hive created PR", AuditEntry{Action: ghpkg.AuditActionAgentPRCreated, Detail: "repo=o/r, number=1, agent=scanner"}, prThroughputKindPR, prThroughputRoleCreated, prThroughputActorHive},
+		{"hive created issue", AuditEntry{Action: ghpkg.AuditActionAgentIssueCreated, Detail: "repo=o/r, number=2"}, prThroughputKindIssue, prThroughputRoleCreated, prThroughputActorHive},
+		{"human merged PR", AuditEntry{Action: ghpkg.AuditActionPRMerged, Detail: "repo=o/r, number=3, path=human, actor=alice"}, prThroughputKindPR, prThroughputRoleMerged, prThroughputActorHuman},
+		{"other automation merged PR", AuditEntry{Action: ghpkg.AuditActionPRMerged, Detail: "repo=o/r, number=4, path=other_automation, actor=renovate[bot]"}, prThroughputKindPR, prThroughputRoleMerged, prThroughputActorOtherAutomation},
+		{"hive reviewed PR", AuditEntry{Action: ghpkg.AuditActionPRReviewed, Detail: "repo=o/r, number=5, state=approved, agent=reviewer"}, prThroughputKindPR, prThroughputRoleReviewed, prThroughputActorHive},
+		{"bot co-authored still hive", AuditEntry{Action: ghpkg.AuditActionPRReviewed, Detail: "repo=o/r, number=6, state=commented, agent=reviewer, actor=hive"}, prThroughputKindPR, prThroughputRoleReviewed, prThroughputActorHive},
+		{"issue commented by agent is review", AuditEntry{Action: ghpkg.AuditActionAgentCommentCreated, Detail: "repo=o/r, number=7, agent=scanner"}, prThroughputKindIssue, prThroughputRoleReviewed, prThroughputActorHive},
+		{"issue closed by hive", AuditEntry{Action: ghpkg.AuditActionIssueClosed, Detail: "repo=o/r, number=8, reason=done"}, prThroughputKindIssue, prThroughputRoleClosed, prThroughputActorHive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, role, actor, ok := prThroughputActorAttribution(tt.entry)
+			if !ok || kind != tt.wantKind || role != tt.wantRole || actor != tt.wantActor {
+				t.Fatalf("attribution = %q/%q/%q ok=%v, want %q/%q/%q", kind, role, actor, ok, tt.wantKind, tt.wantRole, tt.wantActor)
+			}
+		})
+	}
+}
+
 func TestPRThroughputObservedHumanMergeCountsOnce(t *testing.T) {
 	a := &AuditLog{}
 	a.LogRecordAt("2026-10-02T12:00:00Z", "system", ghpkg.AuditActionPRMerged, "repo=o/r, number=11, path=human, actor=alice", "governor", "o/r", 11)
@@ -188,7 +236,7 @@ func TestPRThroughputSweepThenObservedMergeDedupes(t *testing.T) {
 	if got.Merged != 1 || got.MergedByPath["sweep"] != 1 || got.MergedByPath["other_automation"] != 0 {
 		t.Fatalf("deduped merge counters = %+v, want one sweep merge", got)
 	}
-	window := buildPRThroughputWindow(a.RecentWithPrefixSince(time.Time{}, ""), time.Date(2026, 10, 2, 13, 0, 0, 0, time.UTC), 24, "")
+	window := buildPRThroughputWindow(a.RecentWithPrefixSince(time.Time{}, ""), time.Date(2026, 10, 2, 13, 0, 0, 0, time.UTC), 24, "", prThroughputRoleMerged)
 	if window.Merged != 1 || window.MergedByPath["sweep"] != 1 {
 		t.Fatalf("deduped window = %+v, want one sweep merge", window)
 	}
@@ -224,7 +272,7 @@ func TestBuildPRThroughputWindow(t *testing.T) {
 		{hours: 168, opened: 2, merged: 3, closed: 1, byPath: map[string]int{"sweep": 1, "relay": 1, prThroughputMergePathUnknown: 1}},
 	}
 	for _, tt := range tests {
-		got := buildPRThroughputWindow(entries, now, tt.hours, "")
+		got := buildPRThroughputWindow(entries, now, tt.hours, "", prThroughputRoleMerged)
 		if got.Hours != tt.hours || got.AllTime || got.Source != prThroughputSourceAudit {
 			t.Errorf("hours=%d: envelope = %+v", tt.hours, got)
 		}
@@ -248,7 +296,7 @@ func TestBuildPRThroughputWindow(t *testing.T) {
 		}
 	}
 
-	empty := buildPRThroughputWindow(nil, now, 1, "")
+	empty := buildPRThroughputWindow(nil, now, 1, "", prThroughputRoleMerged)
 	if empty.RecordedSince != "" || empty.MergedByPath == nil {
 		t.Errorf("empty window = %+v, want no recorded_since and a non-nil map", empty)
 	}
@@ -258,7 +306,7 @@ func TestBuildPRThroughputAllTime(t *testing.T) {
 	got := buildPRThroughputAllTime(PRThroughputCounters{
 		Opened: 10, Merged: 7, Closed: 2, Since: "2026-01-01T00:00:00Z",
 		MergedByPath: map[string]int{"sweep": 4, "relay": 3},
-	}, nil, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "")
+	}, nil, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "", prThroughputRoleMerged)
 	if !got.AllTime || got.Hours != 0 || got.Source != prThroughputSourceCounters {
 		t.Fatalf("envelope = %+v", got)
 	}
@@ -268,7 +316,7 @@ func TestBuildPRThroughputAllTime(t *testing.T) {
 	if got.Since != "2026-01-01T00:00:00Z" || got.RecordedSince != "2026-01-01T00:00:00Z" {
 		t.Fatalf("since/recorded_since = %q/%q", got.Since, got.RecordedSince)
 	}
-	if empty := buildPRThroughputAllTime(PRThroughputCounters{}, nil, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), ""); empty.MergedByPath == nil {
+	if empty := buildPRThroughputAllTime(PRThroughputCounters{}, nil, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "", prThroughputRoleMerged); empty.MergedByPath == nil {
 		t.Error("merged_by_path must be a non-nil map")
 	}
 }
@@ -281,9 +329,11 @@ func TestBuildPRThroughputAnalytics(t *testing.T) {
 		{Timestamp: rfc3339(now.Add(-80 * time.Minute)), Action: ghpkg.AuditActionAgentPRCreated, Detail: "repo=o/r, number=2", Agent: "beta"},
 		{Timestamp: rfc3339(now.Add(-70 * time.Minute)), Action: ghpkg.AuditActionPRClosed, Detail: "repo=o/r, number=2, reason=stale", Agent: "beta"},
 		{Timestamp: rfc3339(now.Add(-7 * time.Hour)), Action: ghpkg.AuditActionPRMerged, Detail: "repo=o/r, number=9, path=relay", Agent: "alpha"},
+		{Timestamp: rfc3339(now.Add(-45 * time.Minute)), Action: ghpkg.AuditActionPRReviewed, Detail: "repo=o/r, number=1, state=approved", Agent: "reviewer"},
+		{Timestamp: rfc3339(now.Add(-40 * time.Minute)), Action: ghpkg.AuditActionIssueClosed, Detail: "repo=o/r, number=10, reason=done", Agent: "scanner"},
 		{Timestamp: rfc3339(now.Add(-50 * time.Minute)), Action: ghpkg.AuditActionAgentPRCreated, Detail: "repo=o/other, number=3", Agent: "gamma"},
 	}
-	got := buildPRThroughputWindow(entries, now, 6, "o/r")
+	got := buildPRThroughputWindow(entries, now, 6, "o/r", prThroughputRoleMerged)
 	if got.Opened != 2 || got.Merged != 1 || got.Closed != 1 {
 		t.Fatalf("filtered counts = %d/%d/%d", got.Opened, got.Merged, got.Closed)
 	}
@@ -310,6 +360,13 @@ func TestBuildPRThroughputAnalytics(t *testing.T) {
 	}
 	if len(got.ClosedReasons) != 1 || got.ClosedReasons[0].Name != "stale" {
 		t.Fatalf("closed_reasons = %+v", got.ClosedReasons)
+	}
+	if got.ByActor[prThroughputKindPR][prThroughputRoleReviewed][prThroughputActorHive] != 1 ||
+		got.ByActor[prThroughputKindIssue][prThroughputRoleClosed][prThroughputActorHive] != 1 {
+		t.Fatalf("by_actor = %+v, want PR review and issue close attribution", got.ByActor)
+	}
+	if got.SelectedRole != prThroughputRoleMerged || len(got.Series) == 0 {
+		t.Fatalf("series shape = role %q len %d", got.SelectedRole, len(got.Series))
 	}
 }
 
@@ -354,7 +411,7 @@ func TestPRThroughputAllTimeRepoCounters(t *testing.T) {
 	var counters PRThroughputCounters
 	counters.add(AuditEntry{Timestamp: "2026-01-01T00:00:00Z", Action: ghpkg.AuditActionAgentPRCreated, Detail: "repo=O/R, number=1"})
 	counters.add(AuditEntry{Timestamp: "2026-01-02T00:00:00Z", Action: ghpkg.AuditActionPRMerged, Detail: "repo=o/other, number=2, path=relay"})
-	got := buildPRThroughputAllTime(counters, nil, time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC), "o/r")
+	got := buildPRThroughputAllTime(counters, nil, time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC), "o/r", prThroughputRoleMerged)
 	if got.Opened != 1 || got.Merged != 0 || got.Repo != "o/r" {
 		t.Fatalf("repo all-time = %+v", got)
 	}
@@ -427,6 +484,9 @@ func TestHandlePRThroughputAllTimeUsesCounters(t *testing.T) {
 	}
 	if !body.AllTime || body.Source != prThroughputSourceCounters || body.Opened != 1 || body.Merged != 1 || body.MergedByPath["sweep"] != 1 {
 		t.Fatalf("all-time body = %+v", body)
+	}
+	if body.ByActor[prThroughputKindPR][prThroughputRoleMerged][prThroughputActorHive] != 1 || body.SelectedRole != prThroughputRoleMerged {
+		t.Fatalf("all-time actor shape = role %q by_actor %+v", body.SelectedRole, body.ByActor)
 	}
 	if body.RecordedSince == "" {
 		t.Error("all-time response must say how far back the counters go")
