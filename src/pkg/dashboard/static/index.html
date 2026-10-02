@@ -1253,10 +1253,6 @@
     /* Governor uses the shared dash-card shell; the outer #governor node is only
        the reorder/collapse container so it does not draw a second frame. */
     .governor { margin-bottom: var(--sp-8); }
-    .governor > .dash-card.governor-card { border-color: var(--line-subtle); }
-    .governor.dead > .dash-card.governor-card { border-color: var(--red); }
-    .governor.starting > .dash-card.governor-card { border-color: var(--yellow); }
-    .governor.active > .dash-card.governor-card { border-color: var(--green); }
     .gov-title { font-size: var(--fs-lg); font-weight: 700; margin-bottom: var(--sp-4); }
     .gov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--sp-4); }
     .gov-stat { font-size: 0.85rem; }
@@ -1702,7 +1698,7 @@
     .overview-chart-bar-label { fill: var(--text); font-size: var(--fs-2xs); font-weight: 800; dominant-baseline: central; }
     .overview-chart-bar-value, .overview-chart-axis-label { fill: var(--muted); font-size: var(--fs-2xs); dominant-baseline: central; }
     .overview-chart-fill { fill: var(--slice-c); }
-    .overview-chart-line { fill: none; stroke: var(--slice-c); stroke-width: 2; }
+    .overview-chart-line { fill: none; stroke: var(--slice-c); stroke-width: 1.5; }
     .overview-chart-point { fill: var(--slice-c); }
     .overview-chart-hist-cell { fill: var(--slice-c); }
     .overview-panel-in { animation-duration: var(--overview-transition-duration, 1000ms); animation-timing-function: ease; animation-fill-mode: both; }
@@ -11366,7 +11362,7 @@
     const OVERVIEW_LABEL_MODES = ['both', 'counts', 'percent'];
     const OVERVIEW_TIME_BASES = ['updated', 'created'];
     const OVERVIEW_BAR_MIN_PERCENT = 1.5;
-    const OVERVIEW_STACK_W = 220, OVERVIEW_STACK_H = 86, OVERVIEW_STACK_X = 10, OVERVIEW_STACK_Y = 36, OVERVIEW_STACK_BAR_W = 200, OVERVIEW_STACK_BAR_H = 18;
+    const OVERVIEW_STACK_W = 220, OVERVIEW_STACK_H = 98, OVERVIEW_STACK_X = 10, OVERVIEW_STACK_Y = 48, OVERVIEW_STACK_BAR_W = 200, OVERVIEW_STACK_BAR_H = 18, OVERVIEW_STACK_TOTAL_Y = 24;
     const OVERVIEW_LINE_W = 220, OVERVIEW_LINE_H = 150, OVERVIEW_LINE_PAD = 12;
     const OVERVIEW_AGE_BUCKETS = [
       { key: 'lt1d', label: '<1d', maxMinutes: 1440 },
@@ -11503,7 +11499,7 @@
         x += w;
         return out;
       }).join('');
-      return `<svg class="overview-chart-svg" viewBox="0 0 ${OVERVIEW_STACK_W} ${OVERVIEW_STACK_H}" role="img" aria-label="${esc(title)}"><rect class="overview-chart-track" x="${OVERVIEW_STACK_X}" y="${OVERVIEW_STACK_Y}" width="${OVERVIEW_STACK_BAR_W}" height="${OVERVIEW_STACK_BAR_H}" rx="3"></rect>${bars}<text class="overview-chart-total" x="${OVERVIEW_STACK_W / 2}" y="${OVERVIEW_STACK_Y - 10}">${total} total</text></svg>`;
+      return `<svg class="overview-chart-svg" viewBox="0 0 ${OVERVIEW_STACK_W} ${OVERVIEW_STACK_H}" role="img" aria-label="${esc(title)}"><rect class="overview-chart-track" x="${OVERVIEW_STACK_X}" y="${OVERVIEW_STACK_Y}" width="${OVERVIEW_STACK_BAR_W}" height="${OVERVIEW_STACK_BAR_H}" rx="3"></rect>${bars}<text class="overview-chart-total" x="${OVERVIEW_STACK_W / 2}" y="${OVERVIEW_STACK_TOTAL_Y}">${total} total</text></svg>`;
     }
 
     function renderOverviewLine(title, subtitle, slices, history) {
@@ -15055,7 +15051,7 @@ function burnAreaChart() {
         return { x, hive: total ? (Number(p.hive)||0) / total : 0, human: total ? (Number(p.human)||0) / total : 0 };
       });
       const path = key => pts.map((p,i) => `${i?'L':'M'}${p.x.toFixed(1)},${(h-pad-(p[key]*(h-pad*2))).toFixed(1)}`).join(' ');
-      return `<svg class="prt-trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="hive versus human actor share trend"><path d="${path('hive')}" fill="none" stroke="var(--green)" stroke-width="2"/><path d="${path('human')}" fill="none" stroke="var(--blue)" stroke-width="2"/><line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="var(--border)"/></svg>`;
+      return `<svg class="prt-trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="hive versus human actor share trend"><path d="${path('hive')}" fill="none" stroke="var(--green)" stroke-width="1.5"/><path d="${path('human')}" fill="none" stroke="var(--blue)" stroke-width="1.5"/><line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="var(--border)"/></svg>`;
     }
     function prtTrendCaption(dto) {
       const series = Array.isArray(dto.series) ? dto.series : [];
