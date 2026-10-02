@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.5)
+
+### Fixed
+
+- **Agents cut off with "the response stopped arriving" are nudged again** — Claude Code has yet another wording for the mid-stream cut-off it once called "Connection lost mid-response" (#4697), then "Connection closed mid-response" (#7855), then "Response stalled mid-stream" (#6134): `API Error: the response stopped arriving. The response above may be incomplete.` It carries no HTTP status, so nothing in the transient-error allowlist matched and an agent showing it sat idle at `❯` with a half-finished run until the next scheduled kick — which is what the FMA quality agent's terminal was reporting. `response stopped arriving` is now in both the hub's and the contributor relay's allowlists, so the same failure gets the same remedy: an immediate retry of the request that never completed ([#9940](https://github.com/hivecommons/hive/issues/9940)).
+- The Copilot backend's model picker offers `claude-opus-5.5` / `claude-sonnet-5.5` again ([#9927](https://github.com/hivecommons/hive/issues/9927)). The pinned Copilot CLI 1.0.88 does accept Sonnet 5.5 and Opus 5.5, but only under the dotted id spelling (matching every other `X.Y` id the CLI accepts, like `claude-opus-4.6` or `gpt-5.5`) — the dashed `claude-opus-5-5` / `claude-sonnet-5-5` spelling it actually rejects was removed entirely rather than corrected. Both dotted ids are restored to `copilotPinnedCLIModels` and `agent.copilotCLIAcceptedModels`, and canonicalization now rewrites a dashed input to the dotted, CLI-accepted form instead of dropping the model.
+
 ## 2026-10-02 (v5.110.4)
 
 ### Changed
