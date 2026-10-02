@@ -1662,7 +1662,7 @@
     .overview-kpi-value { font-size: var(--fs-lg); font-weight: 800; font-variant-numeric: tabular-nums; }
     .overview-kpi-label { color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
     .overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-5); align-items: stretch; }
-    .overview-chart-card { --overview-chart-card-min-height: 14rem; position: relative; display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); align-items: center; gap: var(--sp-4); min-width: 0; min-height: var(--overview-chart-card-min-height); overflow: hidden; }
+    .overview-chart-card { --overview-chart-card-min-height: 16rem; position: relative; display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); align-items: center; gap: var(--sp-5); min-width: 0; min-height: var(--overview-chart-card-min-height); overflow: hidden; }
     .overview-chart-card + .overview-chart-card { border-left: 1px solid var(--border); padding-left: var(--sp-5); }
     .overview-chart-meta { min-width: 0; padding-right: var(--sp-7); }
     .overview-chart-download { position: absolute; top: var(--sp-2); right: var(--sp-2); display: inline-flex; align-items: center; justify-content: center; width: var(--sp-7); height: var(--sp-7); padding: var(--sp-0); }
@@ -1672,7 +1672,7 @@
     .overview-carousel-arrow:hover { color: var(--text); border-color: var(--accent); }
     .overview-carousel-arrow[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
     .overview-chart-controls-sep { width: 1px; height: 1rem; background: var(--border); }
-    .overview-hbar { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; column-gap: var(--sp-2); row-gap: var(--sp-2); align-items: center; width: 100%; font-size: var(--fs-xs); }
+    .overview-hbar { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; column-gap: var(--sp-2); row-gap: var(--sp-3); align-items: center; width: 100%; font-size: var(--fs-sm); }
     .overview-hbar-label { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 9rem; }
     .overview-hbar-track { display: flex; height: 0.7rem; border-radius: var(--r-pill); background: color-mix(in srgb, var(--muted) 18%, transparent); overflow: hidden; }
     .overview-hbar-fill { display: block; height: 100%; background: var(--slice-c); border-radius: inherit; }
@@ -1727,20 +1727,20 @@
     @keyframes overview-blur-out { from { opacity: 1; filter: blur(0); } to { opacity: 0; filter: blur(0.35rem); } }
     @media (prefers-reduced-motion: reduce) { .overview-panel-in, .overview-panel-out { animation: none; } }
     .overview-chart-title { color: var(--text); font-size: var(--fs-sm); font-weight: 800; margin-bottom: var(--sp-2); }
-    .overview-chart-subtitle { color: var(--muted); font-size: var(--fs-xs); margin-bottom: var(--sp-3); }
-    .overview-chart-svg { width: 100%; max-width: 240px; height: auto; overflow: hidden; }
+    .overview-chart-subtitle { color: var(--muted); font-size: var(--fs-base); margin-bottom: var(--sp-4); }
+    .overview-chart-svg { width: 100%; max-width: 260px; height: auto; overflow: visible; }
     .overview-chart-track { fill: none; stroke: color-mix(in srgb, var(--muted) 18%, transparent); }
     .overview-chart-slice { fill: none; stroke: var(--slice-c); transition: opacity 0.15s; }
     .overview-chart-slice:hover { opacity: 0.78; }
-    .overview-chart-label { fill: var(--text); font-size: var(--fs-2xs); font-weight: 800; text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: var(--surface-2); stroke-width: 3px; }
-    .overview-chart-total { fill: var(--text); font-size: var(--fs-sm); font-weight: 800; text-anchor: middle; dominant-baseline: central; }
-    .overview-chart-total-caption { fill: var(--muted); font-size: var(--fs-2xs); text-anchor: middle; dominant-baseline: central; }
+    .overview-chart-label { fill: var(--text); font-size: var(--fs-sm); font-weight: 800; text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: var(--surface-2); stroke-width: 3px; }
+    .overview-chart-total { fill: var(--text); font-size: var(--fs-2xl); font-weight: 800; text-anchor: middle; dominant-baseline: central; }
+    .overview-chart-total-caption { fill: var(--muted); font-size: var(--fs-sm); text-anchor: middle; dominant-baseline: central; }
     .overview-chart-legend { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; max-width: 22rem; }
-    .overview-chart-legend-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-2); color: var(--muted); font-size: var(--fs-xs); border: 0; background: transparent; text-align: left; width: 100%; padding: var(--sp-1); border-radius: var(--r-sm); cursor: pointer; }
+    .overview-chart-legend-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-2); color: var(--muted); font-size: var(--fs-sm); border: 0; background: transparent; text-align: left; width: 100%; padding: var(--sp-1); border-radius: var(--r-sm); cursor: pointer; }
     .overview-chart-legend-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
     .overview-chart-swatch { width: 0.75rem; height: 0.75rem; border-radius: var(--r-pill); background: var(--slice-c); box-shadow: 0 0 0 1px color-mix(in srgb, var(--slice-c) 45%, transparent); }
-    .overview-chart-legend-label { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .overview-chart-legend-count { font-variant-numeric: tabular-nums; text-align: right; }
+    .overview-chart-legend-label { color: var(--text); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .overview-chart-legend-count { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-align: right; }
     .overview-band-download { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0 var(--sp-1); line-height: 1; }
     .overview-band-download:hover { color: var(--text); }
     .overview-empty { color: var(--muted); font-size: var(--fs-sm); padding: var(--sp-5); border: 1px dashed var(--border); border-radius: var(--r); text-align: center; }
@@ -10948,7 +10948,7 @@
 
     function renderOverviewDonut(title, subtitle, slices, history, state) {
       const visible = (slices || []).filter(s => s.count > 0);
-      const total = visible.reduce((n, s) => n + s.count, 0);
+      const total = visible.reduce((n, s) => n + Number(s.count || 0), 0);
       if (!total) {
         return `<div class="overview-chart-card"><div><div class="overview-chart-title">${esc(title)}</div><div class="overview-chart-subtitle">${esc(subtitle)}</div><div class="overview-empty">Nothing actionable — the hive is caught up</div></div></div>`;
       }
@@ -11060,7 +11060,7 @@
     }
 
     function overviewLegendHTML(slices, kind, state) {
-      const total = (slices || []).reduce((n, s) => n + s.count, 0);
+      const total = (slices || []).reduce((n, s) => n + Number(s.count || 0), 0);
       const visible = (slices || []).filter(s => s.count > 0);
       if (!total) return '<div class="overview-empty">Nothing actionable — the hive is caught up</div>';
       return visible.map(s => {
@@ -11231,13 +11231,13 @@
 
     function renderOverviewKPIs(repos, issueSlices, prSlices, state) {
       if (!state.showKPIs) return '';
-      const openIssues = (repos || []).reduce((n, r) => n + (r.actionableIssues || []).length + (r.heldIssues || []).length, 0);
-      const openPRs = (repos || []).reduce((n, r) => n + (r.openPrs || []).length + (r.heldPrs || []).length, 0);
-      const actionableNow = (issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft'].includes(s.key)).reduce((n, s) => n + s.count, 0);
+      const openIssues = (issueSlices || []).reduce((n, s) => n + Number(s.count || 0), 0);
+      const openPRs = (prSlices || []).reduce((n, s) => n + Number(s.count || 0), 0);
+      const actionableNow = (issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft', 'blocked'].includes(s.key)).reduce((n, s) => n + Number(s.count || 0), 0);
       const held = (repos || []).reduce((n, r) => n + (r.heldIssues || []).length + (r.heldPrs || []).length, 0);
-      const blockedNeedsHuman = (prSlices || []).filter(s => s.key === 'blocked' || s.key === 'waiting').reduce((n, s) => n + s.count, 0)
-        + (issueSlices || []).filter(s => s.key === 'waiting').reduce((n, s) => n + s.count, 0);
-      const age = overviewMedianAgeLabel((issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft'].includes(s.key)), state);
+      const blockedNeedsHuman = (prSlices || []).filter(s => s.key === 'blocked' || s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0)
+        + (issueSlices || []).filter(s => s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0);
+      const age = overviewMedianAgeLabel((issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft', 'blocked'].includes(s.key)), state);
       const cards = [
         ['Open issues', openIssues, 'Actionable plus held issues in the selected repos.'],
         ['Open PRs', openPRs, 'Open plus held pull requests in the selected repos.'],
@@ -11246,7 +11246,7 @@
         ['Blocked / needs-human', blockedNeedsHuman, 'Waiting, blocked, or escalated work needing a person or dependency.'],
         ['Median age', age, 'Median selected actionable item age by the configured time basis.']
       ];
-      return `<div class="overview-kpis">${cards.map(([label, value, tip]) => `<button type="button" class="overview-kpi" data-action="ocNavigate" data-arg0="repos-section" data-stop="1" title="${esc(tip)}"><span class="overview-kpi-value">${esc(value)}</span><span class="overview-kpi-label">${esc(label)}</span></button>`).join('')}</div>`;
+      return `<div class="overview-kpis">${cards.map(([label, value, tip]) => `<button type="button" class="overview-kpi" data-action="ocNavigate" data-arg0="repos-section" data-stop="1" title="${esc(tip)}"><span class="overview-kpi-value">${esc(String(value ?? '—'))}</span><span class="overview-kpi-label">${esc(label)}</span></button>`).join('')}</div>`;
     }
 
     function overviewRepoFilterHTML(repos) {
