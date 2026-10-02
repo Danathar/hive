@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.8)
+
+### Fixed
+
+- Test Connection for LiteLLM now names the hub's egress proxy (HTTPS_PROXY) when a 401/403 comes from a proxy in front of the gateway, so a cluster egress path that differs from your laptop's is visible in the error ([#9945](https://github.com/hivecommons/hive/issues/9945)).
+
 ## 2026-10-02 (v5.110.7)
 
 ### Fixed
