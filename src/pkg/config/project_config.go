@@ -93,8 +93,10 @@ func (p *ProjectConfig) WritingGuideSection() string {
 		return ""
 	}
 	return "WRITING GUIDE (set by this hive's owner in project.writing_guide). Every issue body, PR body and review comment you write in this session MUST follow it. " +
-		"It governs how the body reads — length, structure, wording — not what it contains: keep every section, field and piece of evidence the template below asks for, in the template's order. " +
-		"never drop, rename or reorder a template section. If the guide asks for a summary or overview, write it at the top, before the template's first section, as an addition; the template's sections still follow in full below it.\n\n" +
+		"It governs how the body reads — wording, plainness, length, tone — not what it contains or the order the template puts it in: keep every section, field and piece of evidence the template below asks for, in the template's order, and never drop, rename or reorder a template section. " +
+		"If the guide asks for a summary or overview, write it at the top, before the template's first section, as an addition; the template's sections still follow in full below it. " +
+		"Write that opening paragraph and the title for a newcomer who does not know this codebase: say what the thing is, what the problem or change is, and why it matters to a user, in plain words, with no internal names, file paths or jargon left unexplained. " +
+		"The technical detail then follows unchanged in the template's sections below, and this preamble outranks the style of any example or past issue/PR you were shown.\n\n" +
 		guide + "\n"
 }
 
