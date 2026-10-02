@@ -4321,7 +4321,7 @@
         <p style="color:var(--muted);margin:0 0 18px">Common questions from first-time users. Everything below describes what this hive
         actually does today — where behaviour is surprising, it is called out rather than smoothed over. Each answer links to the
         source doc so this panel stays a map, not a second source of truth.</p>
-        <p style="margin:var(--sp-0) var(--sp-0) var(--sp-6)">Need help from humans? <a href="https://hivecommons.dev/discord" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Join our Discord</a>; the Hive Commons community can help you pick the right next step.</p>
+        <p class="m-0 mb-6">Need help from humans? <a class="text-accent fw-semibold" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a>; the Hive Commons community can help you pick the right next step.</p>
 
         <h3 style="font-size:1rem;margin:var(--sp-0) var(--sp-0) var(--sp-4)">Getting started (L1–L2)</h3>
 
@@ -33435,7 +33435,7 @@ function burnAreaChart() {
         _welcomeOpenSteps.add(firstUndone ? firstUndone.id : WELCOME_STEPS[0].id);
       }
       let html = '';
-      html += '<div class="welcome-intro">New to Hive? Start here → <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">Zero to Automation: Your Getting Started Guide</a> · <a href="https://hivecommons.dev/discord" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Join our Discord</a><br><span style="font-size:0.85em;color:var(--muted)">⏰ Heads up: hosted hives that stay unconfigured or inactive are reaped on a timer. Install the Forge App — the app for your source control system (e.g., GitHub, GitHub Enterprise, GitLab, or Gitea) — in your first session (step 2), and if your hive ever disappears or its URL times out, request a new one from the hub and set it up promptly.</span></div>';
+      html += '<div class="welcome-intro">New to Hive? Start here → <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">Zero to Automation: Your Getting Started Guide</a> · <a class="text-accent fw-semibold" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a><br><span style="font-size:0.85em;color:var(--muted)">⏰ Heads up: hosted hives that stay unconfigured or inactive are reaped on a timer. Install the Forge App — the app for your source control system (e.g., GitHub, GitHub Enterprise, GitLab, or Gitea) — in your first session (step 2), and if your hive ever disappears or its URL times out, request a new one from the hub and set it up promptly.</span></div>';
       let n = 0;
       for (const step of WELCOME_STEPS) {
         n++;

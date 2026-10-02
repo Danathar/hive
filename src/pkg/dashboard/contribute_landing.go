@@ -310,6 +310,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .sidebar{flex:1;background:var(--surface-2);border-left:1px solid var(--line-strong);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
 h1{font-size:var(--fs-3xl);margin-bottom:var(--sp-4)}
 .subtitle{color:var(--text-muted);font-size:1.1rem;margin-bottom:var(--sp-9)}
+.subtitle-discord{font-size:var(--fs-md);margin-top:var(--sp-0);margin-bottom:var(--sp-9)}
+.discord-link{color:var(--cc-accent);font-weight:600}
 .stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:10px;margin-bottom:var(--sp-8)}
 .stat{background:var(--surface-2);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-4);text-align:center;box-shadow:var(--shadow-card)}
 .stat-num{font-size:var(--fs-2xl);font-weight:700;color:var(--cc-accent)}
@@ -1536,7 +1538,7 @@ select.admin-act{min-width:0;max-width:100%%}
 <div id="invite-banner" class="invite-banner" hidden role="status"></div>
 <p class="subtitle">Donate your CLI + API tokens to help this project's AI agent swarm.</p>
 <p class="subtitle" style="font-size:.95rem;margin-top:-24px;margin-bottom:var(--sp-4)">Powered by <strong style="color:var(--text)">ClankeR</strong>, the contributor relay &mdash; it hands tasks from this hive's backlog to the agent running on your machine. Your compute, their backlog. Bring your own inference &mdash; how you want to contribute is up to you.</p>
-<p class="subtitle" style="font-size:.95rem;margin-top:0;margin-bottom:var(--sp-9)">Questions? <a href="https://hivecommons.dev/discord" target="_blank" rel="noopener" style="color:var(--cc-accent);font-weight:600">Join our Discord</a> and we'll help you get to your first PR.</p>
+<p class="subtitle-discord">Questions? <a class="discord-link" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a> and we'll help you get to your first PR.</p>
 <div class="stat-row">
 <div class="stat"><div class="stat-num" style="color:var(--cc-accent)">%d</div><div class="stat-label">Total</div></div>
 %s
