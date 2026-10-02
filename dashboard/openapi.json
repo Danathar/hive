@@ -2739,6 +2739,24 @@
                       "type": "boolean",
                       "description": "Whether the working tree has uncommitted changes"
                     },
+                    "upgradePolicy": {
+                      "type": "object",
+                      "description": "Hub-delivered upgrade policy, present after a heartbeat when the hub has an upgrade posture for this spoke.",
+                      "properties": {
+                        "hub_managed": { "type": "boolean" },
+                        "spoke_managed": { "type": "boolean" },
+                        "schedule": { "type": "string", "enum": ["instant", "daily", "weekly"] },
+                        "schedule_hour": { "type": "integer", "description": "24h local hour for daily/weekly windows" },
+                        "schedule_timezone": { "type": "string", "description": "IANA timezone for the schedule hour" },
+                        "schedule_weekday": { "type": "string", "description": "Weekly window opening day" },
+                        "paused": { "type": "boolean" },
+                        "branch": { "type": "string" },
+                        "channel": { "type": "string" },
+                        "target_sha": { "type": "string" },
+                        "target_resolved": { "type": "boolean" },
+                        "armed_target": { "type": "string" }
+                      }
+                    },
                     "behind": {
                       "type": "integer",
                       "description": "Commits behind origin"

@@ -182,7 +182,7 @@ func TestHandleVersionUsesHubUpgradePolicyTarget(t *testing.T) {
 	s.RegisterAPI(deps)
 
 	s.SetHubUpgradePolicy(&spoke.HeartbeatUpgradePolicy{
-		HubManaged: true, Schedule: "daily", Branch: "v4", Channel: "edge",
+		HubManaged: true, Schedule: "daily", ScheduleHour: 13, ScheduleTimezone: "America/New_York", Branch: "v4", Channel: "edge",
 		TargetSHA: "6a5b337", TargetResolved: true,
 	})
 
@@ -213,6 +213,10 @@ func TestHandleVersionUsesHubUpgradePolicyTarget(t *testing.T) {
 	}
 	if au["state"] != autoUpdateStateBehind || au["targetChannel"] != "edge" {
 		t.Errorf("autoUpdate state=%v targetChannel=%v, want behind/edge", au["state"], au["targetChannel"])
+	}
+	policy, _ := body["upgradePolicy"].(map[string]any)
+	if policy["schedule"] != "daily" || policy["schedule_hour"] != float64(13) || policy["schedule_timezone"] != "America/New_York" {
+		t.Errorf("upgradePolicy cadence = %v, want daily/13/America_New_York", policy)
 	}
 }
 

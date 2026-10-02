@@ -135,7 +135,7 @@ func TestDashboardLayoutNormalizeDropsStrategyLabWhenFeatureHidden(t *testing.T)
 	script := strings.Replace(dashboardLayoutPreamble9062(), "strategy_lab:true", "strategy_lab:false", 1) + jsFunc(t, html, "dashboardLayoutAllIds") + "\n" + jsFunc(t, html, "dashboardLayoutNormalize") + `
 const got = dashboardLayoutNormalize({v:1, main:['nous-section','overview-section','unknown']}).main;
 if (got.includes('nous-section')) throw new Error('hidden Strategy Lab survived normalization: '+JSON.stringify(got));
-if (got[0] !== 'overview-section') throw new Error('unexpected first section: '+JSON.stringify(got));
+if (got[0] !== 'runs-section') throw new Error('unexpected first section: '+JSON.stringify(got));
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
