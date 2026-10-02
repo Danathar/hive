@@ -82,6 +82,7 @@ var _upgradeInProgress = false;
 		jsFunc(t, html, "versionUpgradeProgressStatus") + "\n" +
 		jsFunc(t, html, "versionBeeProgressHTML") + "\n" +
 		jsFunc(t, html, "versionButtonHTML") + "\n" +
+		jsFunc(t, html, "versionManualUpgradeActive") + "\n" +
 		jsFunc(t, html, "renderVersionUpgradeAction") + `
 const fixtures = [
   {
@@ -131,6 +132,10 @@ for (const f of fixtures) {
   if (!f.action && out.includes('data-action="gh27"')) throw new Error(f.name+' unexpectedly actionable: '+out);
   if (f.action && !out.includes('oc-version-upgrade-available')) throw new Error(f.name+' missing available styling: '+out);
 }
+const liveStale = {hash:'e3036bc63882580d803e4d195cd72ed9033e3c0d', short:'e3036bc', target:{source:'hub', resolved:true, sha:'eb4cb90', short:'eb4cb90', managedBy:'hub'}, upgradePolicy:{target_sha:'eb4cb90'}, manualUpgrade:{state:'started', target:'990d0b2'}, autoUpdate:{state:'behind', managedBy:'hub'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}};
+if (versionManualUpgradeActive(liveStale, liveStale.target.sha)) throw new Error('stale manual upgrade should not remain active');
+let liveOut = renderVersionUpgradeAction(liveStale, {offeredUpgradeHash:liveStale.target.sha, offeredUpgradeShort:liveStale.target.short, offeredUpgradeLabel:'Hub target'});
+if (!liveOut.includes('Upgrade to eb4cb90') || !liveOut.includes('data-action="gh27"') || liveOut.includes('Upgrading…')) throw new Error('live stale manual state should show enabled upgrade: '+liveOut);
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
