@@ -1,1 +1,0 @@
-- `just contribute-move` and `hivectl hives reissue` can once again rotate a contributor's registration token on standalone hives — the auth proxy was rejecting `POST /api/contribute/reissue-token`'s GitHub-token credential with a 401 before it reached the handler.

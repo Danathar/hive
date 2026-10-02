@@ -1,1 +1,0 @@
-- copy: work-source-neutral terminology (GitHub-specific wording only where it is GitHub-specific) (#10011)
