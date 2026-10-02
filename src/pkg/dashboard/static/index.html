@@ -1367,9 +1367,12 @@
     .lc-fleet-stat .val.closed { color: var(--red); }
     .prt-tile-spark { display:block; margin-top: var(--sp-2); min-height: 20px; }
     .prt-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--sp-2); margin: var(--sp-3) 0; }
-    .prt-metric { background: color-mix(in srgb, var(--bg) 85%, transparent); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); }
+    .prt-metric { background: color-mix(in srgb, var(--bg) 85%, transparent); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-3); min-height: 4.5rem; }
     .prt-metric .mval { font-size: var(--fs-sm); font-weight: 700; color: var(--text); }
+    .prt-metric .mval .trend-good { color: var(--green); }
+    .prt-metric .mval .trend-bad { color: var(--red); }
     .prt-metric .mlbl { font-size: var(--fs-2xs); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .prt-metric-spark { display:block; min-height: 1.125rem; }
     .prt-paths { color: var(--muted); font-size: var(--fs-xs); margin-bottom: var(--sp-2); }
     .prt-breakdowns { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-3); margin-top: var(--sp-2); }
     .prt-breakdown { color: var(--muted); font-size: var(--fs-xs); }
@@ -1783,7 +1786,10 @@
 
     /* Sparklines */
     .sparkline { display: inline-block; vertical-align: middle; margin-left: var(--sp-3); flex-shrink: 0; }
-    .sparkline svg { display: block; }
+    .sparkline svg { display: block; overflow: visible; }
+    .sparkline--flush { margin-left: var(--sp-0); margin-top: var(--sp-2); }
+    .sparkline-line { stroke-dashoffset: 0; }
+    .sparkline-dot { transform-box: fill-box; transform-origin: center; }
     .spark-row { display: flex; align-items: center; gap: var(--sp-3); overflow: hidden; }
 
     /* Beads */
@@ -6908,7 +6914,60 @@
       return 'oldest → newest';
     }
 
-    function sparkSvg(rawValues, color, times) {
+    function sparklineSeriesKey(series) {
+      if (!Array.isArray(series)) return '';
+      return series.map(v => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return 'x';
+        return Number.isInteger(n) ? String(n) : n.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+      }).join('|');
+    }
+    function sparklineValueSummary(values) {
+      if (!values || !values.length) return 'no data';
+      const first = values[0], latest = values[values.length - 1];
+      const trend = latest > first ? 'up' : latest < first ? 'down' : 'flat';
+      return `latest ${fmtSparkVal(latest)}, trend ${trend}`;
+    }
+    function renderSparkline(el, series, opts) {
+      opts = opts || {};
+      if (!Array.isArray(series) || series.length < 2) return '';
+      const values = series.map(v => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      });
+      const W = opts.width || SPARK_W, H = opts.height || SPARK_H;
+      const min = opts.min != null ? opts.min : Math.min(...values);
+      const max = opts.max != null ? opts.max : Math.max(...values);
+      const range = (max - min) || max || 1;
+      const padX = opts.padX != null ? opts.padX : 0;
+      const padY = opts.padY != null ? opts.padY : 1;
+      const plotW = opts.plotW != null ? opts.plotW : (W - padX * 2);
+      const plotH = opts.plotH != null ? opts.plotH : (H - padY * 2);
+      const points = opts.points || values.map((v, i) => {
+        const x = padX + (i / (values.length - 1)) * plotW;
+        const y = padY + plotH - ((v - min) / range) * plotH;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const lastPt = String(opts.lastPoint || points[points.length - 1]).split(',');
+      const title = opts.title || `${opts.label || 'sparkline'} · range ${fmtSparkVal(min)}–${fmtSparkVal(max)} · ${sparklineValueSummary(values)}`;
+      const aria = opts.ariaLabel || `${opts.label || 'sparkline'}: range ${fmtSparkVal(min)} to ${fmtSparkVal(max)}, ${sparklineValueSummary(values)}`;
+      const id = opts.id || `${opts.label || 'sparkline'}:${opts.color || ''}`;
+      const lineAttrs = opts.lineAttrs || '';
+      const dot = opts.dot === false ? '' : `<circle class="sparkline-dot" cx="${lastPt[0]}" cy="${lastPt[1]}" r="${opts.dotRadius || 2}" fill="${opts.dotColor || opts.color || 'currentColor'}"/>`;
+      const svgClass = opts.svgClass ? ` class="${escapeHtml(opts.svgClass)}"` : '';
+      const titleAttr = opts.svgTitle ? ` title="${escapeHtml(opts.svgTitle)}"` : '';
+      const svg = `<svg${svgClass} width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(aria)}" data-sparkline-id="${escapeHtml(id)}" data-sparkline-key="${escapeHtml(sparklineSeriesKey(values))}"${titleAttr}>` +
+        `<title>${escapeHtml(title)}</title>` +
+        (opts.before || '') +
+        `<polyline class="sparkline-line" points="${points.join(' ')}" fill="none" stroke="${opts.color || 'currentColor'}" stroke-width="${opts.strokeWidth || 1.5}" stroke-linecap="round" stroke-linejoin="round"${lineAttrs}/>` +
+        dot + (opts.after || '') + `</svg>`;
+      const cls = ['sparkline', opts.wrapperClass || ''].filter(Boolean).join(' ');
+      const html = opts.wrapper === false ? svg : `<span class="${escapeHtml(cls)}"${opts.wrapperTitle ? ` title="${escapeHtml(opts.wrapperTitle)}"` : ''}>${svg}</span>`;
+      if (el && el.nodeType === 1) el.innerHTML = html;
+      return html;
+    }
+
+    function sparkSvg(rawValues, color, times, id) {
       if (!rawValues || rawValues.length < 2) return '';
       // Fill zero gaps: carry forward last non-zero value through consecutive zeros
       const values = [...rawValues];
@@ -6919,19 +6978,11 @@
       }
       const max = Math.max(...values);
       const min = Math.min(...values);
-      const range = (max - min) || max || 1;
-      const pts = values.map((v, i) => {
-        const x = (i / (values.length - 1)) * SPARK_W;
-        const y = SPARK_H - ((v - min) / range) * (SPARK_H - 2) - 1;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      });
       // <title> gives every tiny sparkline a hover scale (#4298: graphs with
       // no axes are impossible to read — these are too small for drawn axes).
-      return `<span class="sparkline"><svg width="${SPARK_W}" height="${SPARK_H}" viewBox="0 0 ${SPARK_W} ${SPARK_H}">` +
-        `<title>range ${fmtSparkVal(min)}–${fmtSparkVal(max)} · latest ${fmtSparkVal(values[values.length - 1])} · ${values.length} points, ${sparkSpanLabel(times, values.length)}</title>` +
-        `<polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>` +
-        `<circle cx="${pts[pts.length-1].split(',')[0]}" cy="${pts[pts.length-1].split(',')[1]}" r="2" fill="${color}"/>` +
-        `</svg></span>`;
+      // renderSparkline emits that as <title>range ${fmtSparkVal(min)}…
+      const title = `range ${fmtSparkVal(min)}–${fmtSparkVal(max)} · latest ${fmtSparkVal(values[values.length - 1])} · ${values.length} points, ${sparkSpanLabel(times, values.length)}`;
+      return renderSparkline(null, values, { color, title, ariaLabel: title, label: id || 'sparkline', id: id || title });
     }
 
     function getHistorySeries(key) {
@@ -15002,7 +15053,7 @@ function burnAreaChart() {
       const values = buckets.map(b => Number(b[field]) || 0);
       const times = buckets.map(b => Date.parse(b.t));
       if (values.length < 2) return '';
-      const base = sparkSvg(values, color, times);
+      const base = sparkSvg(values, color, times, `pr-throughput:${field}`);
       const details = buckets.slice(-8).map(b => `${fmtSparkTime(Date.parse(b.t))}: ${Number(b[field]) || 0}`).join(' · ');
       return base.replace('<svg ', `<svg title="${escapeHtml(details)}" `);
     }
@@ -15020,7 +15071,89 @@ function burnAreaChart() {
       if (v == null || !isFinite(Number(v))) return '—';
       const n = Number(v);
       const good = inverse ? n <= 0 : n >= 0;
-      return `<span style="color:${good ? 'var(--green)' : 'var(--red)'}">${n >= 0 ? '▲' : '▼'} ${Math.abs(n).toFixed(0)}%</span>`;
+      return `<span class="${good ? 'trend-good' : 'trend-bad'}">${n >= 0 ? '▲' : '▼'} ${Math.abs(n).toFixed(0)}%</span>`;
+    }
+    function prtFmtNumber(v) {
+      if (v == null || !isFinite(Number(v))) return '—';
+      const n = Number(v);
+      return Math.abs(n) >= 10 ? n.toFixed(0) : n.toFixed(1);
+    }
+    function prtPctChange(current, previous) {
+      if (current == null || previous == null) return null;
+      const c = Number(current), p = Number(previous);
+      if (!isFinite(c) || !isFinite(p) || p === 0) return null;
+      return ((c - p) / p) * 100;
+    }
+    function prtFiniteSeries(values, times) {
+      const out = { values: [], times: [] };
+      values.forEach((v, i) => {
+        const n = Number(v);
+        if (!isFinite(n)) return;
+        out.values.push(n);
+        out.times.push(times[i]);
+      });
+      return out;
+    }
+    function prtSparkTitle(values, fmt) {
+      const finite = values.map(Number).filter(Number.isFinite);
+      if (!finite.length) return 'min — · max — · latest —';
+      const min = Math.min(...finite);
+      const max = Math.max(...finite);
+      const latest = finite[finite.length - 1];
+      return `min ${fmt(min)} · max ${fmt(max)} · latest ${fmt(latest)}`;
+    }
+    function prtMetricSpark(values, times, color, label, fmt, id) {
+      const series = prtFiniteSeries(values, times);
+      if (series.values.length < 2) return '';
+      const title = prtSparkTitle(series.values, fmt);
+      return `<span class="prt-metric-spark">${renderSparkline(null, series.values, {
+        color,
+        title,
+        ariaLabel: `${label}: ${title}`,
+        label,
+        id: `pr-throughput:${id}`,
+        wrapperClass: 'sparkline--flush',
+        wrapperTitle: title,
+      })}</span>`;
+    }
+    function prtBucketMetricSeries(dto) {
+      const buckets = Array.isArray(dto.buckets) ? dto.buckets : [];
+      const bucketDays = Math.max((Number(dto.bucket_seconds) || 3600) / 86400, 1 / 1440);
+      const times = buckets.map(b => Date.parse(b.t));
+      const opened = buckets.map(b => Number(b.opened) || 0);
+      const merged = buckets.map(b => Number(b.merged) || 0);
+      const closed = buckets.map(b => Number(b.closed) || 0);
+      const ttmP50 = buckets.map(b => b.ttm_p50 == null ? null : Number(b.ttm_p50));
+      const ttmP90 = buckets.map(b => b.ttm_p90 == null ? null : Number(b.ttm_p90));
+      let backlog = 0;
+      const netBacklog = buckets.map((b, i) => {
+        backlog += opened[i] - merged[i] - closed[i];
+        return backlog;
+      });
+      const mergedTrend = merged.map((v, i) => i === 0 ? null : prtPctChange(v, merged[i - 1]));
+      const ttmTrend = [];
+      let previousTTM = null;
+      for (const current of ttmP50) {
+        ttmTrend.push(previousTTM == null ? null : prtPctChange(current, previousTTM));
+        if (current != null && isFinite(current)) previousTTM = current;
+      }
+      return {
+        times,
+        mergedVelocity: merged.map(v => v / bucketDays),
+        openedVelocity: opened.map(v => v / bucketDays),
+        medianTTM: ttmP50,
+        p90TTM: ttmP90,
+        mergeRatio: buckets.map((b, i) => opened[i] > 0 ? merged[i] / opened[i] : 0),
+        netBacklog,
+        mergedTrend,
+        ttmTrend,
+      };
+    }
+    function prtTrendColor(values, inverse) {
+      const finite = values.map(Number).filter(Number.isFinite);
+      if (!finite.length) return 'var(--muted)';
+      const latest = finite[finite.length - 1];
+      return (inverse ? latest <= 0 : latest >= 0) ? 'var(--green)' : 'var(--red)';
     }
     function prtTopList(title, items) {
       if (!Array.isArray(items) || !items.length) return '';
@@ -15100,15 +15233,16 @@ function burnAreaChart() {
         .map((k) => `${Number(byPath[k])} ${escapeHtml(pathLabels[k] || k)}`);
       const pathsHtml = pathParts.length ? `<div class="prt-paths">Merged by: ${pathParts.join(' · ')}</div>` : '';
       const m = dto.metrics || {};
+      const metricSeries = prtBucketMetricSeries(dto);
       const metricsHtml = `<div class="prt-metrics">
-        <div class="prt-metric" title="Merged PRs divided by selected window length, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.merged_per_day))}</div><div class="mlbl">merge velocity</div></div>
-        <div class="prt-metric" title="Opened PRs divided by selected window length, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.opened_per_day))}</div><div class="mlbl">open velocity</div></div>
-        <div class="prt-metric" title="Median elapsed time from PR open audit event to merge audit event for PRs merged in this range. Shows — until matching open timestamps exist."><div class="mval">${escapeHtml(prtFmtHours(m.median_time_to_merge_hours))}</div><div class="mlbl">median TTM</div></div>
-        <div class="prt-metric" title="90th percentile elapsed time from PR open to merge for PRs merged in this range."><div class="mval">${escapeHtml(prtFmtHours(m.p90_time_to_merge_hours))}</div><div class="mlbl">p90 TTM</div></div>
-        <div class="prt-metric" title="Merged divided by opened in this range."><div class="mval">${escapeHtml(prtFmtPct(m.merge_ratio))}</div><div class="mlbl">merge ratio</div></div>
-        <div class="prt-metric" title="Opened minus merged minus closed without merging; positive means backlog grew."><div class="mval">${Number(m.net_backlog_change) || 0}</div><div class="mlbl">net backlog</div></div>
-        <div class="prt-metric" title="Merged count compared with the previous equal-length window."><div class="mval">${prtTrend(m.trend && m.trend.merged_pct, false)}</div><div class="mlbl">merged trend</div></div>
-        <div class="prt-metric" title="Median time-to-merge compared with the previous equal-length window; down is better."><div class="mval">${prtTrend(m.trend && m.trend.median_time_to_merge_pct, true)}</div><div class="mlbl">TTM trend</div></div>
+        <div class="prt-metric" title="Merged PRs divided by each throughput bucket, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.merged_per_day))}</div><div class="mlbl">merge velocity</div>${prtMetricSpark(metricSeries.mergedVelocity, metricSeries.times, 'var(--green)', 'merge velocity', prtFmtRate, 'merge-velocity')}</div>
+        <div class="prt-metric" title="Opened PRs divided by each throughput bucket, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.opened_per_day))}</div><div class="mlbl">open velocity</div>${prtMetricSpark(metricSeries.openedVelocity, metricSeries.times, 'var(--blue)', 'open velocity', prtFmtRate, 'open-velocity')}</div>
+        <div class="prt-metric" title="Per-bucket median elapsed time from PR open audit event to merge audit event. Shows — until matching open timestamps exist."><div class="mval">${escapeHtml(prtFmtHours(m.median_time_to_merge_hours))}</div><div class="mlbl">median TTM</div>${prtMetricSpark(metricSeries.medianTTM, metricSeries.times, 'var(--yellow)', 'median TTM', prtFmtHours, 'median-ttm')}</div>
+        <div class="prt-metric" title="Per-bucket 90th percentile elapsed time from PR open to merge."><div class="mval">${escapeHtml(prtFmtHours(m.p90_time_to_merge_hours))}</div><div class="mlbl">p90 TTM</div>${prtMetricSpark(metricSeries.p90TTM, metricSeries.times, 'var(--red)', 'p90 TTM', prtFmtHours, 'p90-ttm')}</div>
+        <div class="prt-metric" title="Merged divided by opened per throughput bucket."><div class="mval">${escapeHtml(prtFmtPct(m.merge_ratio))}</div><div class="mlbl">merge ratio</div>${prtMetricSpark(metricSeries.mergeRatio, metricSeries.times, 'var(--green)', 'merge ratio', prtFmtPct, 'merge-ratio')}</div>
+        <div class="prt-metric" title="Cumulative opened minus merged minus closed without merging across the selected buckets; positive means backlog grew."><div class="mval">${Number(m.net_backlog_change) || 0}</div><div class="mlbl">net backlog</div>${prtMetricSpark(metricSeries.netBacklog, metricSeries.times, prtTrendColor(metricSeries.netBacklog, true), 'net backlog', prtFmtNumber, 'net-backlog')}</div>
+        <div class="prt-metric" title="Each bucket's merged count compared with the previous bucket."><div class="mval">${prtTrend(m.trend && m.trend.merged_pct, false)}</div><div class="mlbl">merged trend</div>${prtMetricSpark(metricSeries.mergedTrend, metricSeries.times, prtTrendColor(metricSeries.mergedTrend, false), 'merged trend', v => `${prtFmtNumber(v)}%`, 'merged-trend')}</div>
+        <div class="prt-metric" title="Each bucket's median time-to-merge compared with the previous bucket that had TTM samples; down is better."><div class="mval">${prtTrend(m.trend && m.trend.median_time_to_merge_pct, true)}</div><div class="mlbl">TTM trend</div>${prtMetricSpark(metricSeries.ttmTrend, metricSeries.times, prtTrendColor(metricSeries.ttmTrend, true), 'TTM trend', v => `${prtFmtNumber(v)}%`, 'ttm-trend')}</div>
       </div>`;
       const breakdowns = [prtTopList('Merged by agent', dto.merged_by_agent), prtTopList('Top repos', dto.top_repos), prtTopList('Close reasons', dto.closed_reasons)].filter(Boolean).join('');
       const label = prtWindowLabel(dto);
