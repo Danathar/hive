@@ -1,1 +1,0 @@
-- Fix dashboard top notices and stale version upgrade state.
