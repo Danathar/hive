@@ -3216,6 +3216,24 @@
     .dash-card-summary { display: none; font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); margin-left: var(--sp-4); text-align: right; white-space: nowrap; }
     .dash-card-actions:empty + .dash-card-summary, .dash-card-badges:empty + .dash-card-actions + .dash-card-summary { margin-left: auto; }
     .dash-card.collapsed .dash-card-summary { display: inline-flex; align-items: center; gap: var(--sp-2); }
+    .mini-summary-strip { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); width: min(320px, 36vw); max-width: 320px; height: 26px; overflow: hidden; color: var(--muted); }
+    .mini-summary-strip svg { flex: 0 0 auto; display: block; overflow: visible; }
+    .mini-summary-strip .sparkline { display: inline-flex; margin: 0; }
+    .mini-summary-strip .sparkline-line, .mini-spark .sparkline-line { stroke-dasharray: 160; stroke-dashoffset: 160; animation: mini-spark-draw 650ms ease-out forwards; }
+    .mini-gauge-track { stroke: var(--line-subtle); }
+    .mini-gauge-arc { stroke-linecap: round; }
+    .mini-dial-seg { fill: var(--surface-2); stroke: var(--line-subtle); stroke-width: 0.6; }
+    .mini-dial-seg.active { fill: currentColor; stroke: currentColor; }
+    .mini-bar-bg { fill: var(--surface-2); stroke: var(--line-subtle); stroke-width: 0.7; }
+    .mini-delta.good { color: var(--green); }
+    .mini-delta.bad { color: var(--red); }
+    .mini-delta.flat { color: var(--muted); }
+    .mini-health-dot.ok { fill: var(--green); }
+    .mini-health-dot.warn { fill: var(--yellow); }
+    .mini-health-dot.bad { fill: var(--red); }
+    .mini-health-dot.unknown { fill: var(--muted); }
+    @keyframes mini-spark-draw { to { stroke-dashoffset: 0; } }
+    @media (prefers-reduced-motion: reduce) { .mini-summary-strip .sparkline-line, .mini-spark .sparkline-line { animation: none; stroke-dashoffset: 0; } }
     .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease; max-height: none; opacity: 1; }
     .dash-card-body.collapsed { max-height: 0 !important; opacity: 0; pointer-events: none; }
     #audit-panel.audit-resizable { min-height: 320px; height: var(--audit-panel-height, 640px); max-height: 80vh; overflow-y: auto; resize: vertical; position: relative; }
@@ -5156,7 +5174,8 @@
       const subtitle = opts.subtitleHtml ? `<span class="dash-card-subtitle">${opts.subtitleHtml}</span>` : '';
       const badges = opts.badgeHtml ? `<span class="dash-card-badges">${opts.badgeHtml}</span>` : '<span class="dash-card-badges"></span>';
       const actions = opts.actionsHtml ? `<span class="dash-card-actions">${opts.actionsHtml}</span>` : '<span class="dash-card-actions"></span>';
-      const summary = `<span class="dash-card-summary ${opts.summaryClass || ''}" id="${esc(opts.summaryId || (id + '-summary'))}" title="${esc(opts.summaryTitle || 'Collapsed summary')}">${opts.summaryHtml || ''}</span>`;
+      const summaryText = textOrDash(opts.summaryHtml || opts.summary || '');
+      const summary = `<span class="dash-card-summary ${opts.summaryClass || ''}" id="${esc(opts.summaryId || (id + '-summary'))}" title="${esc(opts.summaryTitle || summaryText || 'Collapsed summary')}" aria-label="${esc(opts.summaryTitle || summaryText || 'Collapsed summary')}">${visualSectionSummary(id, summaryText, opts.summaryTitle)}</span>`;
       const cls = ['dash-card-header','section-header-toggle',opts.headerClass || ''].filter(Boolean).join(' ');
       return `<div class="${cls}" data-section-card-header="1" role="button" tabindex="0" aria-expanded="true" aria-controls="${esc(bodyId)}" ${actionAttrs} title="${esc(opts.toggleTitle || 'Collapse / expand this section')}">${grip}<span class="section-chevron ${opts.chevronClass || ''}" aria-hidden="true">▼</span><span class="dash-card-title">${title}${subtitle}</span>${badges}${actions}${summary}</div>`;
     }
@@ -5228,11 +5247,183 @@
     function initializeDashboardSectionCards() {
       Object.keys(DASHBOARD_SECTION_CARD_CONFIG).forEach(refreshSectionCardShell);
     }
+    const MINI_SUMMARY_HISTORY_PREFIX = 'hive_visual_summary_history:';
+    const MINI_SUMMARY_HISTORY_POINTS = 48;
+    function miniHiveKey() {
+      return String(((window._lastStatus || {}).hiveId) || 'default').trim() || 'default';
+    }
+    function miniHistoryStoreKey() {
+      return MINI_SUMMARY_HISTORY_PREFIX + miniHiveKey();
+    }
+    function miniLoadHistoryStore() {
+      try { return JSON.parse(localStorage.getItem(miniHistoryStoreKey()) || '{}') || {}; } catch { return {}; }
+    }
+    function miniSaveHistoryStore(store) {
+      try { localStorage.setItem(miniHistoryStoreKey(), JSON.stringify(store)); } catch {}
+    }
+    function miniHistorySeries(sectionId, metric, value) {
+      const key = sectionId + ':' + metric;
+      const store = miniLoadHistoryStore();
+      const series = Array.isArray(store[key]) ? store[key].slice(-MINI_SUMMARY_HISTORY_POINTS) : [];
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        const last = series[series.length - 1];
+        if (!last || last.v !== n) series.push({ t: Date.now(), v: n });
+        store[key] = series.slice(-MINI_SUMMARY_HISTORY_POINTS);
+        miniSaveHistoryStore(store);
+      }
+      return series.map(p => Number(p && p.v) || 0);
+    }
+    function miniNumericParts(text) {
+      return String(text || '').match(/-?\d+(?:\.\d+)?/g) || [];
+    }
+    function miniFirstNumber(text) {
+      const nums = miniNumericParts(text);
+      return nums.length ? Number(nums[0]) : 0;
+    }
+    function miniTitleTag(title) {
+      return `<title>${escapeHtml(title || 'summary')}</title>`;
+    }
+    function miniWrap(sectionId, text, inner) {
+      const label = textOrDash(text);
+      return `<span class="mini-summary-strip" role="img" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}" data-mini-summary="${escapeHtml(sectionId)}">${inner}</span>`;
+    }
+    function miniSpark(series, color, label) {
+      const values = (Array.isArray(series) ? series : []).map(Number).filter(Number.isFinite);
+      const usable = values.length >= 2 ? values : [0, values[0] || 0];
+      return renderSparkline(null, usable, { width: 74, height: 24, color: color || 'var(--cyan)', label: label || 'history', title: label || 'history', ariaLabel: label || 'history', svgClass: 'mini-spark', wrapperClass: 'mini-spark-wrap' });
+    }
+    function miniGauge(value, max, color, label) {
+      const v = Math.max(0, Number(value) || 0);
+      const m = Math.max(1, Number(max) || v || 1);
+      const pct = Math.max(0, Math.min(1, v / m));
+      const startX = 8, startY = 21, r = 18;
+      const endAngle = Math.PI * (1 - pct);
+      const endX = startX + r + Math.cos(endAngle) * r;
+      const endY = startY - Math.sin(endAngle) * r;
+      const large = pct > 0.5 ? 1 : 0;
+      const arc = `M ${startX} ${startY} A ${r} ${r} 0 ${large} 1 ${endX.toFixed(1)} ${endY.toFixed(1)}`;
+      const title = label || `${fmtSparkVal(v)} of ${fmtSparkVal(m)}`;
+      return `<svg class="mini-gauge" width="52" height="26" viewBox="0 0 52 26" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}<path class="mini-gauge-track" d="M 8 21 A 18 18 0 0 1 44 21" fill="none" stroke-width="4"/><path class="mini-gauge-arc" d="${arc}" fill="none" stroke="${color || 'var(--cyan)'}" stroke-width="4"/><text x="26" y="20" text-anchor="middle" fill="currentColor" font-size="9" font-weight="700">${escapeHtml(fmtSparkVal(v))}</text></svg>`;
+    }
+    function miniDial(level, levels, label) {
+      const names = Array.isArray(levels) && levels.length ? levels : ['0','1','2','3'];
+      const idx = Math.max(0, Math.min(names.length - 1, typeof level === 'number' ? level : names.findIndex(x => String(x).toLowerCase() === String(level).toLowerCase())));
+      const segW = 9, gap = 2, h = 24, w = names.length * segW + (names.length - 1) * gap;
+      const rects = names.map((name, i) => `<rect class="mini-dial-seg${i <= idx ? ' active' : ''}" x="${i * (segW + gap)}" y="6" width="${segW}" height="12" rx="3"><title>${escapeHtml(name)}</title></rect>`).join('');
+      const title = label || `${names[idx] || level}`;
+      return `<svg class="mini-dial" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}${rects}</svg>`;
+    }
+    function miniBar(parts, label) {
+      const clean = (Array.isArray(parts) ? parts : []).map(p => ({ value: Math.max(0, Number(p && p.value) || 0), color: (p && p.color) || 'var(--muted)', label: (p && p.label) || '' }));
+      const total = clean.reduce((n, p) => n + p.value, 0) || 1;
+      let x = 1;
+      const rects = clean.map(p => {
+        const w = Math.max(p.value > 0 ? 2 : 0, (p.value / total) * 98);
+        const out = `<rect x="${x.toFixed(1)}" y="7" width="${w.toFixed(1)}" height="10" rx="2" fill="${p.color}"><title>${escapeHtml(p.label)}: ${fmtSparkVal(p.value)}</title></rect>`;
+        x += w;
+        return out;
+      }).join('');
+      const title = label || clean.map(p => `${p.label || 'part'} ${fmtSparkVal(p.value)}`).join(', ');
+      return `<svg class="mini-bar" width="104" height="24" viewBox="0 0 104 24" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}<rect class="mini-bar-bg" x="1" y="7" width="98" height="10" rx="3"/>${rects}</svg>`;
+    }
+    function miniDelta(value, prev, label) {
+      const v = Number(value) || 0;
+      const p = Number(prev);
+      const known = Number.isFinite(p);
+      const up = known && v > p;
+      const down = known && v < p;
+      const cls = up ? 'good' : down ? 'bad' : 'flat';
+      const arrow = up ? '▲' : down ? '▼' : '•';
+      const title = label || (known ? `${fmtSparkVal(v)} from ${fmtSparkVal(p)}` : fmtSparkVal(v));
+      return `<svg class="mini-delta ${cls}" width="58" height="24" viewBox="0 0 58 24" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}<text x="2" y="16" fill="currentColor" font-size="11" font-weight="800">${arrow}</text><text x="18" y="16" fill="currentColor" font-size="11" font-weight="800">${escapeHtml(fmtSparkVal(v))}</text></svg>`;
+    }
+    function miniText(value, label) {
+      const text = textOrDash(value);
+      const title = label || text;
+      return `<svg class="mini-text" width="74" height="24" viewBox="0 0 74 24" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}<text x="72" y="16" text-anchor="end" fill="currentColor" font-size="11" font-weight="800">${escapeHtml(text.slice(0, 10))}</text></svg>`;
+    }
+    function miniAvatarDots(contributors, total, label) {
+      const list = Array.isArray(contributors) ? contributors.slice(0, 5) : [];
+      const dots = list.map((c, i) => `<circle cx="${8 + i * 12}" cy="12" r="5" fill="${_getAgentColor((c && (c.github_username || c.login || c.name)) || String(i))}"><title>${escapeHtml((c && (c.github_username || c.login || c.name)) || 'contributor')}</title></circle>`).join('');
+      const n = Number(total) || list.length || 0;
+      const title = label || `${n} contributors`;
+      return `<svg class="mini-avatars" width="92" height="24" viewBox="0 0 92 24" role="img" aria-label="${escapeHtml(title)}">${miniTitleTag(title)}${dots}<text x="90" y="16" text-anchor="end" fill="currentColor" font-size="10" font-weight="800">${escapeHtml(fmtSparkVal(n))}</text></svg>`;
+    }
+    function visualSectionSummary(sectionId, html, title) {
+      const text = textOrDash(html);
+      const data = window._lastStatus || {};
+      const repos = Array.isArray(data.repos) ? data.repos : [];
+      const nums = miniNumericParts(text).map(Number);
+      const n0 = nums.length ? nums[0] : 0;
+      const hist = (metric, value) => miniHistorySeries(sectionId, metric, value);
+      let inner = '';
+      if (sectionId === 'overview-section') {
+        const issueTotal = repos.reduce((n, r) => n + ((r.actionableIssues || r.issues || []).length || Number(r.openIssues || r.open_issues || r.issues || 0) || 0), 0);
+        const prTotal = repos.reduce((n, r) => n + ((r.openPrs || r.prs || []).length || Number(r.open_prs || r.openPRs || r.prs || 0) || 0), 0);
+        inner = miniBar([{ label: 'issues', value: issueTotal, color: 'var(--blue)' }, { label: 'open PRs', value: prTotal, color: 'var(--purple)' }], text) + miniSpark(hist('open-prs', prTotal), 'var(--purple)', text);
+      } else if (sectionId === 'governor') {
+        const gov = data.governor || {};
+        const mode = String(gov.mode || text.split(/\s+/)[0] || 'idle').toLowerCase();
+        const pressure = Number(gov.pressure || gov.total || ((gov.issues || 0) + (gov.prs || 0)) || 0) || 0;
+        const max = Number(gov.surgeThreshold || gov.surge_threshold || gov.thresholds?.surge || 10) || 10;
+        inner = miniDial(mode, ['idle','quiet','busy','surge'], text) + miniGauge(pressure, max, 'var(--yellow)', text);
+      } else if (sectionId === 'advisory-section' || sectionId === 'hive-advice-section') {
+        const series = hist('count', n0);
+        inner = miniDelta(n0, series.length > 1 ? series[series.length - 2] : n0, text) + miniSpark(series, 'var(--blue)', text);
+      } else if (sectionId === 'pr-throughput-section') {
+        const buckets = prtLast && Array.isArray(prtLast.buckets) ? prtLast.buckets : [];
+        const merged = buckets.map(b => Number(b.merged) || 0);
+        const opened = buckets.map(b => Number(b.opened) || 0);
+        inner = miniSpark(merged.length ? merged : hist('merged', nums[0] || 0), 'var(--green)', text) + miniSpark(opened.length ? opened : hist('opened', nums[1] || 0), 'var(--yellow)', text);
+      } else if (sectionId === 'token-panel') {
+        const tokenRates = (typeof computeHourlyBurnRates === 'function' ? computeHourlyBurnRates() : []).map(r => Number(r.rate) || 0);
+        const sessions = nums.length > 1 ? nums[1] : Number(data.tokens?.totals?.sessions || 0);
+        const series = tokenRates.length ? tokenRates : hist('tok-hr', n0);
+        inner = miniSpark(series, 'var(--cyan)', text) + miniDelta(sessions, hist('sessions', sessions).slice(-2)[0], text);
+      } else if (sectionId === 'cost-panel') {
+        const costSeries = (typeof costHist === 'function' ? costHist() : []).map(e => Number(e.usd || e.total_usd) || 0);
+        inner = miniSpark(costSeries.length ? costSeries : hist('usd', n0), 'var(--green)', text) + miniText(text.replace(/\s+/g, ''), text);
+      } else if (sectionId === 'repos-section') {
+        const open = nums[1] || 0, issues = nums[2] || 0;
+        const needsHuman = Number((document.getElementById('repos-needs-human') || {}).textContent) || 0;
+        inner = miniBar([{ label: 'eligible', value: Math.max(0, open - needsHuman), color: 'var(--green)' }, { label: 'blocked', value: needsHuman, color: 'var(--red)' }, { label: 'issues', value: issues, color: 'var(--blue)' }], text);
+      } else if (sectionId === 'beads-section' || sectionId === 'knowledge-section' || sectionId === 'audit-section') {
+        inner = miniSpark(hist('count', n0), sectionId === 'audit-section' ? 'var(--yellow)' : 'var(--cyan)', text);
+      } else if (sectionId === 'acmm-eval-section' || sectionId === 'acmm-reco-section') {
+        inner = miniDial(n0, ['L0','L1','L2','L3','L4','L5','L6'], text);
+      } else if (sectionId === 'review-queue-section') {
+        inner = miniGauge(n0, Math.max(10, n0), 'var(--purple)', text);
+      } else if (sectionId === 'inception-section') {
+        inner = miniBar([{ label: 'proposals', value: n0, color: 'var(--blue)' }, { label: 'in progress', value: nums[1] || 0, color: 'var(--green)' }], text);
+      } else if (sectionId === 'contributors-section') {
+        inner = miniAvatarDots((typeof _cachedContributors === 'undefined' ? [] : _cachedContributors), n0, text);
+      } else if (sectionId === 'debug-section') {
+        const warnings = /healthy/i.test(text) ? 0 : n0;
+        const state = warnings ? 'warn' : 'ok';
+        inner = `<svg class="mini-health" width="28" height="24" viewBox="0 0 28 24" role="img" aria-label="${escapeHtml(text)}">${miniTitleTag(text)}<circle class="mini-health-dot ${state}" cx="14" cy="12" r="6"/></svg>` + miniSpark(hist('warnings', warnings), warnings ? 'var(--yellow)' : 'var(--green)', text);
+      } else if (sectionId === 'agents-section') {
+        const agents = data.agents || window._lastAgents || [];
+        const total = Array.isArray(agents) ? agents.length : n0;
+        const off = Array.isArray(agents) ? agents.filter(a => a && (a.paused || a.stopped || a.offByCadence || a.unscheduledInMode || a.state === 'stopped' || a.state === 'failed')).length : (nums[2] || 0);
+        inner = miniBar([{ label: 'on', value: Math.max(0, total - off), color: 'var(--green)' }, { label: 'off', value: off, color: 'var(--muted)' }, { label: 'paused', value: nums[3] || 0, color: 'var(--yellow)' }], text);
+      } else if (sectionId === 'lifecycle-section') {
+        inner = miniBar([{ label: 'in flight', value: nums[0] || 0, color: 'var(--blue)' }, { label: 'merged', value: nums[1] || 0, color: 'var(--green)' }, { label: 'blocked', value: nums[2] || 0, color: 'var(--red)' }], text);
+      } else {
+        const series = hist('headline', n0);
+        inner = miniDelta(n0, series.length > 1 ? series[series.length - 2] : n0, text);
+      }
+      return miniWrap(sectionId, title || text, inner || miniDelta(n0, n0, text));
+    }
+
     function setSectionSummary(sectionId, html, title) {
       const el = document.getElementById(sectionId + '-summary');
       if (!el) return;
-      el.innerHTML = textOrDash(html);
-      if (title != null) el.title = title;
+      const text = textOrDash(html);
+      el.innerHTML = visualSectionSummary(sectionId, text, title);
+      const label = title || text;
+      el.title = label;
+      el.setAttribute('aria-label', label);
     }
     function textOrDash(value) {
       const s = String(value == null ? '' : value).trim();
