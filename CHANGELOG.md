@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.2)
+
+### Fixed
+
+- dashboard: add Test button to gateway form, fix clipped Cancel (#9916)
+- Discord bot: quote hyphenated `ci-maintainer` key in `agent-identities.js` so the bot starts; add `node --check` CI guard for `discord/**` to prevent similar syntax errors.
+
 ## 2026-10-02 (v5.110.1)
 
 ### Fixed
