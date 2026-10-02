@@ -1,0 +1,1 @@
+- Add Join our Discord links to the hub portal and spoke dashboard Help menu.

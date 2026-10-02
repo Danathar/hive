@@ -2043,8 +2043,8 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="admin-section-head"><h3 id="admin-section-help-links">Help &amp; community links</h3><p>Publish quick links for contributors, one per line as <code>Label | https://example</code>.</p></div>
 <div class="admin-form-stack help-links-admin">
 <label for="admin-help-links-text">Help &amp; community links</label>
-<textarea class="admin-textarea admin-textarea--links" id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://discord.gg/your-hive&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
-<div class="admin-control-note">Stored as <code>contribute.help_links</code>. Use <code>https://discord.gg/...</code> invites for Discord; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
+<textarea class="admin-textarea admin-textarea--links" id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://hivecommons.dev/discord&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
+<div class="admin-control-note">Stored as <code>contribute.help_links</code>. Use the Hive Commons Discord redirect for contributors; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
 <div class="admin-action-row"><button type="button" class="hv-btn btn-primary admin-save" id="admin-help-links-save">Save help links</button></div>
 </div>
 </section>
