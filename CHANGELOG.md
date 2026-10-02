@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.10)
+
+### Fixed
+
+- Copying an agent CLI's own selection out of the browser terminal now reaches the browser clipboard ([#9941](https://github.com/hivecommons/hive/issues/9941)). Agent CLIs turn mouse reporting on, so an ordinary drag selects in the CLI, which copies with an OSC 52 escape; tmux's default `set-clipboard external` kept that in tmux's own paste buffer, and ttyd 1.7.7 has no OSC 52 handler anyway, so ⌘C still pasted stale clipboard contents. The terminal attach now sets `set-clipboard on`, and the dashboard's injected terminal script decodes OSC 52 and writes it to the clipboard — with ⌘C / Ctrl+Shift+C falling back to the CLI's last copy if the browser refused the immediate write.
+- LiteLLM **Test Connection** no longer fails a configuration that works for inference just because something in front of the gateway blocks model listing ([#9945](https://github.com/hivecommons/hive/issues/9945)). When an ingress, WAF or VPN proxy refuses `GET /v1/models` with an HTML/empty 401/403, the probe now sends a 1-token `POST /v1/chat/completions` with the configured default model — the same path the hive uses for inference. If that succeeds the test passes with a warning that model listing is blocked; if it is refused too, the error says both paths were blocked, so the hive's network path (not the key) is clearly the thing to fix.
+- A Copilot agent whose stored model is `claude-opus-5-5` or `claude-sonnet-5-5` now launches on `claude-opus-5` / `claude-sonnet-5` explicitly instead of passing an id the pinned Copilot CLI 1.0.88 rejects and silently replaces ([#9927](https://github.com/hivecommons/hive/issues/9927)).
+
 ## 2026-10-02 (v5.110.9)
 
 ### Fixed
