@@ -1,1 +1,0 @@
-- dashboard: cadence table agent name opens the agent card (#9989)

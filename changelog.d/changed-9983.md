@@ -1,1 +1,0 @@
-- dashboard: remove System Diagnostics icon from topbar (#9983)

@@ -1,1 +1,0 @@
-- scanner: upstream watch source listing merged PRs and releases since a watermark (#9997)

@@ -11,6 +11,42 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.112.0)
+
+### Added
+
+- dashboard: overview card  centred layout, repo filter, KPI strip (#10001)
+- dashboard: layout save, presets and reset in the user menu (#10005)
+- dashboard: merge fleet breaker pill and button into one status chip (#10008)
+- dashboard: ACMM level in topbar, version/upgrade consolidated into sidebar chip (#10009)
+- dashboard: refresh desktop widget to current features; move Widget link into user menu (#10012)
+- The spoke dashboard now shows a warning banner when any watched repo in `project.repos` has GitHub Issues disabled ([#9972](https://github.com/hivecommons/hive/issues/9972)). Previously the hive only noticed `has_issues=false` when the advisory issue create failed, and only for the advisory repo, so agent-filed issues on other repos failed with nothing in the dashboard saying why. The metrics collector now probes every watched repo at startup and on its regular 5-minute refresh, and the banner names each affected repo, says whether it is a fork (GitHub turns Issues off on forks by default), and gives the same remedy as the advisory error: enable Issues under Settings > General > Features, or point the hive at the upstream repo. You can dismiss each repo for operators who keep Issues off on purpose. The status payload exposes the same list as `issuesDisabledRepos`.
+- dashboard: auto-merge toggle switch, on only at Level 6 (#9987)
+- dashboard: drag handles to reorder repo tiles (#9990)
+- dashboard: expandable lifecycle timeline rows with stage details (#9991)
+- dashboard: PR throughput sparklines, repo filter, velocity metrics (#9992)
+- dashboard: make Add agent discoverable (#9995)
+- dashboard: every section is a collapsible card with a collapsed summary, matching Cost (#9996)
+- scanner: upstream watch source listing merged PRs and releases since a watermark (#9997)
+
+### Changed
+
+- copy: work-source-neutral terminology (GitHub-specific wording only where it is GitHub-specific) (#10011)
+- dashboard: remove System Diagnostics icon from topbar (#9983)
+- dashboard: move PR author from governor strip into user menu (#9986)
+- dashboard: cadence table agent name opens the agent card (#9989)
+- dashboard: hide Strategy Lab behind dashboard.strategy_lab (default off) (#9993)
+- The security self-assessment now points reviewer evidence at v5 and describes heartbeat response verification as opt-in enforcement.
+
+### Fixed
+
+- `just contribute-move` and `hivectl hives reissue` can once again rotate a contributor's registration token on standalone hives — the auth proxy was rejecting `POST /api/contribute/reissue-token`'s GitHub-token credential with a 401 before it reached the handler.
+- fix hub contribute landing (#10013)
+- fix reviewer accuracy calibration (#9994)
+- Test Connection no longer blames an ingress proxy when a gateway answers a keyless `GET /v1/models` with a bare 401 and an empty body, and when an edge proxy blocks model listing while no default model is configured it now explains that the inference fallback check could not be tried.
+- Fixed: the browser terminal's OSC 52 clipboard forwarding (#9970) never actually reached the browser, because `set-clipboard` (in either mode) requires an `Ms` terminfo capability tmux never had for ttyd's TERM; `ttyd-tmux.sh` now declares the `clipboard` terminal-feature outright instead of depending on tmux's own auto-detection (#9941).
+- Fixed `v6 Top-up` auto-resolving the guaranteed `src/pkg/config/config.go` forward-merge conflict (v6 split it into topical files in #9386, so every v5 edit to the old monolith conflicts) the same way it already handles `discord/` deletions, instead of failing for a human on every v5 push (#9956)
+
 ## 2026-10-02 (v5.111.0)
 
 ### Added
