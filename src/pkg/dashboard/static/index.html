@@ -308,24 +308,56 @@
       font-size: var(--fs-xs); font-weight: 700; text-decoration: none;
     }
     #acmm-badge:hover { background: color-mix(in srgb, currentColor 18%, transparent); }
-    #oc-git-version { position: relative; display: block; margin: var(--sp-0); font-family: var(--font-sans); }
-    #oc-git-version #spoke-upgrade-btn { width: 100%; justify-content: center; white-space: nowrap; }
+    #oc-git-version { position: relative; display: block; margin: var(--sp-0); font-family: var(--font-sans); min-width: 0; }
+    #oc-git-version #spoke-upgrade-btn { width: 100%; justify-content: center; white-space: normal; }
     .oc-version-chip {
       width: 100%; display: flex; align-items: center; gap: var(--sp-2); min-height: 32px;
       padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill);
       background: color-mix(in srgb, var(--panel) 82%, transparent); color: var(--text);
-      cursor: pointer; font: inherit; font-size: var(--fs-xs); text-align: left;
+      cursor: pointer; font: inherit; font-size: var(--fs-xs); text-align: left; min-width: 0;
     }
     .oc-version-chip:hover, .oc-version-chip[aria-expanded="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
-    .oc-version-sha { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
-    .oc-version-channel { flex: 0 1 auto; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 7px; border-radius: var(--r-pill); color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent); font-weight: 700; }
-    .oc-version-update-dot { flex: 0 0 auto; color: var(--amber); font-weight: 900; margin-left: auto; }
-    .oc-version-menu { left: 0; right: auto; bottom: calc(100% + 8px); top: auto; min-width: 280px; width: min(360px, calc(100vw - 24px)); }
-    .oc-version-menu .avatar-menu-item { white-space: normal; }
-    .oc-version-row { display: flex; justify-content: space-between; gap: var(--sp-4); padding: var(--sp-2) var(--sp-6); color: var(--muted); font-size: var(--fs-sm); }
-    .oc-version-row strong { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+    .oc-version-sha { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .oc-version-channel { flex: 0 1 auto; min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 7px; border-radius: var(--r-pill); color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent); font-weight: 700; }
+    .oc-version-chip-chevron { flex: 0 0 auto; width: 0.8rem; font-size: var(--fs-sm); font-weight: 700; color: var(--muted); line-height: 1; text-align: center; margin-left: auto; transition: transform 0.15s ease; }
+    .oc-version-chip[aria-expanded="false"] .oc-version-chip-chevron { transform: rotate(-90deg); }
+    .oc-version-update-dot { flex: 0 0 auto; color: var(--amber); font-weight: 900; }
+    .oc-version-menu { left: 0; right: auto; bottom: calc(100% + 8px); top: auto; min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+    .oc-version-menu .avatar-menu-item { white-space: normal; min-width: 0; }
+    .oc-version-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--sp-1); padding: var(--sp-2) var(--sp-5); color: var(--muted); font-size: var(--fs-sm); min-width: 0; }
+    .oc-version-row strong { min-width: 0; text-align: left; overflow-wrap: anywhere; white-space: normal; }
     .oc-version-row strong, .oc-version-row a { color: var(--text); }
-    .oc-version-actions { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3) var(--sp-6); }
+    .oc-version-actions { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3) var(--sp-5); min-width: 0; }
+    .oc-version-muted-action { color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--panel) 72%, transparent); }
+    .oc-version-upgrade-progress { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: var(--sp-3); align-items: center; padding: var(--sp-3); border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--border)); border-radius: var(--r); background: color-mix(in srgb, var(--amber) 10%, var(--panel)); }
+    .oc-version-hive { position: relative; width: 42px; height: 42px; display: grid; place-items: center; color: var(--amber); }
+    .oc-version-hive svg { width: 28px; height: 28px; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--amber) 30%, transparent)); }
+    .oc-version-bee { position: absolute; left: 50%; top: 50%; font-size: 0.82rem; transform-origin: -1px -1px; animation: ocBeeOrbit 1.9s linear infinite; }
+    .oc-version-bee:nth-child(2) { animation-delay: -0.6s; }
+    .oc-version-bee:nth-child(3) { animation-delay: -1.2s; }
+    .oc-version-honey-dot { position: absolute; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--amber); box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 18%, transparent); animation: ocHoneyPulse 1.2s ease-in-out infinite; }
+    .oc-version-progress-copy { min-width: 0; font-size: var(--fs-xs); line-height: 1.35; }
+    .oc-version-progress-title { color: var(--text); font-weight: 700; }
+    .oc-version-progress-status { color: var(--muted); margin-top: var(--sp-1); overflow-wrap: anywhere; }
+    .oc-version-progress-status a { color: var(--accent); }
+    .oc-version-bee-chip { flex: 0 0 auto; animation: ocBeeWaggle 1s ease-in-out infinite; }
+    @keyframes ocBeeOrbit {
+      from { transform: rotate(0deg) translateX(17px) rotate(0deg); }
+      to { transform: rotate(360deg) translateX(17px) rotate(-360deg); }
+    }
+    @keyframes ocBeeWaggle {
+      0%, 100% { transform: translateY(0) rotate(-8deg); }
+      50% { transform: translateY(-2px) rotate(8deg); }
+    }
+    @keyframes ocHoneyPulse {
+      0%, 100% { opacity: 0.55; transform: scale(0.85); }
+      50% { opacity: 1; transform: scale(1.12); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .oc-version-bee, .oc-version-bee-chip { animation: none; }
+      .oc-version-hive .oc-version-bee { display: none; }
+      .oc-version-honey-dot { animation: ocHoneyPulse 2.4s ease-in-out infinite; }
+    }
     /* Drawer toggle. Hidden on desktop; the ≤768px block flips it to
        inline-flex. Lives in .oc-topbar-left because that is the shortest
        topbar group — putting it in center/right would risk wrapping the
@@ -3900,8 +3932,8 @@
     </div>
     <div class="oc-sidebar-footer">
       <div id="oc-git-version" class="git-version oc-version-wrap">
-        <button type="button" id="oc-version-chip" class="oc-version-chip" data-action="toggleVersionMenu" aria-haspopup="true" aria-expanded="false" aria-controls="oc-version-menu" title="Version and update details">
-          <span class="oc-version-sha">version</span>
+        <button type="button" id="oc-version-chip" class="oc-version-chip" data-action="toggleVersionMenu" role="button" aria-haspopup="true" aria-expanded="false" aria-controls="oc-version-menu" title="Version & upgrade details" aria-label="Version & upgrade details">
+          <span class="oc-version-sha">version</span><span class="oc-version-chip-chevron" aria-hidden="true">▼</span>
         </button>
         <div id="oc-version-menu" class="avatar-menu oc-version-menu" hidden role="menu" aria-label="Version and update details"></div>
       </div>
@@ -22560,6 +22592,111 @@ function burnAreaChart() {
 
     // Git version indicator
     const GIT_VERSION_POLL_MS = 300000;
+    const VERSION_UPGRADE_STORAGE_KEY = 'hive.version.upgradeProgress';
+    const VERSION_UPGRADE_DONE_MS = 30000;
+    const VERSION_UPGRADE_LONG_MS = 15 * 60 * 1000;
+    const VERSION_UPGRADE_POLL_MS = 5000;
+    let _versionUpgradePollTimer = null;
+
+    function versionNowMs() {
+      return Date.now();
+    }
+
+    function versionReadUpgradeProgress(now) {
+      now = now || versionNowMs();
+      try {
+        const raw = localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY);
+        if (!raw) return null;
+        const st = JSON.parse(raw);
+        if (!st || !st.target || !st.startedAt) {
+          localStorage.removeItem(VERSION_UPGRADE_STORAGE_KEY);
+          return null;
+        }
+        st.startedAt = Number(st.startedAt);
+        st.completedAt = st.completedAt ? Number(st.completedAt) : 0;
+        if (st.completedAt && now - st.completedAt > VERSION_UPGRADE_DONE_MS) {
+          localStorage.removeItem(VERSION_UPGRADE_STORAGE_KEY);
+          return null;
+        }
+        st.overdue = !st.completedAt && now - st.startedAt > VERSION_UPGRADE_LONG_MS;
+        return st;
+      } catch (_) {
+        try { localStorage.removeItem(VERSION_UPGRADE_STORAGE_KEY); } catch (e) {}
+        return null;
+      }
+    }
+
+    function versionWriteUpgradeProgress(st) {
+      if (!st || !st.target) return null;
+      const next = {
+        target: String(st.target),
+        targetShort: versionShortSHA(st.targetShort || st.target),
+        startedAt: Number(st.startedAt || versionNowMs()),
+        completedAt: st.completedAt ? Number(st.completedAt) : 0
+      };
+      try { localStorage.setItem(VERSION_UPGRADE_STORAGE_KEY, JSON.stringify(next)); } catch (_) {}
+      return next;
+    }
+
+    function versionClearUpgradeProgress() {
+      try { localStorage.removeItem(VERSION_UPGRADE_STORAGE_KEY); } catch (_) {}
+      _upgradeInProgress = false;
+      _upgradeTargetHash = null;
+    }
+
+    function versionRecordUpgradeStart(targetHash, targetShort) {
+      const st = versionWriteUpgradeProgress({ target: targetHash || 'latest', targetShort: targetShort || targetHash || 'latest', startedAt: versionNowMs() });
+      _upgradeInProgress = true;
+      _upgradeTargetHash = targetHash || null;
+      return st;
+    }
+
+    function versionMarkUpgradeComplete(st, now) {
+      if (!st) return null;
+      now = now || versionNowMs();
+      if (!st.completedAt) {
+        st = versionWriteUpgradeProgress({ target: st.target, targetShort: st.targetShort || st.target, startedAt: st.startedAt, completedAt: now });
+      }
+      _upgradeInProgress = false;
+      _upgradeTargetHash = null;
+      return st;
+    }
+
+    function versionReconcileUpgradeProgress(v, now) {
+      const st = versionReadUpgradeProgress(now);
+      if (!st) return null;
+      if (versionSameCommit(v && (v.hash || v.short), st.target)) return versionMarkUpgradeComplete(st, now);
+      if (!st.completedAt) {
+        _upgradeInProgress = true;
+        _upgradeTargetHash = st.target;
+      }
+      return st;
+    }
+
+    function versionElapsedText(startedAt, now) {
+      startedAt = Number(startedAt || 0);
+      now = now || versionNowMs();
+      if (!startedAt) return '';
+      const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+      if (seconds < 60) return seconds + 's elapsed';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return minutes + 'm elapsed';
+      const hours = Math.floor(minutes / 60);
+      return hours + 'h ' + (minutes % 60) + 'm elapsed';
+    }
+
+    function versionScheduleUpgradePoll(state) {
+      if (_versionUpgradePollTimer) {
+        clearTimeout(_versionUpgradePollTimer);
+        _versionUpgradePollTimer = null;
+      }
+      if (!state) return;
+      let delay = VERSION_UPGRADE_POLL_MS;
+      if (state !== true && state.completedAt) {
+        delay = Math.max(500, VERSION_UPGRADE_DONE_MS - (versionNowMs() - Number(state.completedAt)) + 100);
+      }
+      _versionUpgradePollTimer = setTimeout(function() { fetchGitVersion(); }, delay);
+    }
 
     function versionDeliveryLabel(v) {
       const branch = v.branch && v.branch !== 'unknown' ? String(v.branch) : '';
@@ -22617,63 +22754,197 @@ function burnAreaChart() {
       const at = rs && rs.attempt ? rs.attempt : null;
       if (at && at.state && at.state !== 'never') {
         const when = at.completedAt || at.at || '';
-        return 'Last upgrade: ' + at.state.replace('_', ' ') + (when ? ' · ' + when : '');
+        const label = at.state.replace('_', ' ');
+        return { text: 'Last upgrade: ' + label + (when ? ' · ' + relativeAge(when) : ''), title: when || label };
       }
       const mu = v && v.manualUpgrade;
-      if (mu && mu.state) return 'Manual upgrade: ' + mu.state + (mu.updatedAt ? ' · ' + mu.updatedAt : '');
+      if (mu && mu.state) return { text: 'Manual upgrade: ' + mu.state + (mu.updatedAt ? ' · ' + relativeAge(mu.updatedAt) : ''), title: mu.updatedAt || mu.state };
+      return null;
+    }
+
+    function versionShortSHA(sha) {
+      sha = String(sha || '').trim();
+      if (!sha) return '';
+      return sha.slice(0, 8);
+    }
+
+    function versionSameCommit(a, b) {
+      a = String(a || '').trim().toLowerCase();
+      b = String(b || '').trim().toLowerCase();
+      if (!a || !b) return false;
+      const n = Math.min(a.length, b.length);
+      return a.slice(0, n) === b.slice(0, n);
+    }
+
+    function versionDashHTML(reason) {
+      const title = reason || 'hub has not sent a policy yet';
+      return '<strong title="' + escapeHtml(title) + '">—</strong>';
+    }
+
+    function versionPolicy(v) {
+      return (v && (v.upgradePolicy || v.hubUpgradePolicy)) || null;
+    }
+
+    function versionManagedSuffix(v) {
+      const au = v && v.autoUpdate || {};
+      const managedBy = (v && v.target && v.target.managedBy) || au.managedBy || '';
+      if (managedBy === 'hub') return 'hub-managed';
+      if (managedBy === 'spoke') return 'spoke-managed';
       return '';
+    }
+
+    function versionTrackingSummary(v, deliveryLabel) {
+      const managed = versionManagedSuffix(v);
+      let base = '';
+      if (v && v.tracking === 'pinned') base = 'pinned ' + versionShortSHA(v.hash || v.short || '');
+      else base = deliveryLabel || versionTrackingLabel(v || {});
+      return [base, managed].filter(Boolean).join(' · ');
+    }
+
+    function versionCadenceLabel(v) {
+      const p = versionPolicy(v) || {};
+      const au = v && v.autoUpdate || {};
+      const mode = String(p.schedule || au.period || '').toLowerCase();
+      const hour = p.schedule_hour != null ? Number(p.schedule_hour) : null;
+      const tz = p.schedule_timezone || '';
+      const weekday = p.schedule_weekday || '';
+      if (!mode || mode === 'unknown') return '';
+      if (mode === 'instant') return 'Instant on new build';
+      if (mode === 'daily') return 'Daily at ' + (hour == null || isNaN(hour) ? 'configured time' : String(hour).padStart(2, '0') + ':00') + (tz ? ' ' + tz : '');
+      if (mode === 'weekly') return 'Weekly ' + (weekday ? weekday.slice(0, 3) + ' ' : '') + (hour == null || isNaN(hour) ? 'configured time' : String(hour).padStart(2, '0') + ':00') + (tz ? ' ' + tz : '');
+      if (mode === 'manual' || (au.enabled === false && au.policySource === 'hub')) return 'Manual';
+      return mode;
+    }
+
+    function versionStatusSummary(v, targetShort) {
+      const au = v && v.autoUpdate || {};
+      if (!v) return 'Checking…';
+      if (au.state === 'paused') return 'paused by hub';
+      if ((v.target && v.target.resolved === false) || au.state === 'unknown') return 'Checking…';
+      if (v.stableV4ImageReady === false) return 'queued (' + ((v.target && (v.target.channel || v.target.branch)) || v.branch || 'target') + ' building)';
+      if (au.state === 'up_to_date' || (!v.behind && targetShort && versionSameCommit(v.hash || v.short, (v.target && v.target.sha) || v.stableV4Hash || v.latestHash))) return 'up to date';
+      if (au.state === 'failed') return 'upgrade failed';
+      if (au.state === 'retrying') return 'upgrade retrying';
+      if (v.behind || au.state === 'behind') return 'upgrade available' + (targetShort ? ' → ' + targetShort : '');
+      if (au.state === 'disabled') return 'manual';
+      return versionStatusText(v, targetShort);
+    }
+
+    function versionUpgradeProgressStatus(v, st) {
+      if (!st) return '';
+      const target = escapeHtml(st.targetShort || versionShortSHA(st.target || 'target'));
+      const elapsed = versionElapsedText(st.startedAt);
+      if (st.completedAt) return '✅ Upgraded to ' + target + (elapsed ? ' · ' + elapsed : '');
+      const mu = v && v.manualUpgrade;
+      const um = v && v.upgradeMarker;
+      if ((mu && mu.state === 'failed') || (um && um.failed)) return '⚠ upgrade failed — check Audit Log';
+      if (st.overdue) return '⚠ upgrade taking longer than expected — <a href="#audit-section" data-action="ocNavigate" data-arg0="audit-section">check Audit Log</a>' + (elapsed ? ' · ' + escapeHtml(elapsed) : '');
+      let phase = 'queued';
+      if (v && v.stableV4ImageReady === false) phase = 'building';
+      else if (um && !um.failed) phase = 'restarting';
+      else if (mu && mu.state === 'started') phase = 'rolling out';
+      else if (_upgradeInProgress) phase = 'rolling out';
+      return phase + ' → ' + target + (elapsed ? ' · ' + elapsed : '');
+    }
+
+    function versionBeeProgressHTML(st, v) {
+      if (!st) return '';
+      const title = st.completedAt ? 'Upgrade complete' : 'Upgrading…';
+      return '<div class="oc-version-upgrade-progress" role="status" aria-live="polite">' +
+        '<div class="oc-version-hive" aria-hidden="true">' +
+        '<svg viewBox="0 0 64 64" focusable="false"><path d="M32 4 56 18v28L32 60 8 46V18Z" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 4v56M8 18l48 28M56 18 8 46" fill="none" stroke="currentColor" stroke-width="2" opacity="0.38"/></svg>' +
+        '<span class="oc-version-bee">🐝</span><span class="oc-version-bee">🐝</span><span class="oc-version-bee">🐝</span><span class="oc-version-honey-dot"></span>' +
+        '</div><div class="oc-version-progress-copy"><div class="oc-version-progress-title">' + escapeHtml(title) + '</div>' +
+        '<div class="oc-version-progress-status">' + versionUpgradeProgressStatus(v || {}, st) + '</div></div></div>';
+    }
+
+    function renderVersionUpgradeAction(v, ctx) {
+      ctx = ctx || {};
+      const targetHash = ctx.offeredUpgradeHash || '';
+      const targetShort = ctx.offeredUpgradeShort || versionShortSHA(targetHash);
+      const au = v && v.autoUpdate || {};
+      const target = v && v.target || {};
+      const managedBy = target.managedBy || au.managedBy || '';
+      const dep = v && v.deployment || {};
+      const runtimeLabel = dep.runtime ? String(dep.runtime) : 'unknown runtime';
+      const progress = ctx.upgradeProgress || versionReadUpgradeProgress();
+      if (progress) {
+        const disabled = progress.completedAt ? '' : '<button id="spoke-upgrade-btn" class="hv-btn btn-primary btn-sm" disabled aria-disabled="true">Upgrading…</button>';
+        return disabled + versionBeeProgressHTML(progress, v || {});
+      }
+      if (!targetHash || target.resolved === false || au.state === 'unknown') {
+        return '<div class="oc-version-muted-action" title="Waiting for the hub to resolve the target commit">Checking…</div>';
+      }
+      if (versionSameCommit(v && (v.hash || v.short), targetHash) || au.state === 'up_to_date') {
+        return '<div class="oc-version-muted-action text-success" title="Running the resolved target commit">Up to date ✓</div>';
+      }
+      if (managedBy === 'hub' || (au.enabled && managedBy !== '')) {
+        const cadence = versionCadenceLabel(v);
+        const title = 'The hub owns this hive\'s upgrade policy; use the Hub dashboard if an immediate rollout is needed.';
+        return '<div class="oc-version-muted-action" title="' + escapeHtml(title) + '">Hub will upgrade automatically' + (cadence ? ' — next window: ' + escapeHtml(cadence) : '') + '</div>';
+      }
+      if (dep.upgradeSupported !== true) {
+        const why = dep.reason ? String(dep.reason) : 'deployment runtime is unknown';
+        return '<div class="oc-version-muted-action" title="' + escapeHtml(why) + '">Manual update required (' + escapeHtml(runtimeLabel) + ')</div>';
+      }
+      return '<button id="spoke-upgrade-btn" data-action="gh27" class="hv-btn btn-primary btn-sm" data-arg0="' + escapeHtml(targetHash) + '" data-mouseover-action="gh28" data-mouseout-action="gh29" title="' + escapeHtml(runtimeLabel) + ': current ' + escapeHtml(v.short || '?') + ' → ' + escapeHtml(ctx.offeredUpgradeLabel || 'target') + ' ' + escapeHtml(targetShort || '?') + '">Upgrade to ' + escapeHtml(targetShort || 'target') + ' →</button>';
+    }
+
+    function renderVersionDetails(v, ctx) {
+      ctx = ctx || {};
+      const fullHash = String(v && v.hash || 'unknown');
+      const shortHash = versionShortSHA(v && (v.short || v.hash)) || 'unknown';
+      const deliveryLabel = ctx.deliveryLabel || versionDeliveryLabel(v || {}) || 'unknown';
+      const targetHash = ctx.offeredUpgradeHash || (v && v.latestHash) || '';
+      const targetShort = ctx.offeredUpgradeShort || versionShortSHA(targetHash) || '';
+      const compareURL = versionCompareURL(fullHash, targetHash);
+      const lastUpgrade = versionLastUpgradeText(v);
+      const commitURL = 'https://github.com/hivecommons/hive/commit/' + encodeURIComponent(fullHash);
+      const trackingText = versionTrackingSummary(v || {}, deliveryLabel);
+      const statusText = ctx.statusText || versionStatusSummary(v || {}, targetShort);
+      const cadence = versionCadenceLabel(v || {});
+      const currentHTML = fullHash && fullHash !== 'unknown'
+        ? '<strong><a href="' + escapeHtml(commitURL) + '" target="_blank" rel="noopener noreferrer" title="' + escapeHtml(fullHash) + '">' + escapeHtml(shortHash) + '</a></strong>'
+        : versionDashHTML('running commit is unavailable');
+      const row = function(label, valueHTML) { return '<div class="oc-version-row"><span>' + escapeHtml(label) + '</span>' + valueHTML + '</div>'; };
+      window._versionCopyText = ['Hive ' + shortHash, 'hash ' + fullHash, 'channel ' + deliveryLabel, 'tracking ' + trackingText, 'cadence ' + (cadence || '—'), statusText].join('\n');
+      window._versionHashCopyText = fullHash;
+      let html = '';
+      html += '<div class="avatar-menu-label">Version</div>';
+      html += row('Current', currentHTML);
+      html += row('Channel', deliveryLabel ? '<strong>' + escapeHtml(deliveryLabel) + '</strong>' : versionDashHTML('release channel is unavailable'));
+      html += row('Tracking', trackingText ? '<strong title="' + escapeHtml(versionTrackingTooltip(v || {})) + '">' + escapeHtml(trackingText) + '</strong>' : versionDashHTML('hub has not sent a policy yet'));
+      html += row('Status', statusText ? '<strong title="' + escapeHtml((v && v.autoUpdate && v.autoUpdate.detail) || statusText) + '">' + escapeHtml(statusText) + '</strong>' : versionDashHTML('status is still loading'));
+      html += row('Cadence', cadence ? '<strong title="' + escapeHtml(cadence) + '">' + escapeHtml(cadence) + '</strong>' : versionDashHTML('hub has not sent a policy yet'));
+      if (lastUpgrade) html += row('History', '<strong title="' + escapeHtml(lastUpgrade.title || lastUpgrade.text) + '">' + escapeHtml(lastUpgrade.text) + '</strong>');
+      if (compareURL && (v && (v.behind || (v.commitsBehind != null && v.commitsBehind > 0)))) {
+        html += '<a class="avatar-menu-item" href="' + escapeHtml(compareURL) + '" target="_blank" rel="noopener noreferrer">Compare with target ↗</a>';
+      }
+      html += '<a class="avatar-menu-item" href="https://github.com/hivecommons/hive/releases" target="_blank" rel="noopener noreferrer">Changelog / release notes ↗</a>';
+      html += '<div class="avatar-menu-divider"></div>';
+      html += '<div class="oc-version-actions">' + renderVersionUpgradeAction(v || {}, ctx) + '<button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionHashFromMenu">Copy SHA</button><button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionFromMenu">Copy version details</button></div>';
+      return html;
     }
 
     function renderVersionMenu(v, ctx) {
       const menu = document.getElementById('oc-version-menu');
       if (!menu) return;
-      const fullHash = String(v.hash || 'unknown');
-      const shortHash = String(v.short || fullHash.slice(0, 7) || 'unknown');
-      const deliveryLabel = ctx.deliveryLabel || 'unknown';
-      const trackingLabel = ctx.trackingLabel || versionTrackingLabel(v);
-      const targetHash = ctx.offeredUpgradeHash || v.latestHash || '';
-      const targetShort = ctx.offeredUpgradeShort || v.latestShort || '';
-      const compareURL = versionCompareURL(fullHash, targetHash);
-      const lastUpgrade = versionLastUpgradeText(v);
-      const commitURL = 'https://github.com/hivecommons/hive/commit/' + encodeURIComponent(fullHash);
-      const statusText = ctx.statusText || versionStatusText(v, targetShort);
-      const detailsText = [
-        'Hive ' + shortHash,
-        'hash ' + fullHash,
-        'channel ' + deliveryLabel,
-        'tracking ' + trackingLabel,
-        statusText
-      ].filter(Boolean).join('\n');
-      window._versionCopyText = detailsText;
-      let html = '';
-      html += '<div class="avatar-menu-label">Version</div>';
-      html += '<div class="oc-version-row"><span>Current</span><strong><a href="' + escapeHtml(commitURL) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(fullHash) + '</a></strong></div>';
-      html += '<div class="oc-version-row"><span>Channel</span><strong>' + escapeHtml(deliveryLabel || 'unknown') + '</strong></div>';
-      html += '<div class="oc-version-row"><span>Tracking</span><strong title="' + escapeHtml(versionTrackingTooltip(v)) + '">' + escapeHtml(trackingLabel) + '</strong></div>';
-      html += '<div class="oc-version-row"><span>Status</span><strong>' + escapeHtml(statusText) + '</strong></div>';
-      if (lastUpgrade) html += '<div class="oc-version-row"><span>History</span><strong>' + escapeHtml(lastUpgrade) + '</strong></div>';
-      if (compareURL && (v.behind || (v.commitsBehind != null && v.commitsBehind > 0))) {
-        html += '<a class="avatar-menu-item" href="' + escapeHtml(compareURL) + '" target="_blank" rel="noopener noreferrer">Compare with target ↗</a>';
-      }
-      html += '<a class="avatar-menu-item" href="https://github.com/hivecommons/hive/releases" target="_blank" rel="noopener noreferrer">Changelog / release notes ↗</a>';
-      html += '<div class="avatar-menu-divider"></div>';
-      html += '<div class="oc-version-actions">';
-      if (ctx.upgradeHTML) html += ctx.upgradeHTML;
-      else if (ctx.manualUpdateHTML) html += ctx.manualUpdateHTML;
-      html += '<button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionFromMenu">Copy version</button>';
-      html += '</div>';
-      menu.innerHTML = html;
+      menu.innerHTML = renderVersionDetails(v, ctx);
     }
 
     function renderVersionChip(v, ctx) {
       const chip = document.getElementById('oc-version-chip');
       if (!chip) return;
-      const shortHash = String(v.short || v.hash || 'unknown').slice(0, 12);
+      const fullHash = String(v.hash || '');
+      const shortHash = versionShortSHA(v.short || fullHash) || 'unknown';
       const channel = ctx.deliveryLabel || (v.branch && v.branch !== 'unknown' ? String(v.branch) : 'unknown');
+      const progress = ctx.upgradeProgress || null;
       const updateDot = ctx.hasUpgrade ? '<span class="oc-version-update-dot" title="Upgrade available">↑</span>' : '';
-      chip.innerHTML = '<span class="oc-version-sha">' + escapeHtml(shortHash) + '</span>' +
-        (channel ? '<span class="oc-version-channel">' + escapeHtml(channel) + '</span>' : '') + updateDot;
-      chip.title = 'Hive version ' + shortHash + (ctx.hasUpgrade ? ' — upgrade available' : '') + '. Click for details.';
+      const progressGlyph = progress && !progress.completedAt ? '<span class="oc-version-bee-chip" title="Upgrade in progress">🐝</span>' : (progress && progress.completedAt ? '<span class="text-success" title="Upgrade complete">✓</span>' : '');
+      chip.innerHTML = '<span class="oc-version-sha" title="' + escapeHtml(fullHash || shortHash) + '">' + escapeHtml(shortHash) + '</span>' +
+        (channel ? '<span class="oc-version-channel">' + escapeHtml(channel) + '</span>' : '') + progressGlyph + updateDot + '<span class="oc-version-chip-chevron" aria-hidden="true">▼</span>';
+      chip.title = progress && !progress.completedAt ? 'Upgrade in progress — Version & upgrade details' : 'Version & upgrade details';
+      chip.setAttribute('aria-label', 'Version & upgrade details');
     }
 
     async function fetchGitVersion() {
@@ -22700,6 +22971,7 @@ function burnAreaChart() {
           _upgradeInProgress = false;
           _upgradeTargetHash = null;
         }
+        let upgradeProgress = versionReconcileUpgradeProgress(v);
         const upgradeCurrentHash = String(v.hash || '').toLowerCase();
         const upgradeTargetHash = String(_upgradeTargetHash || '').toLowerCase();
         const hasHubTarget = !!(v.target && v.target.source === 'hub');
@@ -22727,8 +22999,7 @@ function burnAreaChart() {
           statusText = 'Upgrading' + (offeredUpgradeShort ? ' → ' + offeredUpgradeShort : '');
           compactStatusHTML = `<span class="git-behind" title="Upgrading to ${escapeHtml(offeredUpgradeShort || '?')}">⬆ upgrading</span>`;
         } else if (_upgradeInProgress && upgradeTargetLanded) {
-          _upgradeInProgress = false;
-          _upgradeTargetHash = null;
+          upgradeProgress = versionMarkUpgradeComplete(upgradeProgress || { target: _upgradeTargetHash, targetShort: offeredUpgradeShort || _upgradeTargetHash, startedAt: versionNowMs() });
           showToast('Upgrade complete!', 'success');
           statusText = 'Up to date';
           compactStatusHTML = '<span class="text-success" title="Up to date with remote">✓</span>';
@@ -22750,16 +23021,21 @@ function burnAreaChart() {
         }
         if (!v.behind) compactStatusHTML += commitsBehindText;
         if (!statusText) statusText = versionStatusText(v, offeredUpgradeShort);
-        const hasUpgrade = !!(v.behind && offeredUpgradeHash && !(mu && mu.state === 'started'));
+        const hasUpgrade = !!(!upgradeProgress && offeredUpgradeHash && !versionSameCommit(v.hash || v.short, offeredUpgradeHash) && !(mu && mu.state === 'started') && !(v.target && v.target.resolved === false));
         const legacyHTML = compactStatusHTML;
         if (el) el.innerHTML = '';
         if (ocEl) {
-          renderVersionChip(v, { deliveryLabel, trackingLabel, hasUpgrade });
-          renderVersionMenu(v, { deliveryLabel, trackingLabel, offeredUpgradeHash, offeredUpgradeShort, upgradeHTML, manualUpdateHTML, hasUpgrade, statusText });
+          window._lastVersionData = v;
+          window._lastVersionContext = { deliveryLabel, trackingLabel, offeredUpgradeHash, offeredUpgradeShort, offeredUpgradeLabel, upgradeHTML, manualUpdateHTML, hasUpgrade, statusText: versionStatusSummary(v, offeredUpgradeShort), upgradeProgress };
+          renderVersionChip(v, window._lastVersionContext);
+          renderVersionMenu(v, window._lastVersionContext);
         }
+        versionScheduleUpgradePoll(upgradeProgress);
         window._lastVersionHTML = legacyHTML;
         renderReleaseStatus(v.releaseStatus);
-      } catch (_) {}
+      } catch (_) {
+        versionScheduleUpgradePoll(versionReadUpgradeProgress());
+      }
     }
 
     function closeVersionMenu() {
@@ -22790,6 +23066,17 @@ function burnAreaChart() {
         showToast('Version copied', 'success');
       } catch (e) {
         showToast('Could not copy version', 'error');
+      }
+    }
+
+    async function copyVersionHashFromMenu() {
+      const text = window._versionHashCopyText || '';
+      if (!text) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+        showToast('SHA copied', 'success');
+      } catch (e) {
+        showToast('Could not copy SHA', 'error');
       }
     }
 
@@ -22934,9 +23221,18 @@ function burnAreaChart() {
     var _upgradeTargetHash = null;
     async function selfUpgrade(targetHash) {
       var btn = document.getElementById('spoke-upgrade-btn');
-      if (btn) { btn.disabled = true; btn.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:var(--sp-2)"></span>Upgrading'; btn.style.opacity = '0.6'; }
+      const targetShort = versionShortSHA(targetHash || '') || 'latest';
+      const progress = versionRecordUpgradeStart(targetHash || 'latest', targetShort);
+      if (btn) { btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); btn.textContent = 'Upgrading…'; btn.style.opacity = '0.6'; }
+      if (window._lastVersionData && window._lastVersionContext) {
+        window._lastVersionContext.upgradeProgress = progress;
+        window._lastVersionContext.hasUpgrade = false;
+        renderVersionChip(window._lastVersionData, window._lastVersionContext);
+        renderVersionMenu(window._lastVersionData, window._lastVersionContext);
+      }
+      versionScheduleUpgradePoll(true);
       try {
-        showToast('Upgrading to latest...', 'info');
+        showToast('Upgrading to ' + targetShort + '...', 'info');
         var resp = await fetch('/api/self-upgrade', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -22945,8 +23241,7 @@ function burnAreaChart() {
         if (!resp.ok) {
           var err = await resp.json().catch(function() { return {}; });
           showToast('Upgrade failed: ' + (err.error || resp.statusText), 'error');
-          _upgradeInProgress = false;
-          _upgradeTargetHash = null;
+          versionClearUpgradeProgress();
           fetchGitVersion();
           return;
         }
@@ -22956,8 +23251,7 @@ function burnAreaChart() {
         fetchGitVersion();
       } catch (e) {
         showToast('Upgrade error: ' + e.message, 'error');
-        _upgradeInProgress = false;
-        _upgradeTargetHash = null;
+        versionClearUpgradeProgress();
         fetchGitVersion();
       }
     }
