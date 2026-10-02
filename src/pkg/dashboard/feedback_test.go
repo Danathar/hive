@@ -1,0 +1,216 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/hivecommons/hive/pkg/config"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
+)
+
+func TestFeedbackRedactsAndBuildsFallbackURL(t *testing.T) {
+	req := feedbackReportRequest{
+		Title:              "Bug with token ghp_secret123",
+		Description:        "bearer abc.def user@example.com password=opensesame",
+		RequestType:        feedbackTypeBug,
+		TargetRepo:         feedbackTargetHive,
+		IncludeDiagnostics: true,
+		Diagnostics:        &feedbackDiagnostics{HiveID: "hive-one", Page: "/?token=secret", Agents: []feedbackAgentDiagnostic{{Name: "scanner", Repo: "private/repo"}}},
+	}
+	if err := validateFeedbackRequest(&req); err != nil {
+		t.Fatal(err)
+	}
+	sanitizeFeedbackRequest(&req)
+	body := buildFeedbackIssueBody(req)
+	if strings.Contains(body, "ghp_secret") || strings.Contains(body, "abc.def") || strings.Contains(body, "user@example.com") || strings.Contains(body, "opensesame") || strings.Contains(body, "private/repo") {
+		t.Fatalf("feedback body leaked sensitive data:\n%s", body)
+	}
+	if !strings.Contains(feedbackFallbackURL(req), "github.com/hivecommons/hive/issues/new") {
+		t.Fatalf("fallback did not target hive repo")
+	}
+}
+
+func TestFeedbackReportStandaloneReturnsFallback(t *testing.T) {
+	s, _ := apiServer(t)
+	body := `{"title":"A useful bug report","description":"Something went wrong in the dashboard","request_type":"bug","target_repo":"docs"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/feedback/report", strings.NewReader(body))
+	markOwnerRequest(req)
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out feedbackReportResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || !strings.Contains(out.FallbackURL, "github.com/hivecommons/docs/issues/new") {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
+func TestFeedbackHubRelayCarriesHiveIDEvenWithoutDiagnostics(t *testing.T) {
+	t.Setenv(spoke.EnvHeartbeatKey, "test-heartbeat")
+	var got feedbackReportRequest
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != feedbackHubIngestPath {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-heartbeat" {
+			t.Fatalf("missing heartbeat bearer")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(feedbackReportResponse{OK: true, IssueNumber: 7, IssueURL: "https://github.com/hivecommons/hive/issues/7"})
+	}))
+	defer hub.Close()
+	s := NewServer(0, dismissLogger())
+	s.deps = &Dependencies{Config: &config.Config{HiveID: "hive-one", Hub: config.HubConfig{Enabled: true, URL: hub.URL, HiveType: "hosted"}}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/feedback/report", strings.NewReader(`{"title":"A useful bug report","description":"Something went wrong in the dashboard","request_type":"bug","include_diagnostics":false}`))
+	markOwnerRequest(req)
+	s.handleFeedbackReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got.HiveID != "hive-one" {
+		t.Fatalf("relayed hive_id = %q", got.HiveID)
+	}
+	if got.Diagnostics != nil {
+		t.Fatalf("diagnostics should remain excluded, got %+v", got.Diagnostics)
+	}
+}
+
+func TestFeedbackStaticUIWiring(t *testing.T) {
+	b, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	for _, want := range []string{"data-action=\"openFeedbackModal\"", "id=\"feedback-bug-btn\"", "id=\"feedback-unread-pill\"", "installFeedbackCapture();", "FEEDBACK_DRAFT_KEY", "feedbackRedact", "/api/feedback/report"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	if strings.Contains(html, `href="https://github.com/hivecommons/hive/issues"`) {
+		t.Fatal("sidebar Report an Issue still links externally instead of opening feedback modal")
+	}
+	if !strings.Contains(html, `data-action="openFeedbackModal" data-arg0="bug"`) {
+		t.Fatal("sidebar Report an Issue does not open the feedback modal on the bug tab")
+	}
+	open := jsFunctionBody(t, html, "function openFeedbackModal(tab)")
+	if strings.Contains(open, "window.prompt") || strings.Contains(open, "alert(") || strings.Contains(open, "confirm(") {
+		t.Fatal("feedback modal uses a native browser dialog")
+	}
+	submit := jsFunctionBody(t, html, "async function submitFeedbackReport()")
+	if !strings.Contains(submit, "fetch('/api/feedback/report'") {
+		t.Fatal("feedback submit does not post to the feedback endpoint")
+	}
+	unread := jsFunctionBody(t, html, "function feedbackUnreadCount(items)")
+	if !strings.Contains(unread, "updated_at > item.last_seen_updated_at") {
+		t.Fatal("feedback unread pill is not derived from updated_at > last_seen_updated_at")
+	}
+}
+
+func TestFeedbackMineRequiresAuthAndRefreshesUserToken(t *testing.T) {
+	oldStore := feedbackSubmissionsPath
+	oldToken := userTokenPath
+	oldBase := feedbackGitHubAPIBase
+	t.Cleanup(func() {
+		feedbackSubmissionsPath = oldStore
+		userTokenPath = oldToken
+		feedbackGitHubAPIBase = oldBase
+	})
+	dir := t.TempDir()
+	feedbackSubmissionsPath = filepath.Join(dir, "feedback-submissions.json")
+	userTokenPath = filepath.Join(dir, "gh-user-token")
+	if err := os.WriteFile(userTokenPath, []byte("ghu_test_token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveFeedbackSubmissions([]feedbackSubmissionRecord{{
+		Owner:             "hivecommons",
+		Repo:              "hive",
+		Number:            42,
+		Title:             "Old title",
+		State:             "open",
+		HTMLURL:           "https://github.com/hivecommons/hive/issues/42",
+		SubmittedAt:       "2026-10-01T00:00:00Z",
+		UpdatedAt:         "2026-10-01T00:00:00Z",
+		LastSeenUpdatedAt: "2026-10-01T00:00:00Z",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/hivecommons/hive/issues/42" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer ghu_test_token" {
+			t.Fatalf("missing user token auth")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"title":      "Updated feedback",
+			"state":      "open",
+			"html_url":   "https://github.com/hivecommons/hive/issues/42",
+			"updated_at": "2026-10-02T00:00:00Z",
+			"comments":   3,
+		})
+	}))
+	defer gh.Close()
+	feedbackGitHubAPIBase = func() string { return gh.URL }
+	s := NewServer(0, dismissLogger())
+	s.deps = &Dependencies{Config: &config.Config{}}
+
+	unauth := httptest.NewRecorder()
+	s.handleFeedbackMine(unauth, httptest.NewRequest(http.MethodGet, "/api/feedback/mine", nil))
+	if unauth.Code != http.StatusForbidden {
+		t.Fatalf("unauth status = %d", unauth.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feedback/mine", nil)
+	markOwnerRequest(req)
+	rec := httptest.NewRecorder()
+	s.handleFeedbackMine(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got feedbackMineResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Unread != 1 || len(got.Items) != 1 || got.Items[0].Title != "Updated feedback" || got.Items[0].Comments != 3 {
+		t.Fatalf("unexpected mine response: %+v", got)
+	}
+
+	reqSeen := httptest.NewRequest(http.MethodGet, "/api/feedback/mine?mark_seen=true", nil)
+	markOwnerRequest(reqSeen)
+	recSeen := httptest.NewRecorder()
+	s.handleFeedbackMine(recSeen, reqSeen)
+	if recSeen.Code != http.StatusOK {
+		t.Fatalf("seen status = %d body=%s", recSeen.Code, recSeen.Body.String())
+	}
+	reloaded, err := loadFeedbackSubmissions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 1 || reloaded[0].LastSeenUpdatedAt != "2026-10-02T00:00:00Z" {
+		t.Fatalf("last seen not updated: %+v", reloaded)
+	}
+}
+
+func TestFeedbackUnreadCount(t *testing.T) {
+	got := feedbackUnreadCount([]feedbackSubmissionRecord{
+		{UpdatedAt: "2026-10-02T00:00:00Z", LastSeenUpdatedAt: "2026-10-01T00:00:00Z"},
+		{UpdatedAt: "2026-10-01T00:00:00Z", LastSeenUpdatedAt: "2026-10-01T00:00:00Z"},
+		{UpdatedAt: "", LastSeenUpdatedAt: "2026-10-01T00:00:00Z"},
+	})
+	if got != 1 {
+		t.Fatalf("unread = %s, want 1", strconv.Itoa(got))
+	}
+}
