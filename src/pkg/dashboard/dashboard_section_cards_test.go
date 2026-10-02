@@ -177,6 +177,9 @@ func TestDashboardCardPolishBatchStaticContracts(t *testing.T) {
 	if strings.Contains(govCSS, "box-shadow") || strings.Contains(govCSS, "padding: var(--sp-6)") || strings.Contains(html, "body.light-mode .governor,") {
 		t.Fatal("Governor outer container still draws card chrome instead of leaving it to .dash-card")
 	}
+	if regexp.MustCompile(`(?s)\.governor(?:\.[\w-]+)?\s*>\s*\.dash-card\.governor-card\s*\{[^}]*(?:border|outline|box-shadow)`).MatchString(html) {
+		t.Fatal("Governor must not override shared dash-card border, outline, or shadow in any state")
+	}
 }
 
 func TestGovernorPRModelsNestedSubsectionIsCollapsible(t *testing.T) {

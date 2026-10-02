@@ -33,6 +33,7 @@ func TestPRThroughputCardPinned(t *testing.T) {
 		"hive · human · other",
 		"function prtTrendSvg",
 		`<svg class="prt-trend-svg"`,
+		`stroke-width="1.5"`,
 		"function prtTrendCaption",
 		"No attribution data yet — counters start now.",
 		"pr-throughput-section-summary",
