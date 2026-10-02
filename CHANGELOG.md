@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.9)
+
+### Fixed
+
+- The automerge sweep no longer squashes forward-merge PRs between release lines ([#9957](https://github.com/hivecommons/hive/issues/9957)). `automerge_sweep.go` hard-coded `MergeMethod: "squash"` at both merge sites with no check of head branch or title, which is correct for feature PRs but wrong for the `🌱 Forward-merge v5 into v6` PRs that `v5-topup.yml` / `v6-topup.yml` open on `sync/v*-to-v*` branches: squashing one copies the source line's content into the target but discards its ancestry, so the next top-up replays the same commits and re-conflicts on the same hunks (as happened with #9932). A new `mergeMethodFor` helper now classifies the PR by head branch (`sync/v5-to-v6`, `scanner/sync-v5-to-v6-9919`) or a "forward-merge" title and routes those to a true merge commit, while every other PR keeps the repository's squash convention.
+
 ## 2026-10-02 (v5.110.8)
 
 ### Fixed
