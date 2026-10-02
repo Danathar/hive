@@ -1658,6 +1658,8 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	s.mux.HandleFunc("GET /gh-setup", s.handleGitHubAppSetupRouter)
 	s.mux.HandleFunc("GET /learn", s.serveStatic("static/learn.html"))
 	s.mux.HandleFunc("GET /get-started", s.serveStatic("static/get-started.html"))
+	s.mux.HandleFunc("GET /contribute", s.handleContributeLanding)
+	s.mux.HandleFunc("GET /contribute/{$}", s.handleContributeLanding)
 	s.mux.HandleFunc("GET /api/docs", s.serveStatic("static/api-docs.html"))
 	s.mux.HandleFunc("GET /tokens.css", s.serveStatic("static/tokens.css"))
 	s.mux.HandleFunc("GET /components.css", s.serveStatic("static/components.css"))
@@ -4507,6 +4509,188 @@ func (s *HubServer) findContributeHive() *RegistryEntry {
 		}
 	}
 	return nil
+}
+
+const contributorRelayDocsURL = "https://docs.hivecommons.dev/docs/hive/contributor-relay"
+
+type contributeLandingHive struct {
+	ID                 string
+	Name               string
+	Org                string
+	URL                string
+	ContributorCount   int
+	ActiveContributors int
+	ActionableIssues   int
+	ActionablePulls    int
+}
+
+func (s *HubServer) handleContributeLanding(w http.ResponseWriter, r *http.Request) {
+	if !isCanonicalHubRequest(r) {
+		s.writeHubErrorPage(w, http.StatusNotFound)
+		return
+	}
+
+	hives := s.contributeLandingHives()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hive — Contribute</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#0f172a;--text:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#f0b429;--link:#58a6ff}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:radial-gradient(circle at top left,#1f2937 0,#0d1117 42rem);color:var(--text)}
+    main{max-width:1080px;margin:0 auto;padding:56px 24px}
+    .hero{padding:40px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(135deg,rgba(240,180,41,.16),rgba(22,27,34,.92))}
+    .eyebrow{text-transform:uppercase;letter-spacing:.12em;color:var(--accent);font-size:.78rem;font-weight:700;margin:0 0 12px}
+    h1{font-size:clamp(2.2rem,6vw,4.5rem);line-height:.95;margin:0 0 18px}
+    p{color:var(--muted);line-height:1.65;font-size:1rem}
+    .lead{max-width:760px;font-size:1.15rem}
+    .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+    .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 18px;border-radius:999px;font-weight:700;text-decoration:none;border:1px solid var(--line);color:var(--text);background:rgba(255,255,255,.04)}
+    .btn.primary{background:var(--accent);color:#0d1117;border-color:var(--accent)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:28px}
+    .card{display:flex;flex-direction:column;gap:12px;padding:22px;border:1px solid var(--line);border-radius:18px;background:rgba(22,27,34,.88)}
+    .card h2{font-size:1.1rem;margin:0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;color:var(--muted);font-size:.86rem}
+    .pill{border:1px solid var(--line);border-radius:999px;padding:4px 9px;background:rgba(255,255,255,.03)}
+    .empty{padding:24px;border:1px dashed var(--line);border-radius:18px;background:rgba(22,27,34,.65)}
+    a{color:var(--link)}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Contributor relay</p>
+      <h1>Contribute compute to public hives</h1>
+      <p class="lead">Hive's contributor relay, ClankeR, lets you lend your AI CLI to a public hive. Pick a hive below, open its contributor portal, and it will show live queue status plus setup commands for your backend.</p>
+      <div class="actions">
+        <a class="btn primary" href="/get-started#contribute">Contributor quickstart</a>
+        <a class="btn" href="%[1]s">Relay docs</a>
+        <a class="btn" href="https://hivecommons.dev/discord">Discord</a>
+      </div>
+    </section>
+    <section aria-labelledby="hive-list-title">
+      <h2 id="hive-list-title" style="margin:34px 0 0">Public hives accepting contributions</h2>
+      %[2]s
+    </section>
+  </main>
+</body>
+</html>
+`, html.EscapeString(contributorRelayDocsURL), renderContributeLandingHiveList(hives))
+}
+
+func isCanonicalHubRequest(r *http.Request) bool {
+	host := strings.ToLower(strings.TrimSpace(r.Host))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return host == hubCanonicalHost()
+}
+
+func (s *HubServer) contributeLandingHives() []contributeLandingHive {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	hives := make([]contributeLandingHive, 0, len(s.registry.Hives))
+	for _, h := range s.registry.Hives {
+		if !h.Online || !h.IsPublic || h.Owner == "" {
+			continue
+		}
+		contributeURL := registryEntryContributeURL(h)
+		if contributeURL == "" {
+			continue
+		}
+		name := strings.TrimSpace(h.ProjectName)
+		if name == "" {
+			name = strings.TrimSpace(h.Name)
+		}
+		if name == "" {
+			name = strings.TrimSpace(h.Org)
+		}
+		if name == "" {
+			name = h.ID
+		}
+		hives = append(hives, contributeLandingHive{
+			ID:                 h.ID,
+			Name:               name,
+			Org:                h.Org,
+			URL:                contributeURL,
+			ContributorCount:   h.ContributorCount,
+			ActiveContributors: h.ActiveContributors,
+			ActionableIssues:   h.ActionableIssues,
+			ActionablePulls:    h.ActionablePRs,
+		})
+	}
+	sort.Slice(hives, func(i, j int) bool {
+		if hives[i].Name == hives[j].Name {
+			return hives[i].ID < hives[j].ID
+		}
+		return hives[i].Name < hives[j].Name
+	})
+	return hives
+}
+
+func registryEntryContributeURL(h RegistryEntry) string {
+	if dashboardURL := publicDashboardBaseURL(h.DashboardURL); dashboardURL != "" {
+		return dashboardURL + "/contribute"
+	}
+	if h.HiveType == "hosted" && h.ID != "" {
+		return (&url.URL{Scheme: "https", Host: h.ID + "." + hubSpokeDomain(), Path: "/contribute"}).String()
+	}
+	return ""
+}
+
+func publicDashboardBaseURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || host == "localhost" || host == "127.0.0.1" || strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	u.Path = ""
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
+}
+
+func renderContributeLandingHiveList(hives []contributeLandingHive) string {
+	if len(hives) == 0 {
+		return `<div class="empty"><p>No public hives are currently advertising a contributor portal. Check the quickstart or Discord for help finding the next available queue.</p></div>`
+	}
+	var b strings.Builder
+	b.WriteString(`<div class="grid">`)
+	for _, h := range hives {
+		b.WriteString(`<article class="card">`)
+		b.WriteString(`<div><h2>`)
+		b.WriteString(html.EscapeString(h.Name))
+		b.WriteString(`</h2>`)
+		if h.Org != "" {
+			b.WriteString(`<p style="margin:.35rem 0 0">`)
+			b.WriteString(html.EscapeString(h.Org))
+			b.WriteString(`</p>`)
+		}
+		b.WriteString(`</div><div class="meta">`)
+		b.WriteString(fmt.Sprintf(`<span class="pill">%d registered</span>`, h.ContributorCount))
+		b.WriteString(fmt.Sprintf(`<span class="pill">%d active</span>`, h.ActiveContributors))
+		b.WriteString(fmt.Sprintf(`<span class="pill">%d issues</span>`, h.ActionableIssues))
+		b.WriteString(fmt.Sprintf(`<span class="pill">%d PRs</span>`, h.ActionablePulls))
+		b.WriteString(`</div><a class="btn primary" href="`)
+		b.WriteString(html.EscapeString(h.URL))
+		b.WriteString(`">Open contributor portal</a></article>`)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
 }
 
 func (s *HubServer) handleContributeProxy(w http.ResponseWriter, r *http.Request) {
