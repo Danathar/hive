@@ -1,0 +1,1 @@
+- The spoke dashboard now has a Feedback flow for reporting bugs or requesting features as GitHub issues, with screenshot attachments, diagnostics preview/redaction, hub relay, user-token filing, and prefilled issue fallback paths ([#9982](https://github.com/hivecommons/hive/issues/9982)).
