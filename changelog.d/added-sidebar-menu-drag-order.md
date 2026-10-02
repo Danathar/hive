@@ -1,0 +1,1 @@
+- Dashboard sidebar items now have drag handles that keep the left menu, dashboard sections, and agent cards in the same saved order.
