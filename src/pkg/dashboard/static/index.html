@@ -456,12 +456,8 @@
       box-sizing: border-box;
     }
     body.light-mode > .gh-rate-alert { margin-left: var(--sp-0); }
-    /* Light mode packs the cards tighter (200px instead of 240px). The grid
-       said so with a narrower minmax(); the flex layout (#8000) says it with
-       a narrower default basis on the item. A card the operator has sized
-       carries its own inline flex-basis, which wins over this. */
+    /* Light mode keeps the shared responsive agent grid; beads still wrap. */
     body.light-mode .beads { flex-wrap: wrap; }
-    body.light-mode .agents { grid-template-columns: 1fr; }
 
     /* Light agent detail panel (shown when agent selected in sidebar) */
     .oc-agent-detail { /* glass panel — same recipe as .agent-card */
@@ -712,13 +708,9 @@
     }
     body.light-mode .agent-card:hover { box-shadow: var(--shadow-raised); }
 
-    /* Light agents grid — rows for Governor/Overview, columns when agent is focused */
-    body.light-mode .agents {
-      grid-template-columns: 1fr; gap: 14px;
-    }
-    body.light-mode.oc-agent-focused .agents {
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    }
+    /* Light agent grid uses the same responsive columns and focused-agent collapse as dark mode. */
+    body.light-mode .agents { gap: 14px; }
+    body.light-mode.oc-agent-focused .agents { grid-template-columns: 1fr; }
 
     /* Light surface panels — bg/border via token remap; radius/shadow only */
     body.light-mode .token-panel,
@@ -813,7 +805,26 @@
     }
 
     /* Agent cards */
-    .agents { display: grid; grid-template-columns: 1fr; gap: var(--sp-5); margin-bottom: var(--sp-8); }
+    .agents { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-5); margin-bottom: var(--sp-8); align-items: start; }
+    @media (max-width: 1399px) { .agents { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 899px) { .agents { grid-template-columns: 1fr; } }
+    body.oc-agent-focused .agents { grid-template-columns: 1fr; }
+    body.oc-agent-focused .agent-card { grid-column: 1 / -1 !important; }
+    @media (max-width: 768px) { .agent-card-resize-col { display: none; } }
+    .agent-card-resize-col {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 9px;
+      cursor: col-resize; touch-action: none; border: 0; padding: var(--sp-0);
+      background: transparent; border-radius: var(--r-lg); border-top-left-radius: 0; border-bottom-left-radius: 0;
+    }
+    .agent-card-resize-col:hover, .agent-card-resize-col.dragging,
+    .agent-card-resize-col:focus-visible { background: color-mix(in srgb, var(--amber) 45%, transparent); outline: none; }
+    #agents-reset-layout-btn[hidden] { display: none; }
+    .agent-card-order-handle { cursor: grab; margin-right: var(--sp-1); }
+    .agent-card-order-handle.dragging { cursor: grabbing; }
+    .agent-card[data-agent-span="2"] { grid-column: span 2; }
+    .agent-card[data-agent-span="3"] { grid-column: span 3; }
+    @media (max-width: 1399px) { .agent-card[data-agent-span="3"] { grid-column: span 2; } }
+    @media (max-width: 899px) { .agent-card[data-agent-span="2"], .agent-card[data-agent-span="3"] { grid-column: span 1; } }
     /* Glass panel (hub recipe expressed in tokens so the light-mode remap
        just works); status is conveyed by the 3px left border + the
        existing status pills. JS toggles .working/.stopped/.paused/.off/
@@ -825,7 +836,7 @@
       border-radius: var(--r-lg); padding: var(--sp-6);
       box-shadow: var(--shadow-card);
       transition: border-color var(--duration-fast);
-      position: relative;
+      position: relative; min-width: 0;
     }
     .agent-card.working { border-left-color: var(--green); }
     .agent-card.idle { border-left-color: var(--line); }
@@ -1172,9 +1183,9 @@
     .dot.stopped { background: var(--status-error); }
     .dot.starting { background: var(--status-info); animation: oc-pulse 1.5s ease-in-out infinite; }
     .dot.needs-login { background: transparent; border: 2px solid var(--status-attention); box-sizing: border-box; }
-    .agent-field { display: flex; justify-content: space-between; font-size: 0.8rem; padding: var(--sp-1) var(--sp-0); }
-    .agent-field .label { color: var(--muted); }
-    .agent-field .value { text-align: right; }
+    .agent-field { display: grid; grid-template-columns: minmax(5.5rem, max-content) minmax(0, 1fr); gap: var(--sp-4); align-items: baseline; font-size: 0.8rem; padding: var(--sp-1) var(--sp-0); }
+    .agent-field .label { color: var(--muted); white-space: nowrap; }
+    .agent-field .value { text-align: right; min-width: 0; overflow-wrap: anywhere; }
     .value.working { color: var(--green); }
     .restart-label { font-size: var(--fs-2xs); color: var(--muted); margin-left: 3px; }
     .restart-warn { color: var(--yellow); }
@@ -3126,8 +3137,8 @@
     }
 
     /* ── Compact agent cards (#1533) ── */
-    .agent-card .agent-card-details { transition: max-height 200ms ease, opacity 200ms ease; overflow: hidden; }
-    .agent-card.compact .agent-card-details { max-height: 0 !important; opacity: 0; pointer-events: none; }
+    .agent-card .agent-card-details { transition: max-height 200ms ease, opacity 200ms ease; overflow-y: auto; overflow-x: hidden; resize: vertical; min-height: 12rem; max-height: 70vh; padding-right: var(--sp-2); }
+    .agent-card.compact .agent-card-details { max-height: 0 !important; min-height: 0 !important; resize: none; opacity: 0; pointer-events: none; }
     .agent-card .compact-toggle {
       background: none; border: none; cursor: pointer; font-size: 0.7rem;
       color: var(--muted); padding: var(--sp-1) var(--sp-3); margin-left: var(--sp-3); border-radius: var(--r-sm);
@@ -4380,6 +4391,7 @@
       <button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Agents section" aria-pressed="false">⠿</button><h2 style="margin:var(--sp-0); cursor:pointer" class="section-label section-header-toggle" data-action="toggleSection" data-arg0="agents-section"><span class="section-chevron">▼</span> Agents</h2>
       <button class="hv-btn btn-secondary btn-sm" id="agents-add-btn" data-action="openAddAgentDialog" data-stop="1" title="Add a new agent from a template or from scratch">＋ Add agent</button>
       <button class="hv-btn btn-danger btn-sm" id="agents-compact-all-btn" data-action="toggleAllAgentsCompact" data-stop="1" title="Toggle all agent cards between compact and expanded view"></button>
+      <button class="hv-btn btn-secondary btn-sm" id="agents-reset-layout-btn" data-action="resetAgentCardLayout" data-stop="1" title="Reset agent card order and sizes to the default layout (this browser only)" hidden>↔️ Reset layout</button>
     </div>
     <div class="section-body">
       <div class="agents" id="agents"></div>
@@ -6403,6 +6415,138 @@
       const focused = ordered.splice(idx, 1)[0];
       ordered.unshift(focused);
       return ordered;
+    }
+
+
+    const AGENT_CARD_LAYOUT_KEY_PREFIX = 'hive-agent-card-layout:';
+    const AGENT_CARD_LAYOUT_VERSION = 1;
+    const AGENT_CARD_MIN_H = 192;
+    const AGENT_CARD_MAX_H = 900;
+    let _agentOrderDrag = null;
+    let _agentSpanDrag = null;
+
+    function agentLayoutHiveKey() {
+      return AGENT_CARD_LAYOUT_KEY_PREFIX + (((window._lastStatus || {}).hiveId) || 'default');
+    }
+
+    function agentLayoutName(name) {
+      return String(name || '').trim();
+    }
+    function agentLayoutDefaultOrder(agents) {
+      return (agents || []).map(a => agentLayoutName(a && a.name)).filter(Boolean);
+    }
+
+    function agentCardLayoutRead() {
+      let raw = null;
+      try { raw = localStorage.getItem(agentLayoutHiveKey()); } catch { return { v: AGENT_CARD_LAYOUT_VERSION, order: [], sizes: {} }; }
+      const parsed = safeJsonParse(raw || '{}', {});
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { v: AGENT_CARD_LAYOUT_VERSION, order: [], sizes: {} };
+      return { v: AGENT_CARD_LAYOUT_VERSION, order: Array.isArray(parsed.order) ? parsed.order : [], sizes: (parsed.sizes && typeof parsed.sizes === 'object' && !Array.isArray(parsed.sizes)) ? parsed.sizes : {} };
+    }
+
+    function clampAgentCardSpan(span) {
+      const n = Math.round(Number(span));
+      if (!isFinite(n) || n <= 1) return 1;
+      return Math.max(1, Math.min(3, n));
+    }
+
+    function clampAgentCardHeight(h) {
+      const n = Math.round(Number(h));
+      if (!isFinite(n) || n <= 0) return 0;
+      return Math.max(AGENT_CARD_MIN_H, Math.min(AGENT_CARD_MAX_H, n));
+    }
+
+    function agentCardLayoutWrite(layout, defaultOrder) {
+      const def = defaultOrder || [];
+      const seen = new Set();
+      const order = [];
+      (layout.order || []).forEach(name => { const key = agentLayoutName(name); if (key && !seen.has(key)) { seen.add(key); order.push(key); } });
+      const sizes = {};
+      Object.keys(layout.sizes || {}).forEach(name => {
+        const key = agentLayoutName(name);
+        if (!key) return;
+        const src = layout.sizes[name] || {};
+        const span = clampAgentCardSpan(src.span);
+        const height = clampAgentCardHeight(src.height);
+        if (span > 1 || height) sizes[key] = { span: span, height: height };
+      });
+      let custom = Object.keys(sizes).length > 0 || order.length !== def.length;
+      for (let i = 0; !custom && i < order.length; i++) custom = order[i] !== def[i];
+      try {
+        if (custom) localStorage.setItem(agentLayoutHiveKey(), JSON.stringify({ v: AGENT_CARD_LAYOUT_VERSION, order, sizes }));
+        else localStorage.removeItem(agentLayoutHiveKey());
+      } catch {}
+    }
+
+    function agentCardLayoutNormalize(agents) {
+      const def = agentLayoutDefaultOrder(agents);
+      const valid = new Set(def);
+      const stored = agentCardLayoutRead();
+      const order = [];
+      const seen = new Set();
+      stored.order.forEach(name => { const key = agentLayoutName(name); if (valid.has(key) && !seen.has(key)) { seen.add(key); order.push(key); } });
+      def.forEach(name => { if (!seen.has(name)) { seen.add(name); order.push(name); } });
+      const sizes = {};
+      Object.keys(stored.sizes || {}).forEach(name => {
+        const key = agentLayoutName(name);
+        if (!valid.has(key)) return;
+        const src = stored.sizes[name] || {};
+        const span = clampAgentCardSpan(src.span);
+        const height = clampAgentCardHeight(src.height);
+        if (span > 1 || height) sizes[key] = { span, height };
+      });
+      const normalized = { v: AGENT_CARD_LAYOUT_VERSION, order, sizes };
+      agentCardLayoutWrite(normalized, def);
+      return normalized;
+    }
+
+    function agentLayoutApplyOrder(agents) {
+      agents = agents || [];
+      const byName = new Map();
+      agents.forEach(a => { const key = agentLayoutName(a && a.name); if (key && !byName.has(key)) byName.set(key, a); });
+      const out = [];
+      agentCardLayoutNormalize(agents).order.forEach(name => { if (byName.has(name)) out.push(byName.get(name)); });
+      return out;
+    }
+
+    function agentCardLayoutSize(name, agents) {
+      const layout = agentCardLayoutNormalize(agents || ((window._lastStatus || {}).agents) || []);
+      const size = layout.sizes[agentLayoutName(name)] || {};
+      return { span: clampAgentCardSpan(size.span), height: clampAgentCardHeight(size.height) };
+    }
+
+    function agentCardLayoutSetSize(name, patch) {
+      const agents = ((window._lastStatus || {}).agents) || window._lastAgents || [];
+      const layout = agentCardLayoutNormalize(agents);
+      const key = agentLayoutName(name);
+      if (!key) return;
+      const prev = layout.sizes[key] || {};
+      const next = { span: patch.span == null ? clampAgentCardSpan(prev.span) : clampAgentCardSpan(patch.span), height: patch.height == null ? clampAgentCardHeight(prev.height) : clampAgentCardHeight(patch.height) };
+      if (next.span > 1 || next.height) layout.sizes[key] = next;
+      else delete layout.sizes[key];
+      agentCardLayoutWrite(layout, agentLayoutDefaultOrder(agents));
+      agentCardLayoutUpdateResetButton(agents);
+    }
+
+    function agentCardLayoutHasCustom(agents) {
+      const def = agentLayoutDefaultOrder(agents || []);
+      const layout = agentCardLayoutNormalize(agents || []);
+      if (Object.keys(layout.sizes || {}).length) return true;
+      if (layout.order.length !== def.length) return true;
+      for (let i = 0; i < layout.order.length; i++) if (layout.order[i] !== def[i]) return true;
+      return false;
+    }
+
+    function agentCardLayoutUpdateResetButton(agents) {
+      const btn = document.getElementById('agents-reset-layout-btn');
+      if (btn) btn.hidden = !agentCardLayoutHasCustom(agents || window._lastAgents || []);
+    }
+
+    function resetAgentCardLayout() {
+      try { localStorage.removeItem(agentLayoutHiveKey()); } catch {}
+      if (window._lastAgents) renderAgents(window._lastAgents);
+      dashboardUpdateLayoutMenuState();
+      showToast('Agent card layout reset to the default', 'info');
     }
 
     function _sidebarReadLayout() {
@@ -8447,7 +8591,9 @@
           '<br><button type="button" class="hv-btn btn-primary btn-sm" data-action="openAddAgentDialog" title="Add a new agent from a template or from scratch">＋ Add your first agent</button>'));
         return;
       }
-      const cards = agentsFocusedFirst(sortedAgents).map(a => {
+      const orderedAgents = agentLayoutApplyOrder(sortedAgents);
+      agentCardLayoutUpdateResetButton(sortedAgents);
+      const cards = agentsFocusedFirst(orderedAgents).map(a => {
         const isOnDemand = a.onDemand === true;
         // Manual/persisted pause wins over offByCadence — see the agent-detail
         // renderer for the incident this ordering prevents.
@@ -8521,9 +8667,15 @@
         const disabledBadge = agentIsDisabled(a) ? ' <span class="status-badge disabled" data-status="neutral" title="Disabled in config — the governor never starts this agent. Configure it with the gear to enable.">disabled</span>' : '';
         const continuousBlocked = a.continuousBlocked === 'budget' ? ' Budget guard is holding continuous re-kicks.' : '';
         const continuousBadge = a.continuous === true ? ` <span class="status-badge" data-status="${a.continuousBlocked ? 'warn' : 'info'}" title="Continuous mode: after a kicked session ends, Hive schedules the next kick after the configured cool-down.${continuousBlocked}">∞ continuous${a.continuousBlocked ? ' held' : ''}</span>` : '';
-        return `<div class="agent-card ${cls}${compactCls}" data-agent="${esc(a.name)}">
+        const layoutSize = agentCardLayoutSize(a.name, sortedAgents);
+        const layoutHeightAttr = layoutSize.height ? ` data-agent-height="${Math.round(layoutSize.height)}"` : '';
+        const agentOrderHandle = `<button type="button" class="dashboard-grip agent-card-order-handle" draggable="true" data-agent-order-grip data-agent="${esc(a.name)}" data-stop="1" aria-label="Drag to reorder ${esc(a.displayName || a.name)}" title="Drag to reorder" aria-pressed="false">⠿</button>`;
+        const agentSpanTip = `Drag or use ← / → to set ${a.displayName || a.name} to span 1, 2, or 3 columns; Esc resets width`;
+        const agentSpanHandle = `<button type="button" class="agent-card-resize-col" data-agent-resize-col data-agent="${esc(a.name)}" data-stop="1" aria-label="${esc(agentSpanTip)}" title="${esc(agentSpanTip)}" aria-valuemin="1" aria-valuemax="3" aria-valuenow="${layoutSize.span || 1}"></button>`;
+        return `<div class="agent-card ${cls}${compactCls}" data-agent="${esc(a.name)}" data-agent-order-key="${esc(a.name)}" data-agent-span="${layoutSize.span || 1}">
+          ${agentSpanHandle}
           <span class="working-indicator"></span>
-          <div class="agent-name"><span class="dot ${dotState}" data-status="${statusAttr(dotState)}"${isOff ? ` title="${esc(agentOffTitle(a))}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' ' + statusBadgeHTML('ready', 'sandboxed', 'Sandboxed runner active', 'done') : ''}${disabledBadge}${continuousBadge}${replicaBadge} ${agentPowerSwitchHtml(a)} ${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="hv-btn btn-danger btn-sm restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
+          <div class="agent-name">${agentOrderHandle}<span class="dot ${dotState}" data-status="${statusAttr(dotState)}"${isOff ? ` title="${esc(agentOffTitle(a))}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' ' + statusBadgeHTML('ready', 'sandboxed', 'Sandboxed runner active', 'done') : ''}${disabledBadge}${continuousBadge}${replicaBadge} ${agentPowerSwitchHtml(a)} ${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm terminal-link" data-action="openAuthenticatedLink" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="hv-btn btn-danger btn-sm restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
           ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence)}
           <div class="agent-state ${isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? agentCadenceOffLabel() : (a.busy === 'working' && a.awaitingCI) ? 'Waiting on CI' : a.busy}${pauseInfoIcon(a)}${(() => {
             if (a.structuredStatus === 'BLOCKED') return statusBadgeHTML('blocked', 'blocked', a.statusEvidence, 'blocked');
@@ -8548,7 +8700,7 @@
             const prefix = retrying ? 'retrying: ' : '';
             return `<div class="agent-error" title="${esc(a.lastError)}">⚠ ${esc(prefix)}${esc(a.lastError)}</div>`;
           })()}
-          <div class="agent-card-details">
+          <div class="agent-card-details" data-agent-resize-y data-agent="${esc(a.name)}"${layoutHeightAttr}>
           <div class="agent-field"><span class="label" title="${isInferenceBackendName(a.cli) ? 'Inference backend (self-hosted model server)' : 'The CLI backend running this agent (e.g. claude, copilot). Pin to prevent governor from switching it.'}">${isInferenceBackendName(a.cli) ? 'method' : 'cli'}</span><span class="value">${cliChip(a.cli, a.pinnedBoth || a.pinnedCli, a.name)}${(a.pinnedBoth || a.pinnedCli) ? '' : ` <button class="hv-btn pin-toggle btn-icon btn-sm" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="cli" data-unpin="false" title="Pin CLI — lock current backend">📌</button>`}</span></div>
           <div class="agent-field"><span class="label" title="The LLM model powering this agent. Governor may change it based on budget or mode. Pin to lock.">model</span><span class="value">${modelChip(a.model, a.govReason, a.pinnedBoth || a.pinnedModel, a.name)}${(a.pinnedBoth || a.pinnedModel) ? '' : ` <button class="hv-btn pin-toggle btn-icon btn-sm" data-action="togglePin" data-agent="${esc(a.name)}" data-pin-type="model" data-unpin="false" title="Pin model — lock current model">📌</button>`}</span></div>
           <div class="agent-field"><span class="label" title="Agent operating mode — controls what GitHub actions this agent can take (advisory, issues, PRs, merge).">mode</span><span class="value">${modeLabel(a)}${a.needsRestart ? ' ' + statusBadgeHTML('needs_context', '⚠ restart needed', 'CLI flags are stale — restart agent to apply new mode', 'needs-context') : ''}</span></div>
@@ -8604,8 +8756,177 @@
           if (prev) prev.focus();
         }
         el.querySelectorAll('.doing').forEach(d => { d.scrollTop = d.scrollHeight; });
+        el.querySelectorAll('[data-agent-resize-y][data-agent-height]').forEach(d => { d.style.height = `${d.dataset.agentHeight}px`; });
       }
     }
+
+    function agentGridColumnCount(grid) {
+      if (!grid || typeof getComputedStyle !== 'function') return 3;
+      const cols = (getComputedStyle(grid).gridTemplateColumns || '').split(' ').filter(Boolean).length;
+      return Math.max(1, Math.min(3, cols || 3));
+    }
+
+    function agentOrderSaveFromDom(grid) {
+      const agents = ((window._lastStatus || {}).agents) || window._lastAgents || [];
+      const layout = agentCardLayoutNormalize(agents);
+      layout.order = Array.from(grid.querySelectorAll('.agent-card[data-agent-order-key]')).map(card => card.getAttribute('data-agent-order-key')).filter(Boolean);
+      agentCardLayoutWrite(layout, agentLayoutDefaultOrder(agents));
+      agentCardLayoutUpdateResetButton(agents);
+    }
+
+    function agentOrderNextCard(card) {
+      let next = card ? card.nextElementSibling : null;
+      while (next && !next.classList.contains('agent-card')) next = next.nextElementSibling;
+      return next;
+    }
+
+    function agentOrderDropSlot(grid, x, y, skip) {
+      const cards = Array.from(grid.querySelectorAll('.agent-card[data-agent-order-key]')).filter(card => card !== skip);
+      let best = null, bestDist = Infinity;
+      cards.forEach(card => {
+        const rect = card.getBoundingClientRect();
+        const horizontal = Math.abs(y - (rect.top + rect.height / 2)) < rect.height;
+        const before = horizontal ? x < (rect.left + rect.width / 2) : y < (rect.top + rect.height / 2);
+        const anchorX = before ? rect.left : rect.right;
+        const anchorY = rect.top + rect.height / 2;
+        const dist = Math.abs(x - anchorX) + Math.abs(y - anchorY);
+        if (dist < bestDist) { bestDist = dist; best = { before: before ? card : agentOrderNextCard(card) }; }
+      });
+      return best || { before: null };
+    }
+
+    function initAgentCardLayoutControls() {
+      const grid = document.getElementById('agents');
+      if (!grid || grid.dataset.agentLayoutControls === '1') return;
+      grid.dataset.agentLayoutControls = '1';
+      const orderHandleOf = (e) => (e.target && e.target.closest) ? e.target.closest('[data-agent-order-grip]') : null;
+      const spanHandleOf = (e) => (e.target && e.target.closest) ? e.target.closest('[data-agent-resize-col]') : null;
+      function cleanupOrder() {
+        if (!_agentOrderDrag) return;
+        _agentOrderDrag.card.classList.remove('dashboard-drag-source');
+        _agentOrderDrag.handle.classList.remove('dragging');
+        _agentOrderDrag.handle.setAttribute('aria-pressed', 'false');
+        grid.querySelectorAll(':scope > .dashboard-drop-indicator').forEach(el => el.remove());
+        _agentOrderDrag = null;
+      }
+      grid.addEventListener('dragstart', (e) => {
+        const handle = orderHandleOf(e);
+        if (!handle) return;
+        const card = handle.closest('.agent-card');
+        if (!card) return;
+        const indicator = document.createElement('div');
+        indicator.className = 'dashboard-drop-indicator';
+        _agentOrderDrag = { handle, card, indicator };
+        card.classList.add('dashboard-drag-source');
+        handle.classList.add('dragging');
+        handle.setAttribute('aria-pressed', 'true');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', card.getAttribute('data-agent-order-key') || '');
+      });
+      grid.addEventListener('dragover', (e) => {
+        if (!_agentOrderDrag) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const slot = agentOrderDropSlot(grid, e.clientX, e.clientY, _agentOrderDrag.card);
+        _agentOrderDrag.slot = slot;
+        grid.insertBefore(_agentOrderDrag.indicator, slot.before || null);
+      });
+      grid.addEventListener('drop', (e) => {
+        if (!_agentOrderDrag) return;
+        e.preventDefault();
+        const drag = _agentOrderDrag;
+        const slot = drag.slot || agentOrderDropSlot(grid, e.clientX, e.clientY, drag.card);
+        grid.querySelectorAll(':scope > .dashboard-drop-indicator').forEach(el => el.remove());
+        grid.insertBefore(drag.card, slot.before || null);
+        agentOrderSaveFromDom(grid);
+        showToast('Agent card order saved', 'info');
+        cleanupOrder();
+      });
+      grid.addEventListener('dragend', cleanupOrder);
+      grid.addEventListener('keydown', (e) => {
+        const orderHandle = orderHandleOf(e);
+        if (orderHandle) {
+          const card = orderHandle.closest('.agent-card');
+          if (!card) return;
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            orderHandle.setAttribute('aria-pressed', orderHandle.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+            return;
+          }
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowUp' && e.key !== 'ArrowRight' && e.key !== 'ArrowDown') return;
+          e.preventDefault();
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+            const prev = card.previousElementSibling && card.previousElementSibling.classList.contains('agent-card') ? card.previousElementSibling : null;
+            if (prev) grid.insertBefore(card, prev);
+          } else {
+            const next = card.nextElementSibling && card.nextElementSibling.classList.contains('agent-card') ? card.nextElementSibling : null;
+            if (next) grid.insertBefore(card, next.nextElementSibling);
+          }
+          agentOrderSaveFromDom(grid);
+          orderHandle.focus();
+          return;
+        }
+        const spanHandle = spanHandleOf(e);
+        if (!spanHandle) return;
+        const card = spanHandle.closest('.agent-card');
+        if (!card) return;
+        let span = clampAgentCardSpan(card.getAttribute('data-agent-span') || 1);
+        if (e.key === 'ArrowRight') span += 1;
+        else if (e.key === 'ArrowLeft') span -= 1;
+        else if (e.key === 'Home') span = 1;
+        else if (e.key === 'End') span = agentGridColumnCount(grid);
+        else if (e.key === 'Escape') span = 1;
+        else return;
+        e.preventDefault();
+        span = Math.min(agentGridColumnCount(grid), clampAgentCardSpan(span));
+        card.setAttribute('data-agent-span', String(span));
+        spanHandle.setAttribute('aria-valuenow', String(span));
+        agentCardLayoutSetSize(spanHandle.dataset.agent || card.dataset.agent || '', { span });
+      });
+      grid.addEventListener('pointerdown', (e) => {
+        const handle = spanHandleOf(e);
+        if (!handle || e.button > 0) return;
+        const card = handle.closest('.agent-card');
+        if (!card) return;
+        _agentSpanDrag = { handle, card, agent: handle.dataset.agent || '', startX: e.clientX, startSpan: clampAgentCardSpan(card.getAttribute('data-agent-span') || 1), cols: agentGridColumnCount(grid) };
+        try { handle.setPointerCapture(e.pointerId); } catch {}
+        handle.classList.add('dragging');
+        e.preventDefault();
+      });
+      grid.addEventListener('pointermove', (e) => {
+        if (!_agentSpanDrag) return;
+        const colW = Math.max(1, grid.getBoundingClientRect().width / Math.max(1, _agentSpanDrag.cols));
+        const span = Math.min(_agentSpanDrag.cols, clampAgentCardSpan(_agentSpanDrag.startSpan + Math.round((e.clientX - _agentSpanDrag.startX) / colW)));
+        _agentSpanDrag.span = span;
+        _agentSpanDrag.card.setAttribute('data-agent-span', String(span));
+        _agentSpanDrag.handle.setAttribute('aria-valuenow', String(span));
+      });
+      function endSpanDrag() {
+        const drag = _agentSpanDrag;
+        if (!drag) return;
+        _agentSpanDrag = null;
+        drag.handle.classList.remove('dragging');
+        if (drag.span == null) return;
+        agentCardLayoutSetSize(drag.agent, { span: drag.span });
+      }
+      grid.addEventListener('pointerup', endSpanDrag);
+      grid.addEventListener('pointercancel', endSpanDrag);
+      grid.addEventListener('dblclick', (e) => {
+        const handle = spanHandleOf(e);
+        if (!handle) return;
+        e.preventDefault();
+        const card = handle.closest('.agent-card');
+        if (card) card.setAttribute('data-agent-span', '1');
+        handle.setAttribute('aria-valuenow', '1');
+        agentCardLayoutSetSize(handle.dataset.agent || '', { span: 1 });
+      });
+      grid.addEventListener('mouseup', (e) => {
+        const details = e.target && e.target.closest ? e.target.closest('[data-agent-resize-y]') : null;
+        if (!details) return;
+        agentCardLayoutSetSize(details.dataset.agent || '', { height: details.getBoundingClientRect().height });
+      });
+    }
+    initAgentCardLayoutControls();
 
     /* Classified GitHub App auth states, matching github.AppAuthState.String()
        on the spoke. Only the two OPERATOR_* states describe a failure the hive
