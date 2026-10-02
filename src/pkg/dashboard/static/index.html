@@ -1752,11 +1752,17 @@
     .overview-settings-field input, .overview-settings-field select, .overview-chart-select { min-width: 0; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text); padding: var(--sp-1) var(--sp-2); font: inherit; }
     .overview-repo-filter { display: grid; gap: var(--sp-2); max-height: 12rem; overflow: auto; padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); }
     .overview-settings-links { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
-    .overview-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-4); }
-    .overview-kpi { display: grid; gap: var(--sp-1); text-align: left; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); color: var(--text); padding: var(--sp-3); cursor: pointer; }
+    .overview-kpis { position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-4); padding-top: var(--sp-6); }
+    .overview-kpi-range { position: absolute; top: 0; right: 0; display: inline-flex; gap: var(--sp-1); }
+    .overview-kpi-range-btn { min-width: 2rem; height: 1.25rem; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg); color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; cursor: pointer; }
+    .overview-kpi-range-btn.active { border-color: var(--accent); color: var(--accent); }
+    .overview-kpi { display: grid; gap: var(--sp-1); text-align: left; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); color: var(--text); padding: var(--sp-3); min-height: 5.9rem; cursor: pointer; }
     .overview-kpi:hover { border-color: var(--accent); }
     .overview-kpi-value { font-size: var(--fs-lg); font-weight: 800; font-variant-numeric: tabular-nums; }
     .overview-kpi-label { color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .overview-kpi-spark { min-height: 24px; display: flex; align-items: end; margin-top: var(--sp-1); }
+    .overview-kpi-spark .sparkline { width: 100%; }
+    .overview-kpi-spark svg { width: 100%; height: 24px; }
     .overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-5); align-items: stretch; }
     .overview-chart-card { --overview-chart-card-min-height: 16rem; position: relative; display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); align-items: center; gap: var(--sp-5); min-width: 0; min-height: var(--overview-chart-card-min-height); overflow: hidden; }
     .overview-chart-card + .overview-chart-card { border-left: 1px solid var(--border); padding-left: var(--sp-5); }
@@ -12221,11 +12227,12 @@
         const key = node.getAttribute('data-overview-kpi-key') || '';
         const target = Number(node.getAttribute('data-overview-kpi-value'));
         if (!key || !Number.isFinite(target)) return;
+        const display = node.getAttribute('data-overview-kpi-display') || String(target);
         const prior = Number(_overviewKPIValues[key]);
         const start = fromZero || !Number.isFinite(prior) ? 0 : prior;
         _overviewKPIValues[key] = target;
         if (reduced || start === target || !window.requestAnimationFrame) {
-          node.textContent = String(target);
+          node.textContent = display;
           return;
         }
         const duration = overviewCssDurationMs('--anim-kpi-count', 800);
@@ -12235,7 +12242,7 @@
           const t = Math.min(1, (now - started) / duration);
           node.textContent = String(Math.round(start + (target - start) * easeOutCubic(t)));
           if (t < 1) window.requestAnimationFrame(tick);
-          else node.textContent = String(target);
+          else node.textContent = display;
         };
         node.textContent = String(Math.round(start));
         window.requestAnimationFrame(tick);
@@ -12264,6 +12271,100 @@
       const exportFormat = OVERVIEW_EXPORT_FORMATS.includes(saved.exportFormat) ? saved.exportFormat : base.exportFormat;
       const timeBasis = OVERVIEW_TIME_BASES.includes(saved.timeBasis) ? saved.timeBasis : base.timeBasis;
       return { enabled, carousel: !!saved.carousel, intervalMs, transition, duration, active, history, labelMode, showKPIs: saved.showKPIs !== false, exportFormat, timeBasis };
+    }
+
+    const OVERVIEW_KPI_WINDOWS = { '24h': 24 * 3600e3, '7d': 7 * 24 * 3600e3 };
+    const OVERVIEW_KPI_WINDOW_KEY = 'hive.overviewKPI.window';
+    const OVERVIEW_KPI_LOCAL_PREFIX = 'hive.overviewKPI.local.';
+    const OVERVIEW_KPI_LOCAL_MAX = 2016;
+    const OVERVIEW_KPI_MIN_SAMPLE_MS = 5 * 60 * 1000;
+    let _overviewKPIHistory = [];
+    let _overviewKPIWindow = (() => {
+      try { return localStorage.getItem(OVERVIEW_KPI_WINDOW_KEY) || '24h'; } catch { return '24h'; }
+    })();
+    let _overviewKPILocalScope = 'all';
+
+    function overviewKPILocalKey() {
+      const hive = String(((window._lastStatus || {}).hiveId) || 'default').trim() || 'default';
+      return OVERVIEW_KPI_LOCAL_PREFIX + hive + '.' + _overviewKPILocalScope;
+    }
+    function overviewKPIRepoScope(repos) {
+      const selected = (repos || []).map(r => r.full || r.name || '').filter(Boolean).sort();
+      const all = (_overviewLastRepos || []).map(r => r.full || r.name || '').filter(Boolean).sort();
+      if (!all.length || selected.length === all.length) return 'all';
+      return selected.join('|') || 'none';
+    }
+    function overviewKPILoadLocal() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(overviewKPILocalKey()) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch { return []; }
+    }
+    function overviewKPISaveLocal(entries) {
+      try { localStorage.setItem(overviewKPILocalKey(), JSON.stringify((entries || []).slice(-OVERVIEW_KPI_LOCAL_MAX))); } catch {}
+    }
+    function overviewKPIRecordLocal(sample) {
+      if (!sample || !sample.t) return;
+      const entries = overviewKPILoadLocal();
+      const last = entries[entries.length - 1];
+      if (last && Math.abs(Number(last.t || 0) - Number(sample.t || 0)) < OVERVIEW_KPI_MIN_SAMPLE_MS) {
+        entries[entries.length - 1] = sample;
+      } else {
+        entries.push(sample);
+      }
+      overviewKPISaveLocal(entries);
+    }
+    async function fetchOverviewKPIHistory() {
+      try {
+        const since = Date.now() - OVERVIEW_KPI_WINDOWS['7d'];
+        const r = await fetch('/api/' + 'overview/history?since=' + encodeURIComponent(String(since)));
+        const data = await r.json();
+        _overviewKPIHistory = Array.isArray(data) ? data : [];
+        if (window._lastStatus && Array.isArray(window._lastStatus.repos)) renderOverviewCharts(window._lastStatus.repos);
+      } catch { /* non-critical: local fallback below still records samples */ }
+    }
+    function setOverviewKPIWindow(win) {
+      if (!Object.prototype.hasOwnProperty.call(OVERVIEW_KPI_WINDOWS, win)) return;
+      _overviewKPIWindow = win;
+      try { localStorage.setItem(OVERVIEW_KPI_WINDOW_KEY, win); } catch {}
+      renderOverviewCharts(_overviewLastRepos || []);
+    }
+    function overviewKPIHistoryEntries(useServer) {
+      const cutoff = Date.now() - (OVERVIEW_KPI_WINDOWS[_overviewKPIWindow] || OVERVIEW_KPI_WINDOWS['24h']);
+      const byT = new Map();
+      const sources = overviewKPILoadLocal().concat(useServer ? (_overviewKPIHistory || []) : []);
+      sources.forEach(e => {
+        const t = Number(e && e.t);
+        if (Number.isFinite(t) && t >= cutoff) byT.set(t, e);
+      });
+      return Array.from(byT.entries()).sort((a, b) => a[0] - b[0]).map(pair => pair[1]);
+    }
+    function overviewKPICurrentSample(cards) {
+      const sample = { t: Date.now() };
+      (cards || []).forEach(card => { sample[card.field] = Number(card.rawValue); });
+      return sample;
+    }
+    function overviewKPISparkTitle(values, fmt) {
+      const finite = values.map(Number).filter(Number.isFinite);
+      if (!finite.length) return 'min — · max — · latest —';
+      const min = Math.min(...finite);
+      const max = Math.max(...finite);
+      const latest = finite[finite.length - 1];
+      return `min ${fmt(min)} · max ${fmt(max)} · latest ${fmt(latest)}`;
+    }
+    function overviewKPISpark(card, useServer) {
+      const entries = overviewKPIHistoryEntries(useServer);
+      const values = entries.map(e => Number(e[card.field])).filter(Number.isFinite);
+      if (values.length < 2) return '';
+      const title = overviewKPISparkTitle(values, card.sparkFmt || fmtSparkVal);
+      return `<span class="overview-kpi-spark">${renderSparkline(null, values, {
+        width: 92, height: 24, color: card.color, title, ariaLabel: `${card.label}: ${title}`,
+        label: `overview ${card.label}`, id: `overview-kpi:${card.key}`,
+        wrapperClass: 'sparkline--flush', wrapperTitle: title,
+      })}</span>`;
+    }
+    function overviewKPIWindowControls() {
+      return `<span class="overview-kpi-range" aria-label="Overview KPI history range">${Object.keys(OVERVIEW_KPI_WINDOWS).map(win => `<button type="button" class="overview-kpi-range-btn${win === _overviewKPIWindow ? ' active' : ''}" data-action="setOverviewKPIWindow" data-arg0="${esc(win)}" data-stop="1" aria-pressed="${win === _overviewKPIWindow ? 'true' : 'false'}" title="Show ${esc(win)} KPI history">${esc(win)}</button>`).join('')}</span>`;
     }
 
     function saveOverviewChartsState(state) {
@@ -12457,17 +12558,29 @@
     }
 
     function overviewMedianAgeLabel(slices, state) {
+      const median = overviewMedianAgeSeconds(slices, state);
+      if (!Number.isFinite(median)) return '—';
+      return fmtDurationFromSeconds(median);
+    }
+
+    function fmtDurationFromSeconds(seconds) {
+      if (!Number.isFinite(Number(seconds))) return '—';
+      const minutes = Math.max(0, Number(seconds)) / 60;
+      if (minutes < 60) return Math.round(minutes) + 'm';
+      if (minutes < 1440) return Math.round(minutes / 60) + 'h';
+      return Math.round(minutes / 1440) + 'd';
+    }
+
+    function overviewMedianAgeSeconds(slices, state) {
       const ages = (slices || []).flatMap(s => (s.items || []).map(item => {
         const raw = (item && (item.item || item.issue || item.pr)) || item || {};
         const basis = state.timeBasis === 'created' ? (raw.created_at || raw.updated_at) : (raw.updated_at || raw.created_at);
         const t = Date.parse(basis || '');
         return Number.isFinite(t) ? Math.max(0, (Date.now() - t) / 60000) : overviewItemAgeMinutes(item);
       })).filter(n => Number.isFinite(n)).sort((a, b) => a - b);
-      if (!ages.length) return '—';
+      if (!ages.length) return NaN;
       const median = ages[Math.floor(ages.length / 2)];
-      if (median < 60) return Math.round(median) + 'm';
-      if (median < 1440) return Math.round(median / 60) + 'h';
-      return Math.round(median / 1440) + 'd';
+      return Math.round(median * 60);
     }
 
     function renderOverviewKPIs(repos, issueSlices, prSlices, state) {
@@ -12479,18 +12592,23 @@
       const blockedNeedsHuman = (prSlices || []).filter(s => s.key === 'blocked' || s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0)
         + (issueSlices || []).filter(s => s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0);
       const age = overviewMedianAgeLabel((issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft', 'blocked'].includes(s.key)), state);
+      const ageSec = overviewMedianAgeSeconds((issueSlices || []).concat(prSlices || []).filter(s => !['waiting', 'done', 'draft', 'blocked'].includes(s.key)), state);
+      _overviewKPILocalScope = overviewKPIRepoScope(repos);
+      const useServerHistory = _overviewKPILocalScope === 'all';
       const cards = [
-        ['open-issues', 'Open issues', openIssues, 'Actionable plus held issues in the selected repos.'],
-        ['open-prs', 'Open PRs', openPRs, 'Open plus held pull requests in the selected repos.'],
-        ['actionable-now', 'Actionable now', actionableNow, 'Items in bands that can move without waiting.'],
-        ['held', 'Held', held, 'Issues and PRs deliberately paused by a hold.'],
-        ['blocked-needs-human', 'Blocked / needs-human', blockedNeedsHuman, 'Waiting, blocked, or escalated work needing a person or dependency.'],
-        ['median-age', 'Median age', age, 'Median selected actionable item age by the configured time basis.']
+        { key: 'open-issues', field: 'overviewOpenIssues', label: 'Open issues', value: openIssues, rawValue: openIssues, color: 'var(--orange)', tip: 'Actionable plus held issues in the selected repos.' },
+        { key: 'open-prs', field: 'overviewOpenPrs', label: 'Open PRs', value: openPRs, rawValue: openPRs, color: 'var(--green)', tip: 'Open plus held pull requests in the selected repos.' },
+        { key: 'actionable-now', field: 'overviewActionable', label: 'Actionable now', value: actionableNow, rawValue: actionableNow, color: 'var(--accent)', tip: 'Items in bands that can move without waiting.' },
+        { key: 'held', field: 'overviewHeld', label: 'Held', value: held, rawValue: held, color: 'color-mix(in srgb, var(--orange) 65%, var(--muted))', tip: 'Issues and PRs deliberately paused by a hold.' },
+        { key: 'blocked-needs-human', field: 'overviewBlockedHuman', label: 'Blocked / needs-human', value: blockedNeedsHuman, rawValue: blockedNeedsHuman, color: 'var(--red)', tip: 'Waiting, blocked, or escalated work needing a person or dependency.' },
+        { key: 'median-age', field: 'overviewMedianAgeSec', label: 'Median age', value: age, rawValue: ageSec, color: 'var(--purple)', sparkFmt: fmtDurationFromSeconds, tip: 'Median selected actionable item age by the configured time basis.' }
       ];
-      return `<div class="overview-kpis sec-headline" data-collapsed-keep>${cards.map(([key, label, value, tip]) => {
-        const n = Number(value);
-        const attrs = Number.isFinite(n) ? ` data-overview-kpi-key="${esc(key)}" data-overview-kpi-value="${n}"` : '';
-        return `<button type="button" class="overview-kpi" data-action="ocNavigate" data-arg0="repos-section" data-stop="1" title="${esc(tip)}"><span class="overview-kpi-value"${attrs}>${esc(String(value ?? '—'))}</span><span class="overview-kpi-label">${esc(label)}</span></button>`;
+      overviewKPIRecordLocal(overviewKPICurrentSample(cards));
+      return `<div class="overview-kpis sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}${cards.map(card => {
+        const value = card.value;
+        const n = Number(card.rawValue);
+        const attrs = Number.isFinite(n) ? ` data-overview-kpi-key="${esc(card.key)}" data-overview-kpi-value="${n}" data-overview-kpi-display="${esc(String(value ?? '—'))}"` : '';
+        return `<button type="button" class="overview-kpi" data-action="ocNavigate" data-arg0="repos-section" data-stop="1" title="${esc(card.tip)}"><span class="overview-kpi-value"${attrs}>${esc(String(value ?? '—'))}</span><span class="overview-kpi-label">${esc(card.label)}</span>${overviewKPISpark(card, useServerHistory)}</button>`;
       }).join('')}</div>`;
     }
 
@@ -36254,6 +36372,7 @@ function burnAreaChart() {
       setTimeout(() => {
         const deferred = [
           () => fetchFactHistory(),
+          () => fetchOverviewKPIHistory().then(() => { setInterval(fetchOverviewKPIHistory, HISTORY_REFRESH_MS); }),
           () => fetchTrendHistory().then(() => fetchHistory()).then(() => { setInterval(fetchHistory, HISTORY_REFRESH_MS); }),
           () => fetch('/api/budget-ignore').then(r => r.json()).then(d => { budgetIgnored = d.ignored; }).catch(() => {}),
           () => fetchBudgetHistory().then(() => { setInterval(fetchBudgetHistory, HISTORY_REFRESH_MS); }),
