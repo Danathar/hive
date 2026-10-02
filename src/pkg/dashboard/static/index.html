@@ -765,7 +765,6 @@
     }
 
     /* Light surface panels — bg/border via token remap; radius/shadow only */
-    body.light-mode .governor,
     body.light-mode .token-panel,
     body.light-mode .repo-card {
       border-radius: var(--r-lg); box-shadow: var(--shadow-card);
@@ -1276,20 +1275,13 @@
     .backend-select option { background: var(--surface); color: var(--text); }
     .backend-select option:disabled { color: var(--muted); }
 
-    /* Governor — glass panel (hub recipe via tokens); .dead/.starting/
-       .active keep recoloring the perimeter border below. */
-    .governor {
-      background: var(--surface-1);
-      border: var(--line-width) solid var(--line-subtle);
-      border-radius: var(--r-lg); padding: var(--sp-6); margin-bottom: var(--sp-8);
-      box-shadow: var(--shadow-card);
-    }
-    @media (max-width: 480px) {
-      .governor { padding: var(--sp-5); }
-    }
-    .governor.dead { border-color: var(--red); }
-    .governor.starting { border-color: var(--yellow); }
-    .governor.active { border-color: var(--green); }
+    /* Governor uses the shared dash-card shell; the outer #governor node is only
+       the reorder/collapse container so it does not draw a second frame. */
+    .governor { margin-bottom: var(--sp-8); }
+    .governor > .dash-card.governor-card { border-color: var(--line-subtle); }
+    .governor.dead > .dash-card.governor-card { border-color: var(--red); }
+    .governor.starting > .dash-card.governor-card { border-color: var(--yellow); }
+    .governor.active > .dash-card.governor-card { border-color: var(--green); }
     .gov-title { font-size: var(--fs-lg); font-weight: 700; margin-bottom: var(--sp-4); }
     .gov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--sp-4); }
     .gov-stat { font-size: 0.85rem; }
@@ -1305,7 +1297,13 @@
     /* planning-alert: plans awaiting human review — amber, to draw the eye like
        the "N Issues" / on-hold indicators. */
     .gov-stat .val.planning-alert { color: var(--yellow); }
-    .gov-pr-models { margin-top: var(--sp-5); padding: var(--sp-5); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); background: var(--surface-3); }
+    .governor-subsection { margin: var(--sp-5) 0 0; }
+    .governor-subsection .section-body { overflow: hidden; }
+    .gov-pr-models-subheader { width: 100%; display: grid !important; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--sp-3); cursor: pointer; user-select: none; }
+    .gov-pr-models-subtitle { display:block; margin-top:var(--sp-1); color:var(--muted); font-size:var(--fs-xs); line-height:1.3; letter-spacing:0; text-transform:none; font-weight:500; }
+    .gov-pr-models-summary { color:var(--muted); font-size:var(--fs-xs); font-weight:700; text-transform:none; letter-spacing:0; white-space:nowrap; }
+    .governor-subsection:not(.collapsed) .gov-pr-models-summary { display:none; }
+    .gov-pr-models { padding: var(--sp-5); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); background: var(--surface-3); }
     .gov-pr-models-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
     .gov-pr-models-title { font-size: var(--fs-xs); font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:var(--amber); }
     .gov-pr-models-toggle { display:flex; gap:var(--sp-2); }
@@ -1371,16 +1369,22 @@
     .reco-calm { color: var(--muted); font-size: 0.85rem; }
     .reco-fact-heading { margin-top: var(--sp-5); color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
 
-    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: var(--sp-3); }
-    .lc-fleet-stat { flex: 1 1 100px; min-width: 90px; background: var(--bg); border: 1px solid var(--border);
+    .advisory-subsection { display: grid; gap: var(--dash-section-header-gap, var(--sp-3)); margin: var(--sp-6) 0 var(--sp-7); }
+    .advisory-subsection .section-header-toggle { margin: 0 !important; min-height: 1.8rem; display: inline-flex; align-items: center; gap: var(--sp-2); align-self: start; }
+    .advisory-subsection .section-body { overflow: visible; }
+    .advisory-subsection-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--r); padding: var(--dash-card-inner-padding, var(--sp-6)); }
+    .dash-card-subtitle, .section-subtitle { color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; font-weight: 500; letter-spacing: 0; text-transform: none; margin: var(--sp-1) 0 0; }
+    .lc-fleet { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--dash-tile-gap, var(--sp-3)); margin: 0; min-width: min(100%, 26rem); }
+    @media (max-width: 640px) { .lc-fleet { grid-template-columns: 1fr; } }
+    .lc-fleet-stat { min-width: 0; background: var(--bg); border: 1px solid var(--border);
       border-radius: var(--r); padding: var(--sp-4) var(--sp-5); }
     .lc-fleet-stat .val { font-size: 1.3rem; font-weight: 700; }
     .lc-fleet-stat .val.inflight { color: var(--blue); }
     .lc-fleet-stat .val.merged { color: var(--green); }
     .lc-fleet-stat .val.blocked { color: var(--red); }
     .lc-fleet-stat .lbl { font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: var(--sp-1); }
-    .lc-window { color: var(--muted); font-size: var(--fs-xs); margin-bottom: var(--sp-5); }
-    .prt-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--r); padding: var(--sp-6); }
+    .lc-window { color: var(--muted); font-size: var(--fs-xs); margin-bottom: var(--sp-4); }
+    .prt-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--r); padding: var(--dash-card-inner-padding, var(--sp-6)); }
     .prt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: var(--sp-4); }
     .prt-controls { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
     .prt-repo-select { max-width: 220px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); }
@@ -1418,8 +1422,9 @@
     .lc-journey-summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
     .lc-row-chevron { flex: 0 0 auto; width: 1rem; color: var(--muted); transition: transform 0.15s ease; text-align: center; }
     .lc-journey-summary[aria-expanded="true"] .lc-row-chevron { transform: rotate(90deg); }
-    .lc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: var(--sp-3); }
-    .lc-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .lc-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--sp-4); margin-bottom: var(--sp-3); }
+    .lc-controls { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+    @media (max-width: 760px) { .lc-head { grid-template-columns: 1fr; } .lc-controls { justify-content: flex-start; } }
     .lc-kind { flex: 0 0 auto; font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
       padding: 2px 7px; border-radius: 8px; }
     .lc-kind.neutral { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
@@ -1498,7 +1503,12 @@
       background: color-mix(in srgb, var(--amber) 45%, transparent);
       outline: 2px solid var(--amber); outline-offset: -2px;
     }
-    .repo-name { font-size: 0.85rem; font-weight: 600; margin-bottom: var(--sp-3); display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+    .repo-provider-label { font-size:var(--fs-2xs); font-weight:700; letter-spacing:0.08em; color:var(--muted); text-transform:uppercase; margin-bottom:var(--sp-2); }
+    .repo-name { font-size: 0.85rem; font-weight: 600; margin-bottom: var(--sp-3); display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; column-gap: var(--sp-3); row-gap: var(--sp-2); min-height: 1.75rem; }
+    .repo-name a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .repo-header-badges, .repo-header-actions { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+    .repo-header-actions { justify-content: flex-end; }
+    .repo-header-spacer { min-width: var(--sp-2); }
     .repo-card-order-handle { margin-right:var(--sp-0); cursor:grab; }
     .repo-card-order-handle.dragging { cursor:grabbing; }
     /* Per-repo agent pause (#6203). A paused repo KEEPS its card — that is the
@@ -1509,7 +1519,7 @@
     .repo-card:has(.repo-paused-pill) { border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); background: color-mix(in srgb, var(--yellow) 5%, var(--surface)); }
     .repo-card:has(.repo-paused-pill) .repo-stats { opacity: 0.55; }
     .repo-paused-pill { flex: 0 0 auto; font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.02em; line-height: 1; padding: var(--sp-1) var(--sp-3); border-radius: var(--r-pill); white-space: nowrap; text-transform: uppercase; border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent); background: color-mix(in srgb, var(--yellow) 15%, transparent); color: var(--yellow); cursor: help; }
-    .repo-pause-btn { flex: 0 0 auto; margin-left: auto; font-size: 0.66rem; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: var(--r-pill); white-space: nowrap; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--muted); opacity: 0.7; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
+    .repo-pause-btn { flex: 0 0 auto; margin-left: 0; font-size: 0.66rem; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: var(--r-pill); white-space: nowrap; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--muted); opacity: 0.7; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
     .repo-automerge-toggle { flex: 0 0 auto; gap: var(--sp-2); margin: 0; font-size: var(--fs-2xs); color: var(--muted); }
     .repo-automerge-toggle .config-toggle-label { font-size: var(--fs-2xs); }
     .repo-automerge-switch { flex: 0 0 auto; }
@@ -3083,9 +3093,10 @@
       max-height: 0 !important; opacity: 0; pointer-events: none;
     }
     #hive-dashboard-root > [data-dashboard-section] { margin-top: var(--sp-6) !important; margin-bottom: var(--sp-6) !important; }
-    .dash-card { background: var(--surface-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); padding: var(--sp-6); box-shadow: var(--shadow-card); }
+    #hive-dashboard-root { --dash-card-padding: var(--sp-6); --dash-card-inner-padding: var(--sp-6); --dash-card-header-gap: var(--sp-4); --dash-section-header-gap: var(--sp-3); --dash-tile-gap: var(--sp-3); }
+    .dash-card { background: var(--surface-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); padding: var(--dash-card-padding); box-shadow: var(--shadow-card); }
     .dash-card.collapsed { background: var(--surface-1); border-color: var(--line-subtle); }
-    .dash-card-header { font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; text-transform: uppercase; margin-bottom: var(--sp-2); min-height: 32px; display: flex; align-items: center; gap: var(--sp-3); cursor: pointer; user-select: none; width: 100%; }
+    .dash-card-header { font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; text-transform: uppercase; margin-bottom: var(--dash-card-header-gap); min-height: 32px; display: flex; align-items: center; gap: var(--sp-3); cursor: pointer; user-select: none; width: 100%; }
     .dash-card-header:hover { opacity: 0.85; }
     .dash-card-title { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; line-height: 1; }
     .dash-card-header .dashboard-grip { width: 1.55rem; height: 1.55rem; padding: 0; margin-right: 0; font-size: var(--fs-base); font-weight: 400; line-height: 1; }
@@ -3101,6 +3112,8 @@
     .dash-card.collapsed .dash-card-summary { display: inline-flex; align-items: center; gap: var(--sp-2); }
     .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease; max-height: none; opacity: 1; }
     .dash-card-body.collapsed { max-height: 0 !important; opacity: 0; pointer-events: none; }
+    #audit-panel.audit-resizable { min-height: 320px; height: var(--audit-panel-height, 640px); max-height: 80vh; overflow-y: auto; resize: vertical; position: relative; }
+    #audit-panel.audit-resizable::after { content: '↕ drag to resize'; position: sticky; bottom: 0; float: right; margin-top: var(--sp-2); color: var(--muted); font-size: var(--fs-2xs); background: color-mix(in srgb, var(--surface-1) 92%, transparent); border: 1px solid var(--border); border-radius: var(--r-pill); padding: var(--sp-0) var(--sp-2); pointer-events: none; }
     .dash-card .section-label, .dash-card .token-title, .dash-card .cost-title, .dash-card .gov-title { margin: 0; }
     .section-group-header {
       font-size: var(--fs-sm); border-bottom: 1px solid var(--border);
@@ -4133,7 +4146,7 @@
   <div id="advisory-section" data-dashboard-section="advisory-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
     <h2 class="section-label section-group-header section-header-toggle mb-4" data-action="toggleSection" data-arg0="advisory-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Hive Advisory section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 🧭 Hive Advisory</h2>
     <div class="section-body section-group-body">
-    <div class="mb-7" id="advisory-digest-section">
+    <div class="advisory-subsection" id="advisory-digest-section">
       <h2 class="section-label advisory-collapse-header section-header-toggle" style="margin-bottom: var(--sp-4); cursor: pointer; user-select: none;" data-action="toggleAdvisorySection" data-arg0="advisory-digest-main">
         <span id="advisory-digest-main-chevron" class="collapse-chevron">▼</span> 📋 Advisory Digest
       </h2>
@@ -4142,39 +4155,38 @@
       </div>
     </div>
 
-    <div id="hive-advice-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
+    <div id="hive-advice-section" class="advisory-subsection" style="display: none;">
       <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="hive-advice-section"><span class="section-chevron">▼</span> 🧭 Hive Advice <span style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:var(--sp-3);background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">weekly</span></h2>
       <div class="section-body">
-        <div id="hive-advice-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:var(--sp-6)"></div>
+        <div id="hive-advice-card" class="advisory-subsection-card"></div>
       </div>
     </div>
 
-    <div id="fleet-report-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
+    <div id="fleet-report-section" class="advisory-subsection" style="display: none;">
       <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="fleet-report-section"><span class="section-chevron">▼</span> 📡 Fleet Report Preview <span style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:var(--sp-3);background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">dry-run</span></h2>
       <div class="section-body">
-        <div id="fleet-report-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:var(--sp-6)"></div>
+        <div id="fleet-report-card" class="advisory-subsection-card"></div>
       </div>
     </div>
 
-    <div id="acmm-reco-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
+    <div id="acmm-reco-section" class="advisory-subsection" style="display: none;">
       <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="acmm-reco-section"><span class="section-chevron">▼</span> ⬆️ Ready to level up? <span style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:var(--sp-3);background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">advisory</span></h2>
       <div class="section-body">
-        <div id="acmm-reco-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:var(--sp-6)"></div>
+        <div id="acmm-reco-card" class="advisory-subsection-card"></div>
       </div>
     </div>
 
-    <div id="lifecycle-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
+    <div id="lifecycle-section" class="advisory-subsection" style="display: none;">
       <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="lifecycle-section"><span class="section-chevron">▼</span> 🔀 Lifecycle Timeline</h2>
       <div class="section-body">
-        <div id="lifecycle-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:var(--sp-6)"></div>
+        <div id="lifecycle-card" class="advisory-subsection-card"></div>
       </div>
     </div>
 
-    <div id="pr-throughput-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
-      <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="pr-throughput-section"><span class="section-chevron">▼</span> 📬 Change Throughput</h2>
-      <p class="section-subtitle">pull/merge requests across tracked forges</p>
+    <div id="pr-throughput-section" class="advisory-subsection" style="display: none;">
+      <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="pr-throughput-section"><span class="section-chevron">▼</span> 📬 Change Throughput <span class="dash-card-subtitle">pull/merge requests across tracked forges</span></h2>
       <div class="section-body">
-        <div id="pr-throughput-card" class="prt-card"></div>
+        <div id="pr-throughput-card" class="prt-card advisory-subsection-card"></div>
       </div>
     </div>
     </div>
@@ -4262,20 +4274,6 @@
     </div>
   </div>
 
-  <div id="platform-section" data-dashboard-section="platform-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
-    <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="platform-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Platform section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 🧩 Platform</h2>
-    <div class="section-body">
-      <div id="platform-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:var(--sp-6)">
-        <div class="kb-stat-grid" id="platform-stats"></div>
-      </div>
-    </div>
-  </div>
-
-
-
-
-
-
   <div class="mt-6 mb-8" id="audit-section" data-dashboard-section="audit-section">
     <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="audit-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Audit Log section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 📋 Audit Log</h2>
     <div class="section-body">
@@ -4288,7 +4286,7 @@
         <button class="hv-btn btn-danger btn-sm" data-action="clearAuditSearches" title="Clear saved searches">✕</button>
         <span id="audit-match-count" style="font-size:0.7rem;color:var(--muted);white-space:nowrap"></span>
       </div>
-      <div id="audit-panel" style="padding:var(--sp-5);max-height:320px;overflow-y:auto">
+      <div id="audit-panel" class="audit-resizable" style="padding:var(--sp-5)">
         <div class="loading">Loading audit log...</div>
       </div>
     </div>
@@ -4949,12 +4947,11 @@
       'beads-section': { title: '🔮 Beads', summary: '0 beads' },
       'acmm-eval-section': { title: '🎯 ACMM Evaluation', summary: 'L—' },
       'approvals-section': { title: '✋ Approvals', summary: '0 pending' },
-      'platform-section': { title: '🧩 Platform', summary: 'standalone' },
       'audit-section': { title: '📋 Audit Log', summary: '0 events today' },
       'review-queue-section': { title: '🔎 Review Queue', summary: '0 PRs' },
       'nous-section': { title: '🧪 Strategy Lab', summary: '—' },
-      'inception-section': { title: '💡 Project Inception', summary: 'ready' },
-      'knowledge-section': { title: '📚 Knowledge Base', summary: '1/1 layers' },
+      'inception-section': { title: '💡 Project Inception', summary: 'ready', badgeHtml: '<a class="dash-card-badge" href="https://github.com/jumppad-labs/spektacular" target="_blank" rel="noopener noreferrer" data-stop="1" title="Spektacular project">⚡ Powered by Spektacular</a>' },
+      'knowledge-section': { title: '📚 Knowledge Base', summary: '0 facts' },
       'contributors-section': { title: '👥 Contributors', summary: '0 active / 0 registered' },
       'debug-section': { title: '🔍 System Diagnostics', summary: 'health' },
       'logs-section': { title: '📋 Agent Logs', summary: 'logs' },
@@ -4973,11 +4970,12 @@
         ? `data-action="toggleSection" data-keydown-action="${keyAction}" data-arg-types="e,s" data-arg0="${esc(id)}" data-arg1="${esc(id)}" data-keys="*"`
         : `data-action="${esc(action)}" data-keydown-action="${keyAction}" data-arg-types="e" data-keys="*"`;
       const grip = opts.grip === false ? '' : `<button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move ${esc(opts.gripLabel || opts.title || id || 'section')} section" aria-pressed="false">⠿</button>`;
+      const subtitle = opts.subtitleHtml ? `<span class="dash-card-subtitle">${opts.subtitleHtml}</span>` : '';
       const badges = opts.badgeHtml ? `<span class="dash-card-badges">${opts.badgeHtml}</span>` : '<span class="dash-card-badges"></span>';
       const actions = opts.actionsHtml ? `<span class="dash-card-actions">${opts.actionsHtml}</span>` : '<span class="dash-card-actions"></span>';
       const summary = `<span class="dash-card-summary ${opts.summaryClass || ''}" id="${esc(opts.summaryId || (id + '-summary'))}" title="${esc(opts.summaryTitle || 'Collapsed summary')}">${opts.summaryHtml || ''}</span>`;
       const cls = ['dash-card-header','section-header-toggle',opts.headerClass || ''].filter(Boolean).join(' ');
-      return `<div class="${cls}" data-section-card-header="1" role="button" tabindex="0" aria-expanded="true" aria-controls="${esc(bodyId)}" ${actionAttrs} title="${esc(opts.toggleTitle || 'Collapse / expand this section')}">${grip}<span class="section-chevron ${opts.chevronClass || ''}" aria-hidden="true">▼</span><span class="dash-card-title">${title}</span>${badges}${actions}${summary}</div>`;
+      return `<div class="${cls}" data-section-card-header="1" role="button" tabindex="0" aria-expanded="true" aria-controls="${esc(bodyId)}" ${actionAttrs} title="${esc(opts.toggleTitle || 'Collapse / expand this section')}">${grip}<span class="section-chevron ${opts.chevronClass || ''}" aria-hidden="true">▼</span><span class="dash-card-title">${title}${subtitle}</span>${badges}${actions}${summary}</div>`;
     }
     function sectionCardShell(opts, bodyHtml) {
       opts = opts || {};
@@ -5013,7 +5011,7 @@
       if (!body) return;
       const bodyId = sectionId + '-body';
       const template = document.createElement('template');
-      template.innerHTML = sectionCardShell({ id: sectionId, title: cfg.title, summaryHtml: cfg.summary, bodyId: bodyId }, '');
+      template.innerHTML = sectionCardShell({ id: sectionId, title: cfg.title, summaryHtml: cfg.summary, bodyId: bodyId, badgeHtml: cfg.badgeHtml, subtitleHtml: cfg.subtitleHtml }, '');
       const card = template.content.firstElementChild;
       const newHeader = card.querySelector('.dash-card-header');
       const badges = newHeader.querySelector('.dash-card-badges');
@@ -5081,16 +5079,13 @@
       const advWhen = relativeTimeShort(adv.generatedAt || adv.updatedAt || adv.latest || data.timestamp);
       setSectionSummary('advisory-section', `${advCount} advisories${advWhen ? ' · ' + advWhen : ''}`);
       setSectionSummary('acmm-eval-section', `L${data.acmmLevel || '—'}${data.acmmEvalAt ? ' · last eval ' + relativeTimeShort(data.acmmEvalAt) : ''}`);
-      const platform = data.platform || {};
-      setSectionSummary('platform-section', `${platform.hosted ? 'hosted' : (platform.mode || 'standalone')}${platform.version ? ' · ' + platform.version : ''}${platform.channel ? ' · ' + platform.channel : ''}`);
       const auditToday = (document.querySelectorAll('#audit-panel .audit-entry').length || Number(data.auditEventsToday || 0) || 0);
       setSectionSummary('audit-section', `${auditToday} events today`);
       const rq = document.getElementById('review-queue-count');
       setSectionSummary('review-queue-section', textOrDash(rq && rq.textContent));
       const nous = document.getElementById('nous-mode-badge');
       setSectionSummary('nous-section', textOrDash(nous && nous.textContent));
-      const kb = document.getElementById('kb-status-badge');
-      setSectionSummary('knowledge-section', textOrDash(kb && kb.textContent));
+      setSectionSummary('knowledge-section', kbFactsLabel(kbTotalFactsFromStats(window._kbCache || _kbCache || {})));
       const contrib = document.getElementById('contributors-status-badge');
       setSectionSummary('contributors-section', textOrDash(contrib && contrib.textContent));
       const health = document.getElementById('oc-health');
@@ -5169,9 +5164,11 @@
       const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
       const card = document.querySelector(`#${sectionId} .dash-card`);
       const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
+      const section = document.getElementById(sectionId);
       applySectionBodyCollapse(body, collapsed, true);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
       if (card) card.classList.toggle('collapsed', collapsed);
+      if (section) section.classList.toggle('collapsed', collapsed);
       if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     }
     /** Apply persisted collapsed state to a section after render */
@@ -5181,10 +5178,12 @@
       const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
       const card = document.querySelector(`#${sectionId} .dash-card`);
       const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
+      const section = document.getElementById(sectionId);
       normalizeSectionCardChrome(sectionId);
       applySectionBodyCollapse(body, collapsed, false);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
       if (card) card.classList.toggle('collapsed', collapsed);
+      if (section) section.classList.toggle('collapsed', collapsed);
       if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     }
     // ── Dashboard section layout: drag/keyboard reorder, persisted per viewer ──
@@ -5193,7 +5192,7 @@
     var DASHBOARD_LAYOUT_KEY='hive.dashboard.layout';
     var DASHBOARD_LAYOUT_VERSION=1;
     var DASHBOARD_LAYOUT_REGIONS=['main'];
-    var DASHBOARD_LAYOUT_TEMPLATE={main:['overview-section','governor','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','platform-section','audit-section','review-queue-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
+    var DASHBOARD_LAYOUT_TEMPLATE={main:['overview-section','governor','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','audit-section','review-queue-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
     var DASHBOARD_LAYOUT_GRIP_SELECTOR='[data-dashboard-grip]';
     var DASHBOARD_LAYOUT_CARD_SELECTOR='[data-dashboard-section]';
     var DASHBOARD_LAYOUT_ANCHOR_ID='dashboard-notices';
@@ -9327,11 +9326,17 @@
       const total = data?.total || 0;
       const buttons = ['7d', '30d', 'all'].map(w => `<button type="button" class="${govPRModelsWindow === w ? 'active' : ''}" data-action="setGovernorPRModelsWindow" data-arg0="${w}" title="Show PRs authored in ${w === 'all' ? 'all time' : 'the last ' + w}">${w}</button>`).join('');
       const sortButtons = [['effectiveness', 'rank'], ['count', 'PR count']].map(([v, label]) => `<button type="button" class="${govPRModelsSort === v ? 'active' : ''}" data-action="setGovernorPRModelsSort" data-arg0="${v}" title="Sort PRs by model by ${label}">${label}</button>`).join('');
+      const modelRows = data ? governorPRModelRows(data) : [];
+      const modelCount = data && Array.isArray(data.buckets) ? data.buckets.length : 0;
+      const minMerged = data?.min_merged_prs || 5;
+      const topModel = modelRows[0] && (modelRows[0].model || 'unknown');
+      const collapsedSummary = topModel ? `#1 ${escapeHtml(topModel)} · ${modelCount} model${modelCount === 1 ? '' : 's'}` : `${modelCount} model${modelCount === 1 ? '' : 's'}`;
+      const subtitle = `${total} agent-authored PR${total === 1 ? '' : 's'} · rank requires ${minMerged} merged`;
       const rows = !data
         ? '<div class="gov-pr-models-empty">Loading PRs by model…</div>'
         : total === 0
           ? '<div class="gov-pr-models-empty">No agent-authored PRs in window.</div>'
-          : governorPRModelRows(data).map(b => {
+          : modelRows.map(b => {
               const prs = b.prs || 0;
               const share = total ? (prs / total * 100) : 0;
               const mergedPct = prs ? (b.merged || 0) / prs * 100 : 0;
@@ -9385,12 +9390,19 @@
           return `<li><a${href}>${escapeHtml(label)}</a> ${escapeHtml(pr.model || 'unknown')} · ${pr.review_rounds || 0} rounds · ${pr.fix_attempts || 0} fixes · ${pr.follow_up_commits || 0} follow-up commits${fixers}</li>`;
         }).join('')}</ol>
       </div>` : '';
-      return `<div class="gov-pr-models">
-        <div class="gov-pr-models-head"><div><div class="gov-pr-models-title">PRs by model</div><div class="gov-pr-model-sub">${total} agent-authored PR${total === 1 ? '' : 's'} · rank requires ${data?.min_merged_prs || 5} merged</div></div><div class="gov-pr-models-toggle">${buttons}${sortButtons}</div></div>
-        ${rows}
-        ${reworkTable}
-        ${mostReworked}
-        <div class="gov-pr-model-legend"><span class="merged">merged</span><span class="open">open</span><span class="closed">closed-unmerged</span></div>
+      return `<div id="governor-pr-models-section" class="advisory-subsection governor-subsection">
+        <div class="section-label section-header-toggle gov-pr-models-subheader" role="button" tabindex="0" aria-expanded="true" aria-controls="governor-pr-models-section-body" data-action="toggleSection" data-keydown-action="sectionHeaderKey" data-arg-types="e,s" data-arg0="governor-pr-models-section" data-arg1="governor-pr-models-section" data-keys="*">
+          <span class="section-chevron" aria-hidden="true">▼</span>
+          <span>PRS BY MODEL<span class="gov-pr-models-subtitle">${escapeHtml(subtitle)}</span></span>
+          <span class="gov-pr-models-summary">${collapsedSummary}</span>
+          <span class="gov-pr-models-toggle" data-stop="1">${buttons}${sortButtons}</span>
+        </div>
+        <div class="section-body" id="governor-pr-models-section-body"><div class="gov-pr-models">
+          ${rows}
+          ${reworkTable}
+          ${mostReworked}
+          <div class="gov-pr-model-legend"><span class="merged">merged</span><span class="open">open</span><span class="closed">closed-unmerged</span></div>
+        </div></div>
       </div>`;
     }
 
@@ -9509,6 +9521,7 @@
         ${renderCadenceMatrix(cadenceMatrix, currentMode, modes)}`;
       el.innerHTML = sectionCardShell({ id: 'governor', title: '🎛️ Governor', panelClass: 'governor-card', actionsHtml: '<button class="config-gear" data-action="openConfigDialog" data-arg0="governor" data-stop="1" title="Open Governor configuration — manage agents, thresholds, budget, notifications, health checks, and sensing patterns">⚙️</button>', summaryHtml: `${esc(currentMode)} · ${govPressure} pressure`, summaryTitle: 'Governor mode and queue pressure' }, governorBody.replace(/<div class="gov-title"[\s\S]*?<\/div>\n?/, ''));
       applySectionCollapse('governor');
+      applySectionCollapse('governor-pr-models-section');
     }
 
     function renderCadenceMatrix(matrix, currentMode, modes) {
@@ -11645,8 +11658,8 @@
         return `
         <div class="repo-card${cardW ? ' repo-card-sized' : ''}" data-repo-order-key="${esc(cardRepoKey)}"${cardW ? ` style="flex-basis:${cardW}px"` : ''}>
           ${resizeHandle}
-          <div style="font-size:var(--fs-2xs);font-weight:600;letter-spacing:0.02em;color:${isPublic ? 'var(--muted)' : 'var(--indigo)'};margin-bottom:var(--sp-1)" title="This repo lives on ${esc(hostLabel)}${isPublic ? '' : ' (GitHub Enterprise), not public github.com'}">${esc(hostLabel)}${isPublic ? '' : ' · Enterprise'}</div>
-          <div class="repo-name">${orderHandle}<a href="${esc(repoUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(r.full || r.name)}</a>${swarmPill}${pausedPill}${swarmBtn}${autoMergeBtn}${pauseBtn}</div>
+          <div class="repo-provider-label" style="color:${isPublic ? 'var(--muted)' : 'var(--indigo)'}" title="This repo lives on ${esc(hostLabel)}${isPublic ? '' : ' (GitHub Enterprise), not public github.com'}">${esc(hostLabel)}${isPublic ? '' : ' · Enterprise'}</div>
+          <div class="repo-name">${orderHandle}<a href="${esc(repoUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(r.full || r.name)}</a><span class="repo-header-badges">${swarmPill}${pausedPill}</span>${autoMergeBtn}<span class="repo-header-spacer"></span><span class="repo-header-actions">${swarmBtn}${pauseBtn}</span></div>
           <div class="repo-stats">
             <div class="repo-stat"><a href="${esc(repoUrl)}/issues" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.issues >= 0 ? r.issues : '?'}</span>${iSpark}</div><div class="label">issues</div></a>${issueBreakdown}</div>
             <div class="repo-stat"><a href="${esc(repoUrl)}/pulls" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.prs >= 0 ? r.prs : '?'}</span>${pSpark}</div><div class="label">PRs</div></a>${prBreakdown}</div>
@@ -13985,20 +13998,10 @@ function burnAreaChart() {
     }
 
     // PANEL A — "Ready to level up?" — advisory ACMM recommendation.
-    // PANEL — Platform: surfaces the v4 spoke capabilities (forge, mint,
-    // skills) from the main status payload the page already polls. Every field
-    // is guarded: a missing sub-block hides gracefully rather than erroring, and
-    // the section stays hidden until a platform block is present.
-    function renderPlatform(plat) {
-      refreshSectionCardShell('platform-section');
-      const section = document.getElementById('platform-section');
-      const stats = document.getElementById('platform-stats');
-      if (!section || !stats) return;
-      if (!plat) { section.style.display = 'none'; return; }
-
+    let _platformStatus = null;
+    function platformFactTiles(plat) {
+      if (!plat) return '<div class="muted" style="font-size:var(--fs-sm)">No platform status reported yet.</div>';
       const tiles = [];
-
-      // Forge tile — icon + name, instance URL (if self-managed), repo count.
       const forge = plat.forge || {};
       const forgeKind = (forge.kind || 'github').toLowerCase();
       const FORGE_META = {
@@ -14014,47 +14017,29 @@ function burnAreaChart() {
       const forgeTitle = forge.instanceUrl
         ? escapeHtml(forge.instanceUrl) + ' — ' + repoCount + ' repo' + (repoCount === 1 ? '' : 's')
         : repoCount + ' repo' + (repoCount === 1 ? '' : 's') + ' monitored';
-      tiles.push(`<div class="kb-stat" title="${forgeTitle}">
-        <div class="val">${fm.icon} ${escapeHtml(fm.name)}</div>
-        <div class="lbl">${forgeSub}</div>
-      </div>`);
+      tiles.push(`<div class="kb-stat" title="${forgeTitle}"><div class="val">${fm.icon} ${escapeHtml(fm.name)}</div><div class="lbl">${forgeSub}</div></div>`);
 
-      // Mint tile — enabled/disabled badge; issuer + key indicator when on.
       const mint = plat.mint || {};
       if (mint.enabled) {
         const keyMark = mint.keyPresent ? 'key ✓' : 'key —';
-        const issuer = mint.issuer
-          ? escapeHtml(mint.issuer.replace(/^https?:\/\//, ''))
-          : keyMark;
-        tiles.push(`<div class="kb-stat" title="Mint token service enabled${mint.issuer ? ' — issuer ' + escapeHtml(mint.issuer) : ''}; signing ${mint.keyPresent ? 'key present' : 'key not found'}">
-          <div class="val text-success">Mint on</div>
-          <div class="lbl">${issuer} · ${keyMark}</div>
-        </div>`);
+        const issuer = mint.issuer ? escapeHtml(mint.issuer.replace(/^https?:\/\//, '')) : keyMark;
+        tiles.push(`<div class="kb-stat" title="Mint token service enabled${mint.issuer ? ' — issuer ' + escapeHtml(mint.issuer) : ''}; signing ${mint.keyPresent ? 'key present' : 'key not found'}"><div class="val text-success">Mint on</div><div class="lbl">${issuer} · ${keyMark}</div></div>`);
       } else {
-        tiles.push(`<div class="kb-stat" title="Mint token service disabled">
-          <div class="val text-muted">Mint off</div>
-          <div class="lbl">token service</div>
-        </div>`);
+        tiles.push('<div class="kb-stat" title="Mint token service disabled"><div class="val text-muted">Mint off</div><div class="lbl">token service</div></div>');
       }
 
-      // Skills tile — loaded count, or "not configured" when unavailable.
       const skills = plat.skills || {};
       if (skills.available) {
         const loaded = Number(skills.loaded) || 0;
-        tiles.push(`<div class="kb-stat" title="Skills registry loaded from ${escapeHtml(skills.dir || 'the skills directory')}">
-          <div class="val">${loaded}</div>
-          <div class="lbl">skill${loaded === 1 ? '' : 's'} loaded</div>
-        </div>`);
+        tiles.push(`<div class="kb-stat" title="Skills registry loaded from ${escapeHtml(skills.dir || 'the skills directory')}"><div class="val">${loaded}</div><div class="lbl">skill${loaded === 1 ? '' : 's'} loaded</div></div>`);
       } else {
-        tiles.push(`<div class="kb-stat" title="No skills directory configured">
-          <div class="val text-muted">—</div>
-          <div class="lbl">skills not configured</div>
-        </div>`);
+        tiles.push('<div class="kb-stat" title="No skills directory configured"><div class="val text-muted">—</div><div class="lbl">skills not configured</div></div>');
       }
-
-      stats.innerHTML = tiles.join('');
-      section.style.display = '';
-      applySectionCollapse('platform-section');
+      return '<div class="kb-stat-grid platform-diagnostics-grid">' + tiles.join('') + '</div>';
+    }
+    function renderPlatform(plat) {
+      _platformStatus = plat || null;
+      renderDebugSection();
     }
 
 
@@ -14318,6 +14303,12 @@ function burnAreaChart() {
       return String((j && (j.id || j.ref)) || '');
     }
 
+    function lcJourneyHasContent(j) {
+      if (!j) return false;
+      const stages = j.stages || {};
+      return !!(j.ref || j.id || j.current || j.agent || j.lastAt || Object.keys(stages).length);
+    }
+
     function lcStageLabel(kind) {
       const labels = {
         enumerated: 'Enumerated', classified: 'Classified', kicked: 'Kicked', pr_opened: 'PR opened',
@@ -14439,7 +14430,7 @@ function burnAreaChart() {
       dto = dto || {};
       lcLastDTO = dto;
       const fleet = dto.fleet || {};
-      const journeys = Array.isArray(dto.journeys) ? dto.journeys : [];
+      const journeys = (Array.isArray(dto.journeys) ? dto.journeys : []).filter(lcJourneyHasContent);
 
       section.style.display = '';
 
@@ -14460,7 +14451,7 @@ function burnAreaChart() {
 
       let listHtml;
       if (journeys.length === 0) {
-        listHtml = `<div class="lc-empty">No lifecycle journeys yet — they appear as the governor enumerates and works issues.</div>`;
+        listHtml = `<div class="lc-empty">No lifecycle events in the last 6h.</div>`;
       } else {
         listHtml = `<ul class="lc-journeys">${journeys.map((j) => {
           j = j || {};
@@ -15710,6 +15701,14 @@ function burnAreaChart() {
     const RESERVED_KB_CHANNEL = 'bead-synth-wiki';
     const KB_FACT_TYPES = ['pattern', 'gotcha', 'regression', 'decision', 'test_scaffold', 'integration', 'coverage_rule'];
 
+    function kbTotalFactsFromStats(stats) {
+      return ((stats && stats.layers) || []).reduce((sum, l) => sum + (Number(l && l.total_pages) || 0), 0);
+    }
+    function kbFactsLabel(n) {
+      const total = Number(n) || 0;
+      return total.toLocaleString() + ' fact' + (total === 1 ? '' : 's');
+    }
+
     // ── Document Sources ──
     const DOC_CONTENT_ICONS = { 'text/html': '🌐', 'application/pdf': '📄', 'text/plain': '📝', 'text/markdown': '📝', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '📋' };
 
@@ -15768,11 +15767,8 @@ function burnAreaChart() {
         _kbCache._documents = (docsR && docsR.ok) ? await docsR.json() : [];
         var kbBadge = document.getElementById('knowledge-sidebar-badge');
         if (kbBadge) {
-          var kbFacts = 0;
-          ((_kbCache && _kbCache.layers) || []).forEach(function(l) {
-            if (l && typeof l.total_pages === 'number') kbFacts += l.total_pages;
-          });
-          setSidebarCountBadge(kbBadge, _kbCache && _kbCache.enabled ? kbFacts : 0, kbFacts + ' knowledge facts');
+          var kbFacts = kbTotalFactsFromStats(_kbCache);
+          setSidebarCountBadge(kbBadge, _kbCache && _kbCache.enabled ? kbFacts : 0, kbFactsLabel(kbFacts));
         }
         if (_kbInitialLoad && _kbCache && _kbCache.enabled) {
           _kbSetupView = 'none';
@@ -16515,6 +16511,7 @@ function burnAreaChart() {
       }
 
       const layers = _kbCache.layers || [];
+      const totalPages = kbTotalFactsFromStats(_kbCache);
       const healthyCount = layers.filter(l => l.healthy).length;
       if (badge) {
         if (!kbPrimed) {
@@ -16524,7 +16521,7 @@ function burnAreaChart() {
           badge.textContent = 'restart required';
           badge.style.background = 'var(--yellow)';
         } else {
-          badge.textContent = healthyCount + '/' + layers.length + ' layers';
+          badge.textContent = kbFactsLabel(totalPages);
           badge.style.background = healthyCount === layers.length ? 'var(--green)' : (healthyCount > 0 ? 'var(--yellow)' : 'var(--red)');
         }
         badge.style.color = 'white';
@@ -16553,12 +16550,12 @@ function burnAreaChart() {
       }
 
       // Stats row
-      const totalPages = layers.reduce((sum, l) => sum + (l.total_pages || 0), 0);
       const staleTotal = layers.reduce((sum, l) => sum + (l.stale || 0), 0);
       const orphanedTotal = layers.reduce((sum, l) => sum + (l.orphaned || 0), 0);
       html += '<div class="kb-stat-grid" style="margin-bottom:14px">';
       html += `<div class="kb-stat"><div class="val">${totalPages}</div><div class="lbl">Total Facts</div>${factSparkSvg()}</div>`;
-      html += `<div class="kb-stat"><div class="val">${healthyCount}/${layers.length}</div><div class="lbl">Layers Online</div></div>`;
+      html += `<div class="kb-stat" title="Layers are knowledge sources (personal, project, org, community, vaults, or imported docs) that scope where facts come from and where new facts are written."><div class="val">${healthyCount}/${layers.length}</div><div class="lbl">Layers Online</div></div>`;
+      html += '<div class="dash-card-subtitle" style="grid-column:1 / -1">Layers are knowledge-source scopes; facts are the reusable items agents search and inject into prompts.</div>';
       html += `<div class="kb-stat"><div class="val">${escapeHtml(_kbCache.engine || 'n/a')}</div><div class="lbl">Engine</div></div>`;
       if (staleTotal > 0) html += `<div class="kb-stat"><div class="val text-warn">${staleTotal}</div><div class="lbl">Stale</div></div>`;
       if (orphanedTotal > 0) html += `<div class="kb-stat"><div class="val text-danger">${orphanedTotal}</div><div class="lbl">Orphaned</div></div>`;
@@ -17721,7 +17718,25 @@ function burnAreaChart() {
 
     // --- Audit Log ---
     const AUDIT_POLL_MS = 30000;
+    const AUDIT_PANEL_HEIGHT_KEY = 'hive.audit.panel.height';
+    const AUDIT_PANEL_DEFAULT_HEIGHT = 640;
     var _auditEntries = [];
+    var _auditResizeObserver = null;
+    function auditPanelSavedHeight() {
+      const n = Number(localStorage.getItem(AUDIT_PANEL_HEIGHT_KEY));
+      return Number.isFinite(n) && n >= 320 ? Math.min(n, Math.round(window.innerHeight * 0.8)) : AUDIT_PANEL_DEFAULT_HEIGHT;
+    }
+    function initAuditPanelResize() {
+      const panel = document.getElementById('audit-panel');
+      if (!panel) return;
+      panel.style.setProperty('--audit-panel-height', auditPanelSavedHeight() + 'px');
+      if (_auditResizeObserver || typeof ResizeObserver === 'undefined') return;
+      _auditResizeObserver = new ResizeObserver((entries) => {
+        const h = Math.round((entries && entries[0] && entries[0].contentRect && entries[0].contentRect.height) || 0);
+        if (h >= 320) localStorage.setItem(AUDIT_PANEL_HEIGHT_KEY, String(h));
+      });
+      _auditResizeObserver.observe(panel);
+    }
 
     /* Rendered size of the audit log's actor face, in CSS pixels — the log is
        the densest table on the dashboard, so its faces are the smallest. */
@@ -17760,6 +17775,7 @@ function burnAreaChart() {
       refreshSectionCardShell('audit-section');
       var panel = document.getElementById('audit-panel');
       if (!panel) return;
+      initAuditPanelResize();
       if (!entries.length) { panel.innerHTML = '<div style="color:var(--terminal-muted);font-size:var(--fs-base);padding:var(--sp-4)">No audit entries yet</div>'; return; }
       panel.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +
         '<thead><tr style="color:var(--terminal-muted);font-size:0.7rem;border-bottom:1px solid var(--terminal-line)"><th style="text-align:left;padding:var(--sp-2) var(--sp-4)">Time</th><th style="text-align:left;padding:var(--sp-2) var(--sp-4)">User</th><th style="text-align:left;padding:var(--sp-2) var(--sp-4)">Action</th><th style="text-align:left;padding:var(--sp-2) var(--sp-4)">Agent</th><th style="text-align:left;padding:var(--sp-2) var(--sp-4)">Details</th></tr></thead>' +
@@ -18780,7 +18796,7 @@ function burnAreaChart() {
       const COLLAPSIBLE_SECTION_IDS = [
         'advisory-section', 'hive-advice-section', 'acmm-reco-section', 'lifecycle-section', 'pr-throughput-section',
         'overview-section', 'governor', 'token-panel', 'cost-panel', 'repos-section', 'beads-section', 'acmm-eval-section',
-        'platform-section', 'fleet-report-section', 'audit-section', 'review-queue-section', 'nous-section', 'inception-section',
+        'fleet-report-section', 'audit-section', 'review-queue-section', 'nous-section', 'inception-section',
         'knowledge-section', 'contributors-section', 'debug-section', 'logs-section',
         'agents-section', 'faq-section'
       ];
@@ -18937,7 +18953,7 @@ function burnAreaChart() {
             wizard = renderInceptionModeSelect();
         }
       }
-      panel.innerHTML = renderCampaignsPanel() + '<div class="campaigns-card">' + wizard + '</div>';
+      panel.innerHTML = '<div class="inception-spektacular-note">Project inception runs on <a href="https://github.com/jumppad-labs/spektacular" target="_blank" rel="noopener noreferrer">Spektacular</a>, a Hive Commons project.</div>' + renderCampaignsPanel() + '<div class="campaigns-card">' + wizard + '</div>';
       renderCampaignsList();
       if (!_inceptionPollTimer) startInceptionPoll();
     }
@@ -19985,7 +20001,9 @@ function burnAreaChart() {
       const budgetLimit = budget.limit || 0;
       const budgetPct = budgetLimit > 0 ? Math.round((budgetUsed / budgetLimit) * 100) : 0;
 
+      const platform = _platformStatus || data.platform || null;
       grid.innerHTML = `
+        <div style="${cardStyle}" class="platform-diagnostics"><div style="${labelStyle}">Platform</div>${platformFactTiles(platform)}</div>
         <div style="${cardStyle}"><div style="${labelStyle}">Health Checks</div>${healthRows || '<div style="color:var(--muted);font-size:0.8rem">No data</div>'}</div>
         <div style="${cardStyle}"><div style="${labelStyle}">Agent States</div>${agentRows || '<div style="color:var(--muted);font-size:0.8rem">No agents</div>'}</div>
         <div style="${cardStyle}">
