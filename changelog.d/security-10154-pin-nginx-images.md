@@ -1,1 +1,0 @@
-- The `hive-error-pages` and legacy-redirect nginx Deployments now pin `nginx:1.31.6-alpine` by digest instead of the floating `nginx:1-alpine` tag ([#10154](https://github.com/hivecommons/hive/issues/10154)).

@@ -1,1 +1,0 @@
-- Arm continuous mode when it is enabled on an idle agent so the first continuous kick is scheduled after one cooldown.
