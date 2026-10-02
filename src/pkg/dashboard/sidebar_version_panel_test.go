@@ -88,7 +88,7 @@ const fixtures = [
     name:'hub-managed',
     v:{hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222', managedBy:'hub'}, autoUpdate:{enabled:true, managedBy:'hub'}, upgradePolicy:{schedule:'daily', schedule_hour:13, schedule_timezone:'America/New_York'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}},
     ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', offeredUpgradeLabel:'Hub target'},
-    want:'Upgrade to bbb2222', disabled:true, action:false
+    want:'Upgrade to bbb2222', disabled:false, action:true
   },
   {
     name:'manual',
@@ -129,6 +129,7 @@ for (const f of fixtures) {
   if (!f.disabled && out.includes('disabled aria-disabled="true"')) throw new Error(f.name+' should be enabled: '+out);
   if (f.action && !out.includes('data-action="gh27"')) throw new Error(f.name+' missing action: '+out);
   if (!f.action && out.includes('data-action="gh27"')) throw new Error(f.name+' unexpectedly actionable: '+out);
+  if (f.action && !out.includes('oc-version-upgrade-available')) throw new Error(f.name+' missing available styling: '+out);
 }
 `
 	cmd := exec.Command(node, "-e", script)
@@ -170,7 +171,7 @@ var _upgradeTargetHash = null;
 const localStorage = {data:{}, getItem(k){return this.data[k] || null}, setItem(k,v){this.data[k]=String(v)}, removeItem(k){delete this.data[k]}};
 const btn = {disabled:false, textContent:'', style:{}, attrs:{}, setAttribute(k,v){this.attrs[k]=v}};
 const document = { getElementById(id){ return id === 'spoke-upgrade-btn' ? btn : null; } };
-const window = {};
+const window = {_lastVersionData:{hash:'aaa1111abcdef'}};
 function showToast(){}
 function fetch(){ return new Promise(function(){}); }
 function setTimeout(){ return 1; }
@@ -184,7 +185,7 @@ function clearTimeout(){}
 selfUpgrade('bbb2222abcdef');
 if (!btn.disabled || btn.textContent !== 'Upgrading…' || btn.attrs['aria-disabled'] !== 'true') throw new Error('button not disabled as upgrading: '+JSON.stringify(btn));
 const stored = JSON.parse(localStorage.data[VERSION_UPGRADE_STORAGE_KEY] || '{}');
-if (stored.target !== 'bbb2222abcdef' || stored.targetShort !== 'bbb2222') throw new Error('progress not persisted: '+JSON.stringify(stored));
+if (stored.target !== 'bbb2222abcdef' || stored.targetShort !== 'bbb2222' || stored.startedFrom !== 'aaa1111abcdef') throw new Error('progress not persisted: '+JSON.stringify(stored));
 if (!_upgradeInProgress || _upgradeTargetHash !== 'bbb2222abcdef') throw new Error('globals not marked in progress');
 `
 	cmd := exec.Command(node, "-e", script)
@@ -225,6 +226,15 @@ if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null ||
 versionWriteUpgradeProgress({target:'eee5555abcdef', targetShort:'eee5555', startedAt:1000});
 st = versionReconcileUpgradeProgress({hash:'aaa1111', latestHash:'eee5555abcdef', target:{source:'hub', resolved:false}}, 2000);
 if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('unresolved hub target progress was not cleared');
+versionWriteUpgradeProgress({target:'8bd5272abcdef', targetShort:'8bd5272', startedFrom:'old1111abcdef', startedAt:1000});
+st = versionReconcileUpgradeProgress({hash:'8bd5272abcdef', target:{source:'hub', resolved:true, sha:'new9999abcdef'}}, 2000);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('completed old target did not clear when a new target is available');
+versionWriteUpgradeProgress({target:'fff6666abcdef', targetShort:'fff6666', startedFrom:'old1111abcdef', startedAt:1000});
+st = versionReconcileUpgradeProgress({hash:'8bd5272abcdef', target:{source:'hub', resolved:true, sha:'new9999abcdef'}}, 2000);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('running sha changed since click did not clear progress');
+versionWriteUpgradeProgress({target:'old2222abcdef', targetShort:'old2222', startedAt:1000});
+st = versionReconcileUpgradeProgress({hash:'8bd5272abcdef', target:{source:'hub', resolved:true, sha:'new9999abcdef'}}, 2000);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('legacy progress without click source did not clear when running differs from target');
 versionWriteUpgradeProgress({target:'ddd4444abcdef', targetShort:'ddd4444', startedAt:1000});
 st = versionReadUpgradeProgress(1000 + VERSION_UPGRADE_LONG_MS + 1);
 if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) throw new Error('expired progress was not cleared');

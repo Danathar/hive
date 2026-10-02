@@ -329,6 +329,8 @@
     .oc-version-row strong, .oc-version-row a { color: var(--text); }
     .oc-version-row strong a { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .oc-version-actions { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3) var(--sp-5); min-width: 0; }
+    #oc-git-version #spoke-upgrade-btn.oc-version-upgrade-available { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+    #oc-git-version #spoke-upgrade-btn.oc-version-upgrade-available::before { content: '●'; color: var(--amber); font-size: 0.7em; line-height: 1; }
     .oc-version-muted-action { color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--panel) 72%, transparent); }
     .oc-version-upgrade-progress { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: var(--sp-3); align-items: center; padding: var(--sp-3); border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--border)); border-radius: var(--r); background: color-mix(in srgb, var(--amber) 10%, var(--panel)); min-width: 0; overflow: hidden; }
     .oc-version-hive { position: relative; width: 42px; height: 42px; display: grid; place-items: center; color: var(--amber); }
@@ -23182,6 +23184,7 @@ function burnAreaChart() {
       const next = {
         target: String(st.target),
         targetShort: versionShortSHA(st.targetShort || st.target),
+        startedFrom: String(st.startedFrom || ''),
         startedAt: Number(st.startedAt || versionNowMs()),
         completedAt: st.completedAt ? Number(st.completedAt) : 0
       };
@@ -23195,8 +23198,8 @@ function burnAreaChart() {
       _upgradeTargetHash = null;
     }
 
-    function versionRecordUpgradeStart(targetHash, targetShort) {
-      const st = versionWriteUpgradeProgress({ target: targetHash || '', targetShort: targetShort || targetHash || '', startedAt: versionNowMs() });
+    function versionRecordUpgradeStart(targetHash, targetShort, currentHash) {
+      const st = versionWriteUpgradeProgress({ target: targetHash || '', targetShort: targetShort || targetHash || '', startedFrom: currentHash || '', startedAt: versionNowMs() });
       _upgradeInProgress = !!st;
       _upgradeTargetHash = st ? targetHash : null;
       return st;
@@ -23206,7 +23209,7 @@ function burnAreaChart() {
       if (!st) return null;
       now = now || versionNowMs();
       if (!st.completedAt) {
-        st = versionWriteUpgradeProgress({ target: st.target, targetShort: st.targetShort || st.target, startedAt: st.startedAt, completedAt: now });
+        st = versionWriteUpgradeProgress({ target: st.target, targetShort: st.targetShort || st.target, startedFrom: st.startedFrom || '', startedAt: st.startedAt, completedAt: now });
       }
       _upgradeInProgress = false;
       _upgradeTargetHash = null;
@@ -23216,13 +23219,29 @@ function burnAreaChart() {
     function versionReconcileUpgradeProgress(v, now) {
       const st = versionReadUpgradeProgress(now);
       if (!st) return null;
-      if (versionSameCommit(v && (v.hash || v.short), st.target)) return versionMarkUpgradeComplete(st, now);
+      const running = v && (v.hash || v.short);
       const target = v && v.target || {};
+      const policy = versionPolicy(v) || {};
       if (target.source === 'hub' && target.resolved === false) {
         versionClearUpgradeProgress();
         return null;
       }
-      const knownTarget = target.sha || target.short || v && v.latestHash || v && v.targetHash || '';
+      const knownTarget = target.sha || policy.target_sha || policy.armed_target || target.short || v && v.stableV4Hash || v && v.latestHash || v && v.targetHash || '';
+      if (versionSameCommit(running, st.target)) {
+        if (knownTarget && !versionSameCommit(knownTarget, st.target)) {
+          versionClearUpgradeProgress();
+          return null;
+        }
+        return versionMarkUpgradeComplete(st, now);
+      }
+      if (!st.startedFrom && running && !versionSameCommit(running, st.target)) {
+        versionClearUpgradeProgress();
+        return null;
+      }
+      if (st.startedFrom && running && !versionSameCommit(running, st.startedFrom)) {
+        versionClearUpgradeProgress();
+        return null;
+      }
       if (!knownTarget) {
         versionClearUpgradeProgress();
         return null;
@@ -23429,7 +23448,8 @@ function burnAreaChart() {
     function versionButtonHTML(label, title, targetHash, enabled) {
       const disabled = enabled ? '' : ' disabled aria-disabled="true"';
       const action = enabled ? ' data-action="gh27" data-arg0="' + escapeHtml(targetHash || '') + '" data-mouseover-action="gh28" data-mouseout-action="gh29"' : '';
-      return '<button id="spoke-upgrade-btn" class="hv-btn btn-primary btn-sm" type="button"' + action + disabled + ' title="' + escapeHtml(title || label) + '">' + escapeHtml(label) + '</button>';
+      const available = enabled ? ' oc-version-upgrade-available' : '';
+      return '<button id="spoke-upgrade-btn" class="hv-btn btn-primary btn-sm' + available + '" type="button"' + action + disabled + ' title="' + escapeHtml(title || label) + '">' + escapeHtml(label) + '</button>';
     }
 
     function renderVersionUpgradeAction(v, ctx) {
@@ -23438,7 +23458,6 @@ function burnAreaChart() {
       const targetShort = ctx.offeredUpgradeShort || versionShortSHA(targetHash) || 'target';
       const au = v && v.autoUpdate || {};
       const target = v && v.target || {};
-      const managedBy = target.managedBy || au.managedBy || '';
       const dep = v && v.deployment || {};
       const runtimeLabel = dep.runtime ? String(dep.runtime) : 'unknown runtime';
       const progress = ctx.upgradeProgress || null;
@@ -23448,16 +23467,12 @@ function burnAreaChart() {
       if (!targetHash || target.resolved === false || au.state === 'unknown') {
         return versionButtonHTML('Checking…', 'Checking upgrade target — the hub has not resolved a target commit yet', '', false);
       }
-      if (versionSameCommit(v && (v.hash || v.short), targetHash) || au.state === 'up_to_date' || (progress && progress.completedAt)) {
+      if (versionSameCommit(v && (v.hash || v.short), targetHash) || au.state === 'up_to_date') {
         const done = progress && progress.completedAt ? versionBeeProgressHTML(progress, v || {}) : '';
         return versionButtonHTML('Up to date ✓', 'Running the resolved target commit ' + targetShort, targetHash, false) + done;
       }
       if (au.state === 'paused' || target.paused) {
         return versionButtonHTML('Upgrade paused', 'Automatic upgrades are paused by the hub', targetHash, false);
-      }
-      if (managedBy === 'hub' || (au.enabled && managedBy !== '')) {
-        const cadence = versionCadenceLabel(v);
-        return versionButtonHTML('Upgrade to ' + targetShort, 'Hub-managed upgrades apply automatically' + (cadence ? ' — next window: ' + cadence : ''), targetHash, false);
       }
       if (dep.upgradeSupported !== true) {
         const why = dep.reason ? String(dep.reason) : 'deployment runtime is unknown';
@@ -23553,9 +23568,10 @@ function burnAreaChart() {
         let upgradeProgress = versionReconcileUpgradeProgress(v);
         const upgradeCurrentHash = String(v.hash || '').toLowerCase();
         const upgradeTargetHash = String(_upgradeTargetHash || '').toLowerCase();
+        const policyTargetHash = v.upgradePolicy && (v.upgradePolicy.target_sha || v.upgradePolicy.armed_target) || '';
         const hasHubTarget = !!(v.target && v.target.source === 'hub');
-        const offeredUpgradeHash = (v.target && v.target.sha) || v.stableV4Hash || (hasHubTarget ? '' : (v.latestHash || ''));
-        const offeredUpgradeShort = (v.target && v.target.short) || v.stableV4Short || (hasHubTarget ? '' : (v.latestShort || 'latest'));
+        const offeredUpgradeHash = (v.target && v.target.sha) || policyTargetHash || v.stableV4Hash || (hasHubTarget ? '' : (v.latestHash || ''));
+        const offeredUpgradeShort = (v.target && v.target.short) || versionShortSHA(policyTargetHash) || v.stableV4Short || (hasHubTarget ? '' : (v.latestShort || 'latest'));
         const offeredUpgradeLabel = upgradeTargetLabel(v) || 'target';
         const upgradeTargetLanded = upgradeTargetHash && (upgradeCurrentHash.startsWith(upgradeTargetHash) || upgradeTargetHash.startsWith(upgradeCurrentHash));
         let compactStatusHTML = '';
@@ -23801,7 +23817,8 @@ function burnAreaChart() {
     async function selfUpgrade(targetHash) {
       var btn = document.getElementById('spoke-upgrade-btn');
       const targetShort = versionShortSHA(targetHash || '') || 'latest';
-      const progress = versionRecordUpgradeStart(targetHash || 'latest', targetShort);
+      const currentHash = window._lastVersionData && (window._lastVersionData.hash || window._lastVersionData.short) || '';
+      const progress = versionRecordUpgradeStart(targetHash || 'latest', targetShort, currentHash);
       if (btn) { btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); btn.textContent = 'Upgrading…'; btn.style.opacity = '0.6'; }
       if (window._lastVersionData && window._lastVersionContext) {
         window._lastVersionContext.upgradeProgress = progress;
