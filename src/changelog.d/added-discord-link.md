@@ -1,1 +1,1 @@
-- Add Join our Discord links to the hub portal and spoke dashboard Help menu.
+- Add Join our Discord links across the website, hub portal, spoke dashboard Help/FAQ/onboarding, contributor surfaces, docs, and issue templates.
