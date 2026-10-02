@@ -1156,6 +1156,7 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 				"has_goose_ready", strings.Contains(output, "goose is ready"),
 				"has_enter", strings.Contains(output, "> Enter to send"),
 				"has_arrow", strings.Contains(output, "❯"),
+				"has_question_form", paneShowsCopilotQuestionForm(output),
 				"has_bob_placeholder", strings.Contains(output, bobInputPlaceholder),
 				"has_codex_ready", strings.Contains(output, codexInputPromptMarker),
 				"head_500", truncateHead(output, 500), "tail_500", truncateTail(output, 500))
@@ -1166,6 +1167,10 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 			// Check the visible pane only: a dismissed consent screen
 			// lingers in the scrollback that captureTmuxPaneForAgent sees.
 			visible := m.captureVisiblePaneForAgent(agent)
+			if paneShowsCopilotQuestionForm(visible) {
+				m.dismissCopilotQuestionFormForKick(agent)
+				continue
+			}
 			if paneShowsConsentScreen(visible) {
 				continue
 			}
