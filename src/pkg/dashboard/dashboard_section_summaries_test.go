@@ -16,8 +16,8 @@ func TestDashboardSectionCardsHaveCollapsedSummaries(t *testing.T) {
 	if !strings.Contains(dashboardHTML, `class="dash-card-summary `) {
 		t.Fatal("sectionCardHeader must render a .dash-card-summary element")
 	}
-	if !strings.Contains(dashboardHTML, "el.innerHTML = textOrDash(html);") {
-		t.Fatal("setSectionSummary must fall back to non-empty text instead of rendering blank summaries")
+	if !strings.Contains(dashboardHTML, "el.innerHTML = visualSectionSummary(sectionId, text, title);") {
+		t.Fatal("setSectionSummary must render visual collapsed summaries instead of bare text")
 	}
 
 	configs := dashboardSectionCardConfigs(t, dashboardHTML)
