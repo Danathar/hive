@@ -1342,6 +1342,25 @@
     .reco-level-flow { display: flex; align-items: center; gap: var(--sp-4); font-weight: 700; font-size: var(--fs-lg); }
     .reco-level-flow .arrow { color: var(--muted); font-weight: 400; }
     .reco-rationale { color: var(--muted); font-size: 0.8rem; margin-top: var(--sp-4); line-height: 1.4; }
+    .hive-advice-review { margin-top: var(--sp-0); }
+    .hive-advice-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); margin-top: var(--sp-3); color: var(--muted); font-size: var(--fs-sm); }
+    .hive-advice-count-chip { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); }
+    .hive-advice-count-chip dt { color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
+    .hive-advice-count-chip dd { display: flex; align-items: baseline; gap: var(--sp-1); margin: var(--sp-0); min-width: 0; }
+    .hive-advice-count-chip .count-value { color: var(--accent); font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 800; font-variant-numeric: tabular-nums; }
+    .hive-advice-count-chip .count-label { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+    .hive-advice-bands { margin-top: var(--sp-5); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); color: var(--muted); font-size: var(--fs-xs); }
+    .hive-advice-bands > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); cursor: pointer; list-style: none; }
+    .hive-advice-bands > summary::-webkit-details-marker { display: none; }
+    .hive-advice-band-title { color: var(--amber); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .hive-advice-band-toggle { border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--surface-2); color: var(--muted); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); }
+    .hive-advice-bands[open] .hive-advice-band-toggle::before { content: 'hide definitions'; }
+    .hive-advice-bands:not([open]) .hive-advice-band-toggle::before { content: 'show definitions'; }
+    .hive-advice-band-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-2) var(--sp-3); align-items: baseline; margin: var(--sp-3) var(--sp-0) var(--sp-0); }
+    .hive-advice-band-list dt { margin: var(--sp-0); }
+    .hive-advice-band-list dd { margin: var(--sp-0); color: var(--muted); line-height: 1.35; }
+    .hive-advice-band-list .repo-issue-pill, .hive-advice-band-list .repo-pr-pill { display: inline-flex; align-items: center; max-width: none; font-size: var(--fs-xs); font-weight: 700; }
+    @media (max-width: 620px) { .hive-advice-counts { grid-template-columns: 1fr; } .hive-advice-band-list { grid-template-columns: 1fr; } }
     .reco-ready { margin-top: 10px; padding: var(--sp-4) var(--sp-5); border-radius: var(--r); font-size: 0.8rem;
       background: var(--green-bg); border: 1px solid var(--green-border); color: var(--text); }
     .reco-checklist { list-style: none; margin: var(--sp-5) var(--sp-0) var(--sp-0); padding: var(--sp-0); display: flex; flex-direction: column; gap: var(--sp-3); }
@@ -14840,7 +14859,8 @@ function burnAreaChart() {
       const until = epoch.end ? new Date(epoch.end).toLocaleDateString() : '';
       const review = `Frozen for ${mode}; next review in ${days} day${days === 1 ? '' : 's'}${until ? ' (' + escapeHtml(until) + ')' : ''}. Numbers refresh every cycle.`;
       const counts = dto.counts || {};
-      const countsHtml = `<div class="crit-cmp">Counts: governor actionable queue ${escapeHtml(String(counts.governorPRs ?? 0))} PRs / ${escapeHtml(String(counts.governorIssues ?? 0))} issues (mode &amp; cadence); Overview chart ${escapeHtml(String(counts.overviewPRs ?? 0))} open PRs / ${escapeHtml(String(counts.overviewIssues ?? 0))} issues (every open or held item; queue-health advice counts these).</div>`;
+      const countChip = (label, tip, prs, issues, issueLabel) => `<div class="hive-advice-count-chip" title="${escapeHtml(tip)}"><dt>${escapeHtml(label)}</dt><dd><span class="count-value">${escapeHtml(String(prs ?? 0))}</span><span class="count-label">${escapeHtml(label === 'Governor queue' ? 'PRs' : 'open PRs')}</span><span class="count-value">${escapeHtml(String(issues ?? 0))}</span><span class="count-label">${escapeHtml(issueLabel)}</span></dd></div>`;
+      const countsHtml = `<dl class="hive-advice-counts" aria-label="Advice count scopes">${countChip('Governor queue', 'Governor actionable queue: mode & cadence', counts.governorPRs, counts.governorIssues, 'issues')}${countChip('Overview chart', 'Overview chart: every open or held item; queue-health advice counts these', counts.overviewPRs, counts.overviewIssues, 'issues')}</dl>`;
       const items = recs.map((r, i) => {
         r = r || {};
         if (r.cleared) {
@@ -14867,9 +14887,18 @@ function burnAreaChart() {
         </li>`;
       }).join('');
       const bands = Array.isArray(dto.bands) ? dto.bands : [];
-      const bandHtml = bands.length ? `<div class="crit-cmp">Bands named above (same rules as the Overview chart): ${bands.map((b) => `<b>${escapeHtml(b.label || b.key || '')}</b> (${b.kind === 'issue' ? 'issues' : 'PRs'}): ${escapeHtml(b.rule || '')}`).join('; ')}</div>` : '';
+      const bandPillClass = (b) => {
+        const key = String((b && b.key) || '').replace(/^(issue|pr)\//, '');
+        if ((b && b.kind) === 'issue') return 'repo-issue-pill' + (key === 'ready' ? '' : ' ' + key);
+        if (key === 'eligible') return 'repo-pr-pill mergeable';
+        if (key === 'blocked') return 'repo-pr-pill merge-outstanding';
+        return 'repo-pr-pill' + (key === 'waiting' ? ' held' : '');
+      };
+      const bandRows = bands.map((b) => `<dt><span class="${escapeHtml(bandPillClass(b))}">${escapeHtml(b.label || b.key || '')}</span></dt><dd>${escapeHtml(b.rule || '')}</dd>`).join('');
+      const bandOpen = bands.length > 2 ? '' : ' open';
+      const bandHtml = bands.length ? `<details class="hive-advice-bands"${bandOpen}><summary><span class="hive-advice-band-title">Band definitions</span><span class="hive-advice-band-toggle" aria-hidden="true"></span></summary><dl class="hive-advice-band-list">${bandRows}</dl></details>` : '';
       section.style.display = '';
-      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge raise">owner advice</span><span class="reco-rationale" style="margin-top:var(--sp-0)">${review}</span></div>${countsHtml}<ul class="reco-checklist">${items}</ul>${bandHtml}`;
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge raise">owner advice</span><span class="reco-rationale hive-advice-review">${review}</span></div>${countsHtml}<ul class="reco-checklist">${items}</ul>${bandHtml}`;
       applySectionCollapse('hive-advice-section');
     }
 
