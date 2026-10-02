@@ -15,6 +15,7 @@ func TestSidebarVersionChipHasExplicitAffordance(t *testing.T) {
 		`title="Version & upgrade details"`,
 		`class="oc-version-chip-chevron"`,
 		`.oc-version-chip[aria-expanded="false"] .oc-version-chip-chevron`,
+		`.oc-version-bee-chip`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("version chip missing %q", want)
@@ -89,5 +90,93 @@ if (!out.includes('Checking…')) throw new Error('checking state wrong: '+out);
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node sidebar version upgrade rules failed: %v\n%s", err, out)
+	}
+}
+
+func TestSidebarVersionUpgradeProgressStaticWiring(t *testing.T) {
+	html := indexHTML(t)
+	for _, want := range []string{
+		`@media (prefers-reduced-motion: reduce)`,
+		`@keyframes ocBeeOrbit`,
+		`VERSION_UPGRADE_STORAGE_KEY`,
+		`function versionRecordUpgradeStart`,
+		`function versionReconcileUpgradeProgress`,
+		`function versionMarkUpgradeComplete`,
+		`Upgrading…`,
+		`oc-version-upgrade-progress`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("missing upgrade progress wiring %q", want)
+		}
+	}
+}
+
+func TestSidebarVersionUpgradeClickPersistsAndDisables(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH — sidebar version upgrade click JS was NOT executed by this run")
+	}
+	html := indexHTML(t)
+	script := `
+const VERSION_UPGRADE_STORAGE_KEY = 'hive.version.upgradeProgress';
+const VERSION_UPGRADE_POLL_MS = 5000;
+let _versionUpgradePollTimer = null;
+var _upgradeInProgress = false;
+var _upgradeTargetHash = null;
+const localStorage = {data:{}, getItem(k){return this.data[k] || null}, setItem(k,v){this.data[k]=String(v)}, removeItem(k){delete this.data[k]}};
+const btn = {disabled:false, textContent:'', style:{}, attrs:{}, setAttribute(k,v){this.attrs[k]=v}};
+const document = { getElementById(id){ return id === 'spoke-upgrade-btn' ? btn : null; } };
+const window = {};
+function showToast(){}
+function fetch(){ return new Promise(function(){}); }
+function setTimeout(){ return 1; }
+function clearTimeout(){}
+` + jsFunc(t, html, "versionShortSHA") + "\n" +
+		jsFunc(t, html, "versionNowMs") + "\n" +
+		jsFunc(t, html, "versionWriteUpgradeProgress") + "\n" +
+		jsFunc(t, html, "versionRecordUpgradeStart") + "\n" +
+		jsFunc(t, html, "versionScheduleUpgradePoll") + "\n" +
+		jsFunc(t, html, "selfUpgrade") + `
+selfUpgrade('bbb2222abcdef');
+if (!btn.disabled || btn.textContent !== 'Upgrading…' || btn.attrs['aria-disabled'] !== 'true') throw new Error('button not disabled as upgrading: '+JSON.stringify(btn));
+const stored = JSON.parse(localStorage.data[VERSION_UPGRADE_STORAGE_KEY] || '{}');
+if (stored.target !== 'bbb2222abcdef' || stored.targetShort !== 'bbb2222') throw new Error('progress not persisted: '+JSON.stringify(stored));
+if (!_upgradeInProgress || _upgradeTargetHash !== 'bbb2222abcdef') throw new Error('globals not marked in progress');
+`
+	cmd := exec.Command(node, "-e", script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node sidebar upgrade click failed: %v\n%s", err, out)
+	}
+}
+
+func TestSidebarVersionProgressClearsAfterMatchedGrace(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH — sidebar version progress persistence JS was NOT executed by this run")
+	}
+	html := indexHTML(t)
+	script := `
+const VERSION_UPGRADE_STORAGE_KEY = 'hive.version.upgradeProgress';
+const VERSION_UPGRADE_DONE_MS = 30000;
+const VERSION_UPGRADE_LONG_MS = 15 * 60 * 1000;
+var _upgradeInProgress = true;
+var _upgradeTargetHash = 'bbb2222abcdef';
+const localStorage = {data:{}, getItem(k){return this.data[k] || null}, setItem(k,v){this.data[k]=String(v)}, removeItem(k){delete this.data[k]}};
+` + jsFunc(t, html, "versionShortSHA") + "\n" +
+		jsFunc(t, html, "versionSameCommit") + "\n" +
+		jsFunc(t, html, "versionNowMs") + "\n" +
+		jsFunc(t, html, "versionReadUpgradeProgress") + "\n" +
+		jsFunc(t, html, "versionWriteUpgradeProgress") + "\n" +
+		jsFunc(t, html, "versionMarkUpgradeComplete") + "\n" +
+		jsFunc(t, html, "versionReconcileUpgradeProgress") + `
+versionWriteUpgradeProgress({target:'bbb2222abcdef', targetShort:'bbb2222', startedAt:1000});
+let st = versionReconcileUpgradeProgress({hash:'bbb2222abcdef'}, 2000);
+if (!st || !st.completedAt) throw new Error('match was not marked complete: '+JSON.stringify(st));
+st = versionReadUpgradeProgress(st.completedAt + VERSION_UPGRADE_DONE_MS + 1);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) throw new Error('completed progress was not cleared after grace');
+`
+	cmd := exec.Command(node, "-e", script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node sidebar progress persistence failed: %v\n%s", err, out)
 	}
 }
