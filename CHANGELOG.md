@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.4)
+
+### Changed
+
+- A `project.writing_guide` now gets issues and PRs an outsider can read: the kick preamble tells agents that the title and the opening paragraph are written for a newcomer who does not know the codebase — what the thing is, what the problem or change is, and why it matters to a user, in plain words with no unexplained internal names, paths or jargon — and that the technical detail follows unchanged in the template's sections below, with the preamble outranking the style of any example or recalled past issue/PR. Since [#9748](https://github.com/hivecommons/hive/pull/9748) agents did add the summary, but wrote it (and the title) for someone who already knew the code, so a reader could not tell what the change was for ([#9926](https://github.com/hivecommons/hive/issues/9926)).
+
+### Fixed
+
+- The Copilot backend's model picker no longer offers `claude-opus-5-5` / `claude-sonnet-5-5` ([#9927](https://github.com/hivecommons/hive/issues/9927)). The pinned Copilot CLI 1.0.88 rejects both from `--model` and silently launches `claude-sonnet-5` instead, so an agent could end up running a different model than the one chosen in the dashboard without any indication. Both ids are removed from `copilotPinnedCLIModels` and `agent.copilotCLIAcceptedModels`; the Claude backend's own Sonnet 5.5 support (added for Claude Code 2.1.284, #9804) is unaffected.
+
 ## 2026-10-02 (v5.110.3)
 
 ### Fixed
