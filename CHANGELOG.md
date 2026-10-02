@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.115.1)
+
+### Fixed
+
+- dashboard: sidebar version panel fits the sidebar, shows cadence/tracking/status and an upgrade action (#10134)
+
 ## 2026-10-02 (v5.115.0)
 
 ### Added
