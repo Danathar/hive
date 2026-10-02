@@ -2913,6 +2913,9 @@ func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 		var cached github.ActionableResult
 		if err := json.Unmarshal(data, &cached); err == nil {
 			b.lastActionable.Store(&cached)
+			if b.sched != nil {
+				b.sched.SetLastActionable(&cached)
+			}
 			b.gov.SeedQueueState(cached.Issues.Count, cached.PRs.Count, cached.Hold.Total, cached.Issues.SLAViolations)
 			b.refreshDashboard()
 			b.logger.Info("restored cached actionable data", "issues", cached.Issues.Count, "prs", cached.PRs.Count, "age", time.Since(cached.GeneratedAt).Round(time.Second))
