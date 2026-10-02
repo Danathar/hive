@@ -363,6 +363,7 @@ The `deploy/` directory contains pre-built configurations for common deployment 
 - [Config layering](docs/config-layering.md) — effective config provenance and precedence.
 - [Dashboard API reference](docs/api-reference.md) — generated route index.
 - [apiproxy](docs/apiproxy.md) — model API proxy purpose and deployment notes.
+- [CNCF Code of Conduct](../CODE_OF_CONDUCT.md) — Hive adopts the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md) for project participation.
 
 ## Build from Source
 
