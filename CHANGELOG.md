@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.118.0)
+
+### Added
+
+- Dashboard collapsed summaries visual strips (#10262)
+
+### Fixed
+
+- Fix lifecycle timeline rendering (#10250)
+- Make dashboard version rendering tests self-contained so shuffle order does not change their JavaScript fixtures.
+
 ## 2026-10-02 (v5.117.0)
 
 ### Added
