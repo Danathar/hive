@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.110.1)
+
+### Fixed
+
+- Dismiss Copilot CLI question forms with Escape before delivering kicks and end generated kick prompts with an explicit concrete task.
+
 ## 2026-10-01 (v5.110.0)
 
 ### Added
