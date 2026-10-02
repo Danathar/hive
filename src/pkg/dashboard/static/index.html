@@ -5246,15 +5246,30 @@
       }
     }
     /** Toggle a section's collapsed state and animate */
-    function toggleSection(sectionId, maybeSectionId) {
-      if (sectionId && typeof sectionId === 'object') sectionId = maybeSectionId;
-      const collapsed = !isSectionCollapsed(sectionId);
-      setSectionCollapsed(sectionId, collapsed);
+    function toggleSection(sectionId, maybeSectionId, opts) {
+      let options = opts || {};
+      if (sectionId && typeof sectionId === 'object') {
+        sectionId = maybeSectionId;
+      } else if (maybeSectionId && typeof maybeSectionId === 'object') {
+        options = maybeSectionId;
+      }
+      const section = document.getElementById(sectionId);
+      const wasNavPeek = section && section.getAttribute('data-nav-peek') === '1';
+      let collapsed;
+      if (wasNavPeek && !options.navPeek) {
+        section.removeAttribute('data-nav-peek');
+        if (_dashboardNavPeekSectionId === sectionId) _dashboardNavPeekSectionId = null;
+        collapsed = false;
+      } else if (Object.prototype.hasOwnProperty.call(options, 'collapsed')) {
+        collapsed = !!options.collapsed;
+      } else {
+        collapsed = !isSectionCollapsed(sectionId);
+      }
+      if (options.persist !== false) setSectionCollapsed(sectionId, collapsed);
       const body = document.querySelector(`#${sectionId} .dash-card-body, #${sectionId} .section-body`);
       const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
       const card = document.querySelector(`#${sectionId} .dash-card`);
       const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
-      const section = document.getElementById(sectionId);
       applySectionBodyCollapse(body, collapsed, true);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
       if (card) card.classList.toggle('collapsed', collapsed);
@@ -5263,18 +5278,44 @@
     }
     /** Apply persisted collapsed state to a section after render */
     function applySectionCollapse(sectionId) {
-      const collapsed = isSectionCollapsed(sectionId);
+      const section = document.getElementById(sectionId);
+      const navPeek = section && section.getAttribute('data-nav-peek') === '1';
+      const collapsed = navPeek ? false : isSectionCollapsed(sectionId);
       const body = document.querySelector(`#${sectionId} .dash-card-body, #${sectionId} .section-body`);
       const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
       const card = document.querySelector(`#${sectionId} .dash-card`);
       const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
-      const section = document.getElementById(sectionId);
+      if (!navPeek && _dashboardNavPeekSectionId === sectionId) _dashboardNavPeekSectionId = null;
       normalizeSectionCardChrome(sectionId);
       applySectionBodyCollapse(body, collapsed, false);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
       if (card) card.classList.toggle('collapsed', collapsed);
       if (section) section.classList.toggle('collapsed', collapsed);
       if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    }
+    var _dashboardNavPeekSectionId = null;
+    function navPeekExpand(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (!section || section.getAttribute('data-nav-peek') === '1' || !isSectionCollapsed(sectionId)) return false;
+      toggleSection(sectionId, { collapsed: false, persist: false, navPeek: true });
+      section.setAttribute('data-nav-peek', '1');
+      _dashboardNavPeekSectionId = sectionId;
+      return true;
+    }
+    function navPeekRestore(nextSectionId) {
+      let sectionId = _dashboardNavPeekSectionId;
+      let section = sectionId ? document.getElementById(sectionId) : null;
+      if (!section || section.getAttribute('data-nav-peek') !== '1') {
+        section = document.querySelector('[data-nav-peek="1"]');
+        sectionId = section && section.id;
+      }
+      if (!sectionId || sectionId === nextSectionId) return false;
+      _dashboardNavPeekSectionId = null;
+      if (!section || section.getAttribute('data-nav-peek') !== '1') return false;
+      section.removeAttribute('data-nav-peek');
+      if (!isSectionCollapsed(sectionId)) return false;
+      toggleSection(sectionId, { collapsed: true, persist: false, navPeek: true });
+      return true;
     }
     // ── Dashboard section layout: drag/keyboard reorder, persisted per viewer ──
     // Keyed by stable top-level section ids. Saved shape: {v:1,main:[...]}; unknown
@@ -5625,6 +5666,8 @@
       const detail = document.getElementById('oc-agent-detail');
       if (detail) { detail.classList.remove('active'); detail.innerHTML = ''; }
       ocUpdateFocusedState();
+      navPeekRestore(section);
+      navPeekExpand(section);
       if (!skipScroll) {
         const el = document.getElementById(section);
         if (el) {
