@@ -1,0 +1,505 @@
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+)
+
+const (
+	feedbackIngestPath             = "/api/feedback/ingest"
+	feedbackMaxRequestBytes        = 15 << 20
+	feedbackMaxTextBytes           = 64 << 10
+	feedbackMaxScreenshots         = 5
+	feedbackMaxScreenshotBytes     = 2 << 20
+	feedbackHubRateWindow          = 24 * time.Hour
+	feedbackHubMaxPerHivePerWindow = 10
+	feedbackGitHubAPIBase          = "https://api.github.com"
+	feedbackTargetHive             = "hive"
+	feedbackTargetDocs             = "docs"
+	feedbackTypeBug                = "bug"
+	feedbackTypeFeature            = "feature"
+)
+
+type feedbackConsoleError struct {
+	Timestamp string `json:"timestamp,omitempty"`
+	Level     string `json:"level,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+type feedbackFailedAPICall struct {
+	Timestamp string `json:"timestamp,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+type feedbackAgentDiagnostic struct {
+	Name    string `json:"name,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	State   string `json:"state,omitempty"`
+	Repo    string `json:"repo,omitempty"`
+	Org     string `json:"org,omitempty"`
+}
+type feedbackDiagnostics struct {
+	Version             string                    `json:"version,omitempty"`
+	Commit              string                    `json:"commit,omitempty"`
+	Channel             string                    `json:"channel,omitempty"`
+	ACMMLevel           string                    `json:"acmm_level,omitempty"`
+	HiveID              string                    `json:"hive_id,omitempty"`
+	Hosted              bool                      `json:"hosted,omitempty"`
+	HubLinked           bool                      `json:"hub_linked,omitempty"`
+	AgentCount          int                       `json:"agent_count,omitempty"`
+	Agents              []feedbackAgentDiagnostic `json:"agents,omitempty"`
+	IncludeProjectRepos bool                      `json:"include_project_repos,omitempty"`
+	BrowserUA           string                    `json:"browser_user_agent,omitempty"`
+	BrowserPlatform     string                    `json:"browser_platform,omitempty"`
+	BrowserLanguage     string                    `json:"browser_language,omitempty"`
+	ScreenSize          string                    `json:"screen_size,omitempty"`
+	WindowSize          string                    `json:"window_size,omitempty"`
+	Page                string                    `json:"page,omitempty"`
+}
+type feedbackReportRequest struct {
+	Title              string                  `json:"title"`
+	Description        string                  `json:"description"`
+	RequestType        string                  `json:"request_type"`
+	TargetRepo         string                  `json:"target_repo"`
+	HiveID             string                  `json:"hive_id,omitempty"`
+	Screenshots        []string                `json:"screenshots,omitempty"`
+	IncludeDiagnostics bool                    `json:"include_diagnostics"`
+	Diagnostics        *feedbackDiagnostics    `json:"diagnostics,omitempty"`
+	ConsoleErrors      []feedbackConsoleError  `json:"console_errors,omitempty"`
+	FailedAPICalls     []feedbackFailedAPICall `json:"failed_api_calls,omitempty"`
+}
+type feedbackReportResponse struct {
+	OK          bool   `json:"ok"`
+	IssueNumber int    `json:"issue_number,omitempty"`
+	IssueURL    string `json:"issue_url,omitempty"`
+	Warning     string `json:"warning,omitempty"`
+}
+type feedbackIssueResult struct {
+	Number int
+	URL    string
+	ID     int64
+}
+
+type feedbackRateLimiter struct {
+	mu    sync.Mutex
+	hives map[string][]time.Time
+}
+
+var hubFeedbackRate feedbackRateLimiter
+var errFeedbackRateLimited = errors.New("feedback: hive rate limit exceeded")
+
+func (l *feedbackRateLimiter) reserve(hiveID string, now time.Time) (func(), error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.hives == nil {
+		l.hives = map[string][]time.Time{}
+	}
+	cutoff := now.Add(-feedbackHubRateWindow)
+	kept := l.hives[hiveID][:0]
+	for _, t := range l.hives[hiveID] {
+		if !t.Before(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	l.hives[hiveID] = kept
+	if len(kept) >= feedbackHubMaxPerHivePerWindow {
+		return nil, errFeedbackRateLimited
+	}
+	l.hives[hiveID] = append(l.hives[hiveID], now)
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		xs := l.hives[hiveID]
+		for i, t := range xs {
+			if t.Equal(now) {
+				l.hives[hiveID] = append(xs[:i], xs[i+1:]...)
+				break
+			}
+		}
+	}, nil
+}
+
+var feedbackTokenPattern = regexp.MustCompile(`(?i)(ghp_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]+`)
+var feedbackBearerPattern = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]+`)
+var feedbackEmailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+var feedbackKVPattern = regexp.MustCompile(`(?i)(secret|token|password|key)\s*[:=]\s*[^\s,;]+`)
+
+func (s *HubServer) handleFeedbackIngest(w http.ResponseWriter, r *http.Request) {
+	if s.hubSecret == "" {
+		npsJSONError(w, "feedback ingest requires a configured hub secret", http.StatusServiceUnavailable)
+		return
+	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		npsJSONError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	presented := strings.TrimPrefix(auth, "Bearer ")
+	body, err := io.ReadAll(io.LimitReader(r.Body, feedbackMaxRequestBytes+1))
+	if err != nil {
+		npsJSONError(w, "read error", http.StatusBadRequest)
+		return
+	}
+	if len(body) > feedbackMaxRequestBytes {
+		npsJSONError(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	var req feedbackReportRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		npsJSONError(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	if err := validateHubFeedbackRequest(&req); err != nil {
+		npsJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	hiveID := sanitizeHeartbeatField(req.HiveID)
+	if req.Diagnostics != nil {
+		if diagHiveID := sanitizeHeartbeatField(req.Diagnostics.HiveID); diagHiveID != "" {
+			hiveID = diagHiveID
+		}
+	}
+	if hiveID == "" || !isValidName(hiveID) {
+		npsJSONError(w, "invalid hive_id", http.StatusBadRequest)
+		return
+	}
+	if !s.verifyHeartbeatBearer(presented, hiveID) {
+		npsJSONError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !s.npsHiveRegistered(hiveID) {
+		npsJSONError(w, "unknown hive - heartbeat first", http.StatusForbidden)
+		return
+	}
+	release, err := hubFeedbackRate.reserve(hiveID, time.Now())
+	if err != nil {
+		npsJSONError(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	token := strings.TrimSpace(s.envGitHubToken)
+	if token == "" {
+		token = hubGitHubToken()
+	}
+	if token == "" {
+		release()
+		npsJSONError(w, "hub GitHub token is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	result, warning, err := createHubFeedbackIssue(r.Context(), http.DefaultClient, token, req, feedbackGitHubAPIBase)
+	if err != nil {
+		release()
+		if s.logger != nil {
+			s.logger.Error("feedback: failed to create issue", "hive", hiveID, "error", err)
+		}
+		npsJSONError(w, "failed to create issue", http.StatusBadGateway)
+		return
+	}
+	if s.logger != nil {
+		s.logger.Info("feedback: created issue", "hive", hiveID, "target", req.TargetRepo, "type", req.RequestType, "issue", result.Number)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(feedbackReportResponse{OK: true, IssueNumber: result.Number, IssueURL: result.URL, Warning: warning})
+}
+
+func validateHubFeedbackRequest(req *feedbackReportRequest) error {
+	req.Title = strings.TrimSpace(req.Title)
+	req.Description = strings.TrimSpace(req.Description)
+	if req.Title == "" || utf8.RuneCountInString(req.Title) > 200 {
+		return errors.New("title is required and must be 200 characters or fewer")
+	}
+	if req.Description == "" {
+		return errors.New("description is required")
+	}
+	if req.RequestType != feedbackTypeBug && req.RequestType != feedbackTypeFeature {
+		return errors.New("request_type must be bug or feature")
+	}
+	if req.TargetRepo == "" {
+		req.TargetRepo = feedbackTargetHive
+	}
+	if req.TargetRepo != feedbackTargetHive && req.TargetRepo != feedbackTargetDocs {
+		return errors.New("target_repo must be hive or docs")
+	}
+	if len(req.Screenshots) > feedbackMaxScreenshots {
+		return fmt.Errorf("at most %d screenshots are allowed", feedbackMaxScreenshots)
+	}
+	textBytes := len(req.Title) + len(req.Description) + len(mustHubFeedbackJSON(req.Diagnostics)) + len(mustHubFeedbackJSON(req.ConsoleErrors)) + len(mustHubFeedbackJSON(req.FailedAPICalls))
+	if textBytes > feedbackMaxTextBytes {
+		return errors.New("feedback text and diagnostics are too large")
+	}
+	for _, ss := range req.Screenshots {
+		if _, err := decodeHubFeedbackDataURI(ss); err != nil {
+			return err
+		}
+	}
+	sanitizeHubFeedbackRequest(req)
+	return nil
+}
+func mustHubFeedbackJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+func sanitizeHubFeedbackRequest(req *feedbackReportRequest) {
+	req.Title = truncateRunes(hubFeedbackRedact(req.Title), 200)
+	req.Description = truncateRunes(hubFeedbackRedact(req.Description), 5000)
+	if len(req.ConsoleErrors) > 20 {
+		req.ConsoleErrors = req.ConsoleErrors[len(req.ConsoleErrors)-20:]
+	}
+	for i := range req.ConsoleErrors {
+		req.ConsoleErrors[i].Message = truncateRunes(hubFeedbackRedact(req.ConsoleErrors[i].Message), 500)
+		req.ConsoleErrors[i].Source = truncateRunes(hubFeedbackRedact(stripHubFeedbackQuery(req.ConsoleErrors[i].Source)), 200)
+	}
+	if len(req.FailedAPICalls) > 20 {
+		req.FailedAPICalls = req.FailedAPICalls[len(req.FailedAPICalls)-20:]
+	}
+	for i := range req.FailedAPICalls {
+		req.FailedAPICalls[i].Path = truncateRunes(hubFeedbackRedact(stripHubFeedbackQuery(req.FailedAPICalls[i].Path)), 200)
+	}
+	if !req.IncludeDiagnostics {
+		req.Diagnostics = nil
+	}
+	if req.Diagnostics != nil {
+		sanitizeHubFeedbackDiagnostics(req.Diagnostics)
+	}
+}
+func sanitizeHubFeedbackDiagnostics(d *feedbackDiagnostics) {
+	d.HiveID = truncateRunes(hubFeedbackRedact(d.HiveID), 120)
+	d.Page = truncateRunes(hubFeedbackRedact(stripHubFeedbackQuery(d.Page)), 200)
+	d.BrowserUA = truncateRunes(hubFeedbackRedact(d.BrowserUA), 300)
+	if len(d.Agents) > 50 {
+		d.Agents = d.Agents[:50]
+	}
+	for i := range d.Agents {
+		d.Agents[i].Name = truncateRunes(hubFeedbackRedact(d.Agents[i].Name), 80)
+		d.Agents[i].Backend = truncateRunes(hubFeedbackRedact(d.Agents[i].Backend), 80)
+		d.Agents[i].Model = truncateRunes(hubFeedbackRedact(d.Agents[i].Model), 80)
+		d.Agents[i].State = truncateRunes(hubFeedbackRedact(d.Agents[i].State), 80)
+		if !d.IncludeProjectRepos {
+			d.Agents[i].Repo = ""
+			d.Agents[i].Org = ""
+		}
+	}
+}
+func hubFeedbackRedact(s string) string {
+	s = feedbackTokenPattern.ReplaceAllString(s, "[REDACTED_TOKEN]")
+	s = feedbackBearerPattern.ReplaceAllString(s, "Bearer [REDACTED]")
+	s = feedbackEmailPattern.ReplaceAllString(s, "[REDACTED_EMAIL]")
+	return feedbackKVPattern.ReplaceAllString(s, "$1=[REDACTED]")
+}
+func stripHubFeedbackQuery(s string) string {
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+func hubFeedbackRepo(req feedbackReportRequest) (string, string) {
+	if req.TargetRepo == feedbackTargetDocs {
+		return "hivecommons", "docs"
+	}
+	return "hivecommons", "hive"
+}
+func hubFeedbackLabels(req feedbackReportRequest) []string {
+	if req.RequestType == feedbackTypeBug {
+		return []string{"kind/bug", "user-feedback"}
+	}
+	return []string{"enhancement", "user-feedback"}
+}
+func createHubFeedbackIssue(ctx context.Context, client *http.Client, token string, req feedbackReportRequest, apiBase string) (feedbackIssueResult, string, error) {
+	owner, repo := hubFeedbackRepo(req)
+	labels := hubFeedbackLabels(req)
+	res, status, err := postHubGitHubIssue(ctx, client, apiBase, token, owner, repo, req.Title, buildHubFeedbackIssueBody(req), labels)
+	warning := ""
+	if err != nil && status == http.StatusForbidden {
+		res, _, err = postHubGitHubIssue(ctx, client, apiBase, token, owner, repo, req.Title, buildHubFeedbackIssueBody(req), nil)
+		warning = "Created without labels because GitHub denied label access."
+	}
+	if err != nil {
+		return feedbackIssueResult{}, "", err
+	}
+	valid := []string{}
+	for _, ss := range req.Screenshots {
+		if _, err := decodeHubFeedbackDataURI(ss); err == nil {
+			valid = append(valid, ss)
+		}
+	}
+	if len(valid) > 0 {
+		go uploadHubFeedbackScreenshots(context.Background(), client, apiBase, token, owner, repo, res.Number, valid)
+	}
+	return res, warning, nil
+}
+func buildHubFeedbackIssueBody(req feedbackReportRequest) string {
+	var b strings.Builder
+	b.WriteString(req.Description)
+	b.WriteString("\n\n---\nSubmitted from the Hive spoke dashboard feedback form.\n")
+	if req.TargetRepo == feedbackTargetDocs {
+		b.WriteString("Target: Documentation\n")
+	} else {
+		b.WriteString("Target: Hive\n")
+	}
+	if req.Diagnostics != nil {
+		b.WriteString("\n<details>\n<summary>Diagnostics</summary>\n\n")
+		writeHubFeedbackDiagnostics(&b, req.Diagnostics)
+		b.WriteString("\n</details>\n")
+	}
+	if len(req.ConsoleErrors) > 0 {
+		b.WriteString(fmt.Sprintf("\n<details>\n<summary>Browser Console Errors (%d captured)</summary>\n\n", len(req.ConsoleErrors)))
+		for _, e := range req.ConsoleErrors {
+			b.WriteString(fmt.Sprintf("- `[%s]` **%s**: %s\n", e.Timestamp, e.Level, e.Message))
+		}
+		b.WriteString("\n</details>\n")
+	}
+	if len(req.FailedAPICalls) > 0 {
+		b.WriteString(fmt.Sprintf("\n<details>\n<summary>Failed API Calls (%d captured)</summary>\n\n", len(req.FailedAPICalls)))
+		for _, c := range req.FailedAPICalls {
+			b.WriteString(fmt.Sprintf("- `[%s]` %s %s\n", c.Timestamp, c.Status, c.Path))
+		}
+		b.WriteString("\n</details>\n")
+	}
+	if len(req.Screenshots) > 0 {
+		b.WriteString(fmt.Sprintf("\nScreenshots: %d attached; the dashboard will upload them as issue comments.\n", len(req.Screenshots)))
+	}
+	return truncateRunes(b.String(), 60000)
+}
+func writeHubFeedbackDiagnostics(b *strings.Builder, d *feedbackDiagnostics) {
+	b.WriteString("| Field | Value |\n|---|---|\n")
+	rows := [][2]string{{"Version", d.Version}, {"Commit", d.Commit}, {"Channel", d.Channel}, {"ACMM Level", d.ACMMLevel}, {"Hive ID", d.HiveID}, {"Hosted", fmt.Sprintf("%t", d.Hosted)}, {"Hub linked", fmt.Sprintf("%t", d.HubLinked)}, {"Agent count", fmt.Sprintf("%d", d.AgentCount)}, {"Browser UA", d.BrowserUA}, {"Browser platform", d.BrowserPlatform}, {"Browser language", d.BrowserLanguage}, {"Screen", d.ScreenSize}, {"Window", d.WindowSize}, {"Page", d.Page}}
+	for _, r := range rows {
+		if r[1] != "" {
+			b.WriteString(fmt.Sprintf("| %s | %s |\n", r[0], strings.ReplaceAll(r[1], "|", "\\|")))
+		}
+	}
+	if len(d.Agents) > 0 {
+		b.WriteString("\nAgents:\n")
+		for _, a := range d.Agents {
+			b.WriteString(fmt.Sprintf("- %s: backend=%s model=%s state=%s\n", a.Name, a.Backend, a.Model, a.State))
+		}
+	}
+}
+func postHubGitHubIssue(ctx context.Context, client *http.Client, apiBase, token, owner, repo, title, body string, labels []string) (feedbackIssueResult, int, error) {
+	payload := map[string]any{"title": title, "body": body}
+	if labels != nil {
+		payload["labels"] = labels
+	}
+	data, _ := json.Marshal(payload)
+	u := strings.TrimRight(apiBase, "/") + "/repos/" + owner + "/" + repo + "/issues"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return feedbackIssueResult{}, 0, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return feedbackIssueResult{}, 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return feedbackIssueResult{}, resp.StatusCode, fmt.Errorf("github create issue: %d", resp.StatusCode)
+	}
+	var out struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		ID      int64  `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return feedbackIssueResult{}, resp.StatusCode, err
+	}
+	return feedbackIssueResult{Number: out.Number, URL: out.HTMLURL, ID: out.ID}, resp.StatusCode, nil
+}
+func decodeHubFeedbackDataURI(dataURI string) ([]byte, error) {
+	parts := strings.SplitN(dataURI, ",", 2)
+	if len(parts) != 2 || !strings.HasPrefix(parts[0], "data:image/") {
+		return nil, errors.New("screenshots must be image data URIs")
+	}
+	b, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, errors.New("invalid screenshot data")
+	}
+	if len(b) > feedbackMaxScreenshotBytes {
+		return nil, fmt.Errorf("each screenshot must be %d MiB or smaller", feedbackMaxScreenshotBytes>>20)
+	}
+	return b, nil
+}
+func uploadHubFeedbackScreenshots(ctx context.Context, client *http.Client, apiBase, token, owner, repo string, issue int, screenshots []string) {
+	_, _ = postHubGitHubComment(ctx, client, apiBase, token, owner, repo, issue, "Processing feedback screenshots…")
+	lines := []string{}
+	for i, ss := range screenshots {
+		content, err := decodeHubFeedbackDataURI(ss)
+		if err != nil {
+			continue
+		}
+		ext := "png"
+		if strings.HasPrefix(ss, "data:image/jpeg") {
+			ext = "jpg"
+		}
+		path := fmt.Sprintf(".github/feedback-screenshots/%d/screenshot-%d.%s", issue, i+1, ext)
+		dl, err := putHubGitHubContent(ctx, client, apiBase, token, owner, repo, path, content)
+		if err == nil && dl != "" {
+			lines = append(lines, fmt.Sprintf("![screenshot %d](%s)", i+1, dl))
+		}
+	}
+	if len(lines) > 0 {
+		_, _ = postHubGitHubComment(ctx, client, apiBase, token, owner, repo, issue, "Feedback screenshots:\n\n"+strings.Join(lines, "\n\n"))
+	}
+}
+func putHubGitHubContent(ctx context.Context, client *http.Client, apiBase, token, owner, repo, path string, content []byte) (string, error) {
+	payload := map[string]string{"message": "Add feedback screenshot", "content": base64.StdEncoding.EncodeToString(content)}
+	data, _ := json.Marshal(payload)
+	u := strings.TrimRight(apiBase, "/") + "/repos/" + owner + "/" + repo + "/contents/" + url.PathEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("github upload: %d", resp.StatusCode)
+	}
+	var out struct {
+		Content struct {
+			DownloadURL string `json:"download_url"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out.Content.DownloadURL, nil
+}
+func postHubGitHubComment(ctx context.Context, client *http.Client, apiBase, token, owner, repo string, issue int, body string) (string, error) {
+	payload := map[string]string{"body": body}
+	data, _ := json.Marshal(payload)
+	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", strings.TrimRight(apiBase, "/"), owner, repo, issue)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("github comment: %d", resp.StatusCode)
+	}
+	return "", nil
+}

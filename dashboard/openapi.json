@@ -18694,6 +18694,60 @@
         }
       }
     },
+
+    "/api/feedback/report": {
+      "post": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Submit dashboard bug or feature feedback",
+        "description": "Creates a GitHub issue for Hive or documentation feedback. Hub-linked spokes relay the sanitized payload to the hub over the per-hive heartbeat bearer; standalone spokes use GitHub user auth when available or return a prefilled fallback_url. Diagnostics are optional and redacted; screenshots are data URI images capped at five files of 2 MiB decoded each.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string", "maxLength": 200 },
+                  "description": { "type": "string" },
+                  "request_type": { "type": "string", "enum": ["bug", "feature"] },
+                  "target_repo": { "type": "string", "enum": ["hive", "docs"] },
+                  "screenshots": { "type": "array", "maxItems": 5, "items": { "type": "string" } },
+                  "include_diagnostics": { "type": "boolean" },
+                  "diagnostics": { "type": "object" },
+                  "console_errors": { "type": "array", "items": { "type": "object" } },
+                  "failed_api_calls": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["title", "description", "request_type"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Issue created or fallback URL returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "issue_number": { "type": "integer" },
+                    "issue_url": { "type": "string" },
+                    "fallback_url": { "type": "string" },
+                    "warning": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid payload" },
+          "413": { "description": "Payload too large" },
+          "502": { "description": "Hub relay or GitHub issue creation failed" }
+        }
+      }
+    },
     "/api/budget/history": {
       "get": {
         "tags": [

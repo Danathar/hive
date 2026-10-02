@@ -1636,6 +1636,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	// same credential as /api/task-status. The only read path is the admin-gated
 	// GET registered in registerSaaSRoutes.
 	s.mux.HandleFunc("POST "+npsIngestPath, s.handleNPSIngest)
+	s.mux.HandleFunc("POST "+feedbackIngestPath, s.handleFeedbackIngest)
 	s.mux.HandleFunc("GET /api/registry", s.handleRegistry)
 	s.mux.HandleFunc("GET /api/hub/leaderboard", s.handleLeaderboard)
 	s.mux.HandleFunc("GET /api/hub/stats", s.handleStats)
