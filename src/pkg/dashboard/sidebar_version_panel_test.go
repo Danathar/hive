@@ -16,6 +16,7 @@ func TestSidebarVersionChipHasExplicitAffordance(t *testing.T) {
 		`class="oc-version-chip-chevron"`,
 		`.oc-version-chip[aria-expanded="false"] .oc-version-chip-chevron`,
 		`.oc-version-bee-chip`,
+		`.oc-version-menu:empty { display: none; }`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("version chip missing %q", want)

@@ -322,6 +322,7 @@
     .oc-version-update-dot { flex: 0 0 auto; color: var(--amber); font-weight: 900; }
     .oc-version-menu { left: 0; right: auto; bottom: calc(100% + 10px); top: auto; min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; overflow: hidden; overflow-wrap: anywhere; }
     .avatar-menu.oc-version-menu { left: 0; right: auto; bottom: calc(100% + 10px); top: auto; min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
+    .oc-version-menu:empty { display: none; }
     .oc-version-menu .avatar-menu-item { white-space: normal; min-width: 0; overflow-wrap: anywhere; }
     .oc-version-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: baseline; gap: var(--sp-2); padding: var(--sp-2) var(--sp-5); color: var(--muted); font-size: var(--fs-sm); min-width: 0; max-width: 100%; overflow: hidden; }
     .oc-version-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -23660,6 +23661,9 @@ function burnAreaChart() {
       const chip = document.getElementById('oc-version-chip');
       if (!menu || !chip) return;
       const nextHidden = !menu.hidden ? true : false;
+      if (!nextHidden && !menu.innerHTML.trim()) {
+        renderVersionMenu(window._lastVersionData || {}, window._lastVersionContext || {});
+      }
       menu.hidden = nextHidden;
       chip.setAttribute('aria-expanded', nextHidden ? 'false' : 'true');
       if (!nextHidden) {
