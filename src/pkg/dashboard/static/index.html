@@ -5048,6 +5048,11 @@
       'overview-section': { title: '🍩 Overview', summary: 'overview', actionIds: ['overview-chart-settings'] },
       'governor': { title: '📊 Governor', summary: 'idle' },
       'advisory-section': { title: '📋 Hive Advisory', summary: '0 advisories' },
+      'hive-advice-section': { title: '🧭 Hive Advice', summary: '0 recommendations', badgeHtml: '<span class="dash-card-badge">weekly</span>' },
+      'fleet-report-section': { title: '📡 Fleet Report Preview', summary: '0 reports', badgeHtml: '<span class="dash-card-badge">dry-run</span>' },
+      'acmm-reco-section': { title: '⬆️ Ready to level up?', summary: 'L— · stay', badgeHtml: '<span class="dash-card-badge">advisory</span>' },
+      'lifecycle-section': { title: '🔀 Lifecycle Timeline', summary: '0 in flight · 0 merged' },
+      'pr-throughput-section': { title: '📬 Change Throughput', summary: '0 merged · 0 opened (24h)', subtitleHtml: 'pull/merge requests across tracked forges' },
       'token-panel': { title: '🪙 Token Usage', summary: '0 sessions' },
       'cost-panel': { title: '💵 Cost', summary: '$0' },
       'repos-section': { title: '📦 Repositories', summary: '0 repos' },
@@ -5064,7 +5069,6 @@
       'logs-section': { title: '📋 Agent Logs', summary: 'logs' },
       'agents-section': { title: '🤖 Agents', summary: '0 running / 0 total' },
       'faq-section': { title: '❓ FAQ', summary: 'questions' },
-      'pr-throughput-section': { title: '📬 Change Throughput', summary: '0 merged · 0% hive' },
     });
     function sectionCardHeader(opts) {
       opts = opts || {};
@@ -5155,7 +5159,7 @@
     function setSectionSummary(sectionId, html, title) {
       const el = document.getElementById(sectionId + '-summary');
       if (!el) return;
-      el.innerHTML = html || '';
+      el.innerHTML = textOrDash(html);
       if (title != null) el.title = title;
     }
     function textOrDash(value) {
@@ -5170,6 +5174,36 @@
       const hrs = Math.floor(mins / 60);
       if (hrs < 48) return hrs + 'h ago';
       return Math.floor(hrs / 24) + 'd ago';
+    }
+    function agentsSectionSummary(agents) {
+      agents = Array.isArray(agents) ? agents : [];
+      const off = agents.filter(a => a && (a.paused || a.stopped || a.offByCadence || a.unscheduledInMode || a.state === 'stopped' || a.state === 'failed')).length;
+      const on = Math.max(0, agents.length - off);
+      return `${agents.length} agents · ${on} on · ${off} off`;
+    }
+    function contributorsSectionSummary(contributors, pool) {
+      contributors = Array.isArray(contributors) ? contributors : [];
+      const active = contributors.filter(c => c && c.active).length || Number(pool && pool.active) || 0;
+      const total = contributors.length || Number(pool && pool.registered) || 0;
+      const ranked = contributors.slice().sort((a, b) => (Number(b.total_tasks_completed || b.tasks_completed) || 0) - (Number(a.total_tasks_completed || a.tasks_completed) || 0));
+      const top = ranked[0] && (ranked[0].github_username || ranked[0].login);
+      if (top) return `${total} contributors · ${active} active · top: @${top}`;
+      return total ? `${total} contributors · ${active} active` : '0 contributors';
+    }
+    function inceptionSectionSummary() {
+      const campaigns = Array.isArray(_campaigns) ? _campaigns : [];
+      const activeStatuses = { active: true, running: true, working: true, in_progress: true, started: true, open: true };
+      let active = campaigns.filter(c => {
+        const status = String((c && (c.status || c.current_stage)) || '').toLowerCase().replace(/[-\s]+/g, '_');
+        return activeStatuses[status] || (!!status && status !== 'complete' && status !== 'completed' && status !== 'parked' && status !== 'archived');
+      }).length;
+      let proposals = campaigns.length;
+      if (_inceptionState && _inceptionState.phase) {
+        proposals = Math.max(1, proposals);
+        active = Math.max(1, active);
+      }
+      if (!proposals && !active) return 'no active proposals';
+      return `${proposals} proposal${proposals === 1 ? '' : 's'} · ${active} in progress`;
     }
     function refreshDashboardSectionSummaries(data) {
       data = data || window._lastStatus || {};
@@ -5198,15 +5232,14 @@
       const health = document.getElementById('oc-health');
       setSectionSummary('debug-section', textOrDash(health && health.textContent));
       const agents = data.agents || window._lastAgents || [];
-      const running = agents.filter(a => a && !a.paused && !a.stopped && !a.offByCadence).length;
-      setSectionSummary('agents-section', `${running} running / ${agents.length} total`);
+      setSectionSummary('agents-section', agentsSectionSummary(agents));
       const appr = document.getElementById('approvals-badge');
       setSectionSummary('approvals-section', `${textOrDash(appr && appr.textContent)} pending`);
       setSectionSummary('logs-section', `${agents.length} agents`);
       setSectionSummary('overview-section', data.governor && data.governor.mode ? `${data.governor.mode} · ${repos.length} repos` : `${repos.length} repos`);
-      setSectionSummary('inception-section', data.inception ? textOrDash(data.inception.phase || data.inception.status) : 'ready');
+      setSectionSummary('inception-section', inceptionSectionSummary());
       const faqCount = document.querySelectorAll('#faq-panel h4').length;
-      setSectionSummary('faq-section', faqCount ? `${faqCount} questions` : '');
+      setSectionSummary('faq-section', faqCount ? `${faqCount} questions` : '—');
     }
 
     /** Check whether a dashboard section is collapsed in localStorage */
@@ -8687,6 +8720,7 @@
     }
     function renderAgents(agents) {
       refreshSectionCardShell('agents-section');
+      setSectionSummary('agents-section', agentsSectionSummary(agents));
       const el = document.getElementById('agents');
       // Preserve custom prompt input values across re-renders
       const savedInputs = {};
@@ -8696,6 +8730,7 @@
       });
       const { sorted: sortedAgents } = _sortAgentsBySidebar(agents);
       if (sortedAgents.length === 0) {
+        setSectionSummary('agents-section', agentsSectionSummary([]));
         setIfChanged(el, emptyStateCard('🤖', 'Add your first agent',
           'Agents are the workers that scan repos, review changes, keep CI healthy, and write docs. Start from a quick template or build one from scratch. ' +
           '<br><button type="button" class="hv-btn btn-primary btn-sm" data-action="openAddAgentDialog" title="Add a new agent from a template or from scratch">＋ Add your first agent</button>'));
@@ -14568,11 +14603,13 @@ function burnAreaChart() {
 
 
     function renderHiveAdvice(dto) {
+      refreshSectionCardShell('hive-advice-section');
       const section = document.getElementById('hive-advice-section');
       const card = document.getElementById('hive-advice-card');
       if (!section || !card) return;
       dto = dto || {};
       const recs = Array.isArray(dto.recommendations) ? dto.recommendations : [];
+      setSectionSummary('hive-advice-section', `${recs.length} recommendation${recs.length === 1 ? '' : 's'}`);
       if (recs.length === 0) { section.style.display = 'none'; return; }
       const epoch = dto.epoch || {};
       const days = Number.isFinite(Number(dto.nextReviewInDays)) ? Number(dto.nextReviewInDays) : 0;
@@ -14616,12 +14653,14 @@ function burnAreaChart() {
 
 
     function renderFleetReport(dto) {
+      refreshSectionCardShell('fleet-report-section');
       const section = document.getElementById('fleet-report-section');
       const card = document.getElementById('fleet-report-card');
       if (!section || !card) return;
       dto = dto || {};
       const reports = Array.isArray(dto.reports) ? dto.reports : [];
       const recoveries = Array.isArray(dto.recoveries) ? dto.recoveries : [];
+      setSectionSummary('fleet-report-section', `${reports.length} reports · ${recoveries.length} recovered`);
       if (reports.length === 0 && recoveries.length === 0) { section.style.display = 'none'; return; }
       const dryRun = dto.dry_run !== false;
       const mk = (r, i, recovered) => {
@@ -14686,6 +14725,7 @@ function burnAreaChart() {
     }
 
     function renderACMMReco(rec) {
+      refreshSectionCardShell('acmm-reco-section');
       const section = document.getElementById('acmm-reco-section');
       const card = document.getElementById('acmm-reco-card');
       if (!section || !card) return;
@@ -14697,6 +14737,10 @@ function burnAreaChart() {
       const unmet = Array.isArray(rec.Unmet) ? rec.Unmet : [];
       const signals = Array.isArray(rec.AutonomySignals) ? rec.AutonomySignals : [];
       const levels = Array.isArray(rec.AutonomyLevels) ? rec.AutonomyLevels : [];
+      const acmmSummary = cur !== null
+        ? `L${cur}${advise === 'raise' && tgt !== null ? ' → L' + tgt : ''} · ${advise}`
+        : `${advise}`;
+      setSectionSummary('acmm-reco-section', acmmSummary);
       const levelsHtml = levels.length
         ? `<div class="reco-fact-heading">Automatic autonomy level decisions</div><ul class="reco-checklist">` + levels.map((l) => {
           l = l || {};
@@ -14947,6 +14991,7 @@ function burnAreaChart() {
     // server-derived details from journey.details while keeping the collapsed
     // density unchanged.
     function renderLifecycle(dto) {
+      refreshSectionCardShell('lifecycle-section');
       const section = document.getElementById('lifecycle-section');
       const card = document.getElementById('lifecycle-card');
       if (!section || !card) return;
@@ -14961,6 +15006,7 @@ function burnAreaChart() {
       const inFlight = Number(fleet.inFlight) || 0;
       const merged = Number(fleet.merged) || 0;
       const blocked = Number(fleet.blocked) || 0;
+      setSectionSummary('lifecycle-section', `${inFlight} in flight · ${merged} merged${blocked ? ' · ' + blocked + ' blocked' : ''}`);
       const controlsHtml = `<div class="gov-pr-models-toggle lc-controls" aria-label="Lifecycle row controls">
         <button type="button" data-action="lifecycleExpandAll" data-stop="1" title="Show details for every visible lifecycle row">Expand all</button>
         <button type="button" data-action="lifecycleCollapseAll" data-stop="1" title="Hide details for every visible lifecycle row">Collapse all</button>
@@ -15223,6 +15269,7 @@ function burnAreaChart() {
     }
 
     function renderPRThroughput(dto) {
+      refreshSectionCardShell('pr-throughput-section');
       const section = document.getElementById('pr-throughput-section');
       const card = document.getElementById('pr-throughput-card');
       if (!section || !card) return;
@@ -15237,12 +15284,9 @@ function burnAreaChart() {
       const mergedActors = prtActorCounts(dto, 'pr', 'merged');
       const mergedActorTotal = mergedActors.hive + mergedActors.human + mergedActors.other;
       const hiveMergedPct = mergedActorTotal ? Math.round((mergedActors.hive / mergedActorTotal) * 100) : 0;
-      const summary = `${merged} merged · ${hiveMergedPct}% hive`;
-      const summaryEl = document.getElementById('pr-throughput-section-summary');
-      if (summaryEl) {
-        summaryEl.textContent = summary;
-        summaryEl.title = 'Merged PRs and hive-attributed share in the selected window';
-      }
+      const windowName = PRT_WINDOWS.find(([h]) => h === prtHours);
+      const summary = `${merged} merged · ${opened} opened (${windowName ? windowName[1] : 'window'})`;
+      setSectionSummary('pr-throughput-section', summary, `Merged and opened PRs in the selected window; ${hiveMergedPct}% hive-attributed merged share`);
       const pathLabels = { sweep: 'auto-merge sweep', queue: 'auto-merge sweep', relay: 'merge relay', human: 'human', other_automation: 'other automation', unknown: 'unrecorded path' };
       const pathParts = Object.keys(byPath).filter((k) => Number(byPath[k]) > 0).sort()
         .map((k) => `${Number(byPath[k])} ${escapeHtml(pathLabels[k] || k)}`);
@@ -18878,6 +18922,7 @@ function burnAreaChart() {
 
     function renderContributors(contributors) {
       refreshSectionCardShell('contributors-section');
+      setSectionSummary('contributors-section', contributorsSectionSummary(contributors, null));
       const panel = document.getElementById('contributors-panel');
       if (!panel) return;
       if (!contributors.length) {
@@ -19095,6 +19140,7 @@ function burnAreaChart() {
       const activeCount = pool.active || 0;
       const totalCount = pool.registered || 0;
       if (sidebarBadge) setSidebarCountBadge(sidebarBadge, totalCount, `${activeCount} active of ${totalCount} registered`);
+      setSectionSummary('contributors-section', contributorsSectionSummary(_cachedContributors || [], pool));
       if (statusBadge) {
         statusBadge.textContent = `${activeCount} active / ${totalCount} registered`;
         statusBadge.style.background = activeCount > 0 ? 'var(--green)' : 'var(--line)';
@@ -19643,6 +19689,7 @@ function burnAreaChart() {
 
     function renderInception() {
       refreshSectionCardShell('inception-section');
+      setSectionSummary('inception-section', inceptionSectionSummary());
       const panel = document.getElementById('inception-panel');
       if (!panel) return;
 
@@ -19704,6 +19751,7 @@ function burnAreaChart() {
 
     function renderCampaignsList() {
       const list = document.getElementById('campaigns-list');
+      setSectionSummary('inception-section', inceptionSectionSummary());
       if (!list) return;
       if (!_campaigns || _campaigns.length === 0) {
         list.innerHTML = '<div class="campaign-empty">No campaigns yet. New Inception archives completed sessions here.</div>';
@@ -20726,6 +20774,9 @@ function burnAreaChart() {
       const budgetPct = budgetLimit > 0 ? Math.round((budgetUsed / budgetLimit) * 100) : 0;
 
       const platform = _platformStatus || data.platform || null;
+      const warningCount = Object.entries(health).filter(([k, v]) => k === 'ci' ? Number(v) < CI_PASS_THRESHOLD && Number(v) !== -1 : !(v === true || v === 1 || v === -1)).length;
+      const version = platform && (platform.version || platform.hiveVersion || platform.gitVersion || platform.commit);
+      setSectionSummary('debug-section', warningCount ? `${warningCount} warning${warningCount === 1 ? '' : 's'}` : `healthy${version ? ' · ' + version : ''}`);
       grid.innerHTML = `
         <div style="${cardStyle}" class="platform-diagnostics"><div style="${labelStyle}">Platform</div>${platformFactTiles(platform)}</div>
         <div style="${cardStyle}"><div style="${labelStyle}">Health Checks</div>${healthRows || '<div style="color:var(--muted);font-size:0.8rem">No data</div>'}</div>
@@ -20791,6 +20842,8 @@ function burnAreaChart() {
 
     function renderLogs() {
       refreshSectionCardShell('logs-section');
+      const logAgents = Object.keys(_logsData || {}).length || (window._lastAgents || []).length;
+      setSectionSummary('logs-section', `${logAgents} agent${logAgents === 1 ? '' : 's'}`);
       const output = document.getElementById('logs-output');
       if (!output) return;
       const select = document.getElementById('logs-agent-select');
