@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.111.0)
+
+### Added
+
+- **`upstream_watch` config block** — a forked repo can now declare the upstream it follows (`upstream: owner/repo`, or omit it to use the GitHub fork parent) plus volume controls: `sources` (`releases`, `prs`), `pr_labels`, `max_issues_per_run` and `label`, with a 6h default `interval`. Off by default and validated at load (repo keys must be in `project.repos`). Configuration only; polling and issue filing follow separately. Part of #9963; closes #9966.
+
+### Changed
+
+- images: bump claude 2.1.284 -> 2.1.287 (#9976)
+
 ## 2026-10-02 (v5.110.10)
 
 ### Fixed
