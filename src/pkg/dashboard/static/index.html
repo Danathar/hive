@@ -10730,10 +10730,10 @@
       if (prRequestedReviews(pr || {}).length) kinds.push('pr:review-requested');
       if (prConversation(pr || {})) kinds.push('pr:comments');
       if (prLinkedIssues(pr || {}).length) kinds.push('pr:linked-issue');
-      if (prCIFailing(pr || {})) kinds.push('pr:ci');
+      if (String((pr && pr.ci_status) || '').toLowerCase() === 'failure' || ((pr && pr.failing_checks) || []).length) kinds.push('pr:ci');
       if ((pr || {}).mergeable === 'no') kinds.push('pr:conflict');
       if (prQueued(pr || {})) kinds.push('pr:queued');
-      if ((info && info.role) || prAgentRole(pr || {})) kinds.push('pr:role');
+      if (info && info.role) kinds.push('pr:role');
       if (prIsStale(pr)) kinds.push('pr:stale');
       if ((pr || {}).review_url) kinds.push('pr:hive-review');
       return Array.from(new Set(kinds));
