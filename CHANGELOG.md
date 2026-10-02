@@ -11,6 +11,23 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.115.0)
+
+### Added
+
+- dashboard: Change Throughput  hive vs human attribution for created/reviewed/merged PRs and issues, with trend chart (#10021)
+- agents: show continuous mode in cadence table (#10041)
+- feat(autoupdate): surface when the hive was last updated (#10118)
+- Upstream watch now judges each candidate: it classifies an upstream change as security, bugfix, feature or chore (upstream labels first, then the conventional-commit title prefix, with security winning), checks fork applicability cheaply via the contents API (skipping an item when none of its touched files exist on the fork's default branch) and estimates port difficulty (easy/moderate/hard) from the files and lines changed.
+
+### Changed
+
+- Reference CNCF Code of Conduct in READMEs (#10039)
+
+### Fixed
+
+- fix(relay): enter quota hold on headless Codex usage-limit exits (#10068)
+
 ## 2026-10-02 (v5.114.0)
 
 ### Added
