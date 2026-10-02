@@ -101,9 +101,24 @@
     .git-version { font-size: 0.65rem; color: var(--muted); margin-left: 10px; font-weight: 400; font-family: var(--font-mono); }
     .git-version .git-behind { color: var(--yellow); font-weight: 600; white-space: nowrap; }
     /* Release channel + last upgrade attempt panel (#7092). */
+    #dashboard-notices { margin: var(--sp-4) var(--sp-0) var(--sp-5); }
+    #dashboard-notices:empty { display: none; }
     .release-status { margin: 6px 0 10px; padding: var(--sp-4) var(--sp-5); border: 1px solid var(--border); border-radius: var(--r); background: color-mix(in srgb, var(--border) 12%, transparent); font-size: var(--fs-base); line-height: 1.5; }
     .release-status-row { display: block; }
+    .release-status-row + .release-status-row { margin-top: var(--sp-2); }
+    .release-status-row--selector { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+    .release-status-row--info { color: var(--accent); }
+    .release-status-row--warn { color: var(--yellow, #d4a017); }
+    .release-status-row--success { color: var(--green); font-weight: 600; }
+    .release-status-row--danger { color: var(--red); font-weight: 600; }
+    .release-status-row--muted { color: var(--muted); font-weight: 600; }
+    .release-status-detail { margin-top: var(--sp-1); color: var(--muted); line-height: 1.4; }
+    .release-channel-select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 3px 8px; }
     .release-status code { font-family: var(--font-mono); font-size: 0.9em; }
+    .dashboard-notice { border-radius: 8px; padding: var(--sp-5) var(--sp-6); margin-bottom: var(--sp-4); display: flex; align-items: center; gap: 10px; font-size: var(--fs-base); }
+    .dashboard-notice__icon { font-size: var(--fs-lg); }
+    .dashboard-notice__body { flex: 1; color: var(--text); }
+    .dashboard-notice--planning { background: rgba(124,58,237,0.10); border: 1px solid rgba(124,58,237,0.32); }
     .git-version .git-dirty { color: var(--yellow); }
     .header-spacer { flex: 1; }
     /* .widget-dl / .layout-toggle — ghost buttons (system recipe at end of
@@ -4113,7 +4128,8 @@
        renderReleaseStatus() from /api/version's releaseStatus object. -->
   <div id="dashboard-notices">
     <div id="release-status" class="release-status" hidden></div>
-  <div class="dashboard-layout-live" id="dashboard-layout-live" aria-live="polite" aria-atomic="true"></div>
+    <div id="planning-intro" hidden></div>
+    <div class="dashboard-layout-live" id="dashboard-layout-live" aria-live="polite" aria-atomic="true"></div>
 
   <div id="gh-app-install-banner" class="gh-app-install-banner" hidden>
     <span class="fs-2xl">&#9888;&#65039;</span>
@@ -4171,7 +4187,6 @@
     </div>
   </div>
   <div id="hub-banner" style="display:none"></div>
-  <div id="planning-intro" style="display:none"></div>
   <div id="system-alerts-banner" style="display:none"></div>
   </div>
   <div class="repos" id="overview-section" data-dashboard-section="overview-section">
@@ -9694,7 +9709,7 @@
     function maybePlanningIntro(data) {
       var el = document.getElementById('planning-intro');
       if (!el) return;
-      if (localStorage.getItem(PLANNING_INTRO_KEY)) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      if (localStorage.getItem(PLANNING_INTRO_KEY)) { el.hidden = true; el.innerHTML = ''; return; }
       var hasRepos = (data && data.repos && data.repos.length > 0);
       // Only introduce the feature once there is something to plan, and once any
       // planning activity exists we assume the user has found it — stay quiet.
@@ -9703,18 +9718,18 @@
       // Planning needs ACMM L5+ (the architect that decomposes epics is only
       // scheduled there) — don't advertise a feature the hive can't act on.
       var levelOK = ((data && data.acmmLevel) || 0) >= 5;
-      if (!hasRepos || alreadyUsed || !levelOK) { el.style.display = 'none'; el.innerHTML = ''; return; }
-      el.style.display = 'block';
-      el.innerHTML = '<div style="background:rgba(124,58,237,0.10);border:1px solid rgba(124,58,237,0.32);border-radius:8px;padding:var(--sp-5) var(--sp-6);margin-bottom:var(--sp-4);display:flex;align-items:center;gap:10px;font-size:0.85rem">'
-        + '<span style="font-size:1.1rem">🧭</span>'
-        + '<span style="flex:1;color:var(--text)"><strong>New: plan an issue.</strong> Add the <code>plan</code> label to any issue — or click <strong>⧉ Plan</strong> on an issue below — and the architect breaks it into a reviewable task plan you approve before work starts.</span>'
+      if (!hasRepos || alreadyUsed || !levelOK) { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+      el.innerHTML = '<div class="dashboard-notice dashboard-notice--planning">'
+        + '<span class="dashboard-notice__icon">🧭</span>'
+        + '<span class="dashboard-notice__body"><strong>New: plan an issue.</strong> Add the <code>plan</code> label to any issue — or click <strong>⧉ Plan</strong> on an issue below — and the architect breaks it into a reviewable task plan you approve before work starts.</span>'
         + '<button class="hv-btn btn-icon btn-sm" data-action="dismissPlanningIntro" title="Dismiss">✕</button>'
         + '</div>';
     }
     function dismissPlanningIntro() {
       localStorage.setItem(PLANNING_INTRO_KEY, '1');
       var el = document.getElementById('planning-intro');
-      if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+      if (el) { el.hidden = true; el.innerHTML = ''; }
     }
 
     function renderSystemAlerts(alerts) {
@@ -23760,6 +23775,8 @@ function burnAreaChart() {
     }
 
     function versionButtonHTML(label, title, targetHash, enabled) {
+      label = String(label || '').trim();
+      if (!label) return '';
       const disabled = enabled ? '' : ' disabled aria-disabled="true"';
       const action = enabled ? ' data-action="gh27" data-arg0="' + escapeHtml(targetHash || '') + '" data-mouseover-action="gh28" data-mouseout-action="gh29"' : '';
       const available = enabled ? ' oc-version-upgrade-available' : '';
@@ -23813,6 +23830,7 @@ function burnAreaChart() {
         : versionDashHTML('running commit is unavailable');
       const row = function(label, valueHTML, title) { return '<div class="oc-version-row"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + '><span>' + escapeHtml(label) + '</span>' + valueHTML + '</div>'; };
       const value = function(text, title) { return '<strong title="' + escapeHtml(title || text || '') + '">' + escapeHtml(text || '—') + '</strong>'; };
+      const upgradeActionHTML = renderVersionUpgradeAction(v || {}, ctx).trim();
       window._versionCopyText = ['Hive ' + shortHash, 'hash ' + fullHash, 'channel ' + deliveryLabel, 'tracking ' + trackingText, 'cadence ' + (cadence || '—'), statusText].join('\n');
       window._versionHashCopyText = fullHash;
       let html = '';
@@ -23828,7 +23846,7 @@ function burnAreaChart() {
       }
       html += '<a class="avatar-menu-item" href="https://github.com/hivecommons/hive/releases" target="_blank" rel="noopener noreferrer">Changelog / release notes ↗</a>';
       html += '<div class="avatar-menu-divider"></div>';
-      html += '<div class="oc-version-actions">' + renderVersionUpgradeAction(v || {}, ctx) + '<button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionHashFromMenu">Copy SHA</button><button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionFromMenu">Copy version details</button></div>';
+      html += '<div class="oc-version-actions">' + upgradeActionHTML + '<button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionHashFromMenu">Copy SHA</button><button type="button" class="hv-btn btn-secondary btn-sm" data-action="copyVersionFromMenu">Copy version details</button></div>';
       return html;
     }
 
@@ -24021,24 +24039,24 @@ function burnAreaChart() {
 
       // --- Channel (honest about "unknown") ---
       var ch = rs.channel || {};
-      var chColor, chIcon, chLabel;
+      var chTone, chIcon, chLabel;
       if (ch.resolved && ch.channel) {
-        chColor = 'var(--accent)'; chIcon = '📡';
+        chTone = 'info'; chIcon = '📡';
         chLabel = 'Channel: <strong>' + escapeHtml(ch.channel) + '</strong>';
         if (ch.pendingChannel && ch.pendingChannel !== ch.channel) {
-          chLabel += ' <span style="color:var(--yellow, #d4a017);font-weight:600">(switch to <code>' + escapeHtml(ch.pendingChannel) + '</code> requested; waiting for rollout/heartbeat)</span>';
+          chLabel += ' <span class="release-status-row--warn">(switch to <code>' + escapeHtml(ch.pendingChannel) + '</code> requested; waiting for rollout/heartbeat)</span>';
         }
       } else {
-        chColor = 'var(--yellow, #d4a017)'; chIcon = '❔';
+        chTone = 'warn'; chIcon = '❔';
         chLabel = 'Channel: <strong>unknown</strong>' +
-          (ch.imageTag ? ' <span style="opacity:0.8">(image tag <code>' + escapeHtml(ch.imageTag) + '</code> is not a release channel)</span>' :
-          (ch.imageRef ? ' <span style="opacity:0.8">(image <code>' + escapeHtml(ch.imageRef) + '</code> has no release-channel tag)</span>' : ' <span style="opacity:0.8">(image reference unavailable)</span>'));
+          (ch.imageTag ? ' <span class="text-muted">(image tag <code>' + escapeHtml(ch.imageTag) + '</code> is not a release channel)</span>' :
+          (ch.imageRef ? ' <span class="text-muted">(image <code>' + escapeHtml(ch.imageRef) + '</code> has no release-channel tag)</span>' : ' <span class="text-muted">(image reference unavailable)</span>'));
       }
       var selectorHtml = '';
       if (ch.selectorEnabled) {
-        selectorHtml = '<div class="release-status-row" style="margin-top:var(--sp-2);display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap">' +
+        selectorHtml = '<div class="release-status-row release-status-row--selector">' +
           '<label class="text-muted" for="release-channel-select">Follow channel</label>' +
-          '<select id="release-channel-select" data-current="' + escapeHtml(ch.channel || '') + '" data-change-action="switchReleaseChannel" data-arg-types="t" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);padding:3px 8px">' +
+          '<select id="release-channel-select" class="release-channel-select" data-current="' + escapeHtml(ch.channel || '') + '" data-change-action="switchReleaseChannel" data-arg-types="t">' +
           ['stable','candidate','edge'].map(function(c) { return '<option value="' + c + '"' + (c === ch.channel ? ' selected' : '') + '>' + c + '</option>'; }).join('') +
           '</select>' +
           '<span class="text-muted" id="release-channel-switch-msg">' + escapeHtml(ch.selectorDetail || '') + '</span>' +
@@ -24049,20 +24067,24 @@ function burnAreaChart() {
 
       // --- Last upgrade attempt (three distinct states) ---
       var at = rs.attempt || {};
-      var aColor = 'var(--muted)', aIcon = 'ⓘ', aLabel = '';
+      var aTone = 'muted', aIcon = 'ⓘ', aLabel = '';
       var hideAttemptRow = false;
       switch (at.state) {
         case 'succeeded':
-          aColor = 'var(--green)'; aIcon = '✅';
-          aLabel = 'Last upgrade: <strong>succeeded</strong>';
+          aTone = 'success'; aIcon = '✅';
+          aLabel = 'Last upgrade: <strong>completed' + (at.target ? ' → ' + escapeHtml(versionShortSHA(at.target)) : '') + '</strong>';
           break;
         case 'failed':
-          aColor = 'var(--red)'; aIcon = '⚠';
+          aTone = 'danger'; aIcon = '⚠';
           aLabel = 'Last upgrade: <strong>FAILED</strong>';
           break;
         case 'in_progress':
-          aColor = 'var(--yellow, #d4a017)'; aIcon = '⟳';
+          aTone = 'warn'; aIcon = '⟳';
           aLabel = 'Last upgrade: <strong>in progress</strong>';
+          break;
+        case 'superseded':
+          aTone = 'muted'; aIcon = '↷';
+          aLabel = 'Last upgrade: <strong>superseded' + (at.target ? ' → ' + escapeHtml(versionShortSHA(at.target)) : '') + '</strong>';
           break;
         case 'never':
         default:
@@ -24080,23 +24102,23 @@ function burnAreaChart() {
       var when = at.completedAt || at.at || '';
       var whenHtml = '';
       if (when) {
-        whenHtml = ' <span style="opacity:0.85" title="' + escapeHtml(when) + '">at ' +
+        whenHtml = ' <span class="text-muted" title="' + escapeHtml(when) + '">at ' +
           escapeHtml(when) + ' (' + escapeHtml(relativeAge(when)) + ')</span>';
       }
-      var detailHtml = at.detail ? '<div style="margin-top:var(--sp-1);color:var(--muted);line-height:1.4">' + escapeHtml(at.detail) + '</div>' : '';
+      var detailHtml = at.detail ? '<div class="release-status-detail">' + escapeHtml(at.detail) + '</div>' : '';
 
       // --- Staleness warning: never present stale data as current truth. ---
       var staleHtml = '';
       if (rs.hubReachable === false) {
-        staleHtml = '<div style="margin-top:var(--sp-1);color:var(--yellow, #d4a017)">⚠ This view may be stale: the hub has not been reached recently' +
+        staleHtml = '<div class="release-status-detail release-status-row--warn">⚠ This view may be stale: the hub has not been reached recently' +
           (rs.lastHeartbeatAt ? ' (last heartbeat ' + escapeHtml(rs.lastHeartbeatAt) + ')' : '') + '.</div>';
       }
 
       el.innerHTML =
-        '<div class="release-status-row" style="color:' + chColor + '">' + chIcon + ' ' + chLabel + '</div>' +
+        '<div class="release-status-row release-status-row--' + chTone + '">' + chIcon + ' ' + chLabel + '</div>' +
         selectorHtml +
         (hideAttemptRow ? '' :
-          '<div class="release-status-row" style="color:' + aColor + ';font-weight:600">' + aIcon + ' ' + aLabel + whenHtml + '</div>' +
+          '<div class="release-status-row release-status-row--' + aTone + '">' + aIcon + ' ' + aLabel + whenHtml + '</div>' +
           detailHtml) +
         staleHtml;
     }
@@ -24107,7 +24129,7 @@ function burnAreaChart() {
       if (!channel) return;
       var previous = sel.getAttribute('data-current') || '';
       sel.disabled = true;
-      if (msg) { msg.style.color = 'var(--muted)'; msg.textContent = 'Requesting switch to ' + channel + '…'; }
+      if (msg) { msg.classList.remove('text-danger'); msg.classList.add('text-muted'); msg.textContent = 'Requesting switch to ' + channel + '…'; }
       try {
         var r = await fetch('/api/release-channel', {
           method: 'POST',
@@ -24120,7 +24142,7 @@ function burnAreaChart() {
         showToast('Release-channel switch to ' + channel + ' requested', 'success');
       } catch (e) {
         if (previous) sel.value = previous;
-        if (msg) { msg.style.color = 'var(--red)'; msg.textContent = e && e.message ? e.message : 'Release-channel switch failed'; }
+        if (msg) { msg.classList.remove('text-muted'); msg.classList.add('text-danger'); msg.textContent = e && e.message ? e.message : 'Release-channel switch failed'; }
         showToast(e && e.message ? e.message : 'Release-channel switch failed', 'error');
       } finally {
         sel.disabled = false;
