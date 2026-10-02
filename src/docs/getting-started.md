@@ -59,6 +59,10 @@ None of the level guidance below works until your hive is connected to your git 
 
 ---
 
+## Community help
+
+If you get stuck, [Join our Discord](https://hivecommons.dev/discord). The invite is permanent, and the Hive Commons community can help with setup, first-run questions, contributor relay, and choosing a safe next ACMM step.
+
 ## Common gotchas (so you don't panic)
 
 - **Dashboard full of warnings?** Normal. Most warnings clear automatically after the Forge App is installed and the first heartbeat runs. Don't panic.

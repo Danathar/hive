@@ -3838,6 +3838,7 @@
       <a class="oc-nav-item" id="welcome-nav-item" style="display:none" data-action="openWelcomeDialog" title="Open the Getting Started checklist — one-time setup steps for a new hive"><span class="oc-nav-emoji">🚀</span><span class="oc-nav-text">Getting Started</span></a>
       <a class="oc-nav-item" href="/api/docs" target="_blank"><span class="oc-nav-emoji">📘</span><span class="oc-nav-text">API Spec (Redoc)</span></a>
       <a class="oc-nav-item" href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener noreferrer" title="Zero to Automation: the beginner guide to running your hive, level by level"><span class="oc-nav-emoji">📖</span><span class="oc-nav-text">Getting Started Guide</span></a>
+      <a class="oc-nav-item" href="https://hivecommons.dev/discord" target="_blank" rel="noopener"><span class="oc-nav-emoji">💬</span><span class="oc-nav-text">Join our Discord</span></a>
       <a class="oc-nav-item" href="https://github.com/hivecommons/hive/issues" target="_blank" rel="noopener noreferrer"><span class="oc-nav-emoji">🐛</span><span class="oc-nav-text">Report an Issue</span></a>
     </div>
     <div class="system-gauges" id="system-gauges">
@@ -4321,6 +4322,7 @@
         <p style="color:var(--muted);margin:0 0 18px">Common questions from first-time users. Everything below describes what this hive
         actually does today — where behaviour is surprising, it is called out rather than smoothed over. Each answer links to the
         source doc so this panel stays a map, not a second source of truth.</p>
+        <p class="m-0 mb-6">Need help from humans? <a class="text-accent fw-semibold" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a>; the Hive Commons community can help you pick the right next step.</p>
 
         <h3 style="font-size:1rem;margin:var(--sp-0) var(--sp-0) var(--sp-4)">Getting started (L1–L2)</h3>
 
@@ -25468,8 +25470,8 @@ function burnAreaChart() {
         </div>
 
         <div class="config-field">
-          <label>Help &amp; community links <span class="config-info">i<span class="config-tooltip">Shown on /contribute Onboarding, Operations, and in relay terminals at connect. One "Label | URL" per line, max 5. Discord channel URLs only work for existing server members; prefer discord.gg invite links for new contributors.</span></span></label>
-          <textarea rows="4" style="width:100%;font-family:var(--font-mono);font-size:0.72rem;resize:vertical" placeholder="Chat with other contributors | https://discord.gg/your-hive" data-change-action="setContributeHelpLinksFromText" data-arg-types="v">${esc(helpLinksText)}</textarea>
+          <label>Help &amp; community links <span class="config-info">i<span class="config-tooltip">Shown on /contribute Onboarding, Operations, and in relay terminals at connect. One "Label | URL" per line, max 5. Discord channel URLs only work for existing server members; prefer https://hivecommons.dev/discord for new contributors.</span></span></label>
+          <textarea rows="4" style="width:100%;font-family:var(--font-mono);font-size:0.72rem;resize:vertical" placeholder="Chat with other contributors | https://hivecommons.dev/discord" data-change-action="setContributeHelpLinksFromText" data-arg-types="v">${esc(helpLinksText)}</textarea>
           <span style="font-size:0.65rem;color:var(--muted);margin-top:var(--sp-2);display:block">Stored as <code>contribute.help_links</code>. Empty restores Hive's default contributor docs and issue links.</span>
         </div>
 
@@ -33081,6 +33083,11 @@ function burnAreaChart() {
           while (card.firstChild) card.removeChild(card.firstChild);
           card.appendChild(npsText('div', 'nps-card-title', 'Thank you!'));
           card.appendChild(npsText('div', 'nps-card-prompt', 'Your feedback helps shape the hive.'));
+      const help = npsText('a', 'nps-card-prompt nps-card-discord', 'Need help? Join our Discord');
+      help.href = 'https://hivecommons.dev/discord';
+      help.target = '_blank';
+      help.rel = 'noopener';
+      card.appendChild(help);
           if (_npsKeyHandler) document.removeEventListener('keydown', _npsKeyHandler);
           _npsKeyHandler = null;
           setTimeout(npsCloseCard, NPS_THANK_YOU_DISPLAY_MS);
@@ -33429,7 +33436,7 @@ function burnAreaChart() {
         _welcomeOpenSteps.add(firstUndone ? firstUndone.id : WELCOME_STEPS[0].id);
       }
       let html = '';
-      html += '<div class="welcome-intro">New to Hive? Start here → <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">Zero to Automation: Your Getting Started Guide</a><br><span style="font-size:0.85em;color:var(--muted)">⏰ Heads up: hosted hives that stay unconfigured or inactive are reaped on a timer. Install the Forge App — the app for your source control system (e.g., GitHub, GitHub Enterprise, GitLab, or Gitea) — in your first session (step 2), and if your hive ever disappears or its URL times out, request a new one from the hub and set it up promptly.</span></div>';
+      html += '<div class="welcome-intro">New to Hive? Start here → <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">Zero to Automation: Your Getting Started Guide</a> · <a class="text-accent fw-semibold" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a><br><span style="font-size:0.85em;color:var(--muted)">⏰ Heads up: hosted hives that stay unconfigured or inactive are reaped on a timer. Install the Forge App — the app for your source control system (e.g., GitHub, GitHub Enterprise, GitLab, or Gitea) — in your first session (step 2), and if your hive ever disappears or its URL times out, request a new one from the hub and set it up promptly.</span></div>';
       let n = 0;
       for (const step of WELCOME_STEPS) {
         n++;

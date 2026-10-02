@@ -50,7 +50,7 @@ project:
 #     - label: Contributor docs
 #       url: https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md
 #     - label: Chat with other contributors
-#       url: https://discord.gg/your-hive
+#       url: https://hivecommons.dev/discord
 
 # GitHub App / PR policy. The #5117 self-authorization hold defaults on through
 # ACMM L5 and off at ACMM L6 Fully Autonomous. App-authored PRs whose only

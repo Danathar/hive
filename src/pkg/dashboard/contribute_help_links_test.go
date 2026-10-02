@@ -35,7 +35,7 @@ func TestContributeHelpLinksRenderingUsesTextContent(t *testing.T) {
 		`a.textContent=l.label`,
 		`/api/contribute/help-links`,
 		`contribute.help_links`,
-		`https://discord.gg/`,
+		`https://hivecommons.dev/discord`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("contribute_landing.go missing %q", want)
@@ -56,7 +56,7 @@ func TestContributeHelpLinksAuthAndValidation(t *testing.T) {
 		{"read-write", http.StatusOK},
 		{"owner", http.StatusOK},
 	} {
-		rec := putHelpLinksWithRole(s, tc.role, `{"help_links":[{"label":"Chat <b>now</b>","url":"https://discord.gg/hive"}]}`)
+		rec := putHelpLinksWithRole(s, tc.role, `{"help_links":[{"label":"Chat <b>now</b>","url":"https://hivecommons.dev/discord"}]}`)
 		if rec.Code != tc.want {
 			t.Fatalf("role %q status = %d, want %d; body=%s", tc.role, rec.Code, tc.want, rec.Body.String())
 		}

@@ -213,8 +213,9 @@ overlay write those lists as **The Commons**, with a rank order and `ranked`,
 contributors to act as selected spoke roles with `HIVE_AGENT_ROLE` /
 **Acting as**, profile-level grant chips, and `hub.contribute_delegatable_roles`.
 
-See [docs/contributor-relay.md](docs/contributor-relay.md) and
-[docs/contributor-trust-and-roles.md](docs/contributor-trust-and-roles.md).
+See [docs/contributor-relay.md](docs/contributor-relay.md),
+[docs/contributor-trust-and-roles.md](docs/contributor-trust-and-roles.md), and
+[Join our Discord](https://hivecommons.dev/discord) for newcomer questions.
 
 ## Governor
 
