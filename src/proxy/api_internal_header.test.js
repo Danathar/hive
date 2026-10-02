@@ -172,6 +172,18 @@ async function main() {
     assert.equal(seen.internal, null);
   });
 
+  await check('public POST /api/contribute/reissue-token bypasses the token gate (#10007)', async () => {
+    // reissueContributorToken authenticates with the caller's GitHub token
+    // (Authorization: token <pat>), not the shared dashboard token, so the
+    // proxy must let it through to the Go handler rather than 401ing first.
+    const res = await req('POST', '/api/contribute/reissue-token', { Authorization: 'token ghp_example' });
+    assert.equal(res.status, 200);
+    const seen = JSON.parse(res.body);
+    // It bypasses the dashboard-token gate, so it must carry no X-Hive-Internal
+    // trust material — the Go API still verifies the GitHub token itself.
+    assert.equal(seen.internal, null);
+  });
+
   await stopProxy(proxy);
 
   // ── hosted mode: no shared token exists at all ──────────────────────────
