@@ -2,7 +2,7 @@
 
 ClankeR lets a contributor lend their local AI CLI subscription to a hive. A contributor runs a small relay process on their machine; the hive assigns it real work — issues from the project's queue — and the contributor's agent executes each task locally with the CLI and model of their choice, reporting completion/PR metadata back over a WebSocket.
 
-For labels that make work eligible or ineligible for contributors, see [Hive Labels and Control Signals](labels-and-control-signals.md).
+For labels that make work eligible or ineligible for contributors, see [Hive Labels and Control Signals](labels-and-control-signals.md). For help getting to your first PR, [Join our Discord](https://hivecommons.dev/discord).
 
 The relay turns a hive from a fixed set of resident agents into an elastic swarm: the admin curates *what* is offered (which repos, which labels, which models are acceptable), and contributors decide *how* it gets done (their CLI, their model, their compute, their tokens). The relay connects to `/api/contribute/ws`, receives one task at a time, runs the selected CLI in the contributor's environment, and reports the result back.
 
@@ -57,8 +57,8 @@ Management). The dashboard shows those links on Onboarding and Operations, and
 the hub includes them in `auth_ok` so the relay prints them once when it
 connects. Use it for contributor docs, Discord/Slack invites, or a maintainer
 issue queue. Discord `https://discord.com/channels/<server>/<channel>` URLs only
-work for people already in that server; use a `https://discord.gg/...` invite if
-new contributors need to join.
+work for people already in that server; use `https://hivecommons.dev/discord` if
+new contributors need to join the Hive Commons Discord.
 
 `contribute-hive` starts the relay in one of two modes:
 

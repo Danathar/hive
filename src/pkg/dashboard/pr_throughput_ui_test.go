@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestPRThroughputCardPinned pins the PR throughput card (#9432): it fetches
+// TestPRThroughputCardPinned pins the Change Throughput card (#9432): it fetches
 // /api/pr-throughput for a selectable window (including all time), renders
 // opened / merged / closed-without-merging counts, splits merges by path, and
 // labels how far back the data goes the way the Lifecycle Timeline does.
@@ -14,6 +14,8 @@ func TestPRThroughputCardPinned(t *testing.T) {
 	for _, snippet := range []string{
 		`id="pr-throughput-section"`,
 		`id="pr-throughput-card"`,
+		`📬 Change Throughput`,
+		`pull/merge requests across tracked forges`,
 		`data-arg0="pr-throughput-section"`,
 		"function renderPRThroughput",
 		"function fetchPRThroughput",
@@ -21,10 +23,22 @@ func TestPRThroughputCardPinned(t *testing.T) {
 		"[[1, '1h'], [6, '6h'], [12, '12h'], [24, '24h'], [48, '48h'], [168, '7d'], [0, 'all']]",
 		`data-action="setPRThroughputHours"`,
 		"window.setPRThroughputHours = setPRThroughputHours",
+		"window.setPRThroughputRole = setPRThroughputRole",
+		"'pr-throughput-section': { title: '📬 Change Throughput', summary: '0 merged · 0% hive' }",
 		`<div class="lbl">Opened</div>`,
 		`<div class="lbl">Merged</div>`,
 		`<div class="lbl">Closed without merging</div>`,
+		"function prtActorMatrix",
+		"Actor attribution",
+		"hive · human · other",
+		"function prtTrendSvg",
+		`<svg class="prt-trend-svg"`,
+		"function prtTrendCaption",
+		"No attribution data yet — counters start now.",
+		"pr-throughput-section-summary",
 		"dto.merged_by_path",
+		"dto.by_actor",
+		"dto.series",
 		"function prtWindowLabel",
 		"dto.recorded_since",
 		"of recorded history",
@@ -32,7 +46,7 @@ func TestPRThroughputCardPinned(t *testing.T) {
 		"'lifecycle-section', 'pr-throughput-section',",
 	} {
 		if !strings.Contains(html, snippet) {
-			t.Fatalf("PR throughput card missing snippet %q", snippet)
+			t.Fatalf("Change Throughput card missing snippet %q", snippet)
 		}
 	}
 }

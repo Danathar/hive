@@ -7,7 +7,7 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14261/badge)](https://www.bestpractices.dev/projects/14261)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-AI agent orchestration for open source projects. A single Go binary enumerates GitHub issues and PRs, classifies them by complexity, and dispatches work to AI agents (Claude, Copilot, Gemini, Goose) on adaptive cadences governed by queue depth.
+AI agent orchestration for open source projects. A single Go binary enumerates issues and pull/merge requests from connected work sources, classifies them by complexity, and dispatches work to AI agents (Claude, Copilot, Gemini, Goose) on adaptive cadences governed by queue depth.
 
 Hive separates decisions into two layers: a **deterministic pipeline** of shell scripts handles filtering, classification, merge-gating, and enforcement before any LLM sees the work. Agents only handle judgment calls — reading code, reasoning about fixes, writing PRs.
 
@@ -515,9 +515,9 @@ Hive uses an **AI-native Capability Maturity Model** (ACMM) with six levels that
 | L3 | Quality-Gated (Measured) | 6 | Quality agent opens issues and PRs gated by the literal `hold` level-gate label. Others remain advisory. |
 | L4 | Security-Aware (Adaptive) | 7 | All agents file issues. Quality, sec-check, and CI open PRs gated by the literal `hold` level-gate label. |
 | L5 | Semi-Autonomous (Semi-Automated) | 9 | All agents open PRs gated by the literal `hold` level-gate label. Humans batch-review and approve. |
-| L6 | Fully Autonomous | 10 | Agents open PRs and auto-merge on green CI. Non-outreach PRs have no level hold; outreach PRs remain held for human review. |
+| L6 | Fully Autonomous | 10 | Agents open PRs and auto-merge when checks pass. Non-outreach PRs have no level hold; outreach PRs remain held for human review. |
 
-Each level defines per-agent **policy modes**: advisory (observe only), measured (file issues), holdgated (PRs with the literal `hold` level-gate label), or full (auto-merge). The dashboard `hive-pause/<hive-id>` label is a separate manual hold; `hive/<hive-id>` is provenance only. See `src/docs/acmm-policy-matrix.md` for the full matrix and `src/docs/labels-and-control-signals.md` for label behavior. Browse the [documentation map](src/docs/documentation-map.md) for operations, contributor relay, snapshots, health checks, and design guides.
+Each level defines per-agent **policy modes**: advisory (observe only), measured (file issues), holdgated (PRs with the literal `hold` level-gate label), or full (auto-merge). The dashboard `hive-pause/<hive-id>` label is a separate manual hold; `hive/<hive-id>` is provenance only. See `src/docs/acmm-policy-matrix.md` for the full matrix and `src/docs/labels-and-control-signals.md` for label behavior. Browse the [documentation map](src/docs/documentation-map.md) for operations, contributor relay, snapshots, health checks, and design guides. Questions and newcomer help are welcome in [Join our Discord](https://hivecommons.dev/discord).
 
 Operational references from the repository root include [hub disaster recovery](docs/HUB_DISASTER_RECOVERY.md), [federation design](docs/federation-design.md), [outreach antispam policy](docs/outreach-antispam.md), [macOS deployment notes](docs/macos.md), and [backend setup](docs/backend-setup.md). Worked examples live under [examples/](examples/README.md), including [KubeStellar skill and campaign configs](examples/kubestellar/README.md), [SQLite state backend notes](examples/sqlite-state.md), and [ACMM runtime fragments](examples/acmm/README.md).
 
@@ -614,7 +614,7 @@ for, and which ones ship inside a Hive release.
 
 See the [Hive Hub](https://hive.hivecommons.dev) to browse registered hives, view leaderboards, and find hives accepting contributions.
 
-To contribute to Hive itself, see [CONTRIBUTING.md](CONTRIBUTING.md) and open issues or PRs on this repository.
+To contribute to Hive itself, see [CONTRIBUTING.md](CONTRIBUTING.md) and open issues or PRs on this repository. Contributors are expected to follow the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md), adopted in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 Recent user-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 

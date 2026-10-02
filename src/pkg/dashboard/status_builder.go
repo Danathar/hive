@@ -290,6 +290,7 @@ func BuildFrontendStatus(
 		HiveID:              cfg.HiveID,
 		HiveIDEditable:      !hiveIDLocked,
 		HiveIDLockReason:    hiveIDLockReason,
+		Features:            buildFeatures(cfg),
 		Agents:              agents,
 		HiddenAgents:        hiddenAgents,
 		ConfiguredAgents:    buildConfiguredAgents(cfg),
@@ -305,6 +306,7 @@ func BuildFrontendStatus(
 		AgentMetrics:        agentMetrics,
 		Hold:                buildHold(actionable),
 		IssueToMerge:        issueToMerge,
+		IssuesDisabledRepos: metricsCollector.GetIssuesDisabledRepos(),
 		ACMMLevel:           detectACMMLevel(cfg),
 		ACMMLevelConfigured: cfg.ACMMLevel != nil,
 		ACMMPackAgents:      buildACMMPackAgents(cfg),
@@ -314,6 +316,15 @@ func BuildFrontendStatus(
 		ReleaseLineLag:      buildReleaseLineLag(),
 	}
 	return payload
+}
+
+func buildFeatures(cfg *config.Config) FrontendFeatures {
+	if cfg == nil {
+		return FrontendFeatures{}
+	}
+	return FrontendFeatures{
+		StrategyLab: cfg.Dashboard.StrategyLab,
+	}
 }
 
 func mergeAgentAuthHealth(health map[string]any, agents []FrontendAgent) {
@@ -756,6 +767,15 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 		cadence := cadenceDisplay(cadenceValue)
 		nextKick := computeNextKickFromCadence(proc.LastKick, cadenceValue)
 		nextKickIn := computeNextKickETA(proc.LastKick, cadenceValue)
+		continuousState := govState.Continuous[name]
+		if agentCfg, ok := cfg.Agents[name]; ok && agentCfg.Continuous && !continuousState.NextKick.IsZero() {
+			nextKick = formatHumanTime(continuousState.NextKick)
+			if d := time.Until(continuousState.NextKick); d > 0 {
+				nextKickIn = formatETA(d)
+			} else {
+				nextKickIn = "due now"
+			}
+		}
 
 		// offByCadence: the agent's cadence for the CURRENT governor mode is a
 		// non-kicking value ("pause"/"off"), so the governor will never kick it
@@ -825,46 +845,52 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 
 		agentCfg := proc.Config
 		a := FrontendAgent{
-			Name:                   name,
-			ID:                     agentID,
-			DisplayName:            agentCfg.DisplayName,
-			Description:            agentCfg.Description,
-			Role:                   agentCfg.Role,
-			SortOrder:              agentCfg.GetSortOrder(),
-			Emoji:                  agentCfg.Emoji,
-			Color:                  agentCfg.Color,
-			BeadRole:               agentCfg.GetBeadRole(),
-			Managed:                agentCfg.Managed,
-			Enabled:                agentEnabled,
-			ReplicaBase:            agentCfg.ReplicaOf,
-			ReplicaIndex:           agentCfg.ReplicaIndex,
-			ReplicaCount:           agentCfg.ReplicaCount,
-			OnDemand:               agentCfg.OnDemand,
-			Sandboxed:              agentCfg.SandboxEnabled(cfg.AgentSandbox),
-			Session:                name,
-			State:                  string(proc.State),
-			Starting:               proc.Starting && proc.State != agent.StateRunning,
-			Busy:                   busy,
-			AwaitingCI:             awaitingCI,
-			Paused:                 proc.Paused,
-			PausedAt:               formatOptionalTime(proc.PausedAt),
-			PausedReason:           proc.PausedReason,
-			PausedTrigger:          proc.PausedTrigger,
-			PausedBy:               proc.PausedBy,
-			OffByCadence:           offByCadence,
-			NoCadence:              noCadence,
-			CLI:                    cli,
-			Model:                  model,
-			ReasoningEffort:        agentCfg.ReasoningEffort,
-			Cadence:                cadence,
-			PinnedCli:              pinnedCli,
-			PinnedModel:            pinnedModel,
-			PinnedBoth:             pinnedCli && pinnedModel,
-			Pinned:                 pinnedCli || pinnedModel,
-			LastKick:               lastKick,
-			LastKickAt:             lastKickAt,
-			NextKick:               nextKick,
-			NextKickIn:             nextKickIn,
+			Name:            name,
+			ID:              agentID,
+			DisplayName:     agentCfg.DisplayName,
+			Description:     agentCfg.Description,
+			Role:            agentCfg.Role,
+			SortOrder:       agentCfg.GetSortOrder(),
+			Emoji:           agentCfg.Emoji,
+			Color:           agentCfg.Color,
+			BeadRole:        agentCfg.GetBeadRole(),
+			Managed:         agentCfg.Managed,
+			Enabled:         agentEnabled,
+			ReplicaBase:     agentCfg.ReplicaOf,
+			ReplicaIndex:    agentCfg.ReplicaIndex,
+			ReplicaCount:    agentCfg.ReplicaCount,
+			OnDemand:        agentCfg.OnDemand,
+			Sandboxed:       agentCfg.SandboxEnabled(cfg.AgentSandbox),
+			Session:         name,
+			State:           string(proc.State),
+			Starting:        proc.Starting && proc.State != agent.StateRunning,
+			Busy:            busy,
+			AwaitingCI:      awaitingCI,
+			Paused:          proc.Paused,
+			PausedAt:        formatOptionalTime(proc.PausedAt),
+			PausedReason:    proc.PausedReason,
+			PausedTrigger:   proc.PausedTrigger,
+			PausedBy:        proc.PausedBy,
+			OffByCadence:    offByCadence,
+			NoCadence:       noCadence,
+			CLI:             cli,
+			Model:           model,
+			ReasoningEffort: agentCfg.ReasoningEffort,
+			Cadence:         cadence,
+			PinnedCli:       pinnedCli,
+			PinnedModel:     pinnedModel,
+			PinnedBoth:      pinnedCli && pinnedModel,
+			Pinned:          pinnedCli || pinnedModel,
+			LastKick:        lastKick,
+			LastKickAt:      lastKickAt,
+			NextKick:        nextKick,
+			NextKickIn:      nextKickIn,
+			Continuous:      agentCfg.Continuous,
+			FrontendAgentContinuous: FrontendAgentContinuous{
+				ContinuousBlocked: continuousState.Blocked,
+				ContinuousKicks:   continuousState.Kicks,
+				ContinuousTokens:  continuousState.TokensConsumed,
+			},
 			KicksUndeliverable:     proc.KicksUndeliverable,
 			BusySince:              formatOptionalTime(proc.BusySince),
 			LastTranscriptActivity: formatOptionalTime(proc.LastTranscriptActivity),
@@ -917,6 +943,17 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			a.StatusEvidence = "blocked: inference (" + proc.ProviderErrorClass + ")"
 			if line := strings.TrimSpace(proc.ProviderErrorLine); line != "" {
 				a.StatusEvidence += ": " + line
+			}
+			if agentCfg.Continuous && !continuousState.BackoffUntil.IsZero() && time.Now().Before(continuousState.BackoffUntil) {
+				a.ContinuousBackoff = continuousState.Backoff.Round(time.Second).String()
+				a.ContinuousBackoffUntil = continuousState.BackoffUntil.UTC().Format(time.RFC3339)
+				if a.Condition == "" {
+					a.Condition = "ContinuousBackoff"
+					a.ConditionMessage = "continuous re-kick backed off after failed delivery"
+					if continuousState.LastError != "" {
+						a.ConditionMessage += ": " + continuousState.LastError
+					}
+				}
 			}
 			if a.Condition == "" {
 				a.Condition = "ProviderError"
@@ -1080,6 +1117,7 @@ func buildMissingRuntimeAgent(name string, agentCfg config.AgentConfig, cfg *con
 		Model:            model,
 		ReasoningEffort:  agentCfg.ReasoningEffort,
 		Cadence:          cadenceDisplay(cadenceValue),
+		Continuous:       agentCfg.Continuous,
 		GovBackend:       cli,
 		GovModel:         model,
 		StatsConfig:      resolveStatsSources(loadStatsConfig(name), cfg),
@@ -1702,7 +1740,7 @@ func buildGovernorWithLaneDepths(state governor.State, cfg *config.Config, laneD
 		Thresholds:       thresholds,
 		NextKick:         nextKick,
 		SuppressedLanes:  cloneStringSlice(state.SuppressedLanes),
-		LaneQueueDepths:  cloneIntMap(laneDepths),
+		LaneQueueDepths:  cloneStatusIntMap(laneDepths),
 		LanePauseReasons: cloneStringStringMap(state.LanePauseReasons),
 		NextKickAt:       nextKickAt,
 		NextKickIn:       nextKickIn,
@@ -1739,7 +1777,7 @@ func cloneStringSlice(in []string) []string {
 	return out
 }
 
-func cloneIntMap(in map[string]int) map[string]int {
+func cloneStatusIntMap(in map[string]int) map[string]int {
 	if len(in) == 0 {
 		return nil
 	}

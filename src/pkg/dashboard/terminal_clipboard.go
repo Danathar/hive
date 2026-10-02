@@ -36,11 +36,31 @@ import (
 // server.go) precisely because this server never holds ttyd's document bytes
 // to hash, and an inline element needs no second proxied request.
 //
+// OSC 52 is honoured only within a short window after an operator gesture in
+// the document (see the script): the escape is plain pane output, so without
+// that gate any agent, tool or printed file could set the operator's
+// clipboard — paste-jacking on the very flow this exists for.
+//
 // Plain Ctrl+C is deliberately NOT intercepted: it is SIGINT, and an operator
 // who cannot interrupt a runaway command in an agent's pane is worse off than
 // one who cannot copy. Only ⌘C and Ctrl+Shift+C — neither of which a terminal
 // application consumes — are claimed, and only while a selection exists, so a
 // pane with nothing selected keeps the browser's own behaviour.
+//
+// THE AGENT CLI'S OWN SELECTION (#9941 follow-up). Every agent CLI turns mouse
+// reporting on, so tmux forwards an ordinary drag to the APPLICATION: the
+// highlight the operator sees is the CLI's selection, which xterm.js knows
+// nothing about. The CLI copies it with an OSC 52 escape, and per tmux(1)
+// EITHER set-clipboard mode forwards that escape to the attached client only
+// when its terminfo entry carries an `Ms` capability. ttyd's default TERM,
+// xterm-256color, has no such entry, so the escape dead-ended with no `Ms` to
+// act on — set-clipboard's default of `external` was never the defect; a
+// missing `Ms` makes `on` just as inert. ttyd-tmux.sh now declares the
+// `clipboard` terminal-feature outright (supplying `Ms` without depending on
+// tmux's own secondary-DA auto-detection through this proxy chain) and sets
+// `set-clipboard on`, so the escape reaches the attached client, and the
+// script below handles OSC 52 — ttyd 1.7.7 loads no
+// clipboard addon — by writing the decoded text to the browser clipboard.
 
 // maxTerminalDocumentBytes bounds how much of a proxied response is buffered
 // for injection. ttyd's index.html is a few kilobytes; anything larger is not
@@ -86,10 +106,72 @@ const terminalClipboardScript = `<script id="` + terminalClipboardMarker + `">
     }
     legacyCopy(text);
   }
+  /* OSC 52: the agent CLI owns the mouse (it turns mouse reporting on), so an
+     ordinary drag is the APPLICATION's selection, not xterm.js's. The CLI
+     copies it with an OSC 52 escape that tmux (set-clipboard on, see
+     ttyd-tmux.sh) forwards here — and ttyd 1.7.7 ships no handler for it, so
+     the copy dead-ended in tmux's paste buffer (#9941). Write it to the
+     clipboard now; the mouseup that ended the drag is still a live user
+     activation in every browser. Also remember it, so a later ⌘C /
+     Ctrl+Shift+C with no xterm.js selection copies it from inside a gesture
+     if the immediate write was refused. */
+  var appCopiedText = '';
+  /* OSC 52 is just bytes in the pane: the agent CLI, any tool it runs, or
+     any file or issue body it prints can emit it, and the /terminal tab is
+     top-level, so a focused tab writes the clipboard with no activation at
+     all. Only honour the escape shortly after a real operator gesture in
+     this document — the mouseup that ends a drag-copy in the CLI is such a
+     gesture — and drop (neither write nor remember) anything else, so pane
+     output cannot swap the operator's clipboard behind their back. */
+  var GESTURE_WINDOW_MS = 2000;
+  var lastGestureAt = 0;
+  function noteGesture() { lastGestureAt = Date.now(); }
+  ['mousedown', 'mouseup', 'touchend', 'keydown'].forEach(function (name) {
+    document.addEventListener(name, noteGesture, true);
+  });
+  function operatorGestureRecent() {
+    return lastGestureAt > 0 && (Date.now() - lastGestureAt) <= GESTURE_WINDOW_MS;
+  }
+  function decodeOsc52(data) {
+    var semi = data.indexOf(';');
+    if (semi < 0) return '';
+    var payload = data.slice(semi + 1);
+    if (!payload || payload === '?') return '';
+    try {
+      var bin = atob(payload);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (e) {
+      return '';
+    }
+  }
+  function registerOsc52(attempt) {
+    var term = window.term;
+    if (!term || !term.parser || typeof term.parser.registerOscHandler !== 'function') {
+      if (attempt < 100) setTimeout(function () { registerOsc52(attempt + 1); }, 100);
+      return;
+    }
+    if (term.hiveOsc52Registered) return;
+    term.hiveOsc52Registered = true;
+    term.parser.registerOscHandler(52, function (data) {
+      if (!operatorGestureRecent()) return true;
+      var text = decodeOsc52(data);
+      if (text) {
+        appCopiedText = text;
+        copyText(text);
+      }
+      return true;
+    });
+  }
+  registerOsc52(0);
+  function textToCopy() {
+    return selectedText() || appCopiedText;
+  }
   /* Browser Edit menu / context menu copy: the event fires, but the selection
      it would serialise is empty because xterm.js draws its own. */
   document.addEventListener('copy', function (e) {
-    var text = selectedText();
+    var text = textToCopy();
     if (!text || !e.clipboardData) return;
     e.clipboardData.setData('text/plain', text);
     e.preventDefault();
@@ -101,7 +183,7 @@ const terminalClipboardScript = `<script id="` + terminalClipboardMarker + `">
     if (e.key !== 'c' && e.key !== 'C') return;
     var isCopyCombo = e.metaKey ? !e.ctrlKey : (e.ctrlKey && e.shiftKey);
     if (!isCopyCombo) return;
-    var text = selectedText();
+    var text = textToCopy();
     if (!text) return;
     e.preventDefault();
     e.stopPropagation();

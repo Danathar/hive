@@ -15,6 +15,7 @@ build/test commands, see [`docs/development.md`](development.md).
   way to land a first PR and learn the review flow.
 - Comment on the issue before starting anything non-trivial so work isn't
   duplicated.
+- Need a quick human answer? [Join our Discord](https://hivecommons.dev/discord).
 
 ## 2. Set up a local environment
 

@@ -212,6 +212,21 @@ func validateAgentGeneralInput(body map[string]interface{}) error {
 			}
 		}
 	}
+	if v, ok := body["continuousCooldown"]; ok {
+		if f, ok := v.(float64); ok {
+			if f <= 0 {
+				return fmt.Errorf("continuousCooldown must be positive seconds")
+			}
+		}
+	}
+	if v, ok := body["continuousBudgetPct"]; ok {
+		if f, ok := v.(float64); ok {
+			n := int(f)
+			if n < 1 || n > 100 {
+				return fmt.Errorf("continuousBudgetPct must be between 1 and 100")
+			}
+		}
+	}
 	return nil
 }
 

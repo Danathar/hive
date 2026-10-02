@@ -7,7 +7,7 @@ import (
 
 func TestNormalizeContributeHelpLinks(t *testing.T) {
 	links, err := NormalizeContributeHelpLinks([]ContributeHelpLink{
-		{Label: "  Chat\nwith <b>contributors</b>  ", URL: "https://discord.gg/hive "},
+		{Label: "  Chat\nwith <b>contributors</b>  ", URL: "https://hivecommons.dev/discord "},
 		{Label: strings.Repeat("x", ContributeHelpLinkLabelMaxRunes+5), URL: "http://example.test/help"},
 	})
 	if err != nil {

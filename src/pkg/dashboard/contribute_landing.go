@@ -310,6 +310,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .sidebar{flex:1;background:var(--surface-2);border-left:1px solid var(--line-strong);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
 h1{font-size:var(--fs-3xl);margin-bottom:var(--sp-4)}
 .subtitle{color:var(--text-muted);font-size:1.1rem;margin-bottom:var(--sp-9)}
+.subtitle-discord{font-size:var(--fs-md);margin-top:var(--sp-0);margin-bottom:var(--sp-9)}
+.discord-link{color:var(--cc-accent);font-weight:600}
 .stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:10px;margin-bottom:var(--sp-8)}
 .stat{background:var(--surface-2);border:var(--line-width) solid var(--line-subtle);border-radius:var(--r-lg);padding:var(--sp-5) var(--sp-4);text-align:center;box-shadow:var(--shadow-card)}
 .stat-num{font-size:var(--fs-2xl);font-weight:700;color:var(--cc-accent)}
@@ -1535,7 +1537,8 @@ select.admin-act{min-width:0;max-width:100%%}
 <h1>🐝 Contribute to %s</h1>
 <div id="invite-banner" class="invite-banner" hidden role="status"></div>
 <p class="subtitle">Donate your CLI + API tokens to help this project's AI agent swarm.</p>
-<p class="subtitle" style="font-size:.95rem;margin-top:-24px;margin-bottom:var(--sp-9)">Powered by <strong style="color:var(--text)">ClankeR</strong>, the contributor relay &mdash; it hands tasks from this hive's backlog to the agent running on your machine. Your compute, their backlog. Bring your own inference &mdash; how you want to contribute is up to you.</p>
+<p class="subtitle" style="font-size:.95rem;margin-top:-24px;margin-bottom:var(--sp-4)">Powered by <strong style="color:var(--text)">ClankeR</strong>, the contributor relay &mdash; it hands tasks from this hive's backlog to the agent running on your machine. Your compute, their backlog. Bring your own inference &mdash; how you want to contribute is up to you.</p>
+<p class="subtitle-discord">Questions? <a class="discord-link" href="https://hivecommons.dev/discord" target="_blank" rel="noopener">Join our Discord</a> and we'll help you get to your first PR.</p>
 <div class="stat-row">
 <div class="stat"><div class="stat-num" style="color:var(--cc-accent)">%d</div><div class="stat-label">Total</div></div>
 %s
@@ -2043,8 +2046,8 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="admin-section-head"><h3 id="admin-section-help-links">Help &amp; community links</h3><p>Publish quick links for contributors, one per line as <code>Label | https://example</code>.</p></div>
 <div class="admin-form-stack help-links-admin">
 <label for="admin-help-links-text">Help &amp; community links</label>
-<textarea class="admin-textarea admin-textarea--links" id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://discord.gg/your-hive&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
-<div class="admin-control-note">Stored as <code>contribute.help_links</code>. Use <code>https://discord.gg/...</code> invites for Discord; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
+<textarea class="admin-textarea admin-textarea--links" id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://hivecommons.dev/discord&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
+<div class="admin-control-note">Stored as <code>contribute.help_links</code>. Use <code>https://hivecommons.dev/discord</code> for contributors; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
 <div class="admin-action-row"><button type="button" class="hv-btn btn-primary admin-save" id="admin-help-links-save">Save help links</button></div>
 </div>
 </section>

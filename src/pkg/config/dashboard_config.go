@@ -78,6 +78,9 @@ type DashboardConfig struct {
 	// ThemeOverrides are layered on the selected built-in theme and are mutable
 	// through the owner-only dashboard appearance API.
 	ThemeOverrides dashboardtheme.Overrides `yaml:"theme_overrides,omitempty" json:"theme_overrides,omitempty"`
+	// StrategyLab exposes the experimental Nous/Strategy Lab dashboard section.
+	// It stays hidden by default while the v6 workstream remains experimental.
+	StrategyLab bool `yaml:"strategy_lab,omitempty" json:"strategy_lab,omitempty"`
 	// IssueBands configures the Repositories card's display-only issue taxonomy.
 	// It is intentionally separate from governor/project eligibility labels:
 	// queue policy decides what agents may work; these labels only decide which
