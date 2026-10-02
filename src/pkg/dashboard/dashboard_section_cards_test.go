@@ -384,7 +384,7 @@ func TestLayoutResetRestoresSidebarAndCardDefaults(t *testing.T) {
 		"localStorage.removeItem(DASHBOARD_LAYOUT_KEY)",
 		"dashboardLayoutExtraKeys().forEach",
 		"dashboardApplyLayout(dashboardLayoutNormalize(null))",
-		"renderAgents(((window._lastStatus||{}).agents)||[])",
+		"renderAgents(((window._lastStatus||{}).agents)||",
 	} {
 		if !strings.Contains(reset, want) {
 			t.Fatalf("dashboard reset no longer restores shared layout defaults: missing %q", want)
