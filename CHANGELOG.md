@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.113.0)
+
+### Added
+
+- discord: Join our Discord link in hub portal and spoke Help menu (#10006)
+- agents: continuous mode  re-kick when a session ends, never mid-session (#10020)
+- issue-template: contributor story form for hivecommons.dev/stories (#10022)
+
+### Fixed
+
+- Fix Change Throughput to count forge-observed human and automation merges/closures without double-counting hive-performed merges.
+
+### Security
+
+- The browser terminal now honours an OSC 52 copy from the agent CLI only within two seconds of an operator gesture in the terminal tab ([#10027](https://github.com/hivecommons/hive/issues/10027)). OSC 52 is plain pane output — the agent, any tool it runs, or any file or issue body it prints can emit it — and the `/terminal` tab is top-level, so a focused tab wrote the operator's clipboard with no action on their part; a drag-copy in the CLI still lands exactly as before, while anything that arrives unprompted is dropped rather than written or kept for a later ⌘C.
+
 ## 2026-10-02 (v5.112.0)
 
 ### Added
