@@ -4839,6 +4839,7 @@
         <footer class="feedback-footer"><button class="hv-btn btn-secondary" data-action="closeFeedbackModal">Cancel</button><button class="hv-btn btn-primary" id="feedback-submit" data-action="submitFeedbackReport">Submit feedback</button></footer>
       </div>`;
       document.body.appendChild(overlay);
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) closeFeedbackModal(); });
       document.body.classList.add('modal-open'); document.documentElement.classList.add('modal-open');
       const type = (tab === 'feature' || draft.request_type === 'feature') ? 'feature' : 'bug';
       overlay.querySelector('input[name="feedback-kind"][value="' + type + '"]').checked = true;
@@ -23710,6 +23711,8 @@ function burnAreaChart() {
       if (acmmOverlay && acmmOverlay.style.display === 'flex') { acmmCloseDialog(); return; }
       const welcomeOverlay = document.getElementById('welcome-overlay');
       if (welcomeOverlay && !welcomeOverlay.classList.contains('hidden')) { closeWelcomeDialog(); return; }
+      const feedbackOverlay = document.getElementById('feedback-overlay');
+      if (feedbackOverlay) { closeFeedbackModal(); return; }
       if (_configModalOpen) { closeConfigDialog(); return; }
       if (_acmmOpen) { closeACMMDialog(); return; }
       const nousOverlay = document.getElementById('nous-config-overlay');

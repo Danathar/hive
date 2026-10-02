@@ -132,6 +132,13 @@ func TestFeedbackStaticUIWiring(t *testing.T) {
 	if !strings.Contains(open, `<details class="feedback-preview-shell">`) {
 		t.Fatal("feedback preview details element missing")
 	}
+	if !strings.Contains(open, "overlay.addEventListener('click', function(e) { if (e.target === overlay) closeFeedbackModal(); });") {
+		t.Fatal("feedback modal does not close on backdrop click")
+	}
+	escapeHandler := regexp.MustCompile(`(?s)document\.addEventListener\('keydown', \(e\) => \{.*?if \(e\.key !== 'Escape'\) return;.*?const feedbackOverlay = document\.getElementById\('feedback-overlay'\);.*?if \(feedbackOverlay\) \{ closeFeedbackModal\(\); return; \}`).FindString(html)
+	if escapeHandler == "" {
+		t.Fatal("Escape keydown handler is not wired to closeFeedbackModal")
+	}
 	submit := jsFunctionBody(t, html, "async function submitFeedbackReport()")
 	if !strings.Contains(submit, "fetch('/api/feedback/report'") {
 		t.Fatal("feedback submit does not post to the feedback endpoint")
