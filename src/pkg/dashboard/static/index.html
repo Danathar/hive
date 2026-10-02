@@ -23218,6 +23218,10 @@ function burnAreaChart() {
       if (!st) return null;
       if (versionSameCommit(v && (v.hash || v.short), st.target)) return versionMarkUpgradeComplete(st, now);
       const target = v && v.target || {};
+      if (target.source === 'hub' && target.resolved === false) {
+        versionClearUpgradeProgress();
+        return null;
+      }
       const knownTarget = target.sha || target.short || v && v.latestHash || v && v.targetHash || '';
       if (!knownTarget) {
         versionClearUpgradeProgress();

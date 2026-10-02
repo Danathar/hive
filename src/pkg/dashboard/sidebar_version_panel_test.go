@@ -222,6 +222,9 @@ if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) t
 versionWriteUpgradeProgress({target:'ccc3333abcdef', targetShort:'ccc3333', startedAt:1000});
 st = versionReconcileUpgradeProgress({hash:'aaa1111'}, 2000);
 if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('unknown target progress was not cleared');
+versionWriteUpgradeProgress({target:'eee5555abcdef', targetShort:'eee5555', startedAt:1000});
+st = versionReconcileUpgradeProgress({hash:'aaa1111', latestHash:'eee5555abcdef', target:{source:'hub', resolved:false}}, 2000);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('unresolved hub target progress was not cleared');
 versionWriteUpgradeProgress({target:'ddd4444abcdef', targetShort:'ddd4444', startedAt:1000});
 st = versionReadUpgradeProgress(1000 + VERSION_UPGRADE_LONG_MS + 1);
 if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) throw new Error('expired progress was not cleared');
