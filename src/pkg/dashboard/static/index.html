@@ -3980,6 +3980,7 @@
       <div class="oc-nav-label">Dashboard</div>
       <a class="oc-nav-item" data-section="overview-section" data-action="ocNavigate" data-arg0="overview-section"><span class="oc-nav-emoji">🍩</span><span class="oc-nav-text">Overview</span></a>
       <a class="oc-nav-item active" data-section="governor" data-action="ocNavigate" data-arg0="governor"><span class="oc-nav-emoji">📊</span><span class="oc-nav-text">Governor</span></a>
+      <a class="oc-nav-item" data-section="pr-throughput-section" data-action="ocNavigate" data-arg0="pr-throughput-section"><span class="oc-nav-emoji">📊</span><span class="oc-nav-text">Throughput</span></a>
     </div>
     <div class="oc-nav-group" id="oc-agent-nav-group">
       <div class="oc-tree-toggle" data-action="ocToggleAgentTree" data-arg-types="t">
@@ -4250,6 +4251,13 @@
 
   <div class="governor" id="governor"></div>
 
+  <div id="pr-throughput-section" data-dashboard-section="pr-throughput-section" hidden>
+    <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="pr-throughput-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Change Throughput section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 📊 Change Throughput <span class="dash-card-subtitle">pull/merge requests across tracked forges</span></h2>
+    <div class="section-body">
+      <div id="pr-throughput-card" class="prt-card advisory-subsection-card"></div>
+    </div>
+  </div>
+
   <div id="advisory-section" data-dashboard-section="advisory-section" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
     <h2 class="section-label section-group-header section-header-toggle mb-4" data-action="toggleSection" data-arg0="advisory-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Hive Advisory section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> 🧭 Hive Advisory</h2>
     <div class="section-body section-group-body">
@@ -4290,12 +4298,6 @@
       </div>
     </div>
 
-    <div id="pr-throughput-section" class="advisory-subsection" style="display: none;">
-      <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="pr-throughput-section"><span class="section-chevron">▼</span> 📬 Change Throughput <span class="dash-card-subtitle">pull/merge requests across tracked forges</span></h2>
-      <div class="section-body">
-        <div id="pr-throughput-card" class="prt-card advisory-subsection-card"></div>
-      </div>
-    </div>
     </div>
   </div>
 
@@ -5122,7 +5124,7 @@
       'fleet-report-section': { title: '📡 Fleet Report Preview', summary: '0 reports', badgeHtml: '<span class="dash-card-badge">dry-run</span>' },
       'acmm-reco-section': { title: '⬆️ Ready to level up?', summary: 'L— · stay', badgeHtml: '<span class="dash-card-badge">advisory</span>' },
       'lifecycle-section': { title: '🔀 Lifecycle Timeline', summary: '0 in flight · 0 merged' },
-      'pr-throughput-section': { title: '📬 Change Throughput', summary: '0 merged · 0 opened (24h)', subtitleHtml: 'pull/merge requests across tracked forges' },
+      'pr-throughput-section': { title: '📊 Change Throughput', summary: '0 merged · 0 opened (24h)', subtitleHtml: 'pull/merge requests across tracked forges' },
       'token-panel': { title: '🪙 Token Usage', summary: '0 sessions' },
       'cost-panel': { title: '💵 Cost', summary: '$0' },
       'repos-section': { title: '📦 Repositories', summary: '0 repos' },
@@ -5445,7 +5447,7 @@
     var DASHBOARD_LAYOUT_KEY='hive.dashboard.layout';
     var DASHBOARD_LAYOUT_VERSION=1;
     var DASHBOARD_LAYOUT_REGIONS=['main'];
-    var DASHBOARD_LAYOUT_TEMPLATE={main:['overview-section','governor','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','audit-section','review-queue-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
+    var DASHBOARD_LAYOUT_TEMPLATE={main:['overview-section','governor','pr-throughput-section','advisory-section','token-panel','cost-panel','repos-section','beads-section','acmm-eval-section','approvals-section','audit-section','review-queue-section','nous-section','inception-section','knowledge-section','contributors-section','debug-section','logs-section','agents-section','faq-section']};
     var DASHBOARD_LAYOUT_GRIP_SELECTOR='[data-dashboard-grip]';
     var DASHBOARD_LAYOUT_CARD_SELECTOR='[data-dashboard-section]';
     var DASHBOARD_LAYOUT_ANCHOR_ID='dashboard-notices';
@@ -5744,11 +5746,12 @@
     const OC_TOPBAR_HEIGHT = 64;
     function _ocAgentFromHash() {
       const h = location.hash.replace('#', '');
-      if (!h || h.startsWith('section-')) return null;
+      if (!h || h === 'throughput' || h.startsWith('section-')) return null;
       return h;
     }
     function _ocSectionFromHash() {
       const h = location.hash.replace('#', '');
+      if (h === 'throughput') return 'pr-throughput-section';
       return h && h.startsWith('section-') ? h.replace('section-', '') : null;
     }
     let _ocSelectedAgent = _ocAgentFromHash();
@@ -15624,7 +15627,7 @@ function burnAreaChart() {
       const card = document.getElementById('pr-throughput-card');
       if (!section || !card) return;
       dto = dto || {};
-      section.style.display = '';
+      section.hidden = false;
 
       const buttons = PRT_WINDOWS.map(([h, label]) => `<button type="button" class="${prtHours === h ? 'active' : ''}" data-action="setPRThroughputHours" data-arg0="${h}" title="${h === 0 ? 'All time' : 'Last ' + label}">${label}</button>`).join('');
       const opened = Number(dto.opened) || 0;
