@@ -1,0 +1,1 @@
+- Fix the dashboard sidebar version panel so it fits narrow sidebars, exposes hub cadence/tracking/status, and shows the correct upgrade action state.

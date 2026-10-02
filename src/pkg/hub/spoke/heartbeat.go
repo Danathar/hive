@@ -2551,6 +2551,13 @@ type HeartbeatUpgradePolicy struct {
 	SpokeManaged bool `json:"spoke_managed"`
 	// Schedule is the hub-side cadence: "instant", "daily" or "weekly".
 	Schedule string `json:"schedule,omitempty"`
+	// ScheduleHour is the 24h local hour at/after which scheduled daily/weekly
+	// auto-upgrades may fire. Omitted for instant/manual policies.
+	ScheduleHour int `json:"schedule_hour,omitempty"`
+	// ScheduleTimezone is the IANA timezone for ScheduleHour.
+	ScheduleTimezone string `json:"schedule_timezone,omitempty"`
+	// ScheduleWeekday is the weekly window's opening day, e.g. "Tuesday".
+	ScheduleWeekday string `json:"schedule_weekday,omitempty"`
 	// Paused is the fleet-wide spoke-upgrade kill switch state.
 	Paused bool `json:"paused"`
 	// Branch is the git line the spoke reports running (its target line).

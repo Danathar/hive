@@ -89,6 +89,9 @@ func TestHeartbeatUpgradePolicyDailyScheduleAndUnresolvedChannel(t *testing.T) {
 	if got.Schedule != AutoUpgradeModeDaily {
 		t.Errorf("Schedule = %q, want daily", got.Schedule)
 	}
+	if got.ScheduleHour != 13 || got.ScheduleTimezone != "America/New_York" || got.ScheduleWeekday != "" {
+		t.Errorf("schedule details = hour %d timezone %q weekday %q, want 13 America/New_York and no weekday", got.ScheduleHour, got.ScheduleTimezone, got.ScheduleWeekday)
+	}
 	if got.TargetResolved || got.TargetSHA != "" {
 		t.Errorf("TargetResolved=%v TargetSHA=%q, want unresolved with no SHA — the spoke must render unknown, not the v4 tip", got.TargetResolved, got.TargetSHA)
 	}

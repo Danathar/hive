@@ -75,6 +75,9 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	cacheAge := time.Since(s.cachedLatestAt)
 	policy := s.hubUpgradePolicy
 	s.versionMu.RUnlock()
+	if policy != nil {
+		resp["upgradePolicy"] = policy
+	}
 
 	if cacheAge > dashboardVersionTipCacheTTL || cached == "" {
 		if latest, err := s.fetchLatestRemoteHash(); err == nil && latest != "" {
