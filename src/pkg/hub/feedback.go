@@ -19,18 +19,21 @@ import (
 
 const (
 	feedbackIngestPath             = "/api/feedback/ingest"
+	feedbackIssuesPath             = "/api/feedback/issues"
 	feedbackMaxRequestBytes        = 15 << 20
 	feedbackMaxTextBytes           = 64 << 10
 	feedbackMaxScreenshots         = 5
 	feedbackMaxScreenshotBytes     = 2 << 20
 	feedbackHubRateWindow          = 24 * time.Hour
 	feedbackHubMaxPerHivePerWindow = 10
-	feedbackGitHubAPIBase          = "https://api.github.com"
 	feedbackTargetHive             = "hive"
 	feedbackTargetDocs             = "docs"
 	feedbackTypeBug                = "bug"
 	feedbackTypeFeature            = "feature"
+	feedbackMaxIssueRefs           = 50
 )
+
+var feedbackGitHubAPIBase = "https://api.github.com"
 
 type feedbackConsoleError struct {
 	Timestamp string `json:"timestamp,omitempty"`
@@ -91,6 +94,16 @@ type feedbackIssueResult struct {
 	Number int
 	URL    string
 	ID     int64
+}
+type feedbackIssueStatus struct {
+	Owner     string `json:"owner"`
+	Repo      string `json:"repo"`
+	Number    int    `json:"number"`
+	Title     string `json:"title,omitempty"`
+	State     string `json:"state,omitempty"`
+	HTMLURL   string `json:"html_url,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Comments  int    `json:"comments,omitempty"`
 }
 
 type feedbackRateLimiter struct {
@@ -215,6 +228,54 @@ func (s *HubServer) handleFeedbackIngest(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(feedbackReportResponse{OK: true, IssueNumber: result.Number, IssueURL: result.URL, Warning: warning})
 }
 
+func (s *HubServer) handleFeedbackIssues(w http.ResponseWriter, r *http.Request) {
+	if s.hubSecret == "" {
+		npsJSONError(w, "feedback issue lookup requires a configured hub secret", http.StatusServiceUnavailable)
+		return
+	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		npsJSONError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	hiveID := sanitizeHeartbeatField(r.URL.Query().Get("hive_id"))
+	if hiveID == "" || !isValidName(hiveID) {
+		npsJSONError(w, "invalid hive_id", http.StatusBadRequest)
+		return
+	}
+	if !s.verifyHeartbeatBearer(strings.TrimPrefix(auth, "Bearer "), hiveID) {
+		npsJSONError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !s.npsHiveRegistered(hiveID) {
+		npsJSONError(w, "unknown hive - heartbeat first", http.StatusForbidden)
+		return
+	}
+	refs, err := parseHubFeedbackRefs(r.URL.Query().Get("refs"))
+	if err != nil {
+		npsJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	token := strings.TrimSpace(s.envGitHubToken)
+	if token == "" {
+		token = hubGitHubToken()
+	}
+	if token == "" {
+		npsJSONError(w, "hub GitHub token is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := fetchHubFeedbackIssueStatuses(r.Context(), http.DefaultClient, feedbackGitHubAPIBase, token, refs)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("feedback: issue lookup failed", "hive", hiveID, "error", err)
+		}
+		npsJSONError(w, "failed to refresh issue status", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "items": items})
+}
+
 func validateHubFeedbackRequest(req *feedbackReportRequest) error {
 	req.Title = strings.TrimSpace(req.Title)
 	req.Description = strings.TrimSpace(req.Description)
@@ -314,6 +375,79 @@ func hubFeedbackLabels(req feedbackReportRequest) []string {
 	}
 	return []string{"enhancement", "user-feedback"}
 }
+
+func parseHubFeedbackRefs(raw string) ([]feedbackIssueStatus, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > feedbackMaxIssueRefs {
+		return nil, fmt.Errorf("at most %d issue refs are allowed", feedbackMaxIssueRefs)
+	}
+	out := make([]feedbackIssueStatus, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		hash := strings.LastIndex(part, "#")
+		slash := strings.Index(part, "/")
+		if hash < 0 || slash < 0 || slash > hash {
+			return nil, errors.New("invalid issue ref")
+		}
+		var number int
+		if _, err := fmt.Sscanf(part[hash+1:], "%d", &number); err != nil || number <= 0 {
+			return nil, errors.New("invalid issue number")
+		}
+		owner := part[:slash]
+		repo := part[slash+1 : hash]
+		if owner != "hivecommons" || (repo != "hive" && repo != "docs") {
+			return nil, errors.New("issue refs must target hivecommons/hive or hivecommons/docs")
+		}
+		out = append(out, feedbackIssueStatus{Owner: owner, Repo: repo, Number: number})
+	}
+	return out, nil
+}
+
+func fetchHubFeedbackIssueStatuses(ctx context.Context, client *http.Client, apiBase, token string, refs []feedbackIssueStatus) ([]feedbackIssueStatus, error) {
+	out := make([]feedbackIssueStatus, 0, len(refs))
+	for _, ref := range refs {
+		st, err := fetchHubFeedbackIssueStatus(ctx, client, apiBase, token, ref.Owner, ref.Repo, ref.Number)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+func fetchHubFeedbackIssueStatus(ctx context.Context, client *http.Client, apiBase, token, owner, repo string, number int) (feedbackIssueStatus, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d", strings.TrimRight(apiBase, "/"), owner, repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return feedbackIssueStatus{}, fmt.Errorf("github issue status: %d", resp.StatusCode)
+	}
+	var got struct {
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		UpdatedAt string `json:"updated_at"`
+		Comments  int    `json:"comments"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	return feedbackIssueStatus{Owner: owner, Repo: repo, Number: number, Title: got.Title, State: got.State, HTMLURL: got.HTMLURL, UpdatedAt: got.UpdatedAt, Comments: got.Comments}, nil
+}
+
 func createHubFeedbackIssue(ctx context.Context, client *http.Client, token string, req feedbackReportRequest, apiBase string) (feedbackIssueResult, string, error) {
 	owner, repo := hubFeedbackRepo(req)
 	labels := hubFeedbackLabels(req)

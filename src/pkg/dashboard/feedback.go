@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ const (
 	feedbackMaxScreenshots      = 5
 	feedbackMaxScreenshotBytes  = 2 << 20
 	feedbackHubIngestPath       = "/api/feedback/ingest"
+	feedbackHubIssuesPath       = "/api/feedback/issues"
 	feedbackForwardTimeout      = 20 * time.Second
 	feedbackMaxHubResponseBytes = 8 << 10
 	feedbackTargetHive          = "hive"
@@ -33,13 +35,49 @@ const (
 	feedbackTypeFeature         = "feature"
 	feedbackFallbackBaseHive    = "https://github.com/hivecommons/hive/issues/new"
 	feedbackFallbackBaseDocs    = "https://github.com/hivecommons/docs/issues/new"
+	feedbackSubmissionsFileMode = 0o600
+	feedbackSubmissionsDirMode  = 0o755
+	feedbackMaxMineRefs         = 50
 )
+
+var feedbackSubmissionsPath = "/data/feedback-submissions.json"
 
 type feedbackConsoleError struct {
 	Timestamp string `json:"timestamp,omitempty"`
 	Level     string `json:"level,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Source    string `json:"source,omitempty"`
+}
+
+type feedbackSubmissionRecord struct {
+	Owner             string `json:"owner"`
+	Repo              string `json:"repo"`
+	Number            int    `json:"number"`
+	Title             string `json:"title,omitempty"`
+	State             string `json:"state,omitempty"`
+	HTMLURL           string `json:"html_url,omitempty"`
+	SubmittedAt       string `json:"submitted_at"`
+	UpdatedAt         string `json:"updated_at,omitempty"`
+	Comments          int    `json:"comments,omitempty"`
+	LastSeenUpdatedAt string `json:"last_seen_updated_at,omitempty"`
+}
+
+type feedbackMineResponse struct {
+	OK      bool                       `json:"ok"`
+	Items   []feedbackSubmissionRecord `json:"items"`
+	Unread  int                        `json:"unread"`
+	Warning string                     `json:"warning,omitempty"`
+}
+
+type feedbackIssueStatus struct {
+	Owner     string `json:"owner"`
+	Repo      string `json:"repo"`
+	Number    int    `json:"number"`
+	Title     string `json:"title,omitempty"`
+	State     string `json:"state,omitempty"`
+	HTMLURL   string `json:"html_url,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Comments  int    `json:"comments,omitempty"`
 }
 
 type feedbackFailedAPICall struct {
@@ -142,6 +180,10 @@ func (s *Server) handleFeedbackReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.auditFromRequest(r, "feedback_submit", auditDetail("target", req.TargetRepo, "type", req.RequestType, "via", "hub", "issue", fmt.Sprintf("%d", resp.IssueNumber)), "")
+		if resp.IssueNumber > 0 {
+			owner, repo := feedbackRepo(req)
+			s.recordFeedbackSubmission(owner, repo, resp.IssueNumber, req.Title, resp.IssueURL)
+		}
 		jsonResponse(w, resp)
 		return
 	}
@@ -149,6 +191,8 @@ func (s *Server) handleFeedbackReport(w http.ResponseWriter, r *http.Request) {
 	if token := s.feedbackUserToken(r); token != "" {
 		result, warning, err := createFeedbackGitHubIssue(r.Context(), http.DefaultClient, token, req, feedbackGitHubAPIBase())
 		if err == nil {
+			owner, repo := feedbackRepo(req)
+			s.recordFeedbackSubmission(owner, repo, result.Number, req.Title, result.URL)
 			s.auditFromRequest(r, "feedback_submit", auditDetail("target", req.TargetRepo, "type", req.RequestType, "via", "user", "issue", fmt.Sprintf("%d", result.Number)), "")
 			jsonResponse(w, feedbackReportResponse{OK: true, IssueNumber: result.Number, IssueURL: result.URL, Warning: warning})
 			return
@@ -160,6 +204,271 @@ func (s *Server) handleFeedbackReport(w http.ResponseWriter, r *http.Request) {
 	fallback := feedbackFallbackURL(req)
 	s.auditFromRequest(r, "feedback_submit", auditDetail("target", req.TargetRepo, "type", req.RequestType, "via", "fallback"), "")
 	jsonResponse(w, feedbackReportResponse{OK: true, FallbackURL: fallback, Warning: "Open the prefilled GitHub issue and paste screenshots manually."})
+}
+
+func (s *Server) handleFeedbackMine(w http.ResponseWriter, r *http.Request) {
+	if !s.feedbackMineAuthorized(r) {
+		jsonError(w, "you must be signed in to view feedback reports", http.StatusForbidden)
+		return
+	}
+	items, err := loadFeedbackSubmissions()
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("feedback: could not load submissions", "error", err)
+		}
+		jsonError(w, "could not load feedback reports", http.StatusInternalServerError)
+		return
+	}
+	var warning string
+	if len(items) > 0 {
+		statuses, err := s.refreshFeedbackIssueStatuses(r.Context(), r, items)
+		if err != nil {
+			warning = "Could not refresh issue activity right now."
+			if s.logger != nil {
+				s.logger.Warn("feedback: issue refresh failed", "error", err)
+			}
+		} else {
+			items = mergeFeedbackStatuses(items, statuses)
+		}
+	}
+	if r.URL.Query().Get("mark_seen") == "true" {
+		for i := range items {
+			items[i].LastSeenUpdatedAt = items[i].UpdatedAt
+			if items[i].LastSeenUpdatedAt == "" {
+				items[i].LastSeenUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+		}
+		if err := saveFeedbackSubmissions(items); err != nil && s.logger != nil {
+			s.logger.Warn("feedback: could not mark submissions seen", "error", err)
+		}
+	} else if warning == "" {
+		_ = saveFeedbackSubmissions(items)
+	}
+	jsonResponse(w, feedbackMineResponse{OK: true, Items: items, Unread: feedbackUnreadCount(items), Warning: warning})
+}
+
+func (s *Server) feedbackMineAuthorized(r *http.Request) bool {
+	if r.Header.Get(ownerRoleVerifiedHeader) == "true" {
+		return true
+	}
+	if sess := s.sessionFromRequest(r); sess != nil {
+		_, ok := s.liveSessionRole(sess)
+		return ok
+	}
+	return r.Header.Get("X-Hive-User") != ""
+}
+
+func (s *Server) refreshFeedbackIssueStatuses(ctx context.Context, r *http.Request, items []feedbackSubmissionRecord) ([]feedbackIssueStatus, error) {
+	refs := feedbackRefs(items)
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if s.deps != nil && s.deps.Config != nil && s.deps.Config.Hub.NPSHubLinked() {
+		return s.fetchFeedbackStatusesFromHub(ctx, refs)
+	}
+	if token := s.feedbackUserToken(r); token != "" {
+		return fetchFeedbackIssueStatuses(ctx, http.DefaultClient, feedbackGitHubAPIBase(), token, refs)
+	}
+	return nil, errors.New("no GitHub auth available for feedback issue refresh")
+}
+
+func (s *Server) fetchFeedbackStatusesFromHub(ctx context.Context, refs []feedbackSubmissionRecord) ([]feedbackIssueStatus, error) {
+	hub := s.deps.Config.Hub
+	bearer := spoke.SpokeHeartbeatKey()
+	if bearer == "" {
+		return nil, errors.New("no hub credential configured")
+	}
+	hiveID := strings.TrimSpace(s.deps.Config.HiveID)
+	values := url.Values{}
+	values.Set("hive_id", hiveID)
+	values.Set("refs", encodeFeedbackRefs(refs))
+	endpoint := strings.TrimRight(strings.TrimSpace(hub.URL), "/") + feedbackHubIssuesPath + "?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	resp, err := npsNoRedirectClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer closeHTTPBody(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, feedbackMaxHubResponseBytes))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("hub answered %d", resp.StatusCode)
+	}
+	var out struct {
+		OK    bool                  `json:"ok"`
+		Items []feedbackIssueStatus `json:"items"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+func (s *Server) recordFeedbackSubmission(owner, repo string, number int, title, issueURL string) {
+	if number <= 0 || owner == "" || repo == "" {
+		return
+	}
+	items, err := loadFeedbackSubmissions()
+	if err != nil && s.logger != nil {
+		s.logger.Warn("feedback: could not load submissions before recording", "error", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rec := feedbackSubmissionRecord{
+		Owner:             owner,
+		Repo:              repo,
+		Number:            number,
+		Title:             title,
+		State:             "open",
+		HTMLURL:           issueURL,
+		SubmittedAt:       now,
+		UpdatedAt:         now,
+		LastSeenUpdatedAt: now,
+	}
+	replaced := false
+	for i := range items {
+		if sameFeedbackIssue(items[i], rec) {
+			rec.SubmittedAt = items[i].SubmittedAt
+			items[i] = rec
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		items = append([]feedbackSubmissionRecord{rec}, items...)
+	}
+	if len(items) > feedbackMaxMineRefs {
+		items = items[:feedbackMaxMineRefs]
+	}
+	if err := saveFeedbackSubmissions(items); err != nil && s.logger != nil {
+		s.logger.Warn("feedback: could not save submission", "error", err)
+	}
+}
+
+func loadFeedbackSubmissions() ([]feedbackSubmissionRecord, error) {
+	raw, err := os.ReadFile(feedbackSubmissionsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var f struct {
+		Items []feedbackSubmissionRecord `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, err
+	}
+	if len(f.Items) > feedbackMaxMineRefs {
+		f.Items = f.Items[:feedbackMaxMineRefs]
+	}
+	return f.Items, nil
+}
+
+func saveFeedbackSubmissions(items []feedbackSubmissionRecord) error {
+	if len(items) > feedbackMaxMineRefs {
+		items = items[:feedbackMaxMineRefs]
+	}
+	data, err := json.MarshalIndent(struct {
+		Items []feedbackSubmissionRecord `json:"items"`
+	}{Items: items}, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(feedbackSubmissionsPath)
+	if err := os.MkdirAll(dir, feedbackSubmissionsDirMode); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".feedback-submissions-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(feedbackSubmissionsFileMode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, feedbackSubmissionsPath)
+}
+
+func sameFeedbackIssue(a, b feedbackSubmissionRecord) bool {
+	return strings.EqualFold(a.Owner, b.Owner) && strings.EqualFold(a.Repo, b.Repo) && a.Number == b.Number
+}
+
+func feedbackRefs(items []feedbackSubmissionRecord) []feedbackSubmissionRecord {
+	seen := map[string]bool{}
+	refs := make([]feedbackSubmissionRecord, 0, len(items))
+	for _, item := range items {
+		if item.Owner == "" || item.Repo == "" || item.Number <= 0 {
+			continue
+		}
+		key := strings.ToLower(item.Owner + "/" + item.Repo + "#" + fmt.Sprintf("%d", item.Number))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, item)
+		if len(refs) >= feedbackMaxMineRefs {
+			break
+		}
+	}
+	return refs
+}
+
+func encodeFeedbackRefs(refs []feedbackSubmissionRecord) string {
+	parts := make([]string, 0, len(refs))
+	for _, r := range refs {
+		parts = append(parts, fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number))
+	}
+	return strings.Join(parts, ",")
+}
+
+func mergeFeedbackStatuses(items []feedbackSubmissionRecord, statuses []feedbackIssueStatus) []feedbackSubmissionRecord {
+	byKey := map[string]feedbackIssueStatus{}
+	for _, st := range statuses {
+		byKey[strings.ToLower(fmt.Sprintf("%s/%s#%d", st.Owner, st.Repo, st.Number))] = st
+	}
+	for i := range items {
+		key := strings.ToLower(fmt.Sprintf("%s/%s#%d", items[i].Owner, items[i].Repo, items[i].Number))
+		st, ok := byKey[key]
+		if !ok {
+			continue
+		}
+		if st.Title != "" {
+			items[i].Title = st.Title
+		}
+		if st.State != "" {
+			items[i].State = st.State
+		}
+		if st.HTMLURL != "" {
+			items[i].HTMLURL = st.HTMLURL
+		}
+		if st.UpdatedAt != "" {
+			items[i].UpdatedAt = st.UpdatedAt
+		}
+		items[i].Comments = st.Comments
+	}
+	return items
+}
+
+func feedbackUnreadCount(items []feedbackSubmissionRecord) int {
+	n := 0
+	for _, item := range items {
+		if item.UpdatedAt != "" && item.LastSeenUpdatedAt != "" && item.UpdatedAt > item.LastSeenUpdatedAt {
+			n++
+		}
+	}
+	return n
 }
 
 func validateFeedbackRequest(req *feedbackReportRequest) error {
@@ -315,7 +624,7 @@ func (s *Server) feedbackUserToken(r *http.Request) string {
 	return strings.TrimSpace(string(raw))
 }
 
-func feedbackGitHubAPIBase() string { return "https://api.github.com" }
+var feedbackGitHubAPIBase = func() string { return "https://api.github.com" }
 
 func feedbackRepo(req feedbackReportRequest) (owner, repo string) {
 	if req.TargetRepo == feedbackTargetDocs {
@@ -328,6 +637,50 @@ func feedbackLabels(req feedbackReportRequest) []string {
 		return []string{"kind/bug", "user-feedback"}
 	}
 	return []string{"enhancement", "user-feedback"}
+}
+
+func fetchFeedbackIssueStatuses(ctx context.Context, client *http.Client, apiBase, token string, refs []feedbackSubmissionRecord) ([]feedbackIssueStatus, error) {
+	out := make([]feedbackIssueStatus, 0, len(refs))
+	for _, ref := range refs {
+		st, err := fetchFeedbackIssueStatus(ctx, client, apiBase, token, ref.Owner, ref.Repo, ref.Number)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+func fetchFeedbackIssueStatus(ctx context.Context, client *http.Client, apiBase, token, owner, repo string, number int) (feedbackIssueStatus, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d", strings.TrimRight(apiBase, "/"), owner, repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	defer closeHTTPBody(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return feedbackIssueStatus{}, fmt.Errorf("github issue status: %d", resp.StatusCode)
+	}
+	var got struct {
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		UpdatedAt string `json:"updated_at"`
+		Comments  int    `json:"comments"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		return feedbackIssueStatus{}, err
+	}
+	return feedbackIssueStatus{Owner: owner, Repo: repo, Number: number, Title: got.Title, State: got.State, HTMLURL: got.HTMLURL, UpdatedAt: got.UpdatedAt, Comments: got.Comments}, nil
 }
 
 func createFeedbackGitHubIssue(ctx context.Context, client *http.Client, token string, req feedbackReportRequest, apiBase string) (feedbackIssueResult, string, error) {

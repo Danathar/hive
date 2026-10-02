@@ -18748,6 +18748,61 @@
         }
       }
     },
+
+    "/api/feedback/mine": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "List feedback reports filed from this hive",
+        "description": "Returns the local feedback submission ledger, refreshed from GitHub when the spoke has a hub relay or GitHub user token. The unread count is the number of issues whose updated_at is newer than last_seen_updated_at. Pass mark_seen=true when opening the My reports tab to mark current activity seen.",
+        "parameters": [
+          {
+            "name": "mark_seen",
+            "in": "query",
+            "schema": { "type": "boolean" },
+            "description": "When true, records the current updated_at values as seen after returning the list."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feedback reports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "unread": { "type": "integer" },
+                    "warning": { "type": "string" },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "owner": { "type": "string" },
+                          "repo": { "type": "string" },
+                          "number": { "type": "integer" },
+                          "title": { "type": "string" },
+                          "state": { "type": "string" },
+                          "html_url": { "type": "string" },
+                          "submitted_at": { "type": "string" },
+                          "updated_at": { "type": "string" },
+                          "comments": { "type": "integer" },
+                          "last_seen_updated_at": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": { "description": "Not signed in" },
+          "500": { "description": "Could not load feedback reports" }
+        }
+      }
+    },
     "/api/budget/history": {
       "get": {
         "tags": [

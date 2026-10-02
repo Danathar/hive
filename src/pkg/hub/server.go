@@ -1637,6 +1637,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	// GET registered in registerSaaSRoutes.
 	s.mux.HandleFunc("POST "+npsIngestPath, s.handleNPSIngest)
 	s.mux.HandleFunc("POST "+feedbackIngestPath, s.handleFeedbackIngest)
+	s.mux.HandleFunc("GET "+feedbackIssuesPath, s.handleFeedbackIssues)
 	s.mux.HandleFunc("GET /api/registry", s.handleRegistry)
 	s.mux.HandleFunc("GET /api/hub/leaderboard", s.handleLeaderboard)
 	s.mux.HandleFunc("GET /api/hub/stats", s.handleStats)
