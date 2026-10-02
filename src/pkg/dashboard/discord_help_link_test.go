@@ -43,7 +43,7 @@ func TestContributeLandingMentionsDiscord(t *testing.T) {
 	}
 	body := string(raw)
 	for _, want := range []string{
-		`Questions? <a href="https://hivecommons.dev/discord"`,
+		`Questions? <a class="discord-link" href="https://hivecommons.dev/discord"`,
 		`we'll help you get to your first PR`,
 		`placeholder="Chat with other contributors | https://hivecommons.dev/discord`,
 	} {
