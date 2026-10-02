@@ -392,3 +392,78 @@ func TestReadPathAdvisorRecords(t *testing.T) {
 		t.Fatalf("path = %q ok=%v", path, ok)
 	}
 }
+
+func TestReadPathBandTools(t *testing.T) {
+	cases := []struct {
+		tool   string
+		prefix string
+	}{
+		{adminmcp.ToolIssuesByBand, "/api/overview/issues.json"},
+		{adminmcp.ToolPrsByBand, "/api/overview/prs.json"},
+	}
+	for _, tc := range cases {
+		path, ok := readPath(tc.tool, map[string]any{"repo": "owner/name", "band": "done", "stale": true, "limit": float64(5)})
+		if !ok {
+			t.Fatalf("%s: expected ok", tc.tool)
+		}
+		if !strings.HasPrefix(path, tc.prefix+"?") {
+			t.Fatalf("%s: path = %q", tc.tool, path)
+		}
+		if !strings.Contains(path, "repo=owner%2Fname") || !strings.Contains(path, "stale=true") {
+			t.Fatalf("%s: path = %q, want repo and stale forwarded", tc.tool, path)
+		}
+		if strings.Contains(path, "band=") || strings.Contains(path, "limit=") {
+			t.Fatalf("%s: path = %q, must not forward band or limit", tc.tool, path)
+		}
+	}
+}
+
+func TestReadProviderIssuesByBandFiltersRowsButKeepsBands(t *testing.T) {
+	// Each tool has its own band vocabulary (issueBandKeys vs prBandKeys), so
+	// pick a filter band and a filler band that are valid for that tool.
+	cases := []struct {
+		tool   string
+		want   string
+		filler string
+	}{
+		{adminmcp.ToolIssuesByBand, "done", "ready"},
+		{adminmcp.ToolPrsByBand, "in-review", "open"},
+	}
+	for _, tc := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("band") != "" {
+				t.Fatalf("%s: server saw a band filter %q; the tool must fetch every band", tc.tool, r.URL.Query().Get("band"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"bands": []any{
+					map[string]any{"key": tc.filler, "label": "Filler", "rule": "no other band matched", "count": 1},
+					map[string]any{"key": tc.want, "label": "Wanted", "rule": "matches the filter", "count": 2},
+				},
+				"rows": []any{
+					map[string]any{"number": 1, "band": tc.filler},
+					map[string]any{"number": 2, "band": tc.want},
+					map[string]any{"number": 3, "band": tc.want},
+				},
+			})
+		}))
+		defer server.Close()
+		r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+		result, err := (readProvider{roster: r}).Read(context.Background(), tc.tool, map[string]any{"band": tc.want})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.tool, err)
+		}
+		body, ok := result.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: result = %#v", tc.tool, result)
+		}
+		bands, ok := body["bands"].([]any)
+		if !ok || len(bands) != 2 {
+			t.Fatalf("%s: bands = %#v, want both bands even when filtered", tc.tool, body["bands"])
+		}
+		rows, ok := body["rows"].([]any)
+		if !ok || len(rows) != 2 {
+			t.Fatalf("%s: rows = %#v, want only the 2 %s-band rows", tc.tool, body["rows"], tc.want)
+		}
+	}
+}
