@@ -47,12 +47,15 @@ const window = {};
 		jsFunc(t, html, "versionTrackingSummary") + "\n" +
 		jsFunc(t, html, "versionCadenceLabel") + "\n" +
 		jsFunc(t, html, "versionStatusSummary") + "\n" +
+		jsFunc(t, html, "versionButtonHTML") + "\n" +
 		jsFunc(t, html, "renderVersionUpgradeAction") + "\n" +
 		jsFunc(t, html, "renderVersionDetails") + `
 const out = renderVersionDetails({hash:'07d99d8426ec7b5ae364e25abcdef0123456789', short:'07d99d8', branch:'v5', channel:'candidate', tracking:'floating', latestHash:'07d99d8426ec7b5ae364e25abcdef0123456789', target:{sha:'07d99d8426ec7b5ae364e25abcdef0123456789', short:'07d99d8', managedBy:'hub'}, autoUpdate:{state:'up_to_date', managedBy:'hub', enabled:true, detail:'ok'}, releaseStatus:{attempt:{state:'succeeded', completedAt:'2026-10-02T10:00:00Z'}}}, {deliveryLabel:'candidate (v5)', offeredUpgradeHash:'07d99d8426ec7b5ae364e25abcdef0123456789', offeredUpgradeShort:'07d99d8'});
-if (!out.includes('>07d99d8<')) throw new Error('short sha missing: '+out);
+if (!out.includes('>07d99d<')) throw new Error('short sha missing: '+out);
 if (!out.includes('title="07d99d8426ec7b5ae364e25abcdef0123456789"')) throw new Error('full sha title missing: '+out);
 for (const row of ['Tracking','Status','Cadence']) if (!out.includes('>'+row+'</span>')) throw new Error('missing row '+row+': '+out);
+const fallback = renderVersionDetails({hash:'abcdef1234567890', short:'abcdef1', branch:'v5', channel:'candidate', tracking:'', autoUpdate:{state:'unknown'}}, {deliveryLabel:''});
+if (!fallback.includes('candidate (v5)')) throw new Error('tracking fallback missing: '+fallback);
 const empty = renderVersionDetails({hash:'abcdef1234567890', short:'abcdef1', tracking:'unknown', autoUpdate:{state:'unknown'}}, {deliveryLabel:''});
 if (!empty.includes('>—</strong>')) throw new Error('fallback dash missing: '+empty);
 `
@@ -70,22 +73,63 @@ func TestSidebarVersionUpgradeActionRules(t *testing.T) {
 	html := indexHTML(t)
 	script := `
 function escapeHtml(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+var _upgradeInProgress = false;
 ` + jsFunc(t, html, "versionPolicy") + "\n" +
 		jsFunc(t, html, "versionCadenceLabel") + "\n" +
 		jsFunc(t, html, "versionSameCommit") + "\n" +
+		jsFunc(t, html, "versionShortSHA") + "\n" +
+		jsFunc(t, html, "versionElapsedText") + "\n" +
+		jsFunc(t, html, "versionUpgradeProgressStatus") + "\n" +
+		jsFunc(t, html, "versionBeeProgressHTML") + "\n" +
+		jsFunc(t, html, "versionButtonHTML") + "\n" +
 		jsFunc(t, html, "renderVersionUpgradeAction") + `
-let v = {hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222', managedBy:'hub'}, autoUpdate:{enabled:true, managedBy:'hub'}, upgradePolicy:{schedule:'daily', schedule_hour:13, schedule_timezone:'America/New_York'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}};
-let out = renderVersionUpgradeAction(v, {offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', offeredUpgradeLabel:'Hub target'});
-if (!out.includes('Hub will upgrade automatically') || out.includes('data-action="gh27"')) throw new Error('hub-managed action wrong: '+out);
-v = {hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222'}, autoUpdate:{enabled:false, state:'disabled'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}};
-out = renderVersionUpgradeAction(v, {offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', offeredUpgradeLabel:'target'});
-if (!out.includes('Upgrade to bbb2222 →') || !out.includes('data-action="gh27"')) throw new Error('manual button missing: '+out);
-v = {hash:'bbb2222', short:'bbb2222', target:{sha:'bbb2222', short:'bbb2222'}, autoUpdate:{state:'up_to_date'}, deployment:{upgradeSupported:true}};
-out = renderVersionUpgradeAction(v, {offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222'});
-if (!out.includes('Up to date ✓')) throw new Error('up-to-date state wrong: '+out);
-v = {hash:'aaa1111', short:'aaa1111', target:{resolved:false}, autoUpdate:{state:'unknown'}, deployment:{upgradeSupported:true}};
-out = renderVersionUpgradeAction(v, {offeredUpgradeHash:'', offeredUpgradeShort:''});
-if (!out.includes('Checking…')) throw new Error('checking state wrong: '+out);
+const fixtures = [
+  {
+    name:'hub-managed',
+    v:{hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222', managedBy:'hub'}, autoUpdate:{enabled:true, managedBy:'hub'}, upgradePolicy:{schedule:'daily', schedule_hour:13, schedule_timezone:'America/New_York'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}},
+    ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', offeredUpgradeLabel:'Hub target'},
+    want:'Upgrade to bbb2222', disabled:true, action:false
+  },
+  {
+    name:'manual',
+    v:{hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222'}, autoUpdate:{enabled:false, state:'disabled'}, deployment:{upgradeSupported:true, runtime:'kubernetes'}},
+    ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', offeredUpgradeLabel:'target'},
+    want:'Upgrade to bbb2222', disabled:false, action:true
+  },
+  {
+    name:'current',
+    v:{hash:'bbb2222', short:'bbb2222', target:{sha:'bbb2222', short:'bbb2222'}, autoUpdate:{state:'up_to_date'}, deployment:{upgradeSupported:true}},
+    ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222'},
+    want:'Up to date ✓', disabled:true, action:false
+  },
+  {
+    name:'paused',
+    v:{hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222', short:'bbb2222', paused:true}, autoUpdate:{state:'paused'}, deployment:{upgradeSupported:true}},
+    ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222'},
+    want:'Upgrade paused', disabled:true, action:false
+  },
+  {
+    name:'checking',
+    v:{hash:'aaa1111', short:'aaa1111', target:{resolved:false}, autoUpdate:{state:'unknown'}, deployment:{upgradeSupported:true}},
+    ctx:{offeredUpgradeHash:'', offeredUpgradeShort:''},
+    want:'Checking…', disabled:true, action:false
+  },
+  {
+    name:'progress',
+    v:{hash:'aaa1111', short:'aaa1111', target:{sha:'bbb2222'}, deployment:{upgradeSupported:true}},
+    ctx:{offeredUpgradeHash:'bbb2222', offeredUpgradeShort:'bbb2222', upgradeProgress:{target:'bbb2222abcdef', targetShort:'bbb2222', startedAt:1000}},
+    want:'Upgrading…', disabled:true, action:false
+  }
+];
+for (const f of fixtures) {
+  const out = renderVersionUpgradeAction(f.v, f.ctx);
+  if (!out.includes('id="spoke-upgrade-btn"')) throw new Error(f.name+' missing button: '+out);
+  if (!out.includes(f.want)) throw new Error(f.name+' missing label '+f.want+': '+out);
+  if (f.disabled && !out.includes('disabled aria-disabled="true"')) throw new Error(f.name+' should be disabled: '+out);
+  if (!f.disabled && out.includes('disabled aria-disabled="true"')) throw new Error(f.name+' should be enabled: '+out);
+  if (f.action && !out.includes('data-action="gh27"')) throw new Error(f.name+' missing action: '+out);
+  if (!f.action && out.includes('data-action="gh27"')) throw new Error(f.name+' unexpectedly actionable: '+out);
+}
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -167,6 +211,7 @@ const localStorage = {data:{}, getItem(k){return this.data[k] || null}, setItem(
 		jsFunc(t, html, "versionNowMs") + "\n" +
 		jsFunc(t, html, "versionReadUpgradeProgress") + "\n" +
 		jsFunc(t, html, "versionWriteUpgradeProgress") + "\n" +
+		jsFunc(t, html, "versionClearUpgradeProgress") + "\n" +
 		jsFunc(t, html, "versionMarkUpgradeComplete") + "\n" +
 		jsFunc(t, html, "versionReconcileUpgradeProgress") + `
 versionWriteUpgradeProgress({target:'bbb2222abcdef', targetShort:'bbb2222', startedAt:1000});
@@ -174,6 +219,12 @@ let st = versionReconcileUpgradeProgress({hash:'bbb2222abcdef'}, 2000);
 if (!st || !st.completedAt) throw new Error('match was not marked complete: '+JSON.stringify(st));
 st = versionReadUpgradeProgress(st.completedAt + VERSION_UPGRADE_DONE_MS + 1);
 if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) throw new Error('completed progress was not cleared after grace');
+versionWriteUpgradeProgress({target:'ccc3333abcdef', targetShort:'ccc3333', startedAt:1000});
+st = versionReconcileUpgradeProgress({hash:'aaa1111'}, 2000);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null || _upgradeInProgress) throw new Error('unknown target progress was not cleared');
+versionWriteUpgradeProgress({target:'ddd4444abcdef', targetShort:'ddd4444', startedAt:1000});
+st = versionReadUpgradeProgress(1000 + VERSION_UPGRADE_LONG_MS + 1);
+if (st !== null || localStorage.getItem(VERSION_UPGRADE_STORAGE_KEY) !== null) throw new Error('expired progress was not cleared');
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
