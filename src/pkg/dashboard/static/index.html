@@ -2952,6 +2952,26 @@
     .section-body.collapsed {
       max-height: 0 !important; opacity: 0; pointer-events: none;
     }
+    #hive-dashboard-root > [data-dashboard-section] { margin-top: var(--sp-6) !important; margin-bottom: var(--sp-6) !important; }
+    .dash-card { background: var(--surface-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); padding: var(--sp-6); box-shadow: var(--shadow-card); }
+    .dash-card.collapsed { background: var(--surface-1); border-color: var(--line-subtle); }
+    .dash-card-header { font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; text-transform: uppercase; margin-bottom: var(--sp-2); min-height: 32px; display: flex; align-items: center; gap: var(--sp-3); cursor: pointer; user-select: none; width: 100%; }
+    .dash-card-header:hover { opacity: 0.85; }
+    .dash-card-title { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; line-height: 1; }
+    .dash-card-header .dashboard-grip { width: 1.55rem; height: 1.55rem; padding: 0; margin-right: 0; font-size: var(--fs-base); font-weight: 400; line-height: 1; }
+    .dash-card-header .section-chevron, .dash-card-header .cost-chevron { width: 0.8rem; font-size: 0.72rem; font-weight: 700; color: var(--muted); line-height: 1; text-align: center; }
+    .dash-card-badges, .dash-card-actions { display: inline-flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+    .dash-card-actions { margin-left: auto; }
+    .dash-card-action, .dash-card-actions > button, .dash-card-actions > a, .dash-card-actions > .hv-btn, .dash-card-actions > .config-gear { display: inline-flex !important; align-items: center; justify-content: center; min-height: 24px !important; height: 24px !important; padding: 0 var(--sp-3) !important; border-radius: var(--r-pill) !important; border: 1px solid var(--line-subtle) !important; background: color-mix(in srgb, var(--surface-2) 70%, transparent) !important; color: var(--text) !important; font-size: var(--fs-2xs) !important; font-weight: 700 !important; letter-spacing: 0.04em !important; text-decoration: none !important; line-height: 1 !important; white-space: nowrap; }
+    .dash-card-action:hover, .dash-card-actions > button:hover, .dash-card-actions > a:hover { background: var(--surface-2) !important; border-color: var(--border) !important; }
+    .dash-card-badge, .dash-card-badges > * { display: inline-flex !important; align-items: center; min-height: 22px !important; padding: 0 var(--sp-3) !important; border-radius: var(--r-pill) !important; font-size: var(--fs-2xs) !important; font-weight: 700 !important; letter-spacing: 0.04em !important; line-height: 1 !important; text-transform: uppercase; white-space: nowrap; }
+    .dash-card-badges #review-queue-count { display: none !important; }
+    .dash-card-summary { display: none; font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); margin-left: var(--sp-4); text-align: right; white-space: nowrap; }
+    .dash-card-actions:empty + .dash-card-summary, .dash-card-badges:empty + .dash-card-actions + .dash-card-summary { margin-left: auto; }
+    .dash-card.collapsed .dash-card-summary { display: inline-flex; align-items: center; gap: var(--sp-2); }
+    .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease; max-height: none; opacity: 1; }
+    .dash-card-body.collapsed { max-height: 0 !important; opacity: 0; pointer-events: none; }
+    .dash-card .section-label, .dash-card .token-title, .dash-card .cost-title, .dash-card .gov-title { margin: 0; }
     .section-group-header {
       font-size: var(--fs-sm); border-bottom: 1px solid var(--border);
       padding-bottom: var(--sp-3);
@@ -4608,8 +4628,176 @@
       return `<span class="badge-status status-badge${cls}" data-status="${meta.status}"${tip}>${esc(label || meta.label)}</span>`;
     }
 
+    const DASHBOARD_SECTION_CARD_CONFIG = Object.freeze({
+      'overview-section': { title: '📊 Overview', summary: 'overview', actionIds: ['overview-chart-settings'] },
+      'governor': { title: '🎛️ Governor', summary: 'idle' },
+      'advisory-section': { title: '📋 Hive Advisory', summary: '0 advisories' },
+      'token-panel': { title: 'Token Usage', summary: '0 sessions' },
+      'cost-panel': { title: 'Cost', summary: '$0' },
+      'repos-section': { title: '📦 Repositories', summary: '0 repos' },
+      'beads-section': { title: '🔮 Beads', summary: '0 beads' },
+      'acmm-eval-section': { title: '🎯 ACMM Evaluation', summary: 'L—' },
+      'approvals-section': { title: '✋ Approvals', summary: '0 pending' },
+      'platform-section': { title: '🧩 Platform', summary: 'standalone' },
+      'audit-section': { title: '📋 Audit Log', summary: '0 events today' },
+      'review-queue-section': { title: '🔎 Review Queue', summary: '0 PRs' },
+      'nous-section': { title: '🧪 Strategy Lab', summary: '—' },
+      'inception-section': { title: '💡 Project Inception', summary: 'ready' },
+      'knowledge-section': { title: '📚 Knowledge Base', summary: '1/1 layers' },
+      'contributors-section': { title: '👥 Contributors', summary: '0 active / 0 registered' },
+      'debug-section': { title: '🔍 System Diagnostics', summary: 'health' },
+      'logs-section': { title: '📋 Agent Logs', summary: 'logs' },
+      'agents-section': { title: '🤖 Agents', summary: '0 running / 0 total' },
+      'faq-section': { title: '❓ FAQ', summary: 'questions' },
+    });
+    function sectionCardHeader(opts) {
+      opts = opts || {};
+      const id = opts.id || '';
+      const title = opts.titleHtml || esc(opts.title || id || 'Section');
+      const bodyId = opts.bodyId || (id + '-body');
+      const action = opts.action || 'toggleSection';
+      const keyAction = opts.keyAction || 'sectionHeaderKey';
+      const actionAttrs = action === 'toggleSection'
+        ? `data-action="toggleSection" data-keydown-action="${keyAction}" data-arg-types="e,s" data-arg0="${esc(id)}" data-arg1="${esc(id)}" data-keys="*"`
+        : `data-action="${esc(action)}" data-keydown-action="${keyAction}" data-arg-types="e" data-keys="*"`;
+      const grip = opts.grip === false ? '' : `<button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move ${esc(opts.gripLabel || opts.title || id || 'section')} section" aria-pressed="false">⠿</button>`;
+      const badges = opts.badgeHtml ? `<span class="dash-card-badges">${opts.badgeHtml}</span>` : '<span class="dash-card-badges"></span>';
+      const actions = opts.actionsHtml ? `<span class="dash-card-actions">${opts.actionsHtml}</span>` : '<span class="dash-card-actions"></span>';
+      const summary = `<span class="dash-card-summary ${opts.summaryClass || ''}" id="${esc(opts.summaryId || (id + '-summary'))}" title="${esc(opts.summaryTitle || 'Collapsed summary')}">${opts.summaryHtml || ''}</span>`;
+      const cls = ['dash-card-header','section-header-toggle',opts.headerClass || ''].filter(Boolean).join(' ');
+      return `<div class="${cls}" data-section-card-header="1" role="button" tabindex="0" aria-expanded="true" aria-controls="${esc(bodyId)}" ${actionAttrs} title="${esc(opts.toggleTitle || 'Collapse / expand this section')}">${grip}<span class="section-chevron ${opts.chevronClass || ''}" aria-hidden="true">▼</span><span class="dash-card-title">${title}</span>${badges}${actions}${summary}</div>`;
+    }
+    function sectionCardShell(opts, bodyHtml) {
+      opts = opts || {};
+      const id = opts.id || '';
+      const bodyId = opts.bodyId || (id + '-body');
+      const panelClass = ['dash-card', opts.panelClass || ''].filter(Boolean).join(' ');
+      const bodyClass = ['dash-card-body','section-body', opts.bodyClass || ''].filter(Boolean).join(' ');
+      return `<div class="${panelClass}" data-section-card-shell="1">${sectionCardHeader(opts)}<div class="${bodyClass}" id="${esc(bodyId)}">${bodyHtml || ''}</div></div>`;
+    }
+    function sectionHeaderKey(ev, sectionId) {
+      if (!ev || (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar')) return;
+      ev.preventDefault();
+      toggleSection(sectionId);
+    }
+    function dashboardSectionDirectHeader(section) {
+      if (!section) return null;
+      for (const child of Array.from(section.children)) {
+        if (child.classList && child.classList.contains('section-header-toggle')) return child;
+        const nested = child.matches && child.matches('div') && child.querySelector && child.querySelector(':scope > .section-header-toggle');
+        if (nested && !child.classList.contains('dash-card')) return nested;
+      }
+      return null;
+    }
+    function ensureSectionCard(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (!section || section.querySelector(':scope > .dash-card') || sectionId === 'token-panel' || sectionId === 'cost-panel' || sectionId === 'governor') return;
+      const cfg = DASHBOARD_SECTION_CARD_CONFIG[sectionId] || { title: sectionId, summary: '' };
+      const oldHeader = dashboardSectionDirectHeader(section);
+      if (!oldHeader) return;
+      const body = oldHeader.parentElement === section
+        ? (Array.from(section.children).find(el => el !== oldHeader && el.classList && el.classList.contains('section-body')) || null)
+        : (oldHeader.parentElement.nextElementSibling && oldHeader.parentElement.nextElementSibling.classList && oldHeader.parentElement.nextElementSibling.classList.contains('section-body') ? oldHeader.parentElement.nextElementSibling : null);
+      if (!body) return;
+      const bodyId = sectionId + '-body';
+      const template = document.createElement('template');
+      template.innerHTML = sectionCardShell({ id: sectionId, title: cfg.title, summaryHtml: cfg.summary, bodyId: bodyId }, '');
+      const card = template.content.firstElementChild;
+      const newHeader = card.querySelector('.dash-card-header');
+      const badges = newHeader.querySelector('.dash-card-badges');
+      const actions = newHeader.querySelector('.dash-card-actions');
+      const moveSource = oldHeader.parentElement === section ? oldHeader : oldHeader.parentElement;
+      Array.from(moveSource.querySelectorAll('[id$="-badge"], #repos-host-badge, #repos-needs-human, #review-queue-count, #nous-mode-badge, #kb-status-badge, #contributors-status-badge')).forEach(el => badges.appendChild(el));
+      Array.from(moveSource.querySelectorAll('button[data-stop="1"], a[data-stop="1"], a[data-action]')).forEach(el => {
+        if (el.matches('[data-dashboard-grip]')) return;
+        el.setAttribute('data-stop', '1');
+        actions.appendChild(el);
+      });
+      const shellBody = card.querySelector('.dash-card-body');
+      body.classList.add('dash-card-body');
+      body.id = bodyId;
+      shellBody.replaceWith(body);
+      const insertion = oldHeader.parentElement === section ? oldHeader : oldHeader.parentElement;
+      section.insertBefore(card, insertion);
+      insertion.remove();
+    }
+    function normalizeSectionCardChrome(sectionId) {
+      const card = document.querySelector(`#${sectionId} .dash-card`);
+      if (!card) return;
+      card.querySelectorAll('.dash-card-actions > *').forEach(el => el.classList.add('dash-card-action'));
+      card.querySelectorAll('.dash-card-badges > *').forEach(el => el.classList.add('dash-card-badge'));
+    }
+    function refreshSectionCardShell(sectionId) {
+      ensureSectionCard(sectionId);
+      normalizeSectionCardChrome(sectionId);
+      applySectionCollapse(sectionId);
+    }
+    function initializeDashboardSectionCards() {
+      Object.keys(DASHBOARD_SECTION_CARD_CONFIG).forEach(refreshSectionCardShell);
+    }
+    function setSectionSummary(sectionId, html, title) {
+      const el = document.getElementById(sectionId + '-summary');
+      if (!el) return;
+      el.innerHTML = html || '';
+      if (title != null) el.title = title;
+    }
+    function textOrDash(value) {
+      const s = String(value == null ? '' : value).trim();
+      return s || '—';
+    }
+    function relativeTimeShort(ts) {
+      const t = new Date(ts || '').getTime();
+      if (!Number.isFinite(t)) return '';
+      const mins = Math.max(1, Math.floor((Date.now() - t) / 60000));
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 48) return hrs + 'h ago';
+      return Math.floor(hrs / 24) + 'd ago';
+    }
+    function refreshDashboardSectionSummaries(data) {
+      data = data || window._lastStatus || {};
+      const repos = data.repos || [];
+      const openPrs = repos.reduce((n, r) => n + ((r.openPrs || r.prs || []).length || Number(r.open_prs || r.openPRs || 0) || 0), 0);
+      const issues = repos.reduce((n, r) => n + ((r.actionableIssues || r.issues || []).length || Number(r.openIssues || r.open_issues || 0) || 0), 0);
+      setSectionSummary('repos-section', `${repos.length} repos · ${openPrs} open PRs · ${issues} issues`);
+      const beads = data.beads || {};
+      const beadTotal = Number(beads.total || beads.count || 0) || ((Number(beads.workers) || 0) + (Number(beads.supervisor) || 0));
+      const beadOpen = Number(beads.open || beads.open_count || beads.pending || 0) || 0;
+      setSectionSummary('beads-section', `${beadTotal} beads${beadOpen ? ' · ' + beadOpen + ' open' : ''}`);
+      const adv = data.advisoryDigest || {};
+      const advCount = Number(adv.open || adv.openAdvisories || adv.total || adv.count || 0) || ((adv.items || adv.advisories || []).length || 0);
+      const advWhen = relativeTimeShort(adv.generatedAt || adv.updatedAt || adv.latest || data.timestamp);
+      setSectionSummary('advisory-section', `${advCount} advisories${advWhen ? ' · ' + advWhen : ''}`);
+      setSectionSummary('acmm-eval-section', `L${data.acmmLevel || '—'}${data.acmmEvalAt ? ' · last eval ' + relativeTimeShort(data.acmmEvalAt) : ''}`);
+      const platform = data.platform || {};
+      setSectionSummary('platform-section', `${platform.hosted ? 'hosted' : (platform.mode || 'standalone')}${platform.version ? ' · ' + platform.version : ''}${platform.channel ? ' · ' + platform.channel : ''}`);
+      const auditToday = (document.querySelectorAll('#audit-panel .audit-entry').length || Number(data.auditEventsToday || 0) || 0);
+      setSectionSummary('audit-section', `${auditToday} events today`);
+      const rq = document.getElementById('review-queue-count');
+      setSectionSummary('review-queue-section', textOrDash(rq && rq.textContent));
+      const nous = document.getElementById('nous-mode-badge');
+      setSectionSummary('nous-section', textOrDash(nous && nous.textContent));
+      const kb = document.getElementById('kb-status-badge');
+      setSectionSummary('knowledge-section', textOrDash(kb && kb.textContent));
+      const contrib = document.getElementById('contributors-status-badge');
+      setSectionSummary('contributors-section', textOrDash(contrib && contrib.textContent));
+      const health = document.getElementById('oc-health');
+      setSectionSummary('debug-section', textOrDash(health && health.textContent));
+      const agents = data.agents || window._lastAgents || [];
+      const running = agents.filter(a => a && !a.paused && !a.stopped && !a.offByCadence).length;
+      setSectionSummary('agents-section', `${running} running / ${agents.length} total`);
+      const appr = document.getElementById('approvals-badge');
+      setSectionSummary('approvals-section', `${textOrDash(appr && appr.textContent)} pending`);
+      setSectionSummary('logs-section', `${agents.length} agents`);
+      setSectionSummary('overview-section', data.governor && data.governor.mode ? `${data.governor.mode} · ${repos.length} repos` : `${repos.length} repos`);
+      setSectionSummary('inception-section', data.inception ? textOrDash(data.inception.phase || data.inception.status) : 'ready');
+      const faqCount = document.querySelectorAll('#faq-panel h4').length;
+      setSectionSummary('faq-section', faqCount ? `${faqCount} questions` : '');
+    }
+
     /** Check whether a dashboard section is collapsed in localStorage */
     function isSectionCollapsed(sectionId) {
+      if (sectionId === 'cost-panel' && localStorage.getItem('hive-cost-collapsed') === '1') return true;
       return localStorage.getItem(SECTION_LS_PREFIX + sectionId) === '1';
     }
     /** Persist section collapsed state */
@@ -4618,6 +4806,10 @@
         localStorage.setItem(SECTION_LS_PREFIX + sectionId, '1');
       } else {
         localStorage.removeItem(SECTION_LS_PREFIX + sectionId);
+      }
+      if (sectionId === 'cost-panel') {
+        if (collapsed) localStorage.setItem('hive-cost-collapsed', '1');
+        else localStorage.removeItem('hive-cost-collapsed');
       }
     }
     /** Remove the expanded max-height cap after the max-height transition finishes. */
@@ -4656,21 +4848,31 @@
       }
     }
     /** Toggle a section's collapsed state and animate */
-    function toggleSection(sectionId) {
+    function toggleSection(sectionId, maybeSectionId) {
+      if (sectionId && typeof sectionId === 'object') sectionId = maybeSectionId;
       const collapsed = !isSectionCollapsed(sectionId);
       setSectionCollapsed(sectionId, collapsed);
-      const body = document.querySelector(`#${sectionId} .section-body`);
-      const chevron = document.querySelector(`#${sectionId} .section-chevron`);
+      const body = document.querySelector(`#${sectionId} .dash-card-body, #${sectionId} .section-body`);
+      const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
+      const card = document.querySelector(`#${sectionId} .dash-card`);
+      const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
       applySectionBodyCollapse(body, collapsed, true);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
+      if (card) card.classList.toggle('collapsed', collapsed);
+      if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     }
     /** Apply persisted collapsed state to a section after render */
     function applySectionCollapse(sectionId) {
       const collapsed = isSectionCollapsed(sectionId);
-      const body = document.querySelector(`#${sectionId} .section-body`);
-      const chevron = document.querySelector(`#${sectionId} .section-chevron`);
+      const body = document.querySelector(`#${sectionId} .dash-card-body, #${sectionId} .section-body`);
+      const chevron = document.querySelector(`#${sectionId} .dash-card-header .section-chevron, #${sectionId} .section-chevron`);
+      const card = document.querySelector(`#${sectionId} .dash-card`);
+      const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
+      normalizeSectionCardChrome(sectionId);
       applySectionBodyCollapse(body, collapsed, false);
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
+      if (card) card.classList.toggle('collapsed', collapsed);
+      if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     }
     // ── Dashboard section layout: drag/keyboard reorder, persisted per viewer ──
     // Keyed by stable top-level section ids. Saved shape: {v:1,main:[...]}; unknown
@@ -4691,7 +4893,7 @@
     function dashboardRegionEl(name){return document.getElementById('hive-dashboard-root');}
     function dashboardCardEl(id){return document.querySelector('[data-dashboard-section="'+id+'"]');}
     function dashboardLayoutAnnounce(msg){var live=document.getElementById('dashboard-layout-live');if(live)live.textContent=msg;}
-    function dashboardLayoutCardName(card){var h=card&&card.querySelector('.gov-title,.token-title,.cost-title,.section-header-toggle h2,.section-header-toggle,.section-label');if(h){var clone=h.cloneNode(true);Array.prototype.forEach.call(clone.querySelectorAll('button'),function(b){b.remove();});var txt=clone.textContent.trim();if(txt)return txt.replace(/^▼\s*/,'');}return card?card.getAttribute('data-dashboard-section'):'section';}
+    function dashboardLayoutCardName(card){var h=card&&card.querySelector('.dash-card-title,.gov-title,.token-title,.cost-title,.section-header-toggle h2,.section-header-toggle,.section-label');if(h){var clone=h.cloneNode(true);Array.prototype.forEach.call(clone.querySelectorAll('button'),function(b){b.remove();});var txt=clone.textContent.trim();if(txt)return txt.replace(/^▼\s*/,'');}return card?card.getAttribute('data-dashboard-section'):'section';}
     function dashboardLayoutAllIds(){return DASHBOARD_LAYOUT_TEMPLATE.main.filter(function(id){return !dashboardFeatureSectionHidden(id);});}
     function dashboardLayoutRead(){try{var raw=localStorage.getItem(DASHBOARD_LAYOUT_KEY);return raw?JSON.parse(raw):null;}catch(e){return null;}}
     function dashboardLayoutCurrent(){var out={v:DASHBOARD_LAYOUT_VERSION,main:[]};var region=dashboardRegionEl('main');if(!region)return out;Array.prototype.forEach.call(region.querySelectorAll(':scope > '+DASHBOARD_LAYOUT_CARD_SELECTOR),function(card){var id=card.getAttribute('data-dashboard-section');if(id&&!dashboardFeatureSectionHidden(id))out.main.push(id);});return out;}
@@ -4719,7 +4921,7 @@
     function dashboardEndDrag(save){if(!dashboardDragState)return;var st=dashboardDragState;dashboardClearIndicator();if(st.ghost&&st.ghost.parentElement)st.ghost.parentElement.removeChild(st.ghost);st.card.classList.remove('dashboard-drag-source');st.grip.setAttribute('aria-pressed','false');if(save&&st.slot&&st.slot.region){dashboardInsertSection(st.slot.region,st.card,st.slot.before);dashboardLayoutWrite();dashboardLayoutAnnounce(dashboardLayoutCardName(st.card)+' moved.');}else{dashboardLayoutAnnounce('Move cancelled.');}dashboardDragState=null;}
     function dashboardRestoreSnapshot(){if(!dashboardKeyboardSnapshot)return;dashboardApplyLayout(dashboardKeyboardSnapshot);dashboardLayoutWrite();dashboardKeyboardSnapshot=dashboardLayoutCurrent();dashboardLayoutAnnounce('Keyboard reorder cancelled.');}
     function dashboardMoveCardByKeyboard(card,key){var current=card.parentElement;if(key==='ArrowUp'){var prev=card.previousElementSibling;while(prev&&!prev.matches(DASHBOARD_LAYOUT_CARD_SELECTOR))prev=prev.previousElementSibling;if(prev)dashboardInsertSection(current,card,prev);}else if(key==='ArrowDown'){var next=card.nextElementSibling;while(next&&!next.matches(DASHBOARD_LAYOUT_CARD_SELECTOR))next=next.nextElementSibling;if(next)dashboardInsertSection(current,next,card);}dashboardLayoutWrite();dashboardLayoutAnnounce(dashboardLayoutCardName(card)+' moved.');}
-    function initDashboardSectionLayout(){dashboardEnsureSections();dashboardApplyLayout(dashboardLayoutNormalize(dashboardLayoutRead()));var root=dashboardRegionEl('main');if(!root)return;root.addEventListener('click',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip){ev.preventDefault();ev.stopPropagation();}},true);root.addEventListener('pointerdown',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip)dashboardStartDrag(ev,grip);});root.addEventListener('pointermove',function(ev){if(dashboardDragState){ev.preventDefault();dashboardDragMove(ev);}});root.addEventListener('pointerup',function(ev){if(dashboardDragState){ev.preventDefault();dashboardEndDrag(true);}});root.addEventListener('pointercancel',function(){dashboardEndDrag(false);});root.addEventListener('keydown',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(!grip)return;var key=ev.key,card=grip.closest(DASHBOARD_LAYOUT_CARD_SELECTOR);if(!card)return;if(key===' '||key==='Enter'){ev.preventDefault();var active=grip.getAttribute('aria-pressed')==='true';if(active){dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','false');dashboardLayoutAnnounce('Dropped '+dashboardLayoutCardName(card)+'.');}else{dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','true');dashboardLayoutAnnounce('Picked up '+dashboardLayoutCardName(card)+'. Use arrow keys to move, Escape to cancel.');}return;}if(key==='Escape'){ev.preventDefault();dashboardRestoreSnapshot();grip.setAttribute('aria-pressed','false');return;}if(key==='ArrowUp'||key==='ArrowDown'){ev.preventDefault();if(!dashboardKeyboardSnapshot)dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','true');dashboardMoveCardByKeyboard(card,key);}});root.addEventListener('focusin',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip)dashboardKeyboardSnapshot=dashboardLayoutCurrent();});root.addEventListener('focusout',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip){dashboardKeyboardSnapshot=null;grip.setAttribute('aria-pressed','false');}});dashboardUpdateResetButton();}
+    function initDashboardSectionLayout(){dashboardEnsureSections();initializeDashboardSectionCards();dashboardApplyLayout(dashboardLayoutNormalize(dashboardLayoutRead()));var root=dashboardRegionEl('main');if(!root)return;root.addEventListener('click',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip){ev.preventDefault();ev.stopPropagation();}},true);root.addEventListener('pointerdown',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip)dashboardStartDrag(ev,grip);});root.addEventListener('pointermove',function(ev){if(dashboardDragState){ev.preventDefault();dashboardDragMove(ev);}});root.addEventListener('pointerup',function(ev){if(dashboardDragState){ev.preventDefault();dashboardEndDrag(true);}});root.addEventListener('pointercancel',function(){dashboardEndDrag(false);});root.addEventListener('keydown',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(!grip)return;var key=ev.key,card=grip.closest(DASHBOARD_LAYOUT_CARD_SELECTOR);if(!card)return;if(key===' '||key==='Enter'){ev.preventDefault();var active=grip.getAttribute('aria-pressed')==='true';if(active){dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','false');dashboardLayoutAnnounce('Dropped '+dashboardLayoutCardName(card)+'.');}else{dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','true');dashboardLayoutAnnounce('Picked up '+dashboardLayoutCardName(card)+'. Use arrow keys to move, Escape to cancel.');}return;}if(key==='Escape'){ev.preventDefault();dashboardRestoreSnapshot();grip.setAttribute('aria-pressed','false');return;}if(key==='ArrowUp'||key==='ArrowDown'){ev.preventDefault();if(!dashboardKeyboardSnapshot)dashboardKeyboardSnapshot=dashboardLayoutCurrent();grip.setAttribute('aria-pressed','true');dashboardMoveCardByKeyboard(card,key);}});root.addEventListener('focusin',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip)dashboardKeyboardSnapshot=dashboardLayoutCurrent();});root.addEventListener('focusout',function(ev){var grip=ev.target.closest&&ev.target.closest(DASHBOARD_LAYOUT_GRIP_SELECTOR);if(grip){dashboardKeyboardSnapshot=null;grip.setAttribute('aria-pressed','false');}});dashboardUpdateResetButton();}
     document.addEventListener('DOMContentLoaded', initDashboardSectionLayout);
 
     /** Check whether an agent card should be compact */
@@ -7817,6 +8019,7 @@
         + `</div>`;
     }
     function renderAgents(agents) {
+      refreshSectionCardShell('agents-section');
       const el = document.getElementById('agents');
       // Preserve custom prompt input values across re-renders
       const savedInputs = {};
@@ -8911,7 +9114,7 @@
       loadGovernorPRModels(false, govPRModelsWindow);
       loadReviewerAccuracy(false);
 
-      el.innerHTML = `
+      const governorBody = `
         <div class="gov-title"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Governor section" aria-pressed="false">⠿</button>Governor <button class="config-gear" data-action="openConfigDialog" data-arg0="governor" title="Open Governor configuration — manage agents, thresholds, budget, notifications, health checks, and sensing patterns">⚙️</button></div>
         <div class="gov-grid">
           <div class="gov-stat" title="TIMER — is the governor's evaluation loop alive?&#10;&#10;WHAT: The governor re-evaluates mode and kicks due agents on a fixed cadence. This shows whether that loop is running.&#10;&#10;HOW: 'active' if the governor reported a heartbeat within its expected interval; 'starting' during boot before the first tick; 'DEAD' if no heartbeat has arrived — agents will NOT be kicked automatically until it recovers."><div class="label">timer</div><div class="val ${cls}">${gov.active ? '● active' : (isStarting ? '⏳ starting' : '⚠ DEAD')}</div></div>
@@ -8968,6 +9171,8 @@
         ${renderGovernorPRModelsTile()}
         ${renderReviewerAccuracyTile()}
         ${renderCadenceMatrix(cadenceMatrix, currentMode, modes)}`;
+      el.innerHTML = sectionCardShell({ id: 'governor', title: '🎛️ Governor', panelClass: 'governor-card', actionsHtml: '<button class="config-gear" data-action="openConfigDialog" data-arg0="governor" data-stop="1" title="Open Governor configuration — manage agents, thresholds, budget, notifications, health checks, and sensing patterns">⚙️</button>', summaryHtml: `${esc(currentMode)} · ${govPressure} pressure`, summaryTitle: 'Governor mode and queue pressure' }, governorBody.replace(/<div class="gov-title"[\s\S]*?<\/div>\n?/, ''));
+      applySectionCollapse('governor');
     }
 
     function renderCadenceMatrix(matrix, currentMode, modes) {
@@ -10661,6 +10866,7 @@
     }
 
     function renderRepos(repos) {
+      refreshSectionCardShell('repos-section');
       if (_repoResizeDrag || _repoOrderDrag) return;
       repos = repoOrderApply(repos || []);
       const el = document.getElementById('repos');
@@ -11217,6 +11423,7 @@
     }
 
     function renderBeads(beads) {
+      refreshSectionCardShell('beads-section');
       const el = document.getElementById('beads');
       const workers = beads.workers >= 0 ? beads.workers : 0;
       const supervisor = beads.supervisor >= 0 ? beads.supervisor : 0;
@@ -12614,7 +12821,8 @@ function burnAreaChart() {
       const el = document.getElementById('token-panel');
 
       if (!tokens || !tokens.totals || tokens.totals.sessions === 0) {
-        el.innerHTML = '';
+        el.innerHTML = sectionCardShell({ id: 'token-panel', title: '🪙 Token Usage', panelClass: 'token-panel', headerClass: 'token-title', badgeHtml: '<span class="lookback">24h window · 0 sessions</span>', summaryHtml: '0 tok/hr · 0 sessions (24h)', summaryTitle: 'Current burn and session count' }, '<div class="text-muted">No token usage yet.</div>');
+        applySectionCollapse('token-panel');
         return;
       }
 
@@ -12703,9 +12911,10 @@ function burnAreaChart() {
         return `<div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(aTotal)}</span>${aSpark}</div><div class="tlabel">${name}</div></div>`;
       }).join('');
 
-      el.innerHTML = `<div class="token-panel">
-        <div class="token-title"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Token Usage section" aria-pressed="false">⠿</button>Token Usage <span class="lookback">${tokens.lookbackHours || 24}h window · ${t.sessions} sessions</span></div>
-        <div style="display:flex;gap:var(--sp-6);margin-bottom:var(--sp-8);padding-bottom:var(--sp-6);border-bottom:1px solid var(--border)">
+      const tokenRates = computeHourlyBurnRates();
+      const currentTokHr = tokenRates.length ? tokenRates[tokenRates.length - 1].rate : Math.round(totalTokens / Math.max(1, tokens.lookbackHours || 24));
+      const tokenSummary = `${fmtTokens(currentTokHr)} tok/hr · ${t.sessions} sessions (${tokens.lookbackHours || 24}h)`;
+      const tokenBody = `        <div style="display:flex;gap:var(--sp-6);margin-bottom:var(--sp-8);padding-bottom:var(--sp-6);border-bottom:1px solid var(--border)">
           <div style="flex:1;min-width:0">${intensityGauge()}</div>
           <div style="flex:1;min-width:0">${burnAreaChart()}</div>
         </div>
@@ -12720,8 +12929,9 @@ function burnAreaChart() {
         ${agentSparkRows ? `<div class="token-grid mt-2">${agentSparkRows}</div>` : ''}
         ${advisorHtml}
         <div class="token-models">${modelChips}</div>
-        ${agentSessions.length > 0 ? `<details class="token-sessions"${sessionsOpen ? ' open' : ''}><summary>Active Sessions (${agentSessions.length})</summary>${sessionRows}</details>` : ''}
-      </div>`;
+        ${agentSessions.length > 0 ? `<details class="token-sessions"${sessionsOpen ? ' open' : ''}><summary>Active Sessions (${agentSessions.length})</summary>${sessionRows}</details>` : ''}`;
+      el.innerHTML = sectionCardShell({ id: 'token-panel', title: '🪙 Token Usage', panelClass: 'token-panel', headerClass: 'token-title', badgeHtml: `<span class="lookback">${tokens.lookbackHours || 24}h window · ${t.sessions} sessions</span>`, summaryHtml: tokenSummary, summaryTitle: 'Current burn and session count' }, tokenBody);
+      applySectionCollapse('token-panel');
       const detailsEl = el.querySelector('.token-sessions');
       if (detailsEl) {
         /* Explicitly set .open property — HTML attribute alone can be unreliable after innerHTML */
@@ -12764,27 +12974,14 @@ function burnAreaChart() {
     // localStorage and re-applied after each render so a poll never re-expands it.
     const COST_COLLAPSED_LS_KEY = 'hive-cost-collapsed';
     function isCostCollapsed() {
-      return localStorage.getItem(COST_COLLAPSED_LS_KEY) === '1';
+      return isSectionCollapsed('cost-panel');
     }
     function setCostCollapsed(collapsed) {
-      if (collapsed) localStorage.setItem(COST_COLLAPSED_LS_KEY, '1');
-      else localStorage.removeItem(COST_COLLAPSED_LS_KEY);
+      setSectionCollapsed('cost-panel', collapsed);
     }
     /** Reflect the persisted collapsed state onto the current cost-panel DOM. */
     function applyCostCollapse() {
-      const panel = document.querySelector('#cost-panel .cost-panel');
-      if (!panel) return;
-      const collapsed = isCostCollapsed();
-      const body = panel.querySelector('.cost-body');
-      const chevron = panel.querySelector('.cost-chevron');
-      const header = panel.querySelector('.cost-title');
-      panel.classList.toggle('collapsed', collapsed);
-      if (body) body.classList.toggle('collapsed', collapsed);
-      if (chevron) {
-        chevron.classList.toggle('collapsed', collapsed);
-        chevron.textContent = '▼';
-      }
-      if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      applySectionCollapse('cost-panel');
     }
     /** Toggle collapsed state on click / keyboard, persist, and animate. */
     function toggleCostPanel() {
@@ -12934,7 +13131,8 @@ function burnAreaChart() {
       if (!el) return;
       _lastCost = cost;
       if (!cost || (!cost.estimated && (!cost.gateways || cost.gateways.length === 0))) {
-        el.innerHTML = '';
+        el.innerHTML = sectionCardShell({ id: 'cost-panel', title: '💵 Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: '$0', summaryTitle: 'Estimated all-time total', bodyId: 'cost-panel-body' }, '<div class="text-muted">No cost data yet.</div>');
+        applyCostCollapse();
         return;
       }
 
@@ -13117,13 +13315,7 @@ function burnAreaChart() {
       // shows "—", never "$0.00": those are different facts.
       const repoTable = costRepoTableHtml(lastRepoCost);
 
-      el.innerHTML = `<div class="cost-panel">
-        <div class="cost-title cost-toggle" role="button" tabindex="0" aria-expanded="true" aria-controls="cost-panel-body" data-action="toggleCostPanel" data-keydown-action="costHeaderKey" data-arg-types="e" data-keys="*" title="Collapse / expand the cost panel">
-          <button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Cost section" aria-pressed="false">⠿</button><span class="cost-chevron" aria-hidden="true">▼</span>
-          Cost <span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>
-          <span class="cost-collapsed-total" title="Estimated all-time total">${fmtUSD(est.total_usd)}</span>
-        </div>
-        <div class="cost-body" id="cost-panel-body">
+      const costBody = `
           <div class="cost-subtitle">Estimated from token counts × list prices (as of ${esc(cost.price_table_date || '')}); models without an exact price use a coarse tier estimate (~). Where a metered gateway reports actual spend it refines the estimate, but the figure is always an estimate.</div>
           <div class="cost-disclaimer" style="margin:4px 0 10px">${esc(cost.disclaimer || '')} vLLM / self-hosted figures are estimated (reflect list price, not your infra cost).</div>
           <div class="cost-grid">
@@ -13141,9 +13333,8 @@ function burnAreaChart() {
           ${repoTable}
           ${sessionTable}
           ${unpricedNote}
-          ${costTokenBudgetHtml()}
-        </div>
-      </div>`;
+          ${costTokenBudgetHtml()}`;
+      el.innerHTML = sectionCardShell({ id: 'cost-panel', title: '💵 Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: fmtUSD(est.total_usd), summaryTitle: 'Estimated all-time total', bodyId: 'cost-panel-body' }, costBody);
       // Re-apply the persisted collapsed state so a poll re-render never resets it.
       applyCostCollapse();
       applyCostSubCollapse();
@@ -13274,6 +13465,7 @@ function burnAreaChart() {
     // is guarded: a missing sub-block hides gracefully rather than erroring, and
     // the section stays hidden until a platform block is present.
     function renderPlatform(plat) {
+      refreshSectionCardShell('platform-section');
       const section = document.getElementById('platform-section');
       const stats = document.getElementById('platform-stats');
       if (!section || !stats) return;
@@ -13829,6 +14021,7 @@ function burnAreaChart() {
     }
 
     function renderApprovals(dto) {
+      refreshSectionCardShell('approvals-section');
       _approvalsLast = dto;
       const section = document.getElementById('approvals-section');
       if (!section) return;
@@ -15578,6 +15771,7 @@ function burnAreaChart() {
     }
 
     function renderKnowledge() {
+      refreshSectionCardShell('knowledge-section');
       const panel = document.getElementById('knowledge-panel');
       const badge = document.getElementById('kb-status-badge');
       if (!panel) return;
@@ -16845,6 +17039,7 @@ function burnAreaChart() {
     }
 
     function renderAuditTable(entries) {
+      refreshSectionCardShell('audit-section');
       var panel = document.getElementById('audit-panel');
       if (!panel) return;
       if (!entries.length) { panel.innerHTML = '<div style="color:var(--terminal-muted);font-size:var(--fs-base);padding:var(--sp-4)">No audit entries yet</div>'; return; }
@@ -16985,6 +17180,7 @@ function burnAreaChart() {
     }
 
     function renderReviewQueue(data) {
+      refreshSectionCardShell('review-queue-section');
       var panel = document.getElementById('review-queue-panel');
       if (!panel) return;
       var items = (data && Array.isArray(data.items)) ? data.items : [];
@@ -16994,6 +17190,7 @@ function burnAreaChart() {
       _reviewQueueHasMore = !!(data && data.has_more);
       var countEl = document.getElementById('review-queue-count');
       if (countEl) countEl.textContent = _reviewQueueTotal ? _reviewQueueTotal + ' PR' + (_reviewQueueTotal === 1 ? '' : 's') : '';
+      setSectionSummary('review-queue-section', _reviewQueueTotal ? _reviewQueueTotal + ' PR' + (_reviewQueueTotal === 1 ? '' : 's') : '0 PRs');
       if (!items.length) {
         panel.innerHTML = '<div class="review-queue-empty">Review queue is empty — no open PRs to rank.</div>';
       } else {
@@ -17228,6 +17425,7 @@ function burnAreaChart() {
     }
 
     function renderContributors(contributors) {
+      refreshSectionCardShell('contributors-section');
       const panel = document.getElementById('contributors-panel');
       if (!panel) return;
       if (!contributors.length) {
@@ -17435,6 +17633,7 @@ function burnAreaChart() {
     }
 
     function updateContributorBadge(pool) {
+      refreshSectionCardShell('contributors-section');
       const sidebarBadge = document.getElementById('contributors-sidebar-badge');
       const statusBadge = document.getElementById('contributors-status-badge');
       if (!pool) return;
@@ -17857,15 +18056,18 @@ function burnAreaChart() {
       renderSystemGauges(data.systemResources || null);
       ocUpdateSidebarAgents();
       renderDebugSection();
+      renderFAQ();
+      initializeDashboardSectionCards();
       // Restore persisted collapsed state for all collapsible sections
       const COLLAPSIBLE_SECTION_IDS = [
         'advisory-section', 'hive-advice-section', 'acmm-reco-section', 'lifecycle-section', 'pr-throughput-section',
-        'overview-section', 'repos-section', 'beads-section', 'acmm-eval-section',
+        'overview-section', 'governor', 'token-panel', 'cost-panel', 'repos-section', 'beads-section', 'acmm-eval-section',
         'platform-section', 'fleet-report-section', 'audit-section', 'review-queue-section', 'nous-section', 'inception-section',
         'knowledge-section', 'contributors-section', 'debug-section', 'logs-section',
         'agents-section', 'faq-section'
       ];
       COLLAPSIBLE_SECTION_IDS.forEach(applySectionCollapse);
+      refreshDashboardSectionSummaries(data);
       // Update compact-all button text
       const compactBtn = document.getElementById('agents-compact-all-btn');
       if (compactBtn) compactBtn.textContent = localStorage.getItem(ALL_AGENTS_COMPACT_KEY) === '1' ? '⊞ Expand All' : '⊟ Compact All';
@@ -17982,6 +18184,7 @@ function burnAreaChart() {
     }
 
     function renderInception() {
+      refreshSectionCardShell('inception-section');
       const panel = document.getElementById('inception-panel');
       if (!panel) return;
 
@@ -18961,6 +19164,7 @@ function burnAreaChart() {
     // ── Debug section ──
     const DEBUG_REFRESH_MS = 10000;
     function renderDebugSection() {
+      refreshSectionCardShell('debug-section');
       const grid = document.getElementById('debug-grid');
       if (!grid) return;
       const data = window._lastStatus || {};
@@ -19119,7 +19323,14 @@ function burnAreaChart() {
       renderLogs();
     }
 
+    function renderFAQ() {
+      refreshSectionCardShell('faq-section');
+      const faqCount = document.querySelectorAll('#faq-panel h4').length;
+      setSectionSummary('faq-section', faqCount ? `${faqCount} questions` : '—');
+    }
+
     function renderLogs() {
+      refreshSectionCardShell('logs-section');
       const output = document.getElementById('logs-output');
       if (!output) return;
       const select = document.getElementById('logs-agent-select');
@@ -21429,6 +21640,7 @@ function burnAreaChart() {
     }
 
     function acmmRenderCard() {
+      refreshSectionCardShell('acmm-eval-section');
       const d = _acmmEvalData;
       if (!d) return;
 
