@@ -979,7 +979,7 @@ app.use(async (req, res, next) => {
   next();
 });
 
-const PUBLIC_POST_PATHS = ['/api/contribute/register'];
+const PUBLIC_POST_PATHS = ['/api/contribute/register', '/api/contribute/reissue-token'];
 app.use((req, res, next) => {
   // SECURITY (CWE-306): decide ONCE, for every method, whether this request
   // actually presented the shared dashboard token. apiProxy injects the
