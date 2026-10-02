@@ -2256,21 +2256,45 @@
     .feedback-bug-btn { position:relative; min-width:34px; }
     .feedback-pill { position:absolute; top:-7px; right:-7px; min-width:16px; height:16px; padding:var(--sp-0) var(--sp-1); border-radius:var(--r-pill); background:var(--red); color:var(--text); font-size:var(--fs-2xs); font-weight:800; line-height:16px; text-align:center; box-shadow:var(--shadow-raised); }
     .feedback-pill[hidden] { display:none; }
-    .feedback-modal { max-width: 720px; width: 94vw; max-height: 88vh; overflow-y: auto; }
-    .feedback-row { display:flex; gap: var(--sp-4); flex-wrap: wrap; margin: var(--sp-4) 0; }
-    .feedback-field { display:flex; flex-direction:column; gap: var(--sp-2); margin: var(--sp-4) 0; }
-    .feedback-field input[type="text"], .feedback-field textarea { width:100%; box-sizing:border-box; background: var(--surface); color: var(--text); border:1px solid var(--border); border-radius: var(--r); padding: var(--sp-4); font: inherit; }
-    .feedback-field textarea { min-height: 150px; resize: vertical; }
-    .feedback-drop { border:1px dashed var(--border); border-radius: var(--r); padding: var(--sp-4); color: var(--muted); background: color-mix(in srgb, var(--surface) 70%, transparent); }
-    .feedback-intro { color:var(--muted); margin-top:var(--sp-0); }
-    .feedback-option-extra { display:block; margin-top:var(--sp-3); }
+    .feedback-modal { max-width: 720px; width: min(94vw, 720px); height: auto; max-height: 90vh; overflow: hidden; padding: var(--sp-0); }
+    .feedback-header { position: sticky; top: 0; z-index: 2; display:flex; justify-content:space-between; align-items:flex-start; gap:var(--sp-6); padding:var(--sp-8); border-bottom:1px solid var(--border); background:var(--panel); }
+    .feedback-header h2 { margin:0 0 var(--sp-2); }
+    .feedback-intro { color:var(--muted); margin:0; line-height:1.45; }
+    .feedback-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:var(--sp-8); }
+    .feedback-footer { position: sticky; bottom:0; z-index:2; display:flex; justify-content:flex-end; gap:var(--sp-4); padding:var(--sp-6) var(--sp-8); border-top:1px solid var(--border); background:var(--panel); }
+    .feedback-tabs, .feedback-segmented { display:inline-flex; gap:var(--sp-1); padding:var(--sp-1); border:1px solid var(--border); border-radius:var(--r-pill); background:var(--bg-soft); }
+    .feedback-tabs { margin-bottom:24px; }
+    .feedback-tabs .hv-btn, .feedback-segmented label { border-radius:var(--r-pill); }
+    .feedback-tabs .active, .feedback-segmented label:has(input:checked) { background:var(--surface-2); color:var(--text); border-color:var(--accent); box-shadow:var(--shadow-soft); }
+    .feedback-segmented label { display:inline-flex; align-items:center; gap:var(--sp-2); padding:var(--sp-3) var(--sp-5); border:1px solid transparent; color:var(--muted); cursor:pointer; }
+    .feedback-segmented input { margin:0; }
+    .feedback-grid-row { display:grid; grid-template-columns:1fr 220px; gap:16px; align-items:end; margin-bottom:16px; }
+    .feedback-field { display:flex; flex-direction:column; gap:6px; margin:0 0 16px; color:var(--text); font-weight:600; }
+    .feedback-field span, .feedback-field legend { font-weight:600; }
+    .feedback-field input[type="text"], .feedback-field textarea, .feedback-field select { width:100%; box-sizing:border-box; background: var(--surface); color: var(--text); border:1px solid var(--border); border-radius: var(--r); padding: var(--sp-4); font: inherit; font-weight:400; }
+    .feedback-field textarea { min-height: 170px; resize: vertical; }
+    .feedback-drop { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--sp-3); min-height:118px; border:2px dashed var(--border); border-radius: var(--r-lg); padding: var(--sp-7); text-align:center; color: var(--muted); background: color-mix(in srgb, var(--surface) 70%, transparent); }
+    .feedback-drop-icon { font-size:var(--fs-2xl); line-height:1; }
+    .feedback-drop input { max-width:100%; }
+    .feedback-diagnostics-fieldset { border:1px solid var(--border); border-radius:var(--r-lg); padding:var(--sp-6); margin:0 0 16px; }
+    .feedback-diagnostics-fieldset legend { padding:0 var(--sp-2); font-weight:700; }
+    .feedback-check { display:flex; align-items:flex-start; gap:var(--sp-3); margin-bottom:var(--sp-3); color:var(--text); }
+    .feedback-option-extra { color:var(--muted); }
+    .feedback-disclosure-list { margin:var(--sp-4) 0 0; padding-left:var(--sp-7); color:var(--muted); line-height:1.45; }
+    .feedback-disclosure-list li { margin:var(--sp-2) 0; }
     .feedback-preview-shell { margin-top:var(--sp-4); }
+    .feedback-preview-shell summary { cursor:pointer; color:var(--text); font-weight:600; }
     .feedback-thumbs { display:flex; gap: var(--sp-3); flex-wrap:wrap; margin-top: var(--sp-3); }
     .feedback-thumb { position:relative; border:1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-2); background: var(--panel); }
     .feedback-thumb img { width:90px; height:64px; object-fit:cover; display:block; border-radius: var(--r-sm); }
     .feedback-thumb button { position:absolute; top:-8px; right:-8px; border-radius:var(--r-pill); width:22px; height:22px; border:1px solid var(--border); background: var(--panel); color: var(--text); cursor:pointer; }
-    .feedback-preview { white-space: pre-wrap; max-height: 220px; overflow:auto; background: var(--bg); border:1px solid var(--border); border-radius: var(--r); padding: var(--sp-4); color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
+    .feedback-preview { white-space: pre-wrap; max-height: 240px; overflow:auto; background: var(--bg); border:1px solid var(--border); border-radius: var(--r); padding: var(--sp-4); color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
     .feedback-success { border:1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 12%, transparent); padding: var(--sp-5); border-radius: var(--r); margin-top: var(--sp-4); }
+    @media (max-width: 640px) {
+      .feedback-modal { width:100vw; max-width:none; height:100vh; max-height:100vh; border-radius:var(--sp-0); }
+      .feedback-grid-row { grid-template-columns:1fr; }
+      .feedback-header, .feedback-body, .feedback-footer { padding-left:var(--sp-6); padding-right:var(--sp-6); }
+    }
     @keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
     @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-10px); } }
 
@@ -4684,6 +4708,28 @@
     const FEEDBACK_MAX_SCREENSHOTS = 5;
     const FEEDBACK_MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
     const FEEDBACK_POLL_MS = 5 * 60 * 1000;
+    const FEEDBACK_DIAGNOSTIC_FIELDS = [
+      { key: 'version', label: 'Version', why: 'so we can reproduce on the same dashboard release build' },
+      { key: 'commit', label: 'Commit', why: 'so we can inspect the exact code revision' },
+      { key: 'channel', label: 'Release channel', why: 'so we know which update stream you are running' },
+      { key: 'acmm_level', label: 'ACMM level', why: 'so we can match the dashboard policy mode' },
+      { key: 'hive_id', label: 'Hive ID', why: 'so hub operators can correlate this report with this hive only' },
+      { key: 'hosted', label: 'Hosted flag', why: 'so we know whether this is a hosted or self-managed dashboard' },
+      { key: 'hub_linked', label: 'Hub-linked flag', why: 'so we can follow the same relay path' },
+      { key: 'agent_count', label: 'Agent count', why: 'so we can spot empty or unexpectedly large agent sets' },
+      { key: 'agents', label: 'Agent names, backend, model, and state', why: 'so we can reproduce the affected agent configuration' },
+      { key: 'include_project_repos', label: 'Whether project org/repos were included', why: 'so the report shows if the optional project context was shared' },
+      { key: 'browser_user_agent', label: 'Browser user-agent', why: 'so we can reproduce browser-specific rendering bugs' },
+      { key: 'browser_platform', label: 'Browser platform', why: 'so we know the operating system/browser platform family' },
+      { key: 'browser_language', label: 'Browser language', why: 'so we can reproduce locale-sensitive formatting' },
+      { key: 'screen_size', label: 'Screen size', why: 'so we can reproduce layout issues at the same display size' },
+      { key: 'window_size', label: 'Window size', why: 'so we can reproduce the dashboard viewport' },
+      { key: 'page', label: 'Dashboard section/path', why: 'so we know where you opened the form' },
+      { key: 'agents[].repo', label: 'Project repo for each agent', why: 'so we can identify the affected project when you opt in', optionalProject: true },
+      { key: 'agents[].org', label: 'Project org for each agent', why: 'so we can identify the affected organization when you opt in', optionalProject: true },
+      { key: 'console_errors', label: 'Recent browser console errors', why: 'so we can see client-side failures that happened before submit', outsideDiagnostics: true },
+      { key: 'failed_api_calls', label: 'Recent failed /api calls', why: 'so we can see backend requests that failed before submit', outsideDiagnostics: true }
+    ];
     const feedbackConsoleErrors = [];
     const feedbackFailedApiCalls = [];
     function feedbackPushRing(arr, item) { arr.push(item); while (arr.length > 20) arr.shift(); }
@@ -4724,6 +4770,22 @@
     }
     function feedbackVal(id) { const el = document.getElementById(id); return el ? el.value : ''; }
     function feedbackPlaceholder(type) { return type === 'feature' ? 'What would you like Hive to do?\n\nWhy would it help your workflow?\n\nAny examples or constraints?' : 'What happened?\n\nWhat did you expect?\n\nSteps to reproduce:\n1.\n2.\n3.'; }
+    function renderFeedbackDiagnosticsDisclosure() {
+      const list = document.getElementById('feedback-disclosure-list'); if (!list) return;
+      const includeProjects = document.getElementById('feedback-include-projects')?.checked === true;
+      list.innerHTML = FEEDBACK_DIAGNOSTIC_FIELDS.map(function(f) {
+        const marker = f.optionalProject ? (includeProjects ? 'Optional project field included: ' : 'Optional project field when checked: ') : '';
+        return '<li><strong>' + escapeHtml(marker + f.label) + '</strong> — ' + escapeHtml(f.why) + '</li>';
+      }).join('');
+    }
+    function feedbackDiagnosticPayloadFromValues(values) {
+      const out = {};
+      FEEDBACK_DIAGNOSTIC_FIELDS.forEach(function(f) {
+        if (f.outsideDiagnostics || f.optionalProject) return;
+        out[f.key] = values[f.key];
+      });
+      return out;
+    }
     function openFeedbackModal(tab) {
       if (typeof closeGHUserMenu === 'function') closeGHUserMenu();
       if (document.getElementById('feedback-overlay')) { feedbackShowTab(tab || 'submit'); return; }
@@ -4731,8 +4793,35 @@
       const overlay = document.createElement('div');
       overlay.id = 'feedback-overlay';
       overlay.className = 'config-overlay';
-      overlay.innerHTML = '<div class="config-modal feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title-h"><button class="config-close" data-action="closeFeedbackModal">&times;</button><h2 id="feedback-title-h" class="modal-h">Feedback</h2><p class="feedback-intro">Report a bug or request a feature. Submissions create GitHub issues in hivecommons/hive or hivecommons/docs.</p><div class="feedback-row"><button type="button" class="hv-btn btn-secondary btn-sm" id="feedback-submit-tab" data-action="feedbackShowTab" data-arg0="submit">Submit</button><button type="button" class="hv-btn btn-secondary btn-sm" id="feedback-reports-tab" data-action="feedbackShowTab" data-arg0="reports">My reports <span class="feedback-pill" id="feedback-modal-pill" hidden>0</span></button></div><section id="feedback-submit-panel"><div class="feedback-row"><label><input type="radio" name="feedback-kind" value="bug"> Report a bug</label><label><input type="radio" name="feedback-kind" value="feature"> Request a feature</label></div><div class="feedback-row"><label>Target <select id="feedback-target"><option value="hive">Hive</option><option value="docs">Documentation</option></select></label></div><label class="feedback-field">Title<input id="feedback-title" type="text" maxlength="200"></label><label class="feedback-field">Description<textarea id="feedback-description"></textarea></label><div class="feedback-drop" id="feedback-drop">Paste, drag, or choose up to 5 screenshots (2 MiB each). <input id="feedback-files" type="file" accept="image/*" multiple></div><div class="feedback-thumbs" id="feedback-thumbs"></div><label><input id="feedback-include-diagnostics" type="checkbox" checked> Include diagnostics</label><label class="feedback-option-extra"><input id="feedback-include-projects" type="checkbox"> Include project org/repos in diagnostics</label><details open class="feedback-preview-shell"><summary>Preview exactly what will be sent</summary><pre id="feedback-preview" class="feedback-preview"></pre></details><div id="feedback-result"></div><div class="config-actions"><button class="hv-btn btn-secondary" data-action="closeFeedbackModal">Cancel</button><button class="hv-btn btn-primary" id="feedback-submit" data-action="submitFeedbackReport">Submit feedback</button></div></section><section id="feedback-reports-panel" hidden><div id="feedback-reports-list" class="feedback-preview">Loading…</div></section></div>';
+      overlay.innerHTML = `<div class="config-modal feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title-h">
+        <header class="feedback-header">
+          <div><h2 id="feedback-title-h" class="modal-h">Feedback</h2><p class="feedback-intro">Report a bug or request a feature. Submissions create GitHub issues in hivecommons/hive or hivecommons/docs.</p></div>
+          <button class="config-close" data-action="closeFeedbackModal" aria-label="Close feedback modal">&times;</button>
+        </header>
+        <div class="feedback-body">
+          <div class="feedback-tabs" role="tablist" aria-label="Feedback view">
+            <button type="button" class="hv-btn btn-secondary btn-sm" id="feedback-submit-tab" role="tab" data-action="feedbackShowTab" data-arg0="submit">Submit</button>
+            <button type="button" class="hv-btn btn-secondary btn-sm" id="feedback-reports-tab" role="tab" data-action="feedbackShowTab" data-arg0="reports">My reports <span class="feedback-pill" id="feedback-modal-pill" hidden>0</span></button>
+          </div>
+          <section id="feedback-submit-panel" role="tabpanel" aria-labelledby="feedback-submit-tab">
+            <div class="feedback-grid-row">
+              <div class="feedback-field"><span>Type</span><div class="feedback-segmented" role="radiogroup" aria-label="Feedback type"><label><input type="radio" name="feedback-kind" value="bug"> Bug</label><label><input type="radio" name="feedback-kind" value="feature"> Feature</label></div></div>
+              <label class="feedback-field"><span>Target</span><select id="feedback-target"><option value="hive">Hive</option><option value="docs">Documentation</option></select></label>
+            </div>
+            <label class="feedback-field"><span>Title</span><input id="feedback-title" type="text" maxlength="200"></label>
+            <label class="feedback-field"><span>Description</span><textarea id="feedback-description" rows="8"></textarea></label>
+            <label class="feedback-field"><span>Screenshots</span><div class="feedback-drop" id="feedback-drop"><span class="feedback-drop-icon" aria-hidden="true">🖼️</span><strong>Paste, drag, or choose up to 5 screenshots (2 MiB each)</strong><input id="feedback-files" type="file" accept="image/*" multiple></div></label>
+            <div class="feedback-thumbs" id="feedback-thumbs"></div>
+            <fieldset class="feedback-diagnostics-fieldset"><legend>Diagnostics disclosure</legend><label class="feedback-check"><input id="feedback-include-diagnostics" type="checkbox" checked> <span><strong>Include diagnostics</strong><br><span class="feedback-option-extra">Collected fields are listed below before anything is sent.</span></span></label><label class="feedback-check feedback-option-extra"><input id="feedback-include-projects" type="checkbox"> <span>Also include project org/repos in diagnostics</span></label><ul class="feedback-disclosure-list" id="feedback-disclosure-list"></ul></fieldset>
+            <details class="feedback-preview-shell"><summary>Preview exactly what will be sent</summary><pre id="feedback-preview" class="feedback-preview"></pre></details>
+            <div id="feedback-result"></div>
+          </section>
+          <section id="feedback-reports-panel" role="tabpanel" aria-labelledby="feedback-reports-tab" hidden><div id="feedback-reports-list" class="feedback-preview">Loading…</div></section>
+        </div>
+        <footer class="feedback-footer"><button class="hv-btn btn-secondary" data-action="closeFeedbackModal">Cancel</button><button class="hv-btn btn-primary" id="feedback-submit" data-action="submitFeedbackReport">Submit feedback</button></footer>
+      </div>`;
       document.body.appendChild(overlay);
+      overlay.addEventListener('click', function(e) { if (e.target === overlay) closeFeedbackModal(); });
       document.body.classList.add('modal-open'); document.documentElement.classList.add('modal-open');
       const type = (tab === 'feature' || draft.request_type === 'feature') ? 'feature' : 'bug';
       overlay.querySelector('input[name="feedback-kind"][value="' + type + '"]').checked = true;
@@ -4745,8 +4834,9 @@
       document.getElementById('feedback-include-diagnostics').checked = draft.include_diagnostics !== false;
       document.getElementById('feedback-include-projects').checked = draft.include_project_repos === true;
       window._feedbackScreenshots = [];
+      renderFeedbackDiagnosticsDisclosure();
       overlay.addEventListener('input', function(e) { if (e.target && e.target.name === 'feedback-kind') { hidden.value = e.target.value; document.getElementById('feedback-description').placeholder = feedbackPlaceholder(e.target.value); } saveFeedbackDraft(); updateFeedbackPreview(); });
-      overlay.addEventListener('change', function(e) { if (e.target && e.target.name === 'feedback-kind') { hidden.value = e.target.value; document.getElementById('feedback-description').placeholder = feedbackPlaceholder(e.target.value); } if (e.target && e.target.id === 'feedback-files') feedbackAddFiles(e.target.files); saveFeedbackDraft(); updateFeedbackPreview(); });
+      overlay.addEventListener('change', function(e) { if (e.target && e.target.name === 'feedback-kind') { hidden.value = e.target.value; document.getElementById('feedback-description').placeholder = feedbackPlaceholder(e.target.value); } if (e.target && e.target.id === 'feedback-files') feedbackAddFiles(e.target.files); renderFeedbackDiagnosticsDisclosure(); saveFeedbackDraft(); updateFeedbackPreview(); });
       const desc = document.getElementById('feedback-description');
       desc.addEventListener('paste', function(e) { feedbackAddFiles(e.clipboardData && e.clipboardData.files); });
       const drop = document.getElementById('feedback-drop');
@@ -4761,6 +4851,9 @@
       const reports = document.getElementById('feedback-reports-panel');
       if (submit) submit.hidden = tab !== 'submit';
       if (reports) reports.hidden = tab !== 'reports';
+      const submitBtn = document.getElementById('feedback-submit');
+      if (submitBtn) submitBtn.hidden = tab === 'reports';
+      ['feedback-submit-tab','feedback-reports-tab'].forEach(function(id) { const el = document.getElementById(id); if (!el) return; const active = (id === 'feedback-submit-tab') === (tab === 'submit'); el.classList.toggle('active', active); el.setAttribute('aria-selected', active ? 'true' : 'false'); });
       if (tab === 'reports') await loadFeedbackReports(true);
     }
     function closeFeedbackModal() { const el = document.getElementById('feedback-overlay'); if (el) el.remove(); document.body.classList.remove('modal-open'); document.documentElement.classList.remove('modal-open'); }
@@ -4788,7 +4881,7 @@
       try { const r = await fetch('/api/version'); if (r.ok) version = await r.json(); } catch {}
       const includeRepos = document.getElementById('feedback-include-projects')?.checked === true;
       const agents = (st.agents || []).map(a => ({ name: a.name || '', backend: a.backend || a.activeBackend || '', model: a.model || '', state: a.state || a.status || '', repo: includeRepos ? (a.repo || '') : '', org: includeRepos ? (a.org || '') : '' }));
-      return { version: version.short || version.version || '', commit: version.hash || '', channel: version.channel || '', acmm_level: String(st.acmmLevel || st.acmm_level || ''), hive_id: st.hiveId || '', hosted: !!(st.hosted || st.hubProxied), hub_linked: !!(version.autoUpgrade || st.hubLinked), agent_count: agents.length, agents: agents, include_project_repos: includeRepos, browser_user_agent: navigator.userAgent || '', browser_platform: navigator.platform || '', browser_language: navigator.language || '', screen_size: (screen.width + 'x' + screen.height), window_size: (window.innerWidth + 'x' + window.innerHeight), page: location.pathname + location.hash };
+      return feedbackDiagnosticPayloadFromValues({ version: version.short || version.version || '', commit: version.hash || '', channel: version.channel || '', acmm_level: String(st.acmmLevel || st.acmm_level || ''), hive_id: st.hiveId || '', hosted: !!(st.hosted || st.hubProxied), hub_linked: !!(version.autoUpgrade || st.hubLinked), agent_count: agents.length, agents: agents, include_project_repos: includeRepos, browser_user_agent: navigator.userAgent || '', browser_platform: navigator.platform || '', browser_language: navigator.language || '', screen_size: (screen.width + 'x' + screen.height), window_size: (window.innerWidth + 'x' + window.innerHeight), page: location.pathname + location.hash });
     }
     async function updateFeedbackPreview() { const el = document.getElementById('feedback-preview'); if (!el) return; const payload = await buildFeedbackPayload(); const preview = Object.assign({}, payload); preview.screenshots = (payload.screenshots || []).map((_, i) => '[screenshot ' + (i+1) + ']'); if (!payload.include_diagnostics) { delete preview.diagnostics; delete preview.console_errors; delete preview.failed_api_calls; } el.textContent = JSON.stringify(preview, null, 2); }
     async function submitFeedbackReport() {
@@ -23722,6 +23815,8 @@ function burnAreaChart() {
       if (acmmOverlay && acmmOverlay.style.display === 'flex') { acmmCloseDialog(); return; }
       const welcomeOverlay = document.getElementById('welcome-overlay');
       if (welcomeOverlay && !welcomeOverlay.classList.contains('hidden')) { closeWelcomeDialog(); return; }
+      const feedbackOverlay = document.getElementById('feedback-overlay');
+      if (feedbackOverlay) { closeFeedbackModal(); return; }
       if (_configModalOpen) { closeConfigDialog(); return; }
       if (_acmmOpen) { closeACMMDialog(); return; }
       const nousOverlay = document.getElementById('nous-config-overlay');
