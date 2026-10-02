@@ -79,6 +79,9 @@ func (c *Config) ValidateWithOptions(opts ValidateOptions) error {
 	if err := c.validateGitHubActivityNotifications(); err != nil {
 		return err
 	}
+	if err := c.validateUpstreamWatch(); err != nil {
+		return err
+	}
 	if normalized, err := ValidateSnapshotFrameAncestors(c.Dashboard.SnapshotFrameAncestors); err != nil {
 		return err
 	} else {
@@ -226,6 +229,12 @@ func (c *Config) ValidateWithOptions(opts ValidateOptions) error {
 		}
 		if !ValidateCadenceScope(agent.CadenceScope) {
 			return fmt.Errorf("agent %s: invalid cadence_scope %q (must be aggregate or per_repo)", name, agent.CadenceScope)
+		}
+		if agent.ContinuousCooldown < 0 {
+			return fmt.Errorf("agent %s: continuous_cooldown must be positive", name)
+		}
+		if agent.ContinuousBudgetPct < 0 || agent.ContinuousBudgetPct > 100 {
+			return fmt.Errorf("agent %s: continuous_budget_pct must be 0 (default) or between 1 and 100", name)
 		}
 		if err := ValidateKickTemplateName(agent.KickTemplate); err != nil {
 			return fmt.Errorf("agent %s: %w", agentSourceLabel(name, agent.sourceFile), err)

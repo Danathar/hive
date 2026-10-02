@@ -437,9 +437,10 @@ type StatusPayload struct {
 	// selector is: whether a hive is hub-managed is not something the browser
 	// can determine, and a UI that guesses would either offer an edit that
 	// always 409s or hide one that is legitimately available.
-	HiveIDEditable   bool            `json:"hiveIdEditable"`
-	HiveIDLockReason string          `json:"hiveIdLockReason,omitempty"`
-	Agents           []FrontendAgent `json:"agents"`
+	HiveIDEditable   bool             `json:"hiveIdEditable"`
+	HiveIDLockReason string           `json:"hiveIdLockReason,omitempty"`
+	Features         FrontendFeatures `json:"features"`
+	Agents           []FrontendAgent  `json:"agents"`
 	// HiddenAgents is diagnostic-only (#6581): agent-manager runtime entries
 	// that were left out of Agents (the dashboard cards), each with the stable
 	// reason category it was omitted for. It exists so an operator whose
@@ -497,13 +498,17 @@ type StatusPayload struct {
 	// countdown, so the install banner keys off this field FIRST — no recheck,
 	// classification, or raw-URL sniffing may gate it (the vllmd-13 reset left
 	// blank raw fields suppressing the banner while auth was not-installed).
-	GitHubAppInstallMissing bool               `json:"githubAppInstallMissing,omitempty"`
-	RepoTargetMisconfigured bool               `json:"repoTargetMisconfigured,omitempty"`
-	RepoTargetIssue         string             `json:"repoTargetIssue,omitempty"`
-	GitHubBaseURL           string             `json:"githubBaseURL,omitempty"`
-	InferenceBackends       []InferenceBackend `json:"inferenceBackends,omitempty"`
-	SystemAlerts            []SystemAlert      `json:"systemAlerts,omitempty"`
-	HubBanner               *HubBannerState    `json:"hubBanner,omitempty"`
+	GitHubAppInstallMissing bool   `json:"githubAppInstallMissing,omitempty"`
+	RepoTargetMisconfigured bool   `json:"repoTargetMisconfigured,omitempty"`
+	RepoTargetIssue         string `json:"repoTargetIssue,omitempty"`
+	// IssuesDisabledRepos lists watched repos with has_issues=false, from the
+	// metrics collector's proactive probe (#9972). Drives the Issues-disabled
+	// banner; omitted when every watched repo accepts issues.
+	IssuesDisabledRepos []IssuesDisabledRepo `json:"issuesDisabledRepos,omitempty"`
+	GitHubBaseURL       string               `json:"githubBaseURL,omitempty"`
+	InferenceBackends   []InferenceBackend   `json:"inferenceBackends,omitempty"`
+	SystemAlerts        []SystemAlert        `json:"systemAlerts,omitempty"`
+	HubBanner           *HubBannerState      `json:"hubBanner,omitempty"`
 	// Platform surfaces the v4 spoke capabilities — the configured forge, the
 	// mint token service state, and the skills registry. It is additive and
 	// nil-safe: a github-only, mint-off hive with no skills dir still gets a
@@ -532,6 +537,12 @@ type FrontendInception struct {
 	Phase     knowledge.InceptionPhase `json:"phase,omitempty"`
 	Questions []knowledge.Question     `json:"questions,omitempty"`
 	Answers   map[string]string        `json:"answers,omitempty"`
+}
+
+// FrontendFeatures is the secret-free set of dashboard feature flags consumed
+// by the SPA.
+type FrontendFeatures struct {
+	StrategyLab bool `json:"strategy_lab"`
 }
 
 // FrontendSecurity summarizes the effective operator security posture for compact dashboard display.
@@ -641,33 +652,42 @@ type FrontendAgent struct {
 	// Starting is true while the agent is queued in the post-restart boot
 	// stagger or its launch is in progress. State is still "stopped" then;
 	// the SPA renders this window as "starting" rather than down.
-	Starting               bool   `json:"starting,omitempty"`
-	Busy                   string `json:"busy"`
-	AwaitingCI             bool   `json:"awaitingCI,omitempty"`
-	Paused                 bool   `json:"paused"`
-	PausedAt               string `json:"pausedAt,omitempty"`
-	PausedReason           string `json:"pausedReason,omitempty"`
-	PausedTrigger          string `json:"pausedTrigger,omitempty"`
-	PausedBy               string `json:"pausedBy,omitempty"`
-	OffByCadence           bool   `json:"offByCadence"`
-	NoCadence              bool   `json:"noCadence"`
-	NeedsLogin             bool   `json:"needsLogin"`
-	LoginURL               string `json:"loginURL,omitempty"`
-	AuthAvailable          bool   `json:"authAvailable"`
-	AuthKnown              bool   `json:"authKnown"`
-	CLI                    string `json:"cli"`
-	Model                  string `json:"model"`
-	ReasoningEffort        string `json:"reasoningEffort,omitempty"`
-	Cadence                string `json:"cadence"`
-	Doing                  string `json:"doing"`
-	PinnedCli              bool   `json:"pinnedCli"`
-	PinnedModel            bool   `json:"pinnedModel"`
-	PinnedBoth             bool   `json:"pinnedBoth"`
-	Pinned                 bool   `json:"pinned"`
-	LastKick               string `json:"lastKick,omitempty"`
-	LastKickAt             string `json:"lastKickAt,omitempty"`
-	NextKick               string `json:"nextKick,omitempty"`
-	NextKickIn             string `json:"nextKickIn,omitempty"`
+	Starting bool   `json:"starting,omitempty"`
+	Busy     string `json:"busy"`
+	// AwaitingCI (#9673 item 3) is true only while Busy=="working" AND the
+	// manager's CI-poll guard sees the agent's recent tool calls as all CI
+	// polls (gh run watch/view/list, gh pr checks) with it currently idle at
+	// the prompt. The SPA renders this as "Waiting on CI" instead of
+	// "Working" so a stalled-on-CI agent no longer looks indistinguishable
+	// from one making progress.
+	AwaitingCI        bool   `json:"awaitingCI,omitempty"`
+	Paused            bool   `json:"paused"`
+	PausedAt          string `json:"pausedAt,omitempty"`
+	PausedReason      string `json:"pausedReason,omitempty"`
+	PausedTrigger     string `json:"pausedTrigger,omitempty"`
+	PausedBy          string `json:"pausedBy,omitempty"`
+	OffByCadence      bool   `json:"offByCadence"`
+	NoCadence         bool   `json:"noCadence"`
+	NeedsLogin        bool   `json:"needsLogin"`
+	LoginURL          string `json:"loginURL,omitempty"`
+	AuthAvailable     bool   `json:"authAvailable"`
+	AuthKnown         bool   `json:"authKnown"`
+	CLI               string `json:"cli"`
+	Model             string `json:"model"`
+	ReasoningEffort   string `json:"reasoningEffort,omitempty"`
+	Cadence           string `json:"cadence"`
+	Doing             string `json:"doing"`
+	PinnedCli         bool   `json:"pinnedCli"`
+	PinnedModel       bool   `json:"pinnedModel"`
+	PinnedBoth        bool   `json:"pinnedBoth"`
+	Pinned            bool   `json:"pinned"`
+	LastKick          string `json:"lastKick,omitempty"`
+	LastKickAt        string `json:"lastKickAt,omitempty"`
+	NextKick          string `json:"nextKick,omitempty"`
+	NextKickIn        string `json:"nextKickIn,omitempty"`
+	Continuous        bool   `json:"continuous,omitempty"`
+	ContinuousBackoff string `json:"continuousBackoff,omitempty"`
+	FrontendAgentContinuous
 	KicksUndeliverable     int    `json:"kicksUndeliverable,omitempty"`
 	BusySince              string `json:"busySince,omitempty"`
 	LastTranscriptActivity string `json:"lastTranscriptActivity,omitempty"`

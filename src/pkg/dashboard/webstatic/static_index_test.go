@@ -218,6 +218,88 @@ func TestStaticTerminalHostedApexWiring(t *testing.T) {
 	}
 }
 
+func TestStaticDashboardPRAuthorUserMenuWiring(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`id="oc-gh-menu-pr-author"`,
+		`id="oc-gh-menu-pr-author-copy"`,
+		`data-action="copyPRAuthorFromMenu"`,
+		"function renderPRAuthorInMenu()",
+		"async function copyPRAuthorFromMenu()",
+		"window._aiAuthor = cfg.ai_author_effective || '';",
+		"renderPRAuthorInMenu();",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("PR author user-menu wiring missing %q", want)
+		}
+	}
+	if strings.Contains(html, `<div class="gov-stat" title="PR AUTHOR`) {
+		t.Fatal("governor strip still renders the PR AUTHOR tile")
+	}
+}
+
+func TestStaticAddAgentDiscoverabilityWiring(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`id="agents-add-btn"`,
+		`data-action="openAddAgentDialog"`,
+		`title="Add a new agent from a template or from scratch"`,
+		`＋ Add agent`,
+		`＋ Add your first agent`,
+		`applyAgentQuickStart`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static dashboard Add agent discoverability wiring missing %q", want)
+		}
+	}
+	if strings.Contains(html, `>+ agent</a>`) {
+		t.Fatal("sidebar still exposes the low-contrast '+ agent' link")
+	}
+}
+
+func TestStaticDashboardLayoutUserMenuWiring(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`id="oc-gh-menu-layout-save"`,
+		`id="oc-gh-menu-layout-saved"`,
+		`id="oc-gh-menu-layout-list"`,
+		`id="oc-gh-menu-layout-reset"`,
+		`id="oc-gh-menu-layout-export"`,
+		`id="oc-gh-menu-layout-import"`,
+		`id="oc-gh-menu-layout-status"`,
+		"function dashboardLayoutSnapshot",
+		"function saveDashboardLayoutPreset",
+		"function exportDashboardLayoutJSON",
+		"function importDashboardLayoutJSON",
+		"Layout: default",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("dashboard layout user-menu wiring missing %q", want)
+		}
+	}
+	for _, gone := range []string{
+		`id="dashboard-layout-reset"`,
+		`id="dashboard-layout-reset-main"`,
+		`>↕️ Reset layout</button>`,
+	} {
+		if strings.Contains(html, gone) {
+			t.Fatalf("dashboard layout reset control should only live in the user menu; found %q", gone)
+		}
+	}
+}
+
 func TestStaticDashboardFAQDefaultsAfterOperationalSections(t *testing.T) {
 	body, err := os.ReadFile("../static/index.html")
 	if err != nil {
@@ -249,6 +331,26 @@ func TestStaticDashboardFAQDefaultsAfterOperationalSections(t *testing.T) {
 	defaultOrderTail := "'logs-section','agents-section','faq-section']"
 	if !strings.Contains(html, defaultOrderTail) {
 		t.Fatalf("dashboard default layout/reset order no longer leaves FAQ last; missing %q", defaultOrderTail)
+	}
+}
+
+func TestStaticStrategyLabFeatureGateWiring(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`id="nous-section" data-dashboard-section="nous-section" data-feature="strategy_lab" hidden`,
+		`data-section="nous-section" data-feature="strategy_lab" hidden`,
+		`function strategyLabEnabled()`,
+		`function applyDashboardFeatureVisibility()`,
+		`if (!strategyLabEnabled()) return;`,
+		`() => ensureNousPolling()`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static dashboard Strategy Lab feature gate missing %q", want)
+		}
 	}
 }
 
@@ -321,6 +423,32 @@ func TestStaticRunDetailTranscriptRenderingWiring(t *testing.T) {
 	}
 }
 
+func TestStaticCadenceMatrixNameOpensAgentCard(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`data-action="ocSelectAgent" data-agent="${esc(aname)}" title="Open ${esc(displayLabel)}'s agent card"`,
+		`data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(aname)}" data-tab="Cadences"`,
+		`.gov-matrix td[data-tab="Cadences"], .gov-matrix .gov-agent-name-link { cursor: pointer; }`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("cadence matrix name/cadence wiring missing %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"return `<tr style=\"cursor:pointer\"",
+		"return `<tr data-action=\"openConfigDialog\"",
+		"return `<tr data-tab=\"Cadences\"",
+	} {
+		if strings.Contains(html, banned) {
+			t.Fatalf("cadence matrix row still carries click-target wiring %q", banned)
+		}
+	}
+}
+
 func TestNotificationsTabRendersEventCheckboxesAndSlack(t *testing.T) {
 	body, err := os.ReadFile("../static/index.html")
 	if err != nil {
@@ -340,5 +468,65 @@ func TestNotificationsTabRendersEventCheckboxesAndSlack(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Fatalf("notifications UI missing %q", want)
 		}
+	}
+}
+
+func TestStaticIndexRepoTileReorderHandle(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		"const REPO_ORDER_KEY = 'hive.repoOrder.v1';",
+		`class="dashboard-grip repo-card-order-handle" draggable="true" data-repo-order-grip`,
+		`aria-label="Drag to reorder" title="Drag to reorder"`,
+		"function repoOrderApply(repos)",
+		"repoOrderSaveFromDom(grid);",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static dashboard repo tile reorder wiring missing %q", want)
+		}
+	}
+}
+
+func TestStaticTopbarACMMAndSidebarVersionPlacement(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	topbarStart := strings.Index(html, `<header id="oc-topbar"`)
+	if topbarStart < 0 {
+		t.Fatal("static dashboard is missing the light topbar")
+	}
+	versionPos := strings.Index(html, `id="oc-git-version"`)
+	if versionPos < 0 {
+		t.Fatal("static dashboard is missing the sidebar version chip container")
+	}
+	if versionPos > topbarStart {
+		t.Fatal("#oc-git-version moved back into/after the topbar; version details belong in the sidebar footer")
+	}
+	topbarEnd := strings.Index(html[topbarStart:], `</header>`)
+	if topbarEnd < 0 {
+		t.Fatal("static dashboard topbar is not closed")
+	}
+	topbar := html[topbarStart : topbarStart+topbarEnd]
+	for _, want := range []string{
+		`id="acmm-badge" data-action="ocNavigate" data-arg0="acmm-eval-section"`,
+		`id="oc-version-chip"`,
+		`id="oc-version-menu"`,
+		`aria-expanded="false" aria-controls="oc-version-menu"`,
+	} {
+		haystack := html
+		if strings.Contains(want, "acmm-badge") {
+			haystack = topbar
+		}
+		if !strings.Contains(haystack, want) {
+			t.Fatalf("static dashboard placement missing %q", want)
+		}
+	}
+	if strings.Contains(topbar, `id="oc-git-version"`) || strings.Contains(topbar, `id="spoke-upgrade-btn"`) {
+		t.Fatal("topbar still contains the inline version/upgrade strip")
 	}
 }

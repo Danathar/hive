@@ -190,9 +190,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     chmod +x /usr/local/bin/ttyd
 
 # --- Layer 2b: GitHub CLI (off-PATH — only snapshot publisher uses it) ---
-ARG GH_VERSION=2.101.0
-ARG GH_SHA256_AMD64=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
-ARG GH_SHA256_ARM64=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+ARG GH_VERSION=2.102.0
+ARG GH_SHA256_AMD64=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
+ARG GH_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64) GH_ARCH=amd64; GH_SHA256="$GH_SHA256_AMD64" ;; \
@@ -259,12 +259,12 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
 # dashboard's codex model discovery (`codex app-server` model/list — pure
 # local stdio, no network, unaffected by the proxy CA) falls back to the
 # static list, and non-codex backends are unaffected.
-ARG CODEX_VERSION=0.159.0
+ARG CODEX_VERSION=0.160.0
 RUN npm install -g --ignore-scripts --no-fund --no-audit @openai/codex@${CODEX_VERSION} && npm cache clean --force || \
     echo "WARN: OpenAI Codex CLI install failed — skipping"
 
 # --- Layer 7: Claude Code (most frequent updates) ---
-ARG CLAUDE_CODE_VERSION=2.1.284
+ARG CLAUDE_CODE_VERSION=2.1.287
 # --ignore-scripts (kept, deliberately: no arbitrary postinstall runs during the
 # build) skips claude-code's install.cjs, which is what LINKS the platform
 # native binary into the package's bin/. The binary itself ships in the
@@ -393,7 +393,7 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # Tolerant of failure like the copilot/codex layers: agents configured for
 # backend: pi simply won't launch if this is absent, same degradation as
 # any other missing backend binary.
-ARG PI_VERSION=0.99.1
+ARG PI_VERSION=1.0.0
 RUN npm install -g --ignore-scripts --no-fund --no-audit \
     "@earendil-works/pi-coding-agent@${PI_VERSION}" && npm cache clean --force || \
     echo "WARN: pi CLI install failed — skipping"

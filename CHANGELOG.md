@@ -11,6 +11,93 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.114.0)
+
+### Added
+
+- agents: budget guard for continuous mode (#10031)
+- The spoke dashboard now has a Feedback flow for reporting bugs or requesting features as GitHub issues, with screenshot attachments, diagnostics preview/redaction, hub relay, user-token filing, prefilled issue fallback paths, and a top-bar bug notification pill for tracked feedback activity ([#9982](https://github.com/hivecommons/hive/issues/9982)).
+- Upstream watch now has durable state: a per-repo watermark and last-run time, a filed-ref dedupe index and dismissal tracking, persisted atomically so a hub restart never re-scans or refiles.
+
+### Fixed
+
+- dashboard: `/api/cost` prices `by_agent` per-session at each session's own model instead of one "dominant" model so it stays additive with `total_usd`, and `/api/nous/status` caps `baseline_pct` at 100 instead of reporting unbounded percentages (#10025, #10026)
+- A Copilot agent whose stored or discovered model is `claude-opus-5-5` / `claude-sonnet-5-5` (or the dotted `claude-opus-5.5` / `claude-sonnet-5.5`) now actually launches on Opus/Sonnet 5.5 instead of silently running Opus/Sonnet 5 ([#9927](https://github.com/hivecommons/hive/issues/9927)). `CopilotLaunchModel` correctly canonicalized the dashed id to the CLI-accepted dotted spelling (#9943), but then re-downgraded that result to the bare `-5` family through a stale rejected-id map left over from before #9943 — so any 5.5 selection, dashed or dotted, still launched on 5 with no indication. The stale downgrade is removed; launch now uses the canonical id directly.
+
+### Security
+
+- The sandbox push broker no longer lets the workspace's own git configuration steer the credentialed post-step ([#10023](https://github.com/hivecommons/hive/issues/10023)). The broker runs `git add`, `commit --amend` and `push` as the hive's UID inside a workspace the sandboxed agent wrote, and git reads that repository's `.git/config`, `.git/hooks/` and `.gitattributes` before anything on the command line — so an agent-planted hook, credential helper, `url.*.insteadOf` rewrite or `http.proxy` ran outside the sandbox with the minted push token in reach. Every broker git invocation now carries command-scope overrides (`core.hooksPath=/dev/null`, `core.fsmonitor=false`, a reset `credential.helper`, `commit.gpgsign=false`, and the push remote pinned to the repository the broker was told to push to), and the push is refused up front when the repository-scoped config holds any key outside the small set a fresh clone writes. The trailing-blank-line normaliser also no longer follows committed symlinks.
+
+## 2026-10-02 (v5.113.0)
+
+### Added
+
+- discord: Join our Discord link in hub portal and spoke Help menu (#10006)
+- agents: continuous mode  re-kick when a session ends, never mid-session (#10020)
+- issue-template: contributor story form for hivecommons.dev/stories (#10022)
+
+### Fixed
+
+- Fix Change Throughput to count forge-observed human and automation merges/closures without double-counting hive-performed merges.
+
+### Security
+
+- The browser terminal now honours an OSC 52 copy from the agent CLI only within two seconds of an operator gesture in the terminal tab ([#10027](https://github.com/hivecommons/hive/issues/10027)). OSC 52 is plain pane output — the agent, any tool it runs, or any file or issue body it prints can emit it — and the `/terminal` tab is top-level, so a focused tab wrote the operator's clipboard with no action on their part; a drag-copy in the CLI still lands exactly as before, while anything that arrives unprompted is dropped rather than written or kept for a later ⌘C.
+
+## 2026-10-02 (v5.112.0)
+
+### Added
+
+- dashboard: overview card  centred layout, repo filter, KPI strip (#10001)
+- dashboard: layout save, presets and reset in the user menu (#10005)
+- dashboard: merge fleet breaker pill and button into one status chip (#10008)
+- dashboard: ACMM level in topbar, version/upgrade consolidated into sidebar chip (#10009)
+- dashboard: refresh desktop widget to current features; move Widget link into user menu (#10012)
+- The spoke dashboard now shows a warning banner when any watched repo in `project.repos` has GitHub Issues disabled ([#9972](https://github.com/hivecommons/hive/issues/9972)). Previously the hive only noticed `has_issues=false` when the advisory issue create failed, and only for the advisory repo, so agent-filed issues on other repos failed with nothing in the dashboard saying why. The metrics collector now probes every watched repo at startup and on its regular 5-minute refresh, and the banner names each affected repo, says whether it is a fork (GitHub turns Issues off on forks by default), and gives the same remedy as the advisory error: enable Issues under Settings > General > Features, or point the hive at the upstream repo. You can dismiss each repo for operators who keep Issues off on purpose. The status payload exposes the same list as `issuesDisabledRepos`.
+- dashboard: auto-merge toggle switch, on only at Level 6 (#9987)
+- dashboard: drag handles to reorder repo tiles (#9990)
+- dashboard: expandable lifecycle timeline rows with stage details (#9991)
+- dashboard: PR throughput sparklines, repo filter, velocity metrics (#9992)
+- dashboard: make Add agent discoverable (#9995)
+- dashboard: every section is a collapsible card with a collapsed summary, matching Cost (#9996)
+- scanner: upstream watch source listing merged PRs and releases since a watermark (#9997)
+
+### Changed
+
+- copy: work-source-neutral terminology (GitHub-specific wording only where it is GitHub-specific) (#10011)
+- dashboard: remove System Diagnostics icon from topbar (#9983)
+- dashboard: move PR author from governor strip into user menu (#9986)
+- dashboard: cadence table agent name opens the agent card (#9989)
+- dashboard: hide Strategy Lab behind dashboard.strategy_lab (default off) (#9993)
+- The security self-assessment now points reviewer evidence at v5 and describes heartbeat response verification as opt-in enforcement.
+
+### Fixed
+
+- `just contribute-move` and `hivectl hives reissue` can once again rotate a contributor's registration token on standalone hives — the auth proxy was rejecting `POST /api/contribute/reissue-token`'s GitHub-token credential with a 401 before it reached the handler.
+- fix hub contribute landing (#10013)
+- fix reviewer accuracy calibration (#9994)
+- Test Connection no longer blames an ingress proxy when a gateway answers a keyless `GET /v1/models` with a bare 401 and an empty body, and when an edge proxy blocks model listing while no default model is configured it now explains that the inference fallback check could not be tried.
+- Fixed: the browser terminal's OSC 52 clipboard forwarding (#9970) never actually reached the browser, because `set-clipboard` (in either mode) requires an `Ms` terminfo capability tmux never had for ttyd's TERM; `ttyd-tmux.sh` now declares the `clipboard` terminal-feature outright instead of depending on tmux's own auto-detection (#9941).
+- Fixed `v6 Top-up` auto-resolving the guaranteed `src/pkg/config/config.go` forward-merge conflict (v6 split it into topical files in #9386, so every v5 edit to the old monolith conflicts) the same way it already handles `discord/` deletions, instead of failing for a human on every v5 push (#9956)
+
+## 2026-10-02 (v5.111.0)
+
+### Added
+
+- **`upstream_watch` config block** — a forked repo can now declare the upstream it follows (`upstream: owner/repo`, or omit it to use the GitHub fork parent) plus volume controls: `sources` (`releases`, `prs`), `pr_labels`, `max_issues_per_run` and `label`, with a 6h default `interval`. Off by default and validated at load (repo keys must be in `project.repos`). Configuration only; polling and issue filing follow separately. Part of #9963; closes #9966.
+
+### Changed
+
+- images: bump claude 2.1.284 -> 2.1.287 (#9976)
+
+## 2026-10-02 (v5.110.10)
+
+### Fixed
+
+- Copying an agent CLI's own selection out of the browser terminal now reaches the browser clipboard ([#9941](https://github.com/hivecommons/hive/issues/9941)). Agent CLIs turn mouse reporting on, so an ordinary drag selects in the CLI, which copies with an OSC 52 escape; tmux's default `set-clipboard external` kept that in tmux's own paste buffer, and ttyd 1.7.7 has no OSC 52 handler anyway, so ⌘C still pasted stale clipboard contents. The terminal attach now sets `set-clipboard on`, and the dashboard's injected terminal script decodes OSC 52 and writes it to the clipboard — with ⌘C / Ctrl+Shift+C falling back to the CLI's last copy if the browser refused the immediate write.
+- LiteLLM **Test Connection** no longer fails a configuration that works for inference just because something in front of the gateway blocks model listing ([#9945](https://github.com/hivecommons/hive/issues/9945)). When an ingress, WAF or VPN proxy refuses `GET /v1/models` with an HTML/empty 401/403, the probe now sends a 1-token `POST /v1/chat/completions` with the configured default model — the same path the hive uses for inference. If that succeeds the test passes with a warning that model listing is blocked; if it is refused too, the error says both paths were blocked, so the hive's network path (not the key) is clearly the thing to fix.
+- A Copilot agent whose stored model is `claude-opus-5-5` or `claude-sonnet-5-5` now launches on `claude-opus-5` / `claude-sonnet-5` explicitly instead of passing an id the pinned Copilot CLI 1.0.88 rejects and silently replaces ([#9927](https://github.com/hivecommons/hive/issues/9927)).
+
 ## 2026-10-02 (v5.110.9)
 
 ### Fixed

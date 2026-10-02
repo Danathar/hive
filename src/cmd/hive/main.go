@@ -7019,6 +7019,7 @@ func runEvalCycle(
 					"class", class,
 					"retry_in", remaining.Round(time.Second),
 					"error", line)
+				gov.RecordKickFailure(msg.Agent, fmt.Errorf("provider inference backoff (%s): %s", class, line), time.Now())
 				continue
 			}
 			filtered = append(filtered, msg)
@@ -7427,6 +7428,9 @@ func runEvalCycle(
 					deliveredReviewKicks = append(deliveredReviewKicks, k)
 					persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 				}
+			},
+			onFailed: func(msg scheduler.KickMessage, err error) {
+				gov.RecordKickFailure(msg.Agent, err, time.Now())
 			},
 			onDelivered: func(msg scheduler.KickMessage) {
 				gov.RecordKickForRepo(msg.Agent, msg.Repo)
@@ -9330,7 +9334,7 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 }
 
 func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
-	if cfg == nil || !cfg.Review.RequireApproval {
+	if cfg == nil || !shouldRefreshReviewVerdicts(cfg) {
 		return
 	}
 	artifact, err := review.CollectAndMerge("", "", review.AggregateOptions{
@@ -9347,6 +9351,26 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		return
 	}
 	logger.Info("review verdict artifact refreshed", "aggregates", len(artifact.Items))
+}
+
+func shouldRefreshReviewVerdicts(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Review.RequireApproval {
+		return true
+	}
+	entries, err := os.ReadDir(review.ReportDir(""))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasPrefix(name, review.ReviewReportFilePrefix) && strings.HasSuffix(name, review.ReviewReportFileSuffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewOutcomeResolveCap bounds how many vanished PRs one eval cycle asks

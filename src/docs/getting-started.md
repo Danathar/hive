@@ -1,6 +1,6 @@
 # Zero to Automation: Getting Started with Hive
 
-Hive is a team of AI agents that watch your repo and help improve it — finding bugs, adding tests, writing docs. It works in **levels (L1–L6)**: at low levels agents only *suggest* things, and at high levels they can open and even merge pull requests. You climb the levels as you build trust in what the agents produce — over **weeks per level, not days**. And here's the most important thing to know before you start: **the goal is trust, not level.**
+Hive is a team of AI agents that watch your project and help improve it — finding bugs, adding tests, writing docs. It works in **levels (L1–L6)**: at low levels agents only *suggest* things, and at high levels they can open and even merge pull requests. You climb the levels as you build trust in what the agents produce — over **weeks per level, not days**. And here's the most important thing to know before you start: **the goal is trust, not level.**
 
 ## The Hive Way
 
@@ -10,13 +10,15 @@ The biggest mistake new users make: seeing agent output and either (a) panicking
 
 ## Trust > Level. Always.
 
-> You do not need to reach L6. Ever. L6 is full automation — agents merging code without human review. Some teams run at L4 or L5 indefinitely and that is completely fine. The number doesn't matter. What matters is whether you trust what the agents are producing. A team that runs at L3 with high confidence is in a better place than a team that jumped to L6 and is now drowning in agent PRs they don't understand.
+> You do not need to reach L6. Ever. L6 is full automation — agents merging code without human review. Some teams run at L4 or L5 indefinitely and that is completely fine. The number doesn't matter. What matters is whether you trust what the agents are producing. A team that runs at L3 with high confidence is in a better place than a team that jumped to L6 and is now drowning in agent change requests they don't understand.
 >
 > **The goal is trust, not level.**
 
 ## What this guide doesn't cover (and why)
 
 > Hive is deeply configurable. There are agent policy templates, knowledge layers, custom agents, issue label filters, multi-repo setups, and a lot more. This guide doesn't cover any of that — and that's intentional. You don't need any of it to start. The goal of your first few months is to get comfortable with one or two agents at a low level, not to explore every feature. Features will still be there when you're ready for them. When you are ready for label behavior details, use [Hive Labels and Control Signals](labels-and-control-signals.md).
+
+When you are ready for a specialist, the dashboard has **＋ Add agent** in the Agents sidebar and at the top of the Agents section. It opens a create dialog with quick-start templates for common roles (scanner, reviewer, quality, CI maintainer, guide) plus import-from-YAML for shared agent definitions.
 
 ## What to expect (and what not to)
 
@@ -56,6 +58,10 @@ None of the level guidance below works until your hive is connected to your git 
 > 💡 **Tip: name your hive like a team member.** The `ai_author` field is the login your agents use when opening PRs. Pick a name that signals what it does — `hive-bot`, `your-repo-ai`, `proj-assistant`. A clear name means your team immediately knows which PRs are agent-authored vs human-authored.
 
 ---
+
+## Community help
+
+If you get stuck, [Join our Discord](https://hivecommons.dev/discord). The invite is permanent, and the Hive Commons community can help with setup, first-run questions, contributor relay, and choosing a safe next ACMM step.
 
 ## Common gotchas (so you don't panic)
 
@@ -126,7 +132,7 @@ Read it like a weekly digest, not a to-do list. You don't have to act on everyth
 
 Every issue a hive agent opens has the agent's name in the title — for example `[scanner] Possible nil pointer dereference in handler.go:142` or `[quality] Missing test coverage for payment flow`.
 
-When you see a new issue in your repo, check the title prefix — it tells you which agent filed it and what kind of finding it is:
+When you see a new issue in your project, check the title prefix — it tells you which agent filed it and what kind of finding it is:
 
 - `[scanner]` = bugs
 - `[quality]` = test gaps
@@ -147,7 +153,7 @@ New users often expect PRs at L2 (they don't happen) or are surprised when they 
 | **L3** | **Quality only** can open PRs. Every PR has a literal `hold` level-gate label — it will NOT merge until you remove the hold. No other agent opens PRs at L3. |
 | **L4** | Quality, ci-maintainer, **and** sec-check can open PRs (all with literal `hold` level-gate labels). Scanner and guide file issues — not PRs. |
 | **L5** | All agents can open PRs, all with literal `hold` level-gate labels. Nothing auto-merges. You batch-review. |
-| **L6** | PRs auto-merge when CI goes green. Non-outreach PRs have no level hold; outreach PRs are still held for human review. Full automation. |
+| **L6** | Auto-merge switches on for every active repo, then PRs auto-merge when CI goes green. Owners can toggle individual repos off or back on afterward. Non-outreach PRs have no level hold; outreach PRs are still held for human review. Full automation. |
 
 > **The hold label is your safety net.** Hive uses literal `hold` as the level-gate merge-blocking PR label; `hive-pause/<hive-id>` is the dashboard's manual hold label and `hive/<hive-id>` is provenance only. At every level below L6, every PR an agent opens is blocked from merging until you remove `hold`. You are always in control. Nothing ships without your approval until you reach L6 — and you'll only reach L6 after months of trusting the system.
 >
@@ -264,7 +270,7 @@ See [sandbox-isolation.md](sandbox-isolation.md) for the full threat model, the 
 
 **Be patient:** The first sec-check run can take a full cadence cycle to appear. And yes — you'll get more issues and PRs at this level. Still review them one by one. The literal `hold` label exists precisely so nothing merges without you.
 
-**When to move up:** **4–5 weeks.** Let sec-check find and fix security issues. Watch the pattern of what agents propose. Trust is earned slowly — move up when you're approving most agent PRs without changes.
+**When to move up:** **4–5 weeks.** Let sec-check find and fix security issues. Watch the pattern of what agents propose. Trust is earned slowly — move up when you're approving most agent change requests without changes.
 
 ## L5 — Propose and Review
 
@@ -281,17 +287,17 @@ See [sandbox-isolation.md](sandbox-isolation.md) for the full threat model, the 
 
 **Using the findings:** Batch-review on a schedule (say, twice a week). Approve the PRs you like, decline the ones you don't, 👍 the issues that match your roadmap.
 
-> 💡 **Tip: batch-review in one sitting.** Reviewing ten agent PRs in a single hour teaches you the agents' patterns faster than reviewing one per day. Patterns jump out when the PRs sit side by side — repeated habits, favorite files, blind spots.
+> 💡 **Tip: batch-review in one sitting.** Reviewing ten agent change requests in a single hour teaches you the agents' patterns faster than reviewing one per day. Patterns jump out when the PRs sit side by side — repeated habits, favorite files, blind spots.
 
 **Building tests:** By now, quality should have already added tests for your main flows. If it hasn't, go back to L3 habits before moving on — L6 depends on it.
 
 **Be patient:** With everything un-paused, the dashboard gets busy. Give new agents a heartbeat cycle before judging their output.
 
-**When to move up:** Only when you **genuinely trust the agents' judgment** — meaning you've reviewed enough of their PRs to know they're consistently doing the right thing, and your test suite is strong enough that green CI genuinely means "safe to ship." There's no calendar for this one.
+**When to move up:** Only when you **genuinely trust the agents' judgment** — meaning you've reviewed enough of their PRs to know they're consistently doing the right thing, and your test suite is strong enough that passing checks genuinely means "safe to ship." There's no calendar for this one.
 
 ## L6 — Full Automation
 
-**The level:** Full trust. Agents open PRs and merge them automatically when CI goes green. Non-outreach PRs have no level hold; outreach PRs remain held for human review.
+**The level:** Full trust. Auto-merge is off below L6; when you switch to L6, Hive enables auto-merge for every active repo, then agents open PRs and merge them automatically when CI goes green. Owners can toggle individual repos off or back on afterward. Non-outreach PRs have no level hold; outreach PRs remain held for human review.
 
 **What you get:** A repo that improves itself while you sleep. The tests quality built at L3 are now the guardrails that keep agents honest.
 
@@ -300,7 +306,7 @@ See [sandbox-isolation.md](sandbox-isolation.md) for the full threat model, the 
 
 ⚠️ **Cadence check:** You can shorten cadences now if your token budget allows — but 12h/1d still works fine. Faster isn't better if you're not reading the output.
 
-Telemetry and operations don't auto-enable just because you reached L6 — they carry the same opt-in requirement here as at L5 (**Settings → Project Observability**). If you enabled them at L5, they stay on and switch to full mode (auto-merge on green CI) like the rest of your roster.
+Telemetry and operations don't auto-enable just because you reached L6 — they carry the same opt-in requirement here as at L5 (**Settings → Project Observability**). If you enabled them at L5, they stay on and switch to full mode (auto-merge when checks pass) like the rest of your roster.
 
 **Using the findings:** Spot-check merged PRs weekly. 👍 issues to steer agent priorities.
 

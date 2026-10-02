@@ -21,9 +21,29 @@ via YAML tags.
 
 Dashboard UI changes should follow the shared [dashboard design system](dashboard-design-system.md), [dashboard glossary and sidebar IA](dashboard-glossary.md), and [ADR-0018](adr/0018-dashboard-design-tokens.md). The token layer is the theme contract for future user theme/background work and the migration path away from static inline styles; `go test ./pkg/dashboard/... -run StyleRatchet -v` ratchets inline styles and raw CSS values so the debt only goes down.
 
+## Topbar and sidebar status
+
+The light dashboard topbar keeps high-signal operational state only: project name, fleet controls, health, auth, and a compact ACMM autonomy chip such as `L5 · Semi-Autonomous`. The chip is display-only and navigates to the ACMM Evaluation section; changing levels remains in the existing ACMM dialog/sidebar controls.
+
+Build/version details live in the bottom-left sidebar chip. The collapsed chip shows the short SHA, release channel, and an orange `↑` marker only when an upgrade is available. Open the chip for the full commit link, channel/tracking state, compare/release-notes links, last upgrade status when reported, copy-version, and the manual upgrade action. On small screens the sidebar is reachable through the hamburger drawer, so the version menu remains available without returning the long version strip to the topbar.
+
+## Übersicht widget
+
+The account/avatar menu's **Export → ⬇ Widget** row downloads `GET /api/widget`
+with the same dashboard authentication as the rest of the API. The compact
+payload mirrors the headline dashboard readouts: agent names and
+running/paused/busy/next-kick state, governor mode, ACMM level, actionable
+issue/open PR counts, 7-day PR throughput (opened/merged/closed), spoke version
+and upgrade availability, and the fleet breaker state.
+
 ## Reorder sections
 
-The main dashboard section order is browser-local and display-only. Use the `⠿` grip in each top-level section header to drag a section, or focus the grip and press Space, Up/Down, then Space/Enter to drop; Escape cancels the keyboard move. The order is saved in `localStorage` as `hive.dashboard.layout`, hidden sections keep their slots, the sidebar follows the saved order, and **Reset layout** restores the default v5 order without changing collapse state.
+The main dashboard layout is browser-local and display-only. Use the `⠿` grip in each top-level section header to drag a section, or focus the grip and press Space, Up/Down, then Space/Enter to drop; Escape cancels the keyboard move. The working order is auto-saved in `localStorage` as `hive.dashboard.layout`; ACMM-hidden sections keep their slots, feature-disabled sections are excluded, and the sidebar follows the saved order. Section collapse state and repository card display tweaks are captured with saved layout presets. Open the GitHub avatar menu's **Layout** section to save the current working layout as a named preset (default **My layout**), apply/rename/delete up to five saved layouts, export/import a JSON layout, or **Reset layout to default**. Reset asks for confirmation, clears the working layout on this device, and offers a short undo toast. The avatar shows a small dot whenever the working layout differs from the last applied preset or default.
+
+The Strategy Lab (`dashboard.strategy_lab`) is hidden by default while that
+surface is being reworked. Set `dashboard.strategy_lab: true` to show the
+Strategy Lab dashboard section, its sidebar navigation item, and its Nous
+status controls.
 
 ## Governor card
 
@@ -41,6 +61,33 @@ sort controls; the selected column and direction are saved in browser
 `localStorage`, and a third click restores each card's default live order. The
 default row order is effectiveness rank; operators can toggle back to raw PR
 count without changing the selected window.
+
+## Change Throughput
+
+The **Change Throughput** section (`pr-throughput-section`) summarizes
+pull/merge requests and issues across tracked forges. It reads
+`GET /api/pr-throughput` for selectable windows and repository filters, keeps
+the historical `/api/pr-throughput` path and `pr-throughput-*` element IDs for
+compatibility, and reports opened, observed merged, and observed
+closed-without-merging terminal states.
+
+Actor attribution splits created, reviewed, and merged/closed activity into:
+
+- `hive`: writes that went through this hive's audited relays or governor
+  paths (`agent_pr_created`, `agent_issue_created`, `agent_pr_reviewed`,
+  agent issue comments/claims, relay/sweep merges and issue closes). The hive
+  identities are the same ones used by the GitHub client: the configured GitHub
+  App bot login (`SetAppBotLogin`), review bot settings, and the visible
+  `— hive:` attribution trailer/agent metadata.
+- `human`: forge-observed PR terminal events attributed to a non-bot actor.
+- `other`: Dependabot, Renovate, other bot accounts, unknown terminal actors,
+  and other automation outside this hive.
+
+Issue data comes from the existing issue-request and claim-poller audit stream:
+agent-created issues, agent comments/claims as triage/review signals, and
+agent issue-close events. Historical human issue creation/review/closure is not
+backfilled; the actor matrix and trend chart start accumulating as new audited
+or observed events arrive.
 
 ## Hive Chat
 
@@ -104,12 +151,14 @@ rule.
 ## Repository card legend, issue bands, and PR bands
 
 The collapsible **Overview** section above Repositories summarizes the same
-client-side issue and PR bands across the current repository view. Its SVG
+client-side issue and PR bands across the selected repository view. Its SVG
 charts reuse the repository-card classifiers for actionable plus held
-issues/PRs, so their totals match the visible band counters and respect any
-repo filtering without a separate API call. Operators can view each Issues or
-PRs panel as a donut, pie, horizontal bar, single 100% stacked bar, line/spark
-trend, or age histogram. Every shape is still driven by the same band slices and
+issues/PRs, so their totals match the visible band counters and respect the
+Overview settings repo filter without a separate API call. A compact KPI strip
+shows open issues, open PRs, actionable now, held, blocked/needs-human, and the
+median actionable age. Operators can view each Issues or PRs panel as a donut,
+pie, horizontal bar, single 100% stacked bar, line/spark trend, or age
+histogram. Every shape is still driven by the same band slices and
 server-provided classifications. Hovering a chart element, an Overview legend
 row, or a repository-card band header shows its rule from the Go band specs
 carried in `/api/status` as `overview_bands`. Each actionable/held issue and PR
@@ -117,7 +166,9 @@ carries `band`, `signals`, `stale`, and `held`; the browser does not classify
 labels or timestamps again. Full SSE updates carry the same fields.
 
 The Issues and PRs panels link directly to `/api/overview/issues.csv` and
-`/api/overview/prs.csv`; non-empty legend rows add a `band` query filter.
+`/api/overview/prs.csv` by default, or to the matching `.json` endpoints when
+JSON export is selected; non-empty legend rows add a `band` query filter and
+repo-filtered views add one or more `repo` query filters.
 Exports use the current cached snapshot and the same Go classifier as the
 page, so a download reflects the latest server state even between page updates.
 Automation can use the corresponding `.json` endpoints and optional `band`,
@@ -126,9 +177,13 @@ pages include their API token in the download link's query string.
 
 The Overview header's ⚙️ popover stores browser-local chart preferences under
 `hive-overview-charts`: which chart types are in rotation, whether the carousel
-is enabled, the 5-second to 5-minute interval, transition style, duration, and
-the bounded client-side line/spark history. The default remains donut-only with
-the carousel off, a 30-second interval, fade transition, and normal duration.
+is enabled, the 5-second to 5-minute interval, transition style, duration, donut
+label mode, KPI visibility, export format, default age basis, and the bounded
+client-side line/spark history. The repo multi-select is stored separately under
+`hive.overview.repos`, with All/None shortcuts and an Org shortcut when the
+hive spans multiple GitHub organizations. The default remains donut-only with
+the carousel off, a 30-second interval, fade transition, normal duration, KPI
+strip on, CSV exports, updated-time age basis, and all repos selected.
 Manual arrows and dot indicators are available even when timed rotation is off;
 timed rotation pauses while the panel is hovered or the tab is hidden, and
 reduced-motion users get instant swaps.
@@ -141,7 +196,7 @@ tooltip), issue held pills, plan chips, hold/release controls, issue state
 glyphs (`⛔`, `❓`, `👤`, `✓`, role badges, stale `🕒`) and PR states (`✓`,
 `◐`, `⚠`, held `⏸`, failing CI `✗ CI`, conflicts `⑂`, stale `🕒`,
 reviewed `💬`, auto-merge `🔀`, agent role badges, and review-class badges
-such as `FIX`).
+such as `FIX`). Repository cards also show a labelled auto-merge switch: it is effectively off below L6, switching the hive to L6 turns it on for every active repo, and owners may toggle individual repos afterward.
 
 Actionable issue pills are grouped client-side for display only; enumeration,
 holds, filters, ranking, and agent kick behaviour are unchanged. Bands are

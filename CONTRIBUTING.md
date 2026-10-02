@@ -2,14 +2,14 @@
 
 Thank you for helping improve KubeStellar Hive. This guide is for contributing code and documentation to this repository. If you want to donate compute to a running hive, see [Contribute to a Hive](README.md#contribute-to-a-hive) instead.
 
-**New here?** Start with the [getting-started guide for first-time contributors](docs/getting-started-contributing.md) — it walks the end-to-end journey (finding an issue, local setup, testing without a cluster, key concepts, and what the review/CI process looks like) and links back into this guide for the mechanics.
+**New here?** Start with the [getting-started guide for first-time contributors](docs/getting-started-contributing.md) — it walks the end-to-end journey (finding an issue, local setup, testing without a cluster, key concepts, and what the review/CI process looks like) and links back into this guide for the mechanics. For live community help, [Join our Discord](https://hivecommons.dev/discord).
 
 ## Where to work
 
 - Open issues and pull requests in this repository. Use the issue templates when they are available, and link related issues from the PR body.
 - **A good issue is a real contribution here, not a lesser one.** Much of this repository is written by its maintainers and by the hive's own agents, so the highest-leverage thing an outside contributor can usually do is describe a problem precisely enough to be acted on. When a PR resolves your issue, the commit credits you as a co-author — you appear in the repository's contributor list and on your own GitHub contribution graph, exactly as if you had written the patch. See [Crediting issue authors](#crediting-issue-authors).
 - Pull requests are welcome too, and nothing above changes how they are reviewed.
-- Discuss design and review questions in GitHub issues and PRs so decisions remain public and searchable.
+- Discuss design and review questions in public issues and pull requests so decisions remain public and searchable.
 - Follow the [KubeStellar Code of Conduct](CODE_OF_CONDUCT.md) and [Hive governance](GOVERNANCE.md).
 - Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
