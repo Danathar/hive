@@ -390,6 +390,7 @@ func (s *Scheduler) buildAgentMessage(agentName string, issues []github.Issue, a
 		message = s.addWorkflowPushCeiling(agentName, message)
 		message = s.addTaskMCPPointer(message, elideStuffed)
 		message = s.addQuestionAnswerContract(agentName, message, issues)
+		message = addConcreteKickClosingInstruction(message)
 	}()
 
 	baseName := s.cfg.BaseAgentName(agentName)
@@ -496,6 +497,20 @@ func (s *Scheduler) buildAgentMessage(agentName string, issues []github.Issue, a
 	default:
 		return s.buildGenericMessage(agentName, issues, actionable, elideStuffed)
 	}
+}
+
+const concreteKickClosingInstruction = "Begin now: pick the authorized repo you covered least recently and do your role's work there this session, filing issues/PRs through the hive relays as documented above. Do not ask for clarification — no human is attached to this session; if something is ambiguous, make the conservative choice and note it in your output."
+
+func addConcreteKickClosingInstruction(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return message
+	}
+	if strings.Contains(trimmed, "Do not ask for clarification — no human is attached") ||
+		strings.Contains(trimmed, "Begin now:") {
+		return message
+	}
+	return trimmed + "\n\n" + concreteKickClosingInstruction
 }
 
 func (s *Scheduler) reposSection() string {
