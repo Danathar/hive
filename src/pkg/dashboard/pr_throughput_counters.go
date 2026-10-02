@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,12 +30,35 @@ const (
 	prThroughputMergePathOtherAutomation = "other_automation"
 )
 
+const (
+	prThroughputKindPR    = "pr"
+	prThroughputKindIssue = "issue"
+
+	prThroughputRoleCreated  = "created"
+	prThroughputRoleReviewed = "reviewed"
+	prThroughputRoleMerged   = "merged"
+	prThroughputRoleClosed   = "closed"
+
+	prThroughputActorHive            = "hive"
+	prThroughputActorHuman           = "human"
+	prThroughputActorOtherAutomation = "other"
+
+	prThroughputCounterVersion = 2
+)
+
 // prThroughputActions are the audit actions the PR throughput counts are
-// built from: a PR the hive opened, merged, or closed without merging.
+// built from: changes the hive created/reviewed plus terminal states observed
+// for PRs and issues.
 var prThroughputActions = map[string]bool{
-	ghpkg.AuditActionAgentPRCreated: true,
-	ghpkg.AuditActionPRMerged:       true,
-	ghpkg.AuditActionPRClosed:       true,
+	ghpkg.AuditActionAgentPRCreated:      true,
+	ghpkg.AuditActionAgentIssueCreated:   true,
+	ghpkg.AuditActionHiveIssueCreated:    true,
+	ghpkg.AuditActionPRReviewed:          true,
+	ghpkg.AuditActionAgentCommentCreated: true,
+	ghpkg.AuditActionIssueClaimed:        true,
+	ghpkg.AuditActionPRMerged:            true,
+	ghpkg.AuditActionPRClosed:            true,
+	ghpkg.AuditActionIssueClosed:         true,
 }
 
 // PRThroughputCounters are the durable all-time totals behind the "all time"
@@ -42,10 +66,13 @@ var prThroughputActions = map[string]bool{
 // write time (AuditLog.Log), never recomputed from the audit files, so audit
 // log rotation cannot double-count or lose them.
 type PRThroughputCounters struct {
-	Opened       int            `json:"opened"`
-	Merged       int            `json:"merged"`
-	MergedByPath map[string]int `json:"merged_by_path,omitempty"`
-	Closed       int            `json:"closed"`
+	Version      int                                `json:"version,omitempty"`
+	Opened       int                                `json:"opened"`
+	Merged       int                                `json:"merged"`
+	MergedByPath map[string]int                     `json:"merged_by_path,omitempty"`
+	Closed       int                                `json:"closed"`
+	ByActor      PRThroughputActorMatrix            `json:"by_actor,omitempty"`
+	ActorBuckets map[string]PRThroughputActorMatrix `json:"actor_buckets,omitempty"`
 	// Terminal remembers merged/closed PRs already counted, keyed as
 	// lower(repo)#number, so a forge-observed terminal state cannot double-count
 	// a merge/close the hive already audited through a relay or sweep path.
@@ -59,12 +86,23 @@ type PRThroughputCounters struct {
 }
 
 type PRThroughputRepoCounters struct {
-	Opened       int               `json:"opened"`
-	Merged       int               `json:"merged"`
-	MergedByPath map[string]int    `json:"merged_by_path,omitempty"`
-	Closed       int               `json:"closed"`
-	Terminal     map[string]string `json:"terminal,omitempty"`
-	Since        string            `json:"since,omitempty"`
+	Opened       int                                `json:"opened"`
+	Merged       int                                `json:"merged"`
+	MergedByPath map[string]int                     `json:"merged_by_path,omitempty"`
+	Closed       int                                `json:"closed"`
+	ByActor      PRThroughputActorMatrix            `json:"by_actor,omitempty"`
+	ActorBuckets map[string]PRThroughputActorMatrix `json:"actor_buckets,omitempty"`
+	Terminal     map[string]string                  `json:"terminal,omitempty"`
+	Since        string                             `json:"since,omitempty"`
+}
+
+type PRThroughputActorMatrix map[string]map[string]map[string]int
+
+type PRThroughputActorPoint struct {
+	T     string `json:"t"`
+	Hive  int    `json:"hive"`
+	Human int    `json:"human"`
+	Other int    `json:"other"`
 }
 
 // clone returns a deep copy safe to hand out of the AuditLog lock.
@@ -75,10 +113,14 @@ func (c PRThroughputCounters) clone() PRThroughputCounters {
 		out.MergedByPath[k] = v
 	}
 	out.Terminal = cloneStringMap(c.Terminal)
+	out.ByActor = cloneActorMatrix(c.ByActor)
+	out.ActorBuckets = cloneActorBuckets(c.ActorBuckets)
 	if len(c.ByRepo) > 0 {
 		out.ByRepo = make(map[string]PRThroughputRepoCounters, len(c.ByRepo))
 		for k, v := range c.ByRepo {
 			v.MergedByPath = cloneIntMap(v.MergedByPath)
+			v.ByActor = cloneActorMatrix(v.ByActor)
+			v.ActorBuckets = cloneActorBuckets(v.ActorBuckets)
 			v.Terminal = cloneStringMap(v.Terminal)
 			out.ByRepo[k] = v
 		}
@@ -109,6 +151,7 @@ func (c *PRThroughputCounters) add(e AuditEntry) bool {
 }
 
 func (c *PRThroughputCounters) addTotals(e AuditEntry) {
+	c.Version = prThroughputCounterVersion
 	switch e.Action {
 	case ghpkg.AuditActionAgentPRCreated:
 		c.Opened++
@@ -120,6 +163,19 @@ func (c *PRThroughputCounters) addTotals(e AuditEntry) {
 		c.MergedByPath[prThroughputMergePath(e.Detail)]++
 	case ghpkg.AuditActionPRClosed:
 		c.Closed++
+	}
+	if kind, role, actor, ok := prThroughputActorAttribution(e); ok {
+		c.ByActor = c.ByActor.ensure()
+		addActorMatrix(c.ByActor, kind, role, actor, 1)
+		if c.ActorBuckets == nil {
+			c.ActorBuckets = map[string]PRThroughputActorMatrix{}
+		}
+		bucket := prThroughputCounterBucket(e.Timestamp)
+		if bucket != "" {
+			m := c.ActorBuckets[bucket].ensure()
+			addActorMatrix(m, kind, role, actor, 1)
+			c.ActorBuckets[bucket] = m
+		}
 	}
 	if c.Since == "" || (e.Timestamp != "" && e.Timestamp < c.Since) {
 		c.Since = e.Timestamp
@@ -142,6 +198,19 @@ func (c *PRThroughputRepoCounters) add(e AuditEntry) {
 	case ghpkg.AuditActionPRClosed:
 		c.Closed++
 	}
+	if kind, role, actor, ok := prThroughputActorAttribution(e); ok {
+		c.ByActor = c.ByActor.ensure()
+		addActorMatrix(c.ByActor, kind, role, actor, 1)
+		if c.ActorBuckets == nil {
+			c.ActorBuckets = map[string]PRThroughputActorMatrix{}
+		}
+		bucket := prThroughputCounterBucket(e.Timestamp)
+		if bucket != "" {
+			m := c.ActorBuckets[bucket].ensure()
+			addActorMatrix(m, kind, role, actor, 1)
+			c.ActorBuckets[bucket] = m
+		}
+	}
 	if c.Since == "" || (e.Timestamp != "" && e.Timestamp < c.Since) {
 		c.Since = e.Timestamp
 	}
@@ -149,7 +218,7 @@ func (c *PRThroughputRepoCounters) add(e AuditEntry) {
 
 func (c PRThroughputCounters) forRepo(repo string) PRThroughputCounters {
 	rc := c.ByRepo[strings.ToLower(repo)]
-	return PRThroughputCounters{Opened: rc.Opened, Merged: rc.Merged, MergedByPath: cloneIntMap(rc.MergedByPath), Closed: rc.Closed, Terminal: cloneStringMap(rc.Terminal), Since: rc.Since}
+	return PRThroughputCounters{Version: c.Version, Opened: rc.Opened, Merged: rc.Merged, MergedByPath: cloneIntMap(rc.MergedByPath), Closed: rc.Closed, ByActor: cloneActorMatrix(rc.ByActor), ActorBuckets: cloneActorBuckets(rc.ActorBuckets), Terminal: cloneStringMap(rc.Terminal), Since: rc.Since}
 }
 
 func cloneIntMap(in map[string]int) map[string]int {
@@ -170,6 +239,141 @@ func prThroughputMergePath(detail string) string {
 		return p
 	}
 	return prThroughputMergePathUnknown
+}
+
+func prThroughputActorAttribution(e AuditEntry) (kind, role, actor string, ok bool) {
+	attrs := parseAuditDetailAttrs(e.Detail)
+	switch e.Action {
+	case ghpkg.AuditActionAgentPRCreated:
+		return prThroughputKindPR, prThroughputRoleCreated, prThroughputActorHive, true
+	case ghpkg.AuditActionAgentIssueCreated, ghpkg.AuditActionHiveIssueCreated:
+		return prThroughputKindIssue, prThroughputRoleCreated, prThroughputActorHive, true
+	case ghpkg.AuditActionPRReviewed:
+		return prThroughputKindPR, prThroughputRoleReviewed, prThroughputActorFromAttrs(attrs, prThroughputActorHive), true
+	case ghpkg.AuditActionAgentCommentCreated, ghpkg.AuditActionIssueClaimed:
+		return prThroughputKindIssue, prThroughputRoleReviewed, prThroughputActorHive, true
+	case ghpkg.AuditActionPRMerged:
+		return prThroughputKindPR, prThroughputRoleMerged, prThroughputActorFromAttrs(attrs, actorFromPRPath(prThroughputMergePath(e.Detail))), true
+	case ghpkg.AuditActionPRClosed:
+		return prThroughputKindPR, prThroughputRoleClosed, prThroughputActorFromAttrs(attrs, actorFromPRPath(prThroughputMergePath(e.Detail))), true
+	case ghpkg.AuditActionIssueClosed:
+		return prThroughputKindIssue, prThroughputRoleClosed, prThroughputActorFromAttrs(attrs, prThroughputActorHive), true
+	default:
+		return "", "", "", false
+	}
+}
+
+func actorFromPRPath(path string) string {
+	switch path {
+	case prThroughputMergePathSweep, prThroughputMergePathRelay, ghpkg.PRAuditPathQueue:
+		return prThroughputActorHive
+	case prThroughputMergePathHuman:
+		return prThroughputActorHuman
+	case prThroughputMergePathOtherAutomation, prThroughputMergePathUnknown:
+		return prThroughputActorOtherAutomation
+	default:
+		return prThroughputActorOtherAutomation
+	}
+}
+
+func prThroughputActorFromAttrs(attrs map[string]string, fallback string) string {
+	for _, key := range []string{"actor_class", "actor", "path"} {
+		switch strings.ToLower(strings.TrimSpace(attrs[key])) {
+		case prThroughputActorHive, "sweep", "relay", "queue":
+			return prThroughputActorHive
+		case prThroughputActorHuman:
+			return prThroughputActorHuman
+		case "other_automation", "other", "bot", "automation":
+			return prThroughputActorOtherAutomation
+		}
+	}
+	if fallback == "" {
+		return prThroughputActorOtherAutomation
+	}
+	return fallback
+}
+
+func (m PRThroughputActorMatrix) ensure() PRThroughputActorMatrix {
+	if m == nil {
+		return PRThroughputActorMatrix{}
+	}
+	return m
+}
+
+func addActorMatrix(m PRThroughputActorMatrix, kind, role, actor string, n int) {
+	if kind == "" || role == "" || actor == "" || n == 0 {
+		return
+	}
+	if m[kind] == nil {
+		m[kind] = map[string]map[string]int{}
+	}
+	if m[kind][role] == nil {
+		m[kind][role] = map[string]int{}
+	}
+	m[kind][role][actor] += n
+}
+
+func cloneActorMatrix(in PRThroughputActorMatrix) PRThroughputActorMatrix {
+	out := PRThroughputActorMatrix{}
+	for kind, roles := range in {
+		out[kind] = map[string]map[string]int{}
+		for role, actors := range roles {
+			out[kind][role] = cloneIntMap(actors)
+		}
+	}
+	return out
+}
+
+func cloneActorBuckets(in map[string]PRThroughputActorMatrix) map[string]PRThroughputActorMatrix {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]PRThroughputActorMatrix, len(in))
+	for k, v := range in {
+		out[k] = cloneActorMatrix(v)
+	}
+	return out
+}
+
+func prThroughputCounterBucket(ts string) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ""
+	}
+	return t.UTC().Truncate(time.Hour).Format(time.RFC3339)
+}
+
+func prThroughputActorSeriesFromBuckets(buckets map[string]PRThroughputActorMatrix, role string) []PRThroughputActorPoint {
+	if len(buckets) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]PRThroughputActorPoint, 0, len(keys))
+	for _, k := range keys {
+		p := PRThroughputActorPoint{T: k}
+		addActorPoint(&p, buckets[k], role)
+		if p.Hive+p.Human+p.Other > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func addActorPoint(p *PRThroughputActorPoint, m PRThroughputActorMatrix, role string) {
+	for _, kind := range []string{prThroughputKindPR, prThroughputKindIssue} {
+		gotRole := role
+		if role == prThroughputRoleMerged && kind == prThroughputKindIssue {
+			gotRole = prThroughputRoleClosed
+		}
+		actors := m[kind][gotRole]
+		p.Hive += actors[prThroughputActorHive]
+		p.Human += actors[prThroughputActorHuman]
+		p.Other += actors[prThroughputActorOtherAutomation]
+	}
 }
 
 func prThroughputTerminalAction(action string) bool {
