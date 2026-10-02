@@ -2959,7 +2959,7 @@
     .dash-card-header:hover { opacity: 0.85; }
     .dash-card-title { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.055em; line-height: 1; }
     .dash-card-header .dashboard-grip { width: 1.55rem; height: 1.55rem; padding: 0; margin-right: 0; font-size: var(--fs-base); font-weight: 400; line-height: 1; }
-    .dash-card-header .section-chevron, .dash-card-header .cost-chevron { width: 0.8rem; font-size: 0.72rem; font-weight: 700; color: var(--muted); line-height: 1; text-align: center; }
+    .dash-card-header .section-chevron, .dash-card-header .cost-chevron { width: 0.8rem; font-size: var(--fs-sm); font-weight: 700; color: var(--muted); line-height: 1; text-align: center; }
     .dash-card-badges, .dash-card-actions { display: inline-flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
     .dash-card-actions { margin-left: auto; }
     .dash-card-action, .dash-card-actions > button, .dash-card-actions > a, .dash-card-actions > .hv-btn, .dash-card-actions > .config-gear { display: inline-flex !important; align-items: center; justify-content: center; min-height: 24px !important; height: 24px !important; padding: 0 var(--sp-3) !important; border-radius: var(--r-pill) !important; border: 1px solid var(--line-subtle) !important; background: color-mix(in srgb, var(--surface-2) 70%, transparent) !important; color: var(--text) !important; font-size: var(--fs-2xs) !important; font-weight: 700 !important; letter-spacing: 0.04em !important; text-decoration: none !important; line-height: 1 !important; white-space: nowrap; }
@@ -4629,11 +4629,11 @@
     }
 
     const DASHBOARD_SECTION_CARD_CONFIG = Object.freeze({
-      'overview-section': { title: '📊 Overview', summary: 'overview', actionIds: ['overview-chart-settings'] },
-      'governor': { title: '🎛️ Governor', summary: 'idle' },
+      'overview-section': { title: '🍩 Overview', summary: 'overview', actionIds: ['overview-chart-settings'] },
+      'governor': { title: '📊 Governor', summary: 'idle' },
       'advisory-section': { title: '📋 Hive Advisory', summary: '0 advisories' },
-      'token-panel': { title: 'Token Usage', summary: '0 sessions' },
-      'cost-panel': { title: 'Cost', summary: '$0' },
+      'token-panel': { title: '🪙 Token Usage', summary: '0 sessions' },
+      'cost-panel': { title: '💵 Cost', summary: '$0' },
       'repos-section': { title: '📦 Repositories', summary: '0 repos' },
       'beads-section': { title: '🔮 Beads', summary: '0 beads' },
       'acmm-eval-section': { title: '🎯 ACMM Evaluation', summary: 'L—' },

@@ -146,7 +146,7 @@ func TestCostPanelSeparatesRangesFromBudgetPeriods(t *testing.T) {
 		}
 	}
 
-	renderStart := strings.Index(html, "el.innerHTML = `<div class=\"cost-panel\">")
+	renderStart := strings.Index(html, "const costBody = `")
 	if renderStart < 0 {
 		t.Fatal("could not find Cost panel render template")
 	}
