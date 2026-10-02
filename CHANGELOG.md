@@ -11,6 +11,23 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-02 (v5.114.0)
+
+### Added
+
+- agents: budget guard for continuous mode (#10031)
+- The spoke dashboard now has a Feedback flow for reporting bugs or requesting features as GitHub issues, with screenshot attachments, diagnostics preview/redaction, hub relay, user-token filing, prefilled issue fallback paths, and a top-bar bug notification pill for tracked feedback activity ([#9982](https://github.com/hivecommons/hive/issues/9982)).
+- Upstream watch now has durable state: a per-repo watermark and last-run time, a filed-ref dedupe index and dismissal tracking, persisted atomically so a hub restart never re-scans or refiles.
+
+### Fixed
+
+- dashboard: `/api/cost` prices `by_agent` per-session at each session's own model instead of one "dominant" model so it stays additive with `total_usd`, and `/api/nous/status` caps `baseline_pct` at 100 instead of reporting unbounded percentages (#10025, #10026)
+- A Copilot agent whose stored or discovered model is `claude-opus-5-5` / `claude-sonnet-5-5` (or the dotted `claude-opus-5.5` / `claude-sonnet-5.5`) now actually launches on Opus/Sonnet 5.5 instead of silently running Opus/Sonnet 5 ([#9927](https://github.com/hivecommons/hive/issues/9927)). `CopilotLaunchModel` correctly canonicalized the dashed id to the CLI-accepted dotted spelling (#9943), but then re-downgraded that result to the bare `-5` family through a stale rejected-id map left over from before #9943 — so any 5.5 selection, dashed or dotted, still launched on 5 with no indication. The stale downgrade is removed; launch now uses the canonical id directly.
+
+### Security
+
+- The sandbox push broker no longer lets the workspace's own git configuration steer the credentialed post-step ([#10023](https://github.com/hivecommons/hive/issues/10023)). The broker runs `git add`, `commit --amend` and `push` as the hive's UID inside a workspace the sandboxed agent wrote, and git reads that repository's `.git/config`, `.git/hooks/` and `.gitattributes` before anything on the command line — so an agent-planted hook, credential helper, `url.*.insteadOf` rewrite or `http.proxy` ran outside the sandbox with the minted push token in reach. Every broker git invocation now carries command-scope overrides (`core.hooksPath=/dev/null`, `core.fsmonitor=false`, a reset `credential.helper`, `commit.gpgsign=false`, and the push remote pinned to the repository the broker was told to push to), and the push is refused up front when the repository-scoped config holds any key outside the small set a fresh clone writes. The trailing-blank-line normaliser also no longer follows committed symlinks.
+
 ## 2026-10-02 (v5.113.0)
 
 ### Added
