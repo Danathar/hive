@@ -116,7 +116,7 @@ func TestFeedbackStaticUIWiring(t *testing.T) {
 	for _, want := range []string{
 		".feedback-modal { max-width: 720px",
 		"max-height: 90vh",
-		".feedback-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:24px;",
+		".feedback-body { flex:1 1 auto; min-height:0; overflow-y:auto; padding:var(--sp-8);",
 		".feedback-footer { position: sticky; bottom:0;",
 		"class=\"feedback-footer\"",
 		"class=\"feedback-body\"",
