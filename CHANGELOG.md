@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-03 (v5.130.1)
+
+### Fixed
+
+- Existing Podman installs can run `hive-podman-update.sh reconcile migrate` to repair deployment metadata and activate the dashboard upgrade request bridge without replacing operator configuration, tokens, or secrets; repeated runs are no-ops ([#10419](https://github.com/hivecommons/hive/issues/10419)).
+- Standalone dashboard upgrades target the installed release channel instead of a build-branch head, show the channel image ref and OCI revision before confirmation, and accept validated explicit image refs as overrides.
+- Closing a shared-CI incident now requests branch updates for open PRs carrying its `hive-shared-ci-N` marker, even when their changed files do not intersect the incident fix.
+
 ## 2026-10-03 (v5.130.0)
 
 ### Added
