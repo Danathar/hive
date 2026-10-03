@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-03 (v5.129.4)
+
+### Fixed
+
+- fix(dashboard): escape /metrics label values per Prometheus text format (#10471)
+
 ## 2026-10-03 (v5.129.3)
 
 ### Fixed
