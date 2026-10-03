@@ -144,34 +144,43 @@ GitHub, not Hive, decides each issue author's association.
 | Filed by | How someone ends up here | Default box | Worked without `triage/accepted`? | Worked with `triage/accepted`? | Hive's PR merges on its own at L6? |
 |---|---|---|---|---|---|
 | `OWNER` | Owns the repo or org | ✅ | Yes | Yes | Yes, on green CI |
-| `MEMBER` | Someone added them to the org that owns the repo | ✅ | Yes | Yes | Yes, on green CI |
-| `COLLABORATOR` | Someone gave them access to the repo | ✅ | Yes | Yes | Yes, on green CI |
+| `MEMBER` | Is a member of the org that owns the repo | ✅ | Yes | Yes | Yes, on green CI |
+| `COLLABORATOR` | Was given access to the repo (invited) | ✅ | Yes | Yes | Yes, on green CI |
 | Always-trusted login | You added their login on the Labels tab | n/a | Yes | Yes | Yes, on green CI |
-| `CONTRIBUTOR` | **Automatic:** has had a commit accepted into this repo (one typo fix is enough) | ☐ | No | Yes | **No.** Held until a person removes `hold` |
+| `CONTRIBUTOR` | **Automatic:** has previously committed to this repo (one typo fix is enough) | ☐ | No | Yes | **No.** Held until a person removes `hold` |
 | `FIRST_TIME_CONTRIBUTOR` | **Automatic:** has commits elsewhere on GitHub, none here | ☐ | No | Yes | **No.** Held until a person removes `hold` |
 | `FIRST_TIMER` | **Automatic:** has never committed anywhere on GitHub | ☐ | No | Yes | **No.** Held until a person removes `hold` |
 | `NONE` | No relationship to the repo | ☐ | No | Yes | **No.** Held until a person removes `hold` |
 
 ### What changes automatically, and what doesn't
 
-GitHub moves people between the unchecked rows by itself: a reporter's first
-commit to this repo makes them `CONTRIBUTOR`, whatever they were before. None
-of those rows is checked, so **getting PRs merged never makes anyone
-trusted**. (The open-community posture above checks `CONTRIBUTOR`. That's the
-one setting where a single merged PR does make someone trusted.)
+`FIRST_TIMER`, `FIRST_TIME_CONTRIBUTOR` and `CONTRIBUTOR` come from commit
+history alone, and GitHub changes them by itself: a reporter's first commit to
+this repo makes them `CONTRIBUTOR`, whichever of the other two they were
+before. (`NONE` just means no relationship to the repo.) None of these rows is
+checked by default, so **commit history alone never makes anyone trusted**.
+The open-community posture above checks `CONTRIBUTOR`. That's the one setting
+where a single merged PR does make someone trusted.
 
-The checked rows only change when someone grants repo access or org
-membership. The other way to trust someone is **Always-trusted logins**: it
-trusts one person by name without giving them any repo access, which inviting
-them as a collaborator would.
+The checked rows change only when someone is given repo access or org
+membership. That usually means a person sending an invite. If your org or repo
+grants either automatically (a team sync, an onboarding bot, or a workflow
+that invites contributors after their first merge), whoever it grants becomes
+trusted too. In that case, uncheck the box that automation feeds and trust
+people by login instead.
+
+**Always-trusted logins** trusts one person by name without giving them any
+repo access, which inviting them as a collaborator would.
 
 ### Things that catch people out
 
 - **`MEMBER` means every member of the owning org,** including people with no
   access to this repo. In a large org that's a lot of people. If it's too
   broad, uncheck `MEMBER` and list the people you trust by login.
-- **`COLLABORATOR` doesn't say how much access someone has.** A read-only
-  collaborator is trusted the same as an admin.
+- **`COLLABORATOR` doesn't say how much access someone has.** GitHub reports
+  the association without the permission level, so Hive can't tell a
+  read-only collaborator from an admin. Checking the box trusts everyone you
+  have added as a collaborator.
 - **Hive checks that `triage/accepted` is present, not who added it.** Anyone
   with Triage access or higher on the repo can add it. Triage only lets the
   work start; the hold is what stops the merge.
