@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-03 (v5.130.0)
+
+### Added
+
+- The dashboard agent detail shows observed Copilot sub-agent types and effective models for the latest kick, flagging older Claude generations than the parent launch model ([#10469](https://github.com/hivecommons/hive/issues/10469)).
+
+### Fixed
+
+- Keep contributor-card message drafts open across fleet polls, refreshing the cards after the last message form closes ([#10473](https://github.com/hivecommons/hive/issues/10473)).
+
 ## 2026-10-03 (v5.129.4)
 
 ### Fixed
