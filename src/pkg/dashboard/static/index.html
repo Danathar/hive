@@ -3282,6 +3282,20 @@
     .dash-card.collapsed.has-collapsed-headline .dash-card-summary { display: none; }
     .mini-summary-strip { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); width: min(320px, 36vw); max-width: 320px; height: 26px; overflow: hidden; color: var(--muted); }
     .mini-summary-strip svg { flex: 0 0 auto; display: block; overflow: visible; }
+    .agents-collapsed-tiles { display: flex; align-items: stretch; gap: var(--sp-2); width: min(720px, 52vw); max-width: 720px; height: 26px; overflow-x: auto; overflow-y: hidden; color: var(--muted); scrollbar-width: thin; }
+    .agent-collapsed-tile { flex: 0 0 108px; min-width: 90px; max-width: 120px; border: 1px solid var(--line-subtle); border-radius: var(--r); background: color-mix(in srgb, var(--surface-2) 64%, transparent); color: var(--text); cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 1fr 1fr; gap: 0 var(--sp-2); align-items: center; padding: var(--sp-1) var(--sp-2); font: inherit; font-size: var(--fs-2xs); line-height: 1.1; text-align: left; }
+    .agent-collapsed-tile:hover, .agent-collapsed-tile:focus-visible { border-color: var(--border); background: var(--surface-2); outline: none; }
+    .agent-collapsed-tile.disabled { opacity: 0.58; }
+    .agent-collapsed-tile.needs-login { border-color: color-mix(in srgb, var(--red) 55%, var(--line-subtle)); }
+    .agent-collapsed-tile.active { border-color: color-mix(in srgb, var(--green) 70%, var(--line-subtle)); }
+    .agent-tile-name, .agent-tile-next { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-tile-name { font-weight: 800; color: var(--text); }
+    .agent-tile-next { color: var(--muted); grid-column: 1 / -1; }
+    .agent-tile-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 40%, transparent); }
+    .agent-collapsed-tile.active .agent-tile-dot { animation: green-pulse 2.4s ease-in-out infinite; }
+    .agent-collapsed-tile.needs-login .agent-tile-dot { background: var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 40%, transparent); }
+    .agent-collapsed-tile.disabled .agent-tile-dot { background: var(--muted); box-shadow: none; }
+    @media (prefers-reduced-motion: reduce) { .agent-collapsed-tile.active .agent-tile-dot { animation: none; } }
     .mini-summary-strip .sparkline { display: inline-flex; margin: 0; }
     .mini-summary-strip .sparkline-line, .mini-spark .sparkline-line { stroke-dasharray: 160; stroke-dashoffset: 160; animation: mini-spark-draw 650ms ease-out forwards; }
     .mini-gauge-track { stroke: var(--line-subtle); }
@@ -5459,15 +5473,14 @@
         inner = `<svg class="mini-health" width="28" height="24" viewBox="0 0 28 24" role="img" aria-label="${escapeHtml(text)}">${miniTitleTag(text)}<circle class="mini-health-dot ${state}" cx="14" cy="12" r="6"/></svg>` + miniSpark(hist('warnings', warnings), warnings ? 'var(--yellow)' : 'var(--green)', text);
       } else if (sectionId === 'agents-section') {
         const agents = data.agents || window._lastAgents || [];
-        const total = Array.isArray(agents) ? agents.length : n0;
-        const off = Array.isArray(agents) ? agents.filter(a => a && (a.paused || a.stopped || a.offByCadence || a.unscheduledInMode || a.state === 'stopped' || a.state === 'failed')).length : (nums[2] || 0);
-        inner = miniBar([{ label: 'on', value: Math.max(0, total - off), color: 'var(--green)' }, { label: 'off', value: off, color: 'var(--muted)' }, { label: 'paused', value: nums[3] || 0, color: 'var(--yellow)' }], text);
+        inner = agentsCollapsedTilesHtml(agents, Date.now());
       } else if (sectionId === 'lifecycle-section') {
         inner = miniBar([{ label: 'in flight', value: nums[0] || 0, color: 'var(--blue)' }, { label: 'merged', value: nums[1] || 0, color: 'var(--green)' }, { label: 'blocked', value: nums[2] || 0, color: 'var(--red)' }], text);
       } else {
         const series = hist('headline', n0);
         inner = miniDelta(n0, series.length > 1 ? series[series.length - 2] : n0, text);
       }
+      if (sectionId === 'agents-section' && inner) return inner;
       return miniWrap(sectionId, title || text, inner || miniDelta(n0, n0, text));
     }
 
@@ -5498,6 +5511,95 @@
       const off = agents.filter(a => a && (a.paused || a.stopped || a.offByCadence || a.unscheduledInMode || a.state === 'stopped' || a.state === 'failed')).length;
       const on = Math.max(0, agents.length - off);
       return `${agents.length} agents · ${on} on · ${off} off`;
+    }
+    function agentCollapsedParseNextKick(value, nowMs) {
+      const raw = String(value == null ? '' : value).trim();
+      if (!raw) return null;
+      const lower = raw.toLowerCase();
+      if (lower === '—' || lower === '-' || lower === 'continuous' || lower === 'paused' || lower === 'off' || lower === 'on demand' || lower === 'no cadence') return null;
+      const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+      if (/^(due|now|overdue)/.test(lower)) return now;
+      const rel = lower.match(/^(?:in\s+)?(?:(\d+)\s*(?:h|hr|hrs|hour|hours)(?:\s+(\d+)\s*(?:m|min|mins|minute|minutes))?|(\d+)\s*(?:m|min|mins|minute|minutes)|(\d+)\s*(?:s|sec|secs|second|seconds))$/);
+      if (rel) {
+        const hours = parseInt(rel[1] || '0', 10);
+        const mins = parseInt(rel[2] || rel[3] || '0', 10);
+        const secs = parseInt(rel[4] || '0', 10);
+        return now + hours * 3600000 + mins * 60000 + secs * 1000;
+      }
+      const monthDay = raw.match(/^\d{1,2}\/\d{1,2}\s+/);
+      if (monthDay) {
+        const year = new Date(now).getFullYear();
+        let stamped = Date.parse(`${year}/${raw}`);
+        if (Number.isFinite(stamped) && stamped < now - 86400000) stamped = Date.parse(`${year + 1}/${raw}`);
+        if (Number.isFinite(stamped)) return stamped;
+      }
+      const direct = Date.parse(raw);
+      if (Number.isFinite(direct)) return direct;
+      const clock = raw.match(/^(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\.?)?$/i);
+      if (clock) {
+        const d = new Date(now);
+        let h = parseInt(clock[1], 10);
+        const m = parseInt(clock[2], 10);
+        const meridiem = clock[3] && clock[3].toLowerCase();
+        if (meridiem === 'p' && h < 12) h += 12;
+        if (meridiem === 'a' && h === 12) h = 0;
+        d.setHours(h, m, 0, 0);
+        if (d.getTime() < now - 60000) d.setDate(d.getDate() + 1);
+        return d.getTime();
+      }
+      return null;
+    }
+    function agentCollapsedNextLabel(a, nowMs) {
+      if (!a || agentIsDisabled(a)) return '—';
+      if (a.continuous === true) return 'continuous';
+      const ms = agentCollapsedParseNextKick(a.nextKickIn || a.nextKick, nowMs);
+      if (!Number.isFinite(ms)) return '—';
+      const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+      const delta = ms - now;
+      if (delta <= 60000) return 'due now';
+      if (delta < 3600000) return `in ${Math.max(1, Math.round(delta / 60000))}m`;
+      return 'next ' + new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    function agentCollapsedSortKey(a, index, nowMs) {
+      const disabled = !a || agentIsDisabled(a);
+      const active = !!a && !disabled && a.busy === 'working';
+      const next = !disabled ? agentCollapsedParseNextKick(a.nextKickIn || a.nextKick, nowMs) : null;
+      const continuous = !!a && !disabled && a.continuous === true;
+      let group = 4;
+      if (active) group = 0;
+      else if (continuous) group = 2;
+      else if (Number.isFinite(next)) group = 1;
+      else if (!disabled) group = 3;
+      return { group, next: Number.isFinite(next) ? next : Number.POSITIVE_INFINITY, index };
+    }
+    function sortAgentsForCollapsedTiles(agents, nowMs) {
+      return (Array.isArray(agents) ? agents : []).map((agent, index) => ({ agent, key: agentCollapsedSortKey(agent, index, nowMs) }))
+        .sort((a, b) => (a.key.group - b.key.group) || (a.key.next - b.key.next) || (a.key.index - b.key.index))
+        .map(item => item.agent);
+    }
+    function agentCollapsedAuthInfo(a, isDown) {
+      const text = String((a && (a.backendAuthStatus || a.backendAuthLastError || a.statusEvidence)) || '').toLowerCase();
+      if (text.includes('expired') || text.includes('token_expired')) return { label: 'token expired', status: 'error', needsLogin: true };
+      if (_agentNeedsLogin(a || {}, isDown)) return { label: 'needs login', status: 'error', needsLogin: true };
+      return { label: 'authenticated', status: 'ok', needsLogin: false };
+    }
+    function agentCollapsedTileHtml(a, nowMs) {
+      const name = (a && (a.displayName || a.name)) || 'agent';
+      const key = (a && a.name) || name;
+      const disabled = agentIsDisabled(a);
+      const isDown = a && a.state !== 'running';
+      const active = !!a && !disabled && a.busy === 'working';
+      const auth = agentCollapsedAuthInfo(a || {}, isDown);
+      const power = disabled ? 'disabled' : (isDown ? 'stopped' : 'running');
+      const next = agentCollapsedNextLabel(a, nowMs);
+      const classes = ['agent-collapsed-tile', active ? 'active' : '', disabled ? 'disabled' : '', auth.needsLogin ? 'needs-login' : ''].filter(Boolean).join(' ');
+      const title = `${name} · ${power} · ${auth.label} · next ${next}`;
+      return `<button type="button" class="${classes}" data-action="openAgentCollapsedTile" data-agent="${esc(key)}" data-agent-order-key="${esc(key)}" data-stop="1" title="${esc(title)}" aria-label="${esc(title)}"><span class="agent-tile-name">${esc(name)}</span><span class="agent-tile-dot" data-status="${auth.status}" aria-hidden="true"></span><span class="agent-tile-next">${esc(power)} · ${esc(auth.label)} · ${esc(next)}</span></button>`;
+    }
+    function agentsCollapsedTilesHtml(agents, nowMs) {
+      const list = sortAgentsForCollapsedTiles(agents, nowMs);
+      if (!list.length) return '';
+      return `<span class="agents-collapsed-tiles" data-mini-summary="agents-section">${list.map(a => agentCollapsedTileHtml(a, nowMs)).join('')}</span>`;
     }
     function contributorsSectionSummary(contributors, pool) {
       contributors = Array.isArray(contributors) ? contributors : [];
@@ -6149,6 +6251,34 @@
       el.classList.remove('anchor-highlight');
       void el.offsetWidth;
       el.classList.add('anchor-highlight');
+    }
+    function scrollToAgentCard(name, behavior) {
+      const safeName = (window.CSS && CSS.escape) ? CSS.escape(name || '') : String(name || '').replace(/["\\]/g, '\\$&');
+      const selector = `.agent-card[data-agent="${safeName}"]`;
+      const card = document.querySelector(selector);
+      if (!card) return false;
+      card.scrollIntoView({ block: 'center', behavior: behavior || 'smooth' });
+      card.classList.remove('anchor-highlight');
+      void card.offsetWidth;
+      card.classList.add('anchor-highlight', 'oc-focused');
+      setTimeout(() => card.classList.remove('oc-focused'), 1800);
+      return true;
+    }
+    function openAgentCollapsedTile(name) {
+      if (!name) return;
+      _ocSelectedAgent = name;
+      history.replaceState(null, '', window.hiveURLWithHash ? window.hiveURLWithHash('#' + name) : '#' + name);
+      ocStopPanePoll();
+      document.querySelectorAll('.oc-nav-item').forEach(i => i.classList.remove('active'));
+      const active = document.querySelector(`.oc-nav-item[data-agent-nav="${(window.CSS && CSS.escape) ? CSS.escape(name) : String(name).replace(/["\\]/g, '\\$&')}"]`);
+      if (active) active.classList.add('active');
+      navPeekRestore('agents-section', { instant: true });
+      const expanded = navPeekExpand('agents-section');
+      if (!expanded && isSectionCollapsed('agents-section')) toggleSection('agents-section', { collapsed: false, persist: false, navPeek: true });
+      if (window._lastAgents) renderAgents(window._lastAgents);
+      ocUpdateFocusedState();
+      const after = () => scrollToAgentCard(name, 'smooth');
+      ocAfterNavLayoutSettles(['agents-section'], after);
     }
     function ocNavigate(section, skipScroll) {
       if (dashboardFeatureSectionHidden(section)) return;
@@ -22038,6 +22168,7 @@ function burnAreaChart() {
         case 'openConfigDialog': { const ct = el.dataset.configType || el.dataset.arg0 || 'agent'; const tab = el.dataset.tab || el.dataset.arg2 || null; if (el.classList.contains('agent-link')) { closeConfigDialog(); setTimeout(() => openConfigDialog(ct, agent, tab), 100); } else { openConfigDialog(ct, agent || null, tab); } } break;
         case 'ocSendKick': ocSendKick(agent); break;
         case 'ocSelectAgent': { if (!e.target.closest('.oc-nav-actions')) ocSelectAgent(agent); } break;
+        case 'openAgentCollapsedTile': openAgentCollapsedTile(agent); break;
         case 'kick': kick(agent); break;
         case 'kickEmpty': { const inp = document.getElementById('kick-prompt-' + agent); if (inp) inp.value = ''; kick(agent); } break;
         case 'openTerminal': e.preventDefault(); openTerminal(agent, el.href); break;
