@@ -1,1 +1,0 @@
-- Standalone dashboard upgrades target the installed release channel instead of a build-branch head, show the channel image ref and OCI revision before confirmation, and accept validated explicit image refs as overrides.
