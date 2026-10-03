@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-03 (v5.129.1)
+
+### Fixed
+
+- PR follow-ups now prioritize known base conflicts or behind states over review feedback, including owned fork pointers; contributor review cycles check fork base drift before pushing review fixes ([#10457](https://github.com/hivecommons/hive/issues/10457)).
+
 ## 2026-10-03 (v5.129.0)
 
 ### Added
