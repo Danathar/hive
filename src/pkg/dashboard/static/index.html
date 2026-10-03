@@ -3296,6 +3296,17 @@
     .mini-health-dot.warn { fill: var(--yellow); }
     .mini-health-dot.bad { fill: var(--red); }
     .mini-health-dot.unknown { fill: var(--muted); }
+    .debug-quota-strip { gap: var(--sp-2); width: auto; max-width: min(360px, 40vw); }
+    .debug-quota-chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; height: 24px; padding: 0 var(--sp-2); border: 1px solid var(--line-subtle); border-radius: var(--r-pill); background: color-mix(in srgb, var(--surface-2) 70%, transparent); color: var(--muted); font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.02em; text-transform: none; }
+    .debug-quota-label { color: var(--text); max-width: 5.6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .debug-quota-frac { font-variant-numeric: tabular-nums; color: currentColor; }
+    .debug-quota-gauge { width: 54px; height: 10px; flex: 0 0 auto; }
+    .debug-quota-gauge-track { fill: var(--surface-1); stroke: var(--line-subtle); stroke-width: 1; }
+    .debug-quota-gauge-fill { fill: var(--green); }
+    .debug-quota-chip.warn .debug-quota-gauge-fill { fill: var(--yellow); }
+    .debug-quota-chip.bad .debug-quota-gauge-fill { fill: var(--red); }
+    .debug-quota-chip.warn { color: var(--yellow); }
+    .debug-quota-chip.bad { color: var(--red); }
     @keyframes mini-spark-draw { to { stroke-dashoffset: 0; } }
     @media (prefers-reduced-motion: reduce) { .mini-summary-strip .sparkline-line, .mini-spark .sparkline-line { animation: none; stroke-dashoffset: 0; } }
     .debug-headline { display: none; grid-column: 1 / -1; align-items: center; gap: var(--sp-3); min-width: 0; padding: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); overflow: hidden; }
@@ -5454,9 +5465,7 @@
       } else if (sectionId === 'contributors-section') {
         inner = miniAvatarDots((typeof _cachedContributors === 'undefined' ? [] : _cachedContributors), n0, text);
       } else if (sectionId === 'debug-section') {
-        const warnings = /healthy/i.test(text) ? 0 : n0;
-        const state = warnings ? 'warn' : 'ok';
-        inner = `<svg class="mini-health" width="28" height="24" viewBox="0 0 28 24" role="img" aria-label="${escapeHtml(text)}">${miniTitleTag(text)}<circle class="mini-health-dot ${state}" cx="14" cy="12" r="6"/></svg>` + miniSpark(hist('warnings', warnings), warnings ? 'var(--yellow)' : 'var(--green)', text);
+        return (typeof debugQuotaWidgetHtml === 'function' && debugQuotaWidgetHtml(data)) || miniWrap(sectionId, title || text, miniText(text, text));
       } else if (sectionId === 'agents-section') {
         const agents = data.agents || window._lastAgents || [];
         const total = Array.isArray(agents) ? agents.length : n0;
@@ -21700,9 +21709,15 @@ function burnAreaChart() {
     const DEBUG_REFRESH_MS = 10000;
     function debugQuotaClass(pct) {
       const n = Number(pct) || 0;
-      if (n > 80) return 'debug-quota-bad';
-      if (n > 50) return 'debug-quota-warn';
+      if (n > 85) return 'debug-quota-bad';
+      if (n > 60) return 'debug-quota-warn';
       return 'debug-quota-ok';
+    }
+    function debugQuotaChipClass(pct) {
+      const n = Number(pct) || 0;
+      if (n > 85) return 'bad';
+      if (n > 60) return 'warn';
+      return 'ok';
     }
     function debugCompactNum(n) {
       const v = Math.max(0, Number(n) || 0);
@@ -21711,6 +21726,69 @@ function burnAreaChart() {
       if (v >= 1e6) return trim((v / 1e6).toFixed(v >= 10e6 ? 0 : 1)) + 'M';
       if (v >= 1e3) return trim((v / 1e3).toFixed(v >= 10e3 ? 0 : 1)) + 'K';
       return String(Math.round(v));
+    }
+    function debugQuotaResetLabel(raw) {
+      if (!raw) return '—';
+      const d = new Date(typeof raw === 'number' ? raw * 1000 : raw);
+      if (Number.isNaN(d.getTime())) return '—';
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    function debugQuotaNormalize(source, quota, fallbackLabel) {
+      quota = quota || {};
+      const limit = Number(quota.limit ?? quota.max ?? quota.quota ?? quota.total) || 0;
+      const remaining = Number(quota.remaining ?? quota.left ?? quota.available);
+      const used = Number(quota.used ?? quota.consumed ?? (limit > 0 && Number.isFinite(remaining) ? limit - remaining : 0)) || 0;
+      if (limit <= 0) return null;
+      const safeUsed = Math.max(0, Math.min(limit, used));
+      const pct = Math.round((safeUsed / limit) * 100);
+      const label = source || quota.source || quota.provider || fallbackLabel || 'Source';
+      const bucket = quota.bucket || quota.name || quota.resource || quota.type || '';
+      const reset = quota.reset ?? quota.reset_at ?? quota.resetAt;
+      const resetAt = debugQuotaResetLabel(reset);
+      return { label, bucket, limit, used: safeUsed, pct, resetAt };
+    }
+    function debugQuotaFromWorkSources(data) {
+      const out = [];
+      const containers = [
+        data && data.quotaSources,
+        data && data.workSources,
+        data && data.diagnostics && data.diagnostics.quotaSources,
+        data && data.diagnostics && data.diagnostics.workSources,
+      ].filter(Array.isArray);
+      containers.forEach(list => list.forEach(src => {
+        const sourceLabel = src && (src.label || src.name || src.source || src.provider);
+        const quotas = src && (src.quotas || src.limits || src.rateLimits || src.buckets);
+        const items = Array.isArray(quotas) ? quotas : (quotas && typeof quotas === 'object' ? Object.keys(quotas).map(k => Object.assign({ bucket: k }, quotas[k])) : [src]);
+        items.forEach(item => {
+          const q = debugQuotaNormalize(sourceLabel, item, sourceLabel);
+          if (q) out.push(q);
+        });
+      }));
+      return out;
+    }
+    function debugGitHubQuotaSources(data) {
+      const ghRate = (data && data.ghRateLimits) || {};
+      const buckets = Object.keys(ghRate).filter(k => {
+        const v = ghRate[k];
+        return v && typeof v === 'object' && Number(v.limit || v.max || v.quota || 0) > 0;
+      });
+      return buckets.map(k => {
+        const quota = Object.assign({ bucket: buckets.length === 1 && k === 'core' ? 'API' : k }, ghRate[k]);
+        return debugQuotaNormalize('GitHub', quota, 'GitHub');
+      }).filter(Boolean);
+    }
+    function debugQuotaWidgetHtml(data) {
+      const quotas = debugQuotaFromWorkSources(data || {}).concat(debugGitHubQuotaSources(data || {}));
+      if (!quotas.length) return '';
+      const chips = quotas.map(q => {
+        const cls = debugQuotaChipClass(q.pct);
+        const label = q.bucket ? `${q.label} ${q.bucket}` : q.label;
+        const title = `${label}: ${q.used}/${q.limit} used (${q.pct}%). Resets ${q.resetAt}`;
+        const fill = Math.max(0, Math.min(50, Math.round(q.pct / 2)));
+        return `<span class="debug-quota-chip ${cls}" title="${escapeHtml(title)}"><span class="debug-quota-label">${escapeHtml(label)}</span><svg class="debug-quota-gauge" width="54" height="10" viewBox="0 0 54 10" role="img" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><rect class="debug-quota-gauge-track" x="1" y="2" width="50" height="6" rx="3"/><rect class="debug-quota-gauge-fill" x="1" y="2" width="${fill}" height="6" rx="3"/></svg><span class="debug-quota-frac">${q.used}/${q.limit}</span></span>`;
+      }).join('');
+      const label = quotas.map(q => `${q.label} ${q.used}/${q.limit}`).join(', ');
+      return `<span class="mini-summary-strip debug-quota-strip" role="group" aria-label="${escapeHtml(label)}">${chips}</span>`;
     }
     function debugDiagnosticsHeadlineHtml(data, summaryText) {
       const status = data || {};
@@ -21726,8 +21804,7 @@ function burnAreaChart() {
       const totals = tokens.totals || {};
       const apiText = `GitHub API ${used}/${limit || '—'} (${pct}%) · resets ${resetAt}`;
       const tokenText = `${debugCompactNum(totals.input)} in · ${debugCompactNum(totals.output)} out · ${debugCompactNum(totals.cacheRead)} cache`;
-      const summary = textOrDash(summaryText || 'health');
-      const mini = typeof visualSectionSummary === 'function' ? visualSectionSummary('debug-section', summary, summary) : '';
+      const mini = debugQuotaWidgetHtml(status);
       return `<div class="debug-headline sec-headline" data-collapsed-keep><div class="debug-headline-main"><span class="debug-headline-api ${debugQuotaClass(pct)}" title="${escapeHtml(apiText)}">${escapeHtml(apiText)}</span><span class="debug-headline-tokens" title="${escapeHtml(tokenText)}">${escapeHtml(tokenText)}</span></div><span class="debug-headline-mini">${mini}</span></div>`;
     }
     function renderDebugSection() {
