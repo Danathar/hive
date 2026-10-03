@@ -642,6 +642,7 @@ governor:
 # (hive-review --thread / --resolve-thread). The watcher refuses to touch any
 # thread a human opened. The same key may live in hive-project.yaml instead
 # (hive.yaml wins when both name a login). Absent or empty logins = off.
+# Logins match case-insensitively; either spelling with or without [bot] works.
 # classification:
 #   review_bots:
 #     logins:

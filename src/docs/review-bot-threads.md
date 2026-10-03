@@ -76,8 +76,10 @@ key the Go side reads from the project file
 - **Absent, or empty `logins`: the feature is off.** The monitor writes an
   empty `review-threads.json` and the watcher denies every thread request.
 - `logins` are matched case-insensitively against the **first** comment's
-  author, exactly as GitHub renders it. Do not list a human here: it would let
-  agents resolve that person's threads.
+  author, ignoring surrounding whitespace and a trailing `[bot]` suffix. Both
+  REST/web (`chatgpt-codex-connector[bot]`) and GraphQL
+  (`chatgpt-codex-connector`) spellings match either configured form. Do not
+  list a human here: it would let agents resolve that person's threads.
 - `max_attempts_per_thread` is how many times the hive replies in one thread
   before leaving it for a human. The counter is the thread itself — replies
   authored by the App bot — so there is no state file to drift.

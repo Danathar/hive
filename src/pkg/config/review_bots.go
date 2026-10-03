@@ -46,8 +46,8 @@ type ClassificationConfig struct {
 //     report and the watcher denies every resolve_thread request, so an
 //     agent can never resolve anything on a hive that has not opted in.
 //   - Logins are matched case-insensitively against the thread's first
-//     comment author, exactly as GitHub renders them ("Copilot",
-//     "chatgpt-codex-connector[bot]"). A human login listed here would let
+//     comment author, ignoring whitespace and a trailing "[bot]" suffix
+//     (REST/web include it; GraphQL omits it). A human login listed here would let
 //     agents resolve that human's threads; do not do that.
 //   - MaxAttemptsPerThread bounds how many times the hive replies in one
 //     thread before leaving it for a human. The counter IS the thread's
@@ -81,14 +81,15 @@ func (r ReviewBotsConfig) Enabled() bool {
 }
 
 // IsBot reports whether login is one of the configured review-bot logins
-// (case-insensitive, whitespace-trimmed). An empty login never matches.
+// (case-insensitive, whitespace-trimmed, ignoring a trailing "[bot]" suffix).
+// An empty normalized login never matches.
 func (r ReviewBotsConfig) IsBot(login string) bool {
-	login = strings.TrimSpace(login)
+	login = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(login)), "[bot]")
 	if login == "" {
 		return false
 	}
 	for _, l := range r.Logins {
-		if strings.EqualFold(strings.TrimSpace(l), login) {
+		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(l)), "[bot]") == login {
 			return true
 		}
 	}

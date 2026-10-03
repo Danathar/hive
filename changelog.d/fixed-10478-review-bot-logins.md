@@ -1,0 +1,1 @@
+- Match configured review-bot logins with or without the `[bot]` suffix so Codex GraphQL threads are discovered and can be replied to and resolved ([#10478](https://github.com/hivecommons/hive/issues/10478)).
