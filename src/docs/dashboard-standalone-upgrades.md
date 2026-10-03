@@ -63,6 +63,37 @@ repo-owned file copying to its existing `reconcile apply` path. Ordinary
 `hive.env` and the running Hive container untouched. Do not use `setup --force`
 for this migration: that can replace operator configuration and tokens.
 
+## Upgrade target
+
+For a standalone deployment with `HIVE_SELF_IMAGE` naming a release channel
+(`stable`, `candidate`, or `edge`), the default install target is that image
+reference, not the head of the binary's build branch. Setup derives this
+metadata from the installed image, whose default comes from
+`src/deploy/standalone-images.sh`; no separate default channel is invented by
+the dashboard. `HIVE_SELF_IMAGE_TRACKING=registry|pinned` describes the host's
+update posture; it does not turn a digest pin into a channel subscription.
+
+`/api/version` reports `target.source=channel`, `target.channel`, `target.ref`,
+and the image's OCI revision in `target.sha`/`target.short`. If the registry
+cannot resolve that revision, `target.resolved=false`: the dashboard must not
+substitute a branch head or offer an unverified upgrade. The button identifies
+the channel and revision, and confirmation displays the full image ref. The
+helper receives the channel ref, so a promotion between viewing the dashboard
+and pulling can advance the installed revision.
+
+An empty `/api/self-upgrade` target resolves to the installed channel ref. An
+explicit `target` overrides it: either a legacy 7–40 character hexadecimal
+commit (mapped to its short image tag), or a fully qualified
+`ghcr.io/hivecommons/hive:<tag>` / `ghcr.io/hivecommons/hive@sha256:<digest>`
+reference accepted by the host helper's existing allow-list. A deployment
+without channel metadata must supply an explicit target for this API default;
+a digest pin is never guessed to be `stable`.
+
+Target selection does not itself change the host executor's update semantics.
+The registry-tracking executor work is tracked in #10421, and the host request
+bridge in #10423; this target contract supplies one channel ref to either
+executor rather than independently selecting a branch commit.
+
 ## Host request bridge (Podman/Quadlet)
 
 Podman/Quadlet never executes an upgrade helper inside the container. Install
@@ -83,8 +114,9 @@ The dashboard publishes one `hive-upgrade-<unique-id>.json` per accepted request
 {"target_ref":"ghcr.io/hivecommons/hive:abcdef1","requester":"owner-login","requested_at":"2026-11-12T12:00:00Z"}
 ```
 
-`target_ref` uses the existing dashboard target grammar: a 7–40 character
-hexadecimal image tag, normalized to the first seven lowercase characters.
+`target_ref` uses the dashboard target grammar described above: a validated
+channel/tag/digest image reference, or a legacy 7–40 character hexadecimal
+commit normalized to the first seven lowercase characters.
 `requester` is the authenticated request's audit user (`local` for local token
 access), not a value supplied in the JSON body. `requested_at` is UTC RFC3339.
 Files have mode `0600` and are written and closed under a hidden temporary name

@@ -24811,6 +24811,7 @@ function burnAreaChart() {
       var t = v && v.target;
       if (!t) return 'Upstream tip';
       var branch = t.branch || 'upstream';
+      if (t.source === 'channel') return 'Tracked channel :' + t.channel + ' (' + t.ref + ')';
       if (t.channel) return 'Hub target (' + branch + ' via :' + t.channel + ')';
       if (t.source === 'hub') return 'Hub target (' + branch + ' tip)';
       return branch + ' tip';
@@ -24994,7 +24995,7 @@ function burnAreaChart() {
         const why = dep.reason ? String(dep.reason) : 'deployment runtime is unknown';
         return versionButtonHTML('Upgrade to ' + targetShort, why + ' (' + runtimeLabel + ')', targetHash, false);
       }
-      return versionButtonHTML('Upgrade to ' + targetShort, runtimeLabel + ': current ' + (v.short || '?') + ' → ' + (ctx.offeredUpgradeLabel || 'target') + ' ' + targetShort, targetHash, true);
+      return versionButtonHTML('Upgrade to ' + targetShort, runtimeLabel + ': current ' + (v.short || '?') + ' → ' + (ctx.offeredUpgradeLabel || 'target') + ' ' + targetShort, target.ref || targetHash, true);
     }
 
     function renderVersionDetails(v, ctx) {
@@ -25111,8 +25112,10 @@ function burnAreaChart() {
         const upgradeTargetHash = String(_upgradeTargetHash || '').toLowerCase();
         const policyTargetHash = v.upgradePolicy && (v.upgradePolicy.target_sha || v.upgradePolicy.armed_target) || '';
         const hasHubTarget = !!(v.target && v.target.source === 'hub');
-        const offeredUpgradeHash = (v.target && v.target.sha) || policyTargetHash || v.stableV4Hash || (hasHubTarget ? '' : (v.latestHash || ''));
-        const offeredUpgradeShort = (v.target && v.target.short) || versionShortSHA(policyTargetHash) || v.stableV4Short || (hasHubTarget ? '' : (v.latestShort || 'latest'));
+        const channelTarget = v.target && v.target.source === 'channel';
+        const offeredUpgradeHash = channelTarget ? (v.target.sha || '') : ((v.target && v.target.sha) || policyTargetHash || v.stableV4Hash || (hasHubTarget ? '' : (v.latestHash || '')));
+        const offeredUpgradeShort = channelTarget ? (v.target.short || '') : ((v.target && v.target.short) || versionShortSHA(policyTargetHash) || v.stableV4Short || (hasHubTarget ? '' : (v.latestShort || 'latest')));
+        const offeredUpgradeRef = (v.target && v.target.ref) || offeredUpgradeHash;
         const offeredUpgradeLabel = upgradeTargetLabel(v) || 'target';
         const upgradeTargetLanded = upgradeTargetHash && (upgradeCurrentHash.startsWith(upgradeTargetHash) || upgradeTargetHash.startsWith(upgradeCurrentHash));
         let compactStatusHTML = '';
@@ -25149,7 +25152,7 @@ function burnAreaChart() {
             compactStatusHTML += ` <span style="color:var(--muted);font-size:var(--fs-xs);margin-left:var(--sp-3);white-space:nowrap;padding:1px 7px;border-radius:var(--r-pill);border:1px solid var(--border)" title="This hive is upgraded automatically by the hub (auto-upgrade). Current: ${escapeHtml(v.short || '?')} → ${escapeHtml(offeredUpgradeLabel)}: ${escapeHtml(offeredUpgradeShort)}">Queued for auto-upgrade</span>`;
             upgradeHTML = `<button id="spoke-upgrade-btn" data-action="gh27" class="hv-btn btn-primary btn-sm" data-arg0="${escapeHtml(offeredUpgradeHash || '')}" data-mouseover-action="gh28" data-mouseout-action="gh29" title="Upgrade ${escapeHtml(runtimeLabel)} deployment to ${escapeHtml(offeredUpgradeLabel)} ${escapeHtml(offeredUpgradeShort)} now instead of waiting for auto-upgrade">Upgrade now</button>`;
           } else {
-            upgradeHTML = `<button id="spoke-upgrade-btn" data-action="gh27" class="hv-btn btn-primary btn-sm" data-arg0="${escapeHtml(offeredUpgradeHash || '')}" data-mouseover-action="gh28" data-mouseout-action="gh29" title="${escapeHtml(runtimeLabel)}: current ${escapeHtml(v.short || '?')} → ${escapeHtml(offeredUpgradeLabel)} ${escapeHtml(offeredUpgradeShort)}">↑ Upgrade → ${escapeHtml(offeredUpgradeShort)}</button>`;
+            upgradeHTML = `<button id="spoke-upgrade-btn" data-action="gh27" class="hv-btn btn-primary btn-sm" data-arg0="${escapeHtml(offeredUpgradeRef || '')}" data-mouseover-action="gh28" data-mouseout-action="gh29" title="${escapeHtml(runtimeLabel)}: current ${escapeHtml(v.short || '?')} → ${escapeHtml(offeredUpgradeLabel)} ${escapeHtml(offeredUpgradeShort)}">↑ Upgrade → ${escapeHtml(offeredUpgradeShort)}</button>`;
           }
         } else if (v.latestHash) {
           statusText = 'Up to date';
@@ -25365,10 +25368,17 @@ function burnAreaChart() {
     var _upgradeInProgress = false;
     var _upgradeTargetHash = null;
     async function selfUpgrade(targetHash) {
+      const target = window._lastVersionData && window._lastVersionData.target;
+      let displayHash = targetHash || '';
+      if (target && target.ref && target.source === 'channel' && (targetHash === target.ref || targetHash === target.sha)) {
+        if (!(await hiveConfirm('Upgrade to ' + target.ref + ' (current channel revision ' + (target.short || 'unknown') + ')? The channel may advance before the host pulls it.'))) return;
+        targetHash = target.ref;
+        displayHash = target.sha || '';
+      }
       var btn = document.getElementById('spoke-upgrade-btn');
-      const targetShort = versionShortSHA(targetHash || '') || 'latest';
+      const targetShort = versionShortSHA(displayHash) || 'latest';
       const currentHash = window._lastVersionData && (window._lastVersionData.hash || window._lastVersionData.short) || '';
-      const progress = versionRecordUpgradeStart(targetHash || 'latest', targetShort, currentHash);
+      const progress = versionRecordUpgradeStart(displayHash || 'latest', targetShort, currentHash);
       if (btn) { btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); btn.textContent = 'Upgrading…'; btn.style.opacity = '0.6'; }
       if (window._lastVersionData && window._lastVersionContext) {
         window._lastVersionContext.upgradeProgress = progress;
@@ -25392,7 +25402,7 @@ function burnAreaChart() {
           return;
         }
         _upgradeInProgress = true;
-        _upgradeTargetHash = targetHash || null;
+        _upgradeTargetHash = displayHash || null;
         showToast('Upgrade started — waiting for rollout to complete', 'success');
         fetchGitVersion();
       } catch (e) {
