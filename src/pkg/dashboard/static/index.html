@@ -5473,7 +5473,7 @@
         inner = `<svg class="mini-health" width="28" height="24" viewBox="0 0 28 24" role="img" aria-label="${escapeHtml(text)}">${miniTitleTag(text)}<circle class="mini-health-dot ${state}" cx="14" cy="12" r="6"/></svg>` + miniSpark(hist('warnings', warnings), warnings ? 'var(--yellow)' : 'var(--green)', text);
       } else if (sectionId === 'agents-section') {
         const agents = data.agents || window._lastAgents || [];
-        inner = agentsCollapsedTilesHtml(agents, Date.now());
+        inner = typeof agentsCollapsedTilesHtml === 'function' ? agentsCollapsedTilesHtml(agents, Date.now()) : miniBar([{ label: 'agents', value: Array.isArray(agents) ? agents.length : n0, color: 'var(--green)' }], text);
       } else if (sectionId === 'lifecycle-section') {
         inner = miniBar([{ label: 'in flight', value: nums[0] || 0, color: 'var(--blue)' }, { label: 'merged', value: nums[1] || 0, color: 'var(--green)' }, { label: 'blocked', value: nums[2] || 0, color: 'var(--red)' }], text);
       } else {
