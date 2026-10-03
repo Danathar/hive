@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-03 (v5.127.0)
+
+### Added
+
+- Operators can disable the separate hub task-status push loop with `hub.task_status_push: false` or `HIVE_HUB_TASK_STATUS_PUSH=false` (restart required), while preserving core heartbeats and hub-managed upgrade/config delivery; the default remains enabled.
+
+### Changed
+
+- ci: FOSSA license scan workflow + badge (#10044)
+- Imported run plans record the producing planning engine as their source, retaining `spektacular` for existing callers and leaving epics owned by another planner untouched ([#10357](https://github.com/hivecommons/hive/issues/10357)).
+
+### Fixed
+
+- Pi contributors no longer probe unrelated Claude credentials or read automatic Claude pool readings; unsupported Pi provider quota readers are reported with external-reading guidance ([#10389](https://github.com/hivecommons/hive/issues/10389)).
+- Feedback screenshots are now verified to be real PNG or JPEG images before upload and are committed to a dedicated `feedback-screenshots` branch of the target repository instead of its default branch ([#10392](https://github.com/hivecommons/hive/issues/10392)). Previously a screenshot was accepted on the strength of its `data:image/` prefix alone and landed as an unreviewed commit on the default branch, triggering push workflows and bypassing PR review; the dedicated branch is created from the default-branch head on first use and the stored path moved out of `.github/`.
+
 ## 2026-10-03 (v5.126.0)
 
 ### Added

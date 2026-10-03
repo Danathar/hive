@@ -1,1 +1,0 @@
-- ci: FOSSA license scan workflow + badge (#10044)
