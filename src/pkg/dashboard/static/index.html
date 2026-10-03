@@ -3252,6 +3252,13 @@
     .section-body.collapsed {
       max-height: 0 !important; opacity: 0; pointer-events: none;
     }
+    .section-body.collapsed.collapsed-with-headline {
+      max-height: none !important; opacity: 1; pointer-events: auto;
+    }
+    .collapsed-with-headline .collapsed-hidden { display: none !important; }
+    .collapsed-with-headline .sec-headline,
+    .collapsed-with-headline [data-collapsed-keep] { margin-top: var(--sp-0); margin-bottom: var(--sp-2); }
+    .collapsed-with-headline .collapsed-control-hidden { display: none !important; }
     #hive-dashboard-root > [data-dashboard-section] { margin-top: var(--sp-6) !important; margin-bottom: var(--sp-6) !important; }
     #hive-dashboard-root { --dash-card-padding: var(--sp-6); --dash-card-inner-padding: var(--sp-6); --dash-card-header-gap: var(--sp-4); --dash-section-header-gap: var(--sp-3); --dash-tile-gap: var(--sp-3); }
     .dash-card { background: var(--surface-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--r-lg); padding: var(--dash-card-padding); box-shadow: var(--shadow-card); }
@@ -3270,6 +3277,7 @@
     .dash-card-summary { display: none; font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); margin-left: var(--sp-4); text-align: right; white-space: nowrap; }
     .dash-card-actions:empty + .dash-card-summary, .dash-card-badges:empty + .dash-card-actions + .dash-card-summary { margin-left: auto; }
     .dash-card.collapsed .dash-card-summary { display: inline-flex; align-items: center; gap: var(--sp-2); }
+    .dash-card.collapsed.has-collapsed-headline .dash-card-summary { display: none; }
     .mini-summary-strip { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); width: min(320px, 36vw); max-width: 320px; height: 26px; overflow: hidden; color: var(--muted); }
     .mini-summary-strip svg { flex: 0 0 auto; display: block; overflow: visible; }
     .mini-summary-strip .sparkline { display: inline-flex; margin: 0; }
@@ -3290,6 +3298,7 @@
     @media (prefers-reduced-motion: reduce) { .mini-summary-strip .sparkline-line, .mini-spark .sparkline-line { animation: none; stroke-dashoffset: 0; } }
     .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease; max-height: none; opacity: 1; }
     .dash-card-body.collapsed { max-height: 0 !important; opacity: 0; pointer-events: none; }
+    .dash-card-body.collapsed.collapsed-with-headline { max-height: none !important; opacity: 1; pointer-events: auto; }
     #audit-panel.audit-resizable { min-height: 320px; height: var(--audit-panel-height, 640px); max-height: 80vh; overflow-y: auto; resize: vertical; position: relative; }
     #audit-panel.audit-resizable::after { content: '↕ drag to resize'; position: sticky; bottom: 0; float: right; margin-top: var(--sp-2); color: var(--muted); font-size: var(--fs-2xs); background: color-mix(in srgb, var(--surface-1) 92%, transparent); border: 1px solid var(--border); border-radius: var(--r-pill); padding: var(--sp-0) var(--sp-2); pointer-events: none; }
     .dash-card .section-label, .dash-card .token-title, .dash-card .cost-title, .dash-card .gov-title { margin: 0; }
@@ -5595,16 +5604,53 @@
       body.addEventListener('transitionend', onEnd);
       setTimeout(release, SECTION_TRANSITION_MS);
     }
+    function sectionHeadlineSelector() {
+      return '.sec-headline,[data-collapsed-keep]';
+    }
+    function clearCollapsedHeadlineVisibility(body) {
+      if (!body || !body.querySelectorAll) return;
+      body.classList.remove('collapsed-with-headline');
+      body.querySelectorAll('.collapsed-hidden').forEach(el => el.classList.remove('collapsed-hidden'));
+      body.querySelectorAll('.collapsed-control-hidden').forEach(el => el.classList.remove('collapsed-control-hidden'));
+    }
+    function applyCollapsedHeadlineVisibility(body, collapsed) {
+      if (!body || !body.querySelectorAll) return false;
+      const headlines = Array.from(body.querySelectorAll(sectionHeadlineSelector())).filter(el => el && el.closest && el.closest('.dash-card-body, .section-body') === body);
+      clearCollapsedHeadlineVisibility(body);
+      if (!collapsed || headlines.length === 0) return false;
+      const keep = sectionHeadlineSelector();
+      body.classList.add('collapsed-with-headline');
+      const visit = (parent) => {
+        Array.from(parent.children || []).forEach(child => {
+          if (!child || !child.matches) return;
+          const isHeadline = child.matches(keep);
+          const containsHeadline = !!(child.querySelector && child.querySelector(keep));
+          if (isHeadline) return;
+          if (containsHeadline) {
+            visit(child);
+            return;
+          }
+          child.classList.add('collapsed-hidden');
+        });
+      };
+      visit(body);
+      body.querySelectorAll('.sec-headline [data-collapsed-control], .sec-headline .collapsed-control').forEach(el => el.classList.add('collapsed-control-hidden'));
+      return true;
+    }
+
     /** Reflect a section's collapsed state onto the body while keeping transitions animated. */
     function applySectionBodyCollapse(body, collapsed, animate) {
       if (!body) return;
       if (collapsed) {
-        if (animate) {
+        const hasHeadline = applyCollapsedHeadlineVisibility(body, true);
+        if (animate && !hasHeadline) {
           body.style.maxHeight = body.scrollHeight + 'px';
           void body.offsetHeight;
         }
         body.classList.add('collapsed');
+        body.style.maxHeight = hasHeadline ? SECTION_EXPANDED_MAX_HEIGHT : body.style.maxHeight;
       } else {
+        clearCollapsedHeadlineVisibility(body);
         body.classList.remove('collapsed');
         if (animate) {
           body.style.maxHeight = body.scrollHeight + 'px';
@@ -5640,9 +5686,16 @@
       const card = document.querySelector(`#${sectionId} .dash-card`);
       const header = document.querySelector(`#${sectionId} .dash-card-header, #${sectionId} .section-header-toggle`);
       applySectionBodyCollapse(body, collapsed, options.animate !== false);
+      const hasCollapsedHeadline = !!(body && body.classList && body.classList.contains('collapsed-with-headline'));
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
-      if (card) card.classList.toggle('collapsed', collapsed);
-      if (section) section.classList.toggle('collapsed', collapsed);
+      if (card) {
+        card.classList.toggle('collapsed', collapsed);
+        card.classList.toggle('has-collapsed-headline', hasCollapsedHeadline);
+      }
+      if (section) {
+        section.classList.toggle('collapsed', collapsed);
+        section.classList.toggle('has-collapsed-headline', hasCollapsedHeadline);
+      }
       if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       if (!collapsed && section) replaySparklinesIn(section, { force: true });
       if (sectionId === 'overview-section' && !collapsed) triggerOverviewAnimations('expand');
@@ -5660,9 +5713,16 @@
       if (!navPeek && _dashboardNavPeekSectionId === sectionId) _dashboardNavPeekSectionId = null;
       normalizeSectionCardChrome(sectionId);
       applySectionBodyCollapse(body, collapsed, false);
+      const hasCollapsedHeadline = !!(body && body.classList && body.classList.contains('collapsed-with-headline'));
       if (chevron) chevron.classList.toggle('collapsed', collapsed);
-      if (card) card.classList.toggle('collapsed', collapsed);
-      if (section) section.classList.toggle('collapsed', collapsed);
+      if (card) {
+        card.classList.toggle('collapsed', collapsed);
+        card.classList.toggle('has-collapsed-headline', hasCollapsedHeadline);
+      }
+      if (section) {
+        section.classList.toggle('collapsed', collapsed);
+        section.classList.toggle('has-collapsed-headline', hasCollapsedHeadline);
+      }
       if (header) header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       if (!collapsed && section) replaySparklinesIn(section);
     }
@@ -7482,10 +7542,11 @@
 
     function sparklineSvgVisible(svg) {
       if (!svg || !svg.isConnected) return false;
+      const inHeadline = !!(svg.closest && svg.closest('.sec-headline,[data-collapsed-keep]'));
       const shell = svg.closest('.dash-card, .section-body, [data-dashboard-section], section');
-      if (shell && shell.classList && shell.classList.contains('collapsed')) return false;
+      if (shell && shell.classList && shell.classList.contains('collapsed') && !inHeadline) return false;
       const body = svg.closest('.dash-card-body, .section-body');
-      if (body && body.classList && body.classList.contains('collapsed')) return false;
+      if (body && body.classList && body.classList.contains('collapsed') && !(inHeadline && body.classList.contains('collapsed-with-headline'))) return false;
       if (svg.getClientRects && svg.getClientRects().length === 0) return false;
       return true;
     }
@@ -10532,7 +10593,7 @@
 
       const governorBody = `
         <div class="gov-title"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Governor section" aria-pressed="false">⠿</button>Governor <button class="config-gear" data-action="openConfigDialog" data-arg0="governor" title="Open Governor configuration — manage agents, thresholds, budget, notifications, health checks, and sensing patterns">⚙️</button></div>
-        <div class="gov-grid">
+        <div class="gov-grid sec-headline" data-collapsed-keep>
           <div class="gov-stat" title="TIMER — is the governor's evaluation loop alive?&#10;&#10;WHAT: The governor re-evaluates mode and kicks due agents on a fixed cadence. This shows whether that loop is running.&#10;&#10;HOW: 'active' if the governor reported a heartbeat within its expected interval; 'starting' during boot before the first tick; 'DEAD' if no heartbeat has arrived — agents will NOT be kicked automatically until it recovers."><div class="label">timer</div><div class="val ${cls}">${gov.active ? '● active' : (isStarting ? '⏳ starting' : '⚠ DEAD')}</div></div>
           <div class="gov-stat" title="MODE — the governor's current activity level.&#10;&#10;WHAT: Sets how aggressively agents are scheduled. idle → quiet → busy → surge, each with faster cadences.&#10;&#10;HOW: Derived from queue pressure — actionable issues + open PRs — against the thresholds shown on the gauge below: 0–${CLASSIC_THRESH_QUIET-1}=idle, ${CLASSIC_THRESH_QUIET}–${CLASSIC_THRESH_BUSY-1}=quiet, ${CLASSIC_THRESH_BUSY}–${CLASSIC_THRESH_SURGE-1}=busy, ≥${CLASSIC_THRESH_SURGE}=surge. Thresholds are configurable in Governor settings."><div class="label">mode</div><div class="val" style="color:${modeColor}">${escapeHtml(gov.mode)}</div></div>
           <div class="gov-stat" title="ACTIONABLE ISSUES — open work the agents can pick up.&#10;&#10;WHAT: The issue half of the queue pressure that drives the governor mode (pressure = issues + open PRs). The sparkline shows its recent trend.&#10;&#10;HOW: Count of open issues across all monitored KubeStellar projects, MINUS any labeled hold / do-not-merge / wontfix / blocked."><div class="label">actionable issues</div><div class="spark-row"><span class="val">${issueCount}</span>${issuesSpark}</div></div>
@@ -12426,7 +12487,7 @@
         ['blocked-needs-human', 'Blocked / needs-human', blockedNeedsHuman, 'Waiting, blocked, or escalated work needing a person or dependency.'],
         ['median-age', 'Median age', age, 'Median selected actionable item age by the configured time basis.']
       ];
-      return `<div class="overview-kpis">${cards.map(([key, label, value, tip]) => {
+      return `<div class="overview-kpis sec-headline" data-collapsed-keep>${cards.map(([key, label, value, tip]) => {
         const n = Number(value);
         const attrs = Number.isFinite(n) ? ` data-overview-kpi-key="${esc(key)}" data-overview-kpi-value="${n}"` : '';
         return `<button type="button" class="overview-kpi" data-action="ocNavigate" data-arg0="repos-section" data-stop="1" title="${esc(tip)}"><span class="overview-kpi-value"${attrs}>${esc(String(value ?? '—'))}</span><span class="overview-kpi-label">${esc(label)}</span></button>`;
@@ -14733,7 +14794,7 @@ function burnAreaChart() {
       const tokenRates = computeHourlyBurnRates();
       const currentTokHr = tokenRates.length ? tokenRates[tokenRates.length - 1].rate : Math.round(totalTokens / Math.max(1, tokens.lookbackHours || 24));
       const tokenSummary = `${fmtTokens(currentTokHr)} tok/hr · ${t.sessions} sessions (${tokens.lookbackHours || 24}h)`;
-      const tokenBody = `        <div style="display:flex;gap:var(--sp-6);margin-bottom:var(--sp-8);padding-bottom:var(--sp-6);border-bottom:1px solid var(--border)">
+      const tokenBody = `        <div class="sec-headline" data-collapsed-keep style="display:flex;gap:var(--sp-6);margin-bottom:var(--sp-8);padding-bottom:var(--sp-6);border-bottom:1px solid var(--border)">
           <div style="flex:1;min-width:0">${intensityGauge()}</div>
           <div style="flex:1;min-width:0">${burnAreaChart()}</div>
         </div>
@@ -15137,7 +15198,7 @@ function burnAreaChart() {
       const costBody = `
           <div class="cost-subtitle">Estimated from token counts × list prices (as of ${esc(cost.price_table_date || '')}); models without an exact price use a coarse tier estimate (~). Where a metered gateway reports actual spend it refines the estimate, but the figure is always an estimate.</div>
           <div class="cost-disclaimer" style="margin:4px 0 10px">${esc(cost.disclaimer || '')} vLLM / self-hosted figures are estimated (reflect list price, not your infra cost).</div>
-          <div class="cost-grid">
+          <div class="cost-grid sec-headline" data-collapsed-keep>
             <div class="cost-stat"><div class="cval">${fmtUSD(est.total_usd)}<span class="cost-badge est">est.</span></div><div class="clabel">estimated total — all-time cumulative (token × list price)</div>${costSparkSvg()}</div>
             <div class="cost-stat"><div class="cval" title="${cost.merged_prs ? `${fmtUSD(est.total_usd)} ÷ ${cost.merged_prs} merged PRs` : 'no merged PRs yet'}">${cost.merged_prs ? fmtUSD(est.total_usd / cost.merged_prs) : '—'}</div><div class="clabel">cost / PR — all-time total ÷ merged PRs</div></div>
             <div class="cost-stat"><div class="cval" title="${cost.closed_issues ? `${fmtUSD(est.total_usd)} ÷ ${cost.closed_issues} closed issues` : 'no closed issues yet'}">${cost.closed_issues ? fmtUSD(est.total_usd / cost.closed_issues) : '—'}</div><div class="clabel">cost / issue — all-time total ÷ closed issues</div></div>
@@ -16199,7 +16260,7 @@ function burnAreaChart() {
       const pathsHtml = pathParts.length ? `<div class="prt-paths">Merged by: ${pathParts.join(' · ')}</div>` : '';
       const m = dto.metrics || {};
       const metricSeries = prtBucketMetricSeries(dto);
-      const metricsHtml = `<div class="prt-metrics">
+      const metricsHtml = `<div class="prt-metrics sec-headline" data-collapsed-keep>
         <div class="prt-metric" title="Merged PRs divided by each throughput bucket, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.merged_per_day))}</div><div class="mlbl">merge velocity</div>${prtMetricSpark(metricSeries.mergedVelocity, metricSeries.times, 'var(--green)', 'merge velocity', prtFmtRate, 'merge-velocity')}</div>
         <div class="prt-metric" title="Opened PRs divided by each throughput bucket, normalized to one day."><div class="mval">${escapeHtml(prtFmtRate(m.opened_per_day))}</div><div class="mlbl">open velocity</div>${prtMetricSpark(metricSeries.openedVelocity, metricSeries.times, 'var(--blue)', 'open velocity', prtFmtRate, 'open-velocity')}</div>
         <div class="prt-metric" title="Per-bucket median elapsed time from PR open audit event to merge audit event. Shows — until matching open timestamps exist."><div class="mval">${escapeHtml(prtFmtHours(m.median_time_to_merge_hours))}</div><div class="mlbl">median TTM</div>${prtMetricSpark(metricSeries.medianTTM, metricSeries.times, 'var(--yellow)', 'median TTM', prtFmtHours, 'median-ttm')}</div>
@@ -16211,8 +16272,8 @@ function burnAreaChart() {
       </div>`;
       const breakdowns = [prtTopList('Merged by agent', dto.merged_by_agent), prtTopList('Top repos', dto.top_repos), prtTopList('Close reasons', dto.closed_reasons)].filter(Boolean).join('');
       const label = prtWindowLabel(dto);
-      card.innerHTML = `<div class="prt-head"><div class="lc-window">${escapeHtml(label)}</div><div class="prt-controls"><div class="gov-pr-models-toggle">${buttons}</div>${prtRepoOptions()}<button type="button" class="hv-btn btn-secondary btn-sm" data-action="exportPRThroughputCSV" title="Download bucket series as CSV">CSV</button></div></div>
-        <div class="lc-fleet">
+      card.innerHTML = `<div class="prt-head"><div class="lc-window">${escapeHtml(label)}</div><div class="prt-controls collapsed-control" data-collapsed-control><div class="gov-pr-models-toggle">${buttons}</div>${prtRepoOptions()}<button type="button" class="hv-btn btn-secondary btn-sm" data-action="exportPRThroughputCSV" title="Download bucket series as CSV">CSV</button></div></div>
+        <div class="lc-fleet sec-headline" data-collapsed-keep>
           <div class="lc-fleet-stat" title="Pull/merge requests opened by hive agents in the selected range"><div class="val opened">${opened}</div><div class="lbl">Opened</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'opened', 'var(--blue)')}</span></div>
           <div class="lc-fleet-stat" title="Pull/merge requests observed merged in the selected range"><div class="val merged">${merged}</div><div class="lbl">Merged</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'merged', 'var(--green)')}</span></div>
           <div class="lc-fleet-stat" title="Pull/merge requests observed closed without merging in the selected range"><div class="val closed">${closed}</div><div class="lbl">Closed without merging</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'closed', 'var(--red)')}</span></div>
@@ -18109,7 +18170,7 @@ function burnAreaChart() {
       // Stats row
       const staleTotal = layers.reduce((sum, l) => sum + (l.stale || 0), 0);
       const orphanedTotal = layers.reduce((sum, l) => sum + (l.orphaned || 0), 0);
-      html += '<div class="kb-stat-grid kb-summary-stats">';
+      html += '<div class="kb-stat-grid kb-summary-stats sec-headline" data-collapsed-keep>';
       html += `<div class="kb-stat"><div class="val">${totalPages}</div><div class="lbl">Total Facts</div>${factSparkSvg()}</div>`;
       html += `<div class="kb-stat" title="Layers are knowledge sources (personal, project, org, community, vaults, or imported docs) that scope where facts come from and where new facts are written."><div class="val">${healthyCount}/${layers.length}</div><div class="lbl">Layers Online</div></div>`;
       html += `<div class="kb-stat"><div class="val">${escapeHtml(_kbCache.engine || 'n/a')}</div><div class="lbl">Engine</div></div>`;
