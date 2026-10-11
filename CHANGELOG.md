@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-11 (v5.161.3)
+
+### Fixed
+
+- The `notice-drift` CI check no longer fails when `go-licenses` transiently resolves a license `Source:` URL to `Unknown`: the drift comparison ignores `Source:` lines and `generate-notice.sh` retries the report up to three times (#11497).
+
+## 2026-10-11 (v5.161.2)
+
+### Fixed
+
+- The PR supersession sweep now leaves pull requests alone when they carry a hold label (`hold`, `on-hold`, `hold/review`, the per-hive pause label) or `do-not-merge`, matching every other hive write path. Previously the sweep closed a superseded hive-authored PR immediately and a contributor PR after the grace window regardless of those labels — the only opt-out it honoured was its own `hive/keep-open` ([#11495](https://github.com/hivecommons/hive/issues/11495)).
+
+## 2026-10-11 (v5.161.1)
+
+### Fixed
+
+- Close-on-merge no longer undoes a reopen ([#11449](https://github.com/hivecommons/hive/issues/11449)). When GitHub's closing keyword (not Hive) closed an issue at merge time, a person's later reopen, or `/reopen`, was silently reverted by the ledger sweep or the hourly backfill, because no `<!-- hive-close-on-merge -->` marker existed. Hive now reads the issue timeline since the PR's merge before closing; a `reopened` event by anyone but Hive keeps the issue open, and a one-time `<!-- hive-reopened-after-merge pr=N -->` comment stops later sweeps rereading the timeline for that PR. A different PR that merges after the reopen still closes the issue; a timeline read error leaves it open until the next sweep.
+
+## 2026-10-10 (v5.161.0)
+
+### Added
+
+- The dashboard Review Queue now tags a PR in the supersession sweep's grace window as `superseded`, links the merged PR that superseded it and shows when the sweep will close it. Owners can **Close now** (same comment, `hive/superseded` label and close as the sweep) or **Keep open**, which adds `hive/keep-open`; the sweep never auto-closes a PR carrying that label (`POST /api/review/queue/{owner}/{repo}/{number}/superseded/close|keep-open`, #11430).
+
+### Fixed
+
+- Automerge sweep now blocks on a completed failing check-run or status when the base branch requires no status checks, instead of deferring to a merge endpoint that enforces nothing (hivecommons.github.io #162/#164 regression, #11477).
+
 ## 2026-10-10 (v5.160.1)
 
 ### Fixed
