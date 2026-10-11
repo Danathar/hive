@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-11 (v5.161.3)
+
+### Fixed
+
+- The `notice-drift` CI check no longer fails when `go-licenses` transiently resolves a license `Source:` URL to `Unknown`: the drift comparison ignores `Source:` lines and `generate-notice.sh` retries the report up to three times (#11497).
+
 ## 2026-10-11 (v5.161.2)
 
 ### Fixed
