@@ -69,6 +69,10 @@ func TestOverviewActionableEquationPartitionsOpenWork(t *testing.T) {
 		},
 	}}}
 
+	// L5: the parked needs-human issue and the Hive-verified-done issue are
+	// your turn, the held issue (no recorded source) is a person's hold, and
+	// the held PR's hold source is unknown, so it is your turn.
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
 	got := (&Server{}).statusWithOverviewBands(status, now).ActionableNow
 	if got.Equation == nil {
 		t.Fatal("missing actionable equation")
@@ -83,13 +87,13 @@ func TestOverviewActionableEquationPartitionsOpenWork(t *testing.T) {
 	if got.Equation.OpenIssues != 9 || got.Equation.OpenPRs != 5 || got.Equation.TotalOpen != 14 {
 		t.Fatalf("open side = %+v, want 9 issues + 5 PRs", got.Equation)
 	}
-	if got.Total != 3 || terms["actionable"] != 3 || terms["held"] != 2 || terms["blocked_needs_human"] != 4 || terms["outside"] != 5 {
+	if got.Total != 3 || terms["actionable"] != 3 || terms["your_turn"] != 3 || terms["waiting_elsewhere"] != 1 || terms["held"] != 0 || terms["blocked"] != 1 || terms["outside"] != 6 {
 		t.Fatalf("partition terms = %+v, actionableNow=%+v", terms, got)
 	}
 	if sum != got.Equation.TotalOpen {
 		t.Fatalf("partition sum = %d, want total open %d (%s)", sum, got.Equation.TotalOpen, got.Equation.Text)
 	}
-	if want := "9 issues + 5 PRs = 3 actionable + 2 held + 4 blocked/needs-human + 5 outside"; got.Equation.Text != want {
+	if want := "9 issues + 5 PRs = 3 Your turn + 1 Waiting on someone else + 1 blocked + 6 outside + 3 actionable"; got.Equation.Text != want {
 		t.Fatalf("equation text = %q, want %q", got.Equation.Text, want)
 	}
 	if want := "Actionable now — work that can move without waiting."; got.Equation.Title != want {
@@ -101,17 +105,23 @@ func TestOverviewActionableEquationSurfacesWaitingOnReporter(t *testing.T) {
 	status := &StatusPayload{Repos: []FrontendRepo{{
 		Name: "hive", Full: "hivecommons/hive",
 		ActionableIssues: []any{github.Issue{Repo: "hivecommons/hive", Number: 1, Title: "ready"}},
+		NonActionableIssues: []any{github.RepoWorkIssue{Repo: "hivecommons/hive", Number: 2, Labels: []string{"needs-reporter-confirmation"}, Bucket: repoWorkBucketFiltered, Reason: "needs-reporter-confirmation",
+			CreatedAt: ownershipNow11565, UpdatedAt: ownershipNow11565}},
 		WorkBreakdown: &github.RepoWorkBreakdown{
 			Issues: github.RepoIssueBreakdown{Actionable: 1, Filtered: 1, ReporterConfirmation: 1},
 		},
 	}}}
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
 
-	got := (&Server{}).statusWithOverviewBands(status, time.Now()).ActionableNow
-	blocked := overviewTerm(got.IssueEquation, "blocked_needs_human")
-	if blocked == nil || blocked.Count != 1 {
-		t.Fatalf("blocked term = %+v, want one waiting reporter issue", blocked)
+	got := (&Server{}).statusWithOverviewBands(status, ownershipNow11565).ActionableNow
+	waiting := overviewTerm(got.IssueEquation, "waiting_elsewhere")
+	if waiting == nil || waiting.Count != 1 {
+		t.Fatalf("waiting term = %+v, want one waiting reporter issue", waiting)
 	}
-	for _, row := range blocked.Breakdown {
+	if outside := overviewTerm(got.IssueEquation, "outside"); outside != nil {
+		t.Fatalf("outside term = %+v, the reporter-confirmation issue must leave Outside", outside)
+	}
+	for _, row := range waiting.Breakdown {
 		if row.Key == "waiting-on-reporter" {
 			if row.Count != 1 || row.Label != "waiting on reporter" || !strings.Contains(row.DocsHref, "label%3Aneeds-reporter-confirmation") || !strings.Contains(row.DocsHref, "repo%3Ahivecommons%2Fhive") || strings.Contains(row.DocsHref, "github.com/hivecommons/hive/issues") {
 				t.Fatalf("waiting-on-reporter row = %+v", row)
@@ -119,7 +129,7 @@ func TestOverviewActionableEquationSurfacesWaitingOnReporter(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("missing waiting-on-reporter row in %+v", blocked.Breakdown)
+	t.Fatalf("missing waiting-on-reporter row in %+v", waiting.Breakdown)
 }
 
 func TestOverviewOutsideBreakdownExplainsEveryScannerFilter(t *testing.T) {
@@ -135,8 +145,8 @@ func TestOverviewOutsideBreakdownExplainsEveryScannerFilter(t *testing.T) {
 		HeldPrs:    []any{github.PullRequest{Repo: "hivecommons/hive", Number: 11, Title: "held PR", Labels: []string{"hold"}}},
 		WorkBreakdown: &github.RepoWorkBreakdown{
 			Issues: github.RepoIssueBreakdown{
-				Actionable: 2, Hold: 1, Filtered: 27,
-				NeedsHuman: 1, NeedsDirection: 2, NeedsDecision: 3, NeedsSpec: 4, ReporterConfirmation: 6, Exempt: 5,
+				Actionable: 2, Hold: 1, Filtered: 20,
+				NeedsDirection: 2, NeedsDecision: 3, NeedsSpec: 4, Exempt: 5,
 				ReporterTriage: 7, HiveAdvisory: 8, DependencyDashboard: 9, Other: 10,
 			},
 			PRs: github.RepoPRBreakdown{Actionable: 1, Hold: 1, Draft: 11, Filtered: 12, Other: 13},
@@ -207,7 +217,7 @@ func TestOverviewKPIRenderedMathSublineSumsToHeadline(t *testing.T) {
 	if start < 0 {
 		t.Fatal("Overview KPI helper block not found")
 	}
-	end := strings.Index(html[start:], "    function overviewKPIEquation")
+	end := strings.Index(html[start:], "    // Equation terms in the order the first-match rule applies")
 	if end < 0 {
 		t.Fatal("Overview KPI helper block end not found")
 	}
@@ -218,8 +228,8 @@ function esc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&
 ` + jsFunc(t, html, "dashboardDocsHrefFromPath") + `
 ` + block + `
 const issueEq = { kind: 'issues', open: 42, result: 4, terms: [
+  { key: 'your_turn', label: 'Your turn', count: 3 },
   { key: 'held', label: 'held', count: 10 },
-  { key: 'blocked_needs_human', label: 'blocked/needs-human', count: 3 },
   { key: 'outside', label: 'outside', count: 25, breakdown: [
     { key: 'needs-direction', label: 'needs-direction', count: 6, settingsTab: 'Labels', docsHref: '/docs/dashboard.md#outside-buckets' },
     { key: 'needs-decision', label: 'needs-decision', count: 2 },
@@ -233,7 +243,7 @@ const issueEq = { kind: 'issues', open: 42, result: 4, terms: [
   ] }
 ] };
 const subline = renderOverviewTotalPartitionSubline(issueEq);
-const m = subline.match(/(\d+) actionable \+ (\d+) held \+ (\d+) blocked \+ (\d+) outside/);
+const m = subline.match(/(\d+) actionable \+ (\d+) your turn \+ (\d+) held \+ (\d+) outside/);
 if (!m) throw new Error('partition subline did not render expected breakdown: ' + subline);
 const nums = m.slice(1).map(Number);
 if (42 !== nums[0] + nums[1] + nums[2] + nums[3]) throw new Error('partition terms do not sum to open total: ' + subline);
@@ -276,6 +286,7 @@ func TestGovernorActionableSplitsShareOverviewPartition(t *testing.T) {
 		},
 	}}}
 
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
 	got := (&Server{}).statusWithOverviewBands(status, now).ActionableNow
 	if got.IssueEquation == nil || got.PREquation == nil || got.Equation == nil {
 		t.Fatalf("missing equations: %+v", got)
@@ -289,10 +300,10 @@ func TestGovernorActionableSplitsShareOverviewPartition(t *testing.T) {
 	if got.Issues != got.IssueEquation.Result || got.PRs != got.PREquation.Result {
 		t.Fatalf("governor equations do not match splits: actionable=%+v issueEq=%+v prEq=%+v", got, got.IssueEquation, got.PREquation)
 	}
-	if got.IssueEquation.Text != "6 open − 1 held − 2 blocked/needs-human − 1 outside = 2" {
+	if got.IssueEquation.Text != "6 open − 1 Your turn − 1 Waiting on someone else − 1 outside = 3" {
 		t.Fatalf("issue equation = %q", got.IssueEquation.Text)
 	}
-	if got.PREquation.Text != "4 open − 1 held − 1 blocked/needs-human − 1 outside = 1" {
+	if got.PREquation.Text != "4 open − 1 Your turn − 1 blocked − 1 outside = 1" {
 		t.Fatalf("PR equation = %q", got.PREquation.Text)
 	}
 }
@@ -306,8 +317,8 @@ func TestOverviewKPIBindsForgeTotalsAndTooltips10629(t *testing.T) {
 	for _, want := range []string{
 		"window._lastStatus?.overviewTotals?.issues",
 		"window._lastStatus.overviewTotals",
-		"const openIssues = Number(forgeTotals?.issues?.forge ?? trackedIssues);",
-		"const openPRs = Number(forgeTotals?.prs?.forge ?? trackedPRs);",
+		"const openIssues = Number(forgeTotals?.issues?.forge ?? issueEq.open);",
+		"const openPRs = Number(forgeTotals?.prs?.forge ?? prEq.open);",
 		"All open GitHub issues (pull requests excluded) across the selected configured repos",
 		"All open GitHub pull requests across the selected configured repos, including drafts",
 		"overview-kpi-subline",

@@ -26,9 +26,13 @@ var plainNumberCellPattern = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 
 type overviewFilters struct {
 	bands map[string]bool
-	repos map[string]bool
-	stale *bool
-	held  *bool
+	// slices keeps the rows plotted in the named Overview chart slices
+	// (chart_slice), so a slice's export link returns exactly the rows the
+	// slice counts.
+	slices map[string]bool
+	repos  map[string]bool
+	stale  *bool
+	held   *bool
 }
 
 type overviewJSONResponse struct {
@@ -69,11 +73,16 @@ func (s *Server) handleOverviewExport(w http.ResponseWriter, r *http.Request, ki
 	if s != nil && s.deps != nil && s.deps.Config != nil {
 		cfg = s.deps.Config.Dashboard.IssueBands
 	}
-	validBands := issueBandOrder
+	validBands := append(append([]string{}, issueBandOrder...), overviewBandOutside)
+	validSlices := OverviewSliceSpecs(cfg).Issues
 	if kind == overviewKindPRs {
 		validBands = prBandOrder
+		validSlices = OverviewSliceSpecs(cfg).PRs
 	}
 	filters, err := parseOverviewFilters(r, validBands)
+	if err == nil {
+		err = parseOverviewSlices(r, &filters, validSlices)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -146,6 +155,34 @@ func parseOverviewFilters(r *http.Request, validBands []string) (overviewFilters
 	return filters, nil
 }
 
+// parseOverviewSlices reads the slice filter: the chart slices an export link
+// asks for.
+func parseOverviewSlices(r *http.Request, filters *overviewFilters, validSlices []BandSpec) error {
+	slices := splitQueryValues(r.URL.Query()["slice"])
+	if len(slices) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(validSlices))
+	keys := make([]string, 0, len(validSlices))
+	for _, spec := range validSlices {
+		known[spec.Key] = true
+		keys = append(keys, spec.Key)
+	}
+	filters.slices = map[string]bool{}
+	bad := make([]string, 0)
+	for _, slice := range slices {
+		if !known[slice] {
+			bad = append(bad, slice)
+			continue
+		}
+		filters.slices[slice] = true
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("unknown slice %q; valid slices: %s", strings.Join(bad, ","), strings.Join(keys, ", "))
+	}
+	return nil
+}
+
 func splitQueryValues(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -170,11 +207,21 @@ type overviewIssueItem struct {
 	issue github.Issue
 	held  bool
 	info  IssueBandInfo
+	// ownership is the stored your-turn decision; slice is the Overview chart
+	// slice taken from it ("" for a non-actionable row the charts skip).
+	ownership *Ownership
+	slice     string
+	// nonActionable rows come from the repo card's non-actionable list; bucket
+	// is the enumeration bucket that kept them off the agent queues.
+	nonActionable bool
+	bucket        string
 }
 
-// overviewIssueItems classifies every open and held issue across the repo
-// cards that pass filters. It is the one walk the CSV/JSON export and the
-// owner-advice queue breakdown both read, so they cannot disagree.
+// overviewIssueItems classifies every open, held and non-actionable issue
+// across the repo cards that pass filters, each with its stored ownership
+// decision. A non-actionable row with no band of its own is classified band
+// outside and keeps its bucket. It is the one walk the CSV/JSON export and
+// the owner-advice queue breakdown both read, so they cannot disagree.
 func overviewIssueItems(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time, selfAuthorizationHoldActive func(string) bool) []overviewIssueItem {
 	var out []overviewIssueItem
 	for _, repo := range status.Repos {
@@ -185,28 +232,51 @@ func overviewIssueItems(status *StatusPayload, cfg config.DashboardIssueBandsCon
 		for _, issue := range frontendRepoIssues(repo, false) {
 			issue.Repo = nonEmpty(issue.Repo, repoName)
 			info := IssueBand(issue, false, cfg, now, selfAuthorizationHoldActive)
-			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, false) {
+			ownership := ownershipFor(repo.Ownership, ownershipKindIssue, issue.Number)
+			slice := overviewIssueChartSlice(issue, ownership)
+			if !filters.matchBand(info.Band) || !filters.matchSlice(slice) || !filters.matchFlags(info.Stale, false) {
 				continue
 			}
-			out = append(out, overviewIssueItem{issue: issue, info: info})
+			out = append(out, overviewIssueItem{issue: issue, info: info, ownership: ownership, slice: slice})
 		}
 		for _, issue := range frontendRepoIssues(repo, true) {
 			issue.Repo = nonEmpty(issue.Repo, repoName)
 			info := IssueBand(issue, true, cfg, now, selfAuthorizationHoldActive)
 			info.HoldReason = heldReason(issue.Labels, false, status.HiveID)
-			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, true) {
+			ownership := ownershipFor(repo.Ownership, ownershipKindIssue, issue.Number)
+			slice := overviewIssueChartSlice(issue, ownership)
+			if !filters.matchBand(info.Band) || !filters.matchSlice(slice) || !filters.matchFlags(info.Stale, true) {
 				continue
 			}
-			out = append(out, overviewIssueItem{issue: issue, held: true, info: info})
+			out = append(out, overviewIssueItem{issue: issue, held: true, info: info, ownership: ownership, slice: slice})
+		}
+		for _, raw := range repo.NonActionableIssues {
+			row, ok := repoWorkIssueRow(raw)
+			if !ok {
+				continue
+			}
+			issue := github.Issue{Repo: nonEmpty(row.Repo, repoName), Number: row.Number, Title: row.Title, Author: row.Author, URL: row.URL, Labels: row.Labels, Assignees: row.Assignees, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+			info := IssueBand(issue, false, cfg, now, selfAuthorizationHoldActive)
+			info.Band = nonActionableIssueBand(row)
+			if info.Band == "" {
+				info.Band = overviewBandOutside
+			}
+			ownership := ownershipFor(repo.Ownership, ownershipKindIssue, row.Number)
+			slice := overviewNonActionableChartSlice(ownership)
+			if !filters.matchBand(info.Band) || !filters.matchSlice(slice) || !filters.matchFlags(info.Stale, false) {
+				continue
+			}
+			out = append(out, overviewIssueItem{issue: issue, info: info, ownership: ownership, slice: slice, nonActionable: true, bucket: row.Bucket})
 		}
 	}
 	return out
 }
 
 func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIssueBandsConfig, filters overviewFilters, now time.Time) ([]any, []BandSpec) {
-	byBand := make(map[string][]overviewIssueItem, len(issueBandOrder))
-	counts := make(map[string]int, len(issueBandOrder))
-	for _, key := range issueBandOrder {
+	rowBands := append(append([]string{}, issueBandOrder...), overviewBandOutside)
+	byBand := make(map[string][]overviewIssueItem, len(rowBands))
+	counts := make(map[string]int, len(rowBands))
+	for _, key := range rowBands {
 		byBand[key] = nil
 	}
 	for _, item := range overviewIssueItems(status, cfg, filters, now, s.selfAuthorizationHoldActiveForRepo) {
@@ -214,7 +284,7 @@ func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIs
 		byBand[item.info.Band] = append(byBand[item.info.Band], item)
 	}
 	rows := make([]any, 0)
-	for _, band := range issueBandOrder {
+	for _, band := range rowBands {
 		items := byBand[band]
 		sort.SliceStable(items, func(i, j int) bool {
 			ai := issueActivity(items[i].issue)
@@ -225,12 +295,15 @@ func (s *Server) overviewIssueRows(status *StatusPayload, cfg config.DashboardIs
 			return items[i].issue.Number < items[j].issue.Number
 		})
 		for _, item := range items {
-			rows = append(rows, overviewIssueCSVRow(item.issue, item.held, item.info, cfg, status.GitHubBaseURL))
+			rows = append(rows, overviewIssueCSVRow(item, cfg, status.GitHubBaseURL))
 		}
 	}
 	specs := IssueBandSpecs(cfg)
 	for i := range specs {
 		specs[i].Count = counts[specs[i].Key]
+	}
+	if counts[overviewBandOutside] > 0 {
+		specs = append(specs, overviewOutsideBandSpec(counts[overviewBandOutside]))
 	}
 	return rows, specs
 }
@@ -240,6 +313,10 @@ type overviewPRItem struct {
 	verdict *github.MergeVerdict
 	held    bool
 	info    PRBandInfo
+	// ownership is the stored your-turn decision; slice is the Overview chart
+	// slice taken from it.
+	ownership *Ownership
+	slice     string
 }
 
 // overviewPRItems classifies every open and held PR across the repo cards
@@ -255,18 +332,22 @@ func (s *Server) overviewPRItems(status *StatusPayload, cfg config.DashboardIssu
 		for _, entry := range frontendRepoPRs(repo, false) {
 			entry.pr.Repo = nonEmpty(entry.pr.Repo, repoName)
 			info := prBand(entry.pr, entry.verdict, false, cfg, now, autoMergeLabel, status.HiveID)
-			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, false) {
+			ownership := ownershipFor(repo.Ownership, ownershipKindPR, entry.pr.Number)
+			slice := overviewPRChartSlice(entry.pr, entry.verdict, ownership, autoMergeLabel)
+			if !filters.matchBand(info.Band) || !filters.matchSlice(slice) || !filters.matchFlags(info.Stale, false) {
 				continue
 			}
-			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, info: info})
+			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, info: info, ownership: ownership, slice: slice})
 		}
 		for _, entry := range frontendRepoPRs(repo, true) {
 			entry.pr.Repo = nonEmpty(entry.pr.Repo, repoName)
 			info := prBand(entry.pr, entry.verdict, true, cfg, now, autoMergeLabel, status.HiveID)
-			if !filters.matchBand(info.Band) || !filters.matchFlags(info.Stale, true) {
+			ownership := ownershipFor(repo.Ownership, ownershipKindPR, entry.pr.Number)
+			slice := overviewPRChartSlice(entry.pr, entry.verdict, ownership, autoMergeLabel)
+			if !filters.matchBand(info.Band) || !filters.matchSlice(slice) || !filters.matchFlags(info.Stale, true) {
 				continue
 			}
-			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, held: true, info: info})
+			out = append(out, overviewPRItem{pr: entry.pr, verdict: entry.verdict, held: true, info: info, ownership: ownership, slice: slice})
 		}
 	}
 	return out
@@ -299,7 +380,7 @@ func (s *Server) overviewPRRows(status *StatusPayload, cfg config.DashboardIssue
 			return items[i].pr.Number < items[j].pr.Number
 		})
 		for _, item := range items {
-			rows = append(rows, overviewPRCSVRow(item.pr, item.verdict, item.held, item.info, cfg, status.GitHubBaseURL))
+			rows = append(rows, overviewPRCSVRow(item, cfg, status.GitHubBaseURL))
 		}
 	}
 	specs := PRBandSpecs(cfg)
@@ -315,6 +396,10 @@ func (f overviewFilters) matchRepo(repo string) bool {
 
 func (f overviewFilters) matchBand(band string) bool {
 	return len(f.bands) == 0 || f.bands[band]
+}
+
+func (f overviewFilters) matchSlice(slice string) bool {
+	return len(f.slices) == 0 || f.slices[slice]
 }
 
 func (f overviewFilters) matchFlags(stale, held bool) bool {
@@ -413,10 +498,37 @@ func frontendPullRequest(raw any) (frontendPR, bool) {
 	}
 }
 
-func overviewIssueCSVRow(issue github.Issue, held bool, info IssueBandInfo, cfg config.DashboardIssueBandsConfig, githubBaseURL string) map[string]any {
-	return map[string]any{
-		"band":          issueBandSpec(info.Band, cfg).Label,
-		"band_rule":     issueBandSpec(info.Band, cfg).Rule,
+// overviewOutsideBandSpec describes the export band of a non-actionable issue
+// row that carries no band of its own.
+func overviewOutsideBandSpec(count int) BandSpec {
+	return BandSpec{Key: overviewBandOutside, Label: overviewBandOutside, Rule: "open issue the scanner kept off the agent queues and that has no band of its own — the row's bucket says why", Count: count}
+}
+
+// overviewOwnershipCells are the ownership columns every export row carries.
+func overviewOwnershipCells(o *Ownership) map[string]any {
+	cells := map[string]any{"your_turn": false, "verb": "", "reason_code": "", "reason": "", "waiting_elsewhere": false}
+	if o == nil {
+		return cells
+	}
+	cells["your_turn"] = o.YourTurn
+	cells["verb"] = o.Verb
+	cells["reason_code"] = o.ReasonCode
+	cells["reason"] = o.Reason
+	cells["waiting_elsewhere"] = o.WaitingElsewhere
+	return cells
+}
+
+func overviewIssueCSVRow(item overviewIssueItem, cfg config.DashboardIssueBandsConfig, githubBaseURL string) map[string]any {
+	issue, info := item.issue, item.info
+	spec := issueBandSpec(info.Band, cfg)
+	if info.Band == overviewBandOutside {
+		spec = overviewOutsideBandSpec(0)
+	}
+	row := map[string]any{
+		"band":          spec.Label,
+		"band_rule":     spec.Rule,
+		"bucket":        item.bucket,
+		"slice":         item.slice,
 		"repo":          issue.Repo,
 		"number":        numberCell(issue.Number),
 		"title":         issue.Title,
@@ -426,18 +538,24 @@ func overviewIssueCSVRow(issue github.Issue, held bool, info IssueBandInfo, cfg 
 		"assignees":     stringsSliceAny(issue.Assignees),
 		"agent_role":    info.Role,
 		"acknowledged":  info.Acknowledged,
-		"held":          held,
-		"hold_reason":   heldString(held, info.HoldReason),
+		"held":          item.held,
+		"hold_reason":   heldString(item.held, info.HoldReason),
 		"linked_prs":    linkedPRs(issue.LinkedPRs),
 		"updated_at":    formatUpdatedAt(issue.UpdatedAt),
 		"stale":         info.Stale,
 	}
+	for key, value := range overviewOwnershipCells(item.ownership) {
+		row[key] = value
+	}
+	return row
 }
 
-func overviewPRCSVRow(pr github.PullRequest, verdict *github.MergeVerdict, held bool, info PRBandInfo, cfg config.DashboardIssueBandsConfig, githubBaseURL string) map[string]any {
-	return map[string]any{
+func overviewPRCSVRow(item overviewPRItem, cfg config.DashboardIssueBandsConfig, githubBaseURL string) map[string]any {
+	pr, verdict, info := item.pr, item.verdict, item.info
+	row := map[string]any{
 		"band":            prBandSpec(info.Band, cfg).Label,
 		"band_rule":       prBandSpec(info.Band, cfg).Rule,
+		"slice":           item.slice,
 		"repo":            pr.Repo,
 		"number":          numberCell(pr.Number),
 		"title":           pr.Title,
@@ -449,20 +567,26 @@ func overviewPRCSVRow(pr github.PullRequest, verdict *github.MergeVerdict, held 
 		"failing_checks":  stringsSliceAny(pr.FailingChecks),
 		"review_decision": reviewDecision(pr),
 		"review_class":    string(pr.ReviewClass),
-		"held":            held,
-		"hold_reason":     heldString(held, info.HoldReason),
+		"held":            item.held,
+		"hold_reason":     heldString(item.held, info.HoldReason),
 		"labels":          stringsSliceAny(pr.Labels),
 		"updated_at":      formatUpdatedAt(pr.UpdatedAt),
 		"stale":           info.Stale,
 		"signals":         signalLabels(info.Signals),
 	}
+	for key, value := range overviewOwnershipCells(item.ownership) {
+		row[key] = value
+	}
+	return row
 }
+
+var overviewOwnershipColumns = []string{"your_turn", "verb", "reason_code", "reason", "waiting_elsewhere"}
 
 func overviewCSVColumns(kind string) []string {
 	if kind == overviewKindPRs || kind == "pr" {
-		return []string{"band", "band_rule", "repo", "number", "title", "url", "author", "draft", "merge_verdict", "mergeable", "failing_checks", "review_decision", "review_class", "held", "hold_reason", "labels", "updated_at", "stale", "signals"}
+		return append([]string{"band", "band_rule", "slice", "repo", "number", "title", "url", "author", "draft", "merge_verdict", "mergeable", "failing_checks", "review_decision", "review_class", "held", "hold_reason", "labels", "updated_at", "stale", "signals"}, overviewOwnershipColumns...)
 	}
-	return []string{"band", "band_rule", "repo", "number", "title", "url", "state_signals", "labels", "assignees", "agent_role", "acknowledged", "held", "hold_reason", "linked_prs", "updated_at", "stale"}
+	return append([]string{"band", "band_rule", "bucket", "slice", "repo", "number", "title", "url", "state_signals", "labels", "assignees", "agent_role", "acknowledged", "held", "hold_reason", "linked_prs", "updated_at", "stale"}, overviewOwnershipColumns...)
 }
 
 func overviewCSV(rows []any, columns []string) string {

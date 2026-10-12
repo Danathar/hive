@@ -197,6 +197,12 @@ func (s *Server) buildHiveAdvisorQueue(status *StatusPayload, now time.Time) hiv
 		})
 	}
 	for _, item := range overviewIssueItems(status, cfg, overviewFilters{}, now, s.selfAuthorizationHoldActiveForRepo) {
+		// The advisor's queue health reads the open and held issues; the
+		// non-actionable rows the walk now carries for the export are not part
+		// of it. Owner advice moves onto the ownership decision separately.
+		if item.nonActionable {
+			continue
+		}
 		issue := item.issue
 		labels := labelSet(issue.Labels)
 		q.Issues = append(q.Issues, hiveadvisor.IssueItem{

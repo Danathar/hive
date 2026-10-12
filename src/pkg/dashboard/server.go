@@ -444,7 +444,10 @@ type Server struct {
 
 // StatusPayload matches the JSON contract the dashboard frontend render() expects.
 type StatusPayload struct {
-	OverviewBands    *OverviewBands            `json:"overview_bands,omitempty"`
+	OverviewBands *OverviewBands `json:"overview_bands,omitempty"`
+	// OverviewSlices is the Overview charts' slice taxonomy; each issue and
+	// PR row carries its slice as chart_slice (hivecommons/hive#11507).
+	OverviewSlices   *OverviewSlices           `json:"overview_slices,omitempty"`
 	OverviewTotals   FrontendOverviewTotals    `json:"overviewTotals"`
 	ActionableNow    FrontendActionableNow     `json:"actionableNow"`
 	OverviewCoverage *FrontendOverviewCoverage `json:"overviewCoverage,omitempty"`
@@ -1241,15 +1244,17 @@ type TrendHistoryEntry struct {
 	// Overview KPI row counts. These are sampled with the same persisted ring as
 	// the governor pressure history so the Admin overview tiles have restart-safe
 	// sparkline data without a second PVC file.
-	OverviewKPI          bool `json:"overviewKPI,omitempty"`
-	OverviewOpenIssues   int  `json:"overviewOpenIssues,omitempty"`
-	OverviewOpenPRs      int  `json:"overviewOpenPrs,omitempty"`
-	OverviewActionable   int  `json:"overviewActionable,omitempty"`
-	OverviewHeld         int  `json:"overviewHeld,omitempty"`
-	OverviewBlockedHuman int  `json:"overviewBlockedHuman,omitempty"`
-	OverviewOutside      int  `json:"overviewOutside,omitempty"`
-	OverviewCoverageOK   bool `json:"overviewCoverageOK,omitempty"`
-	OverviewCoverage     int  `json:"overviewCoverage,omitempty"`
+	OverviewKPI        bool `json:"overviewKPI,omitempty"`
+	OverviewOpenIssues int  `json:"overviewOpenIssues,omitempty"`
+	OverviewOpenPRs    int  `json:"overviewOpenPrs,omitempty"`
+	OverviewActionable int  `json:"overviewActionable,omitempty"`
+	OverviewHeld       int  `json:"overviewHeld,omitempty"`
+	OverviewYourTurn   int  `json:"overviewYourTurn,omitempty"`
+	OverviewWaiting    int  `json:"overviewWaiting,omitempty"`
+	OverviewBlocked    int  `json:"overviewBlocked,omitempty"`
+	OverviewOutside    int  `json:"overviewOutside,omitempty"`
+	OverviewCoverageOK bool `json:"overviewCoverageOK,omitempty"`
+	OverviewCoverage   int  `json:"overviewCoverage,omitempty"`
 	// Beads worker/supervisor counts.
 	BeadsWorkers    int `json:"beadsWorkers"`
 	BeadsSupervisor int `json:"beadsSupervisor"`
@@ -3895,67 +3900,27 @@ func overviewKPISnapshotComplete(status *StatusPayload) bool {
 	return true
 }
 
-func (s *Server) attachOverviewKPI(e *TrendHistoryEntry, status *StatusPayload, now time.Time) {
+func (s *Server) attachOverviewKPI(e *TrendHistoryEntry, status *StatusPayload, _ time.Time) {
 	if e == nil || status == nil {
 		return
 	}
 	e.OverviewKPI = true
-	cfg := config.DashboardIssueBandsConfig{}
-	if s != nil && s.deps != nil && s.deps.Config != nil {
-		cfg = s.deps.Config.Dashboard.IssueBands
-	}
+	// The tiles are the Actionable-now partition's terms, so the samples read
+	// the same classification the equation does (hivecommons/hive#11507).
+	part := overviewPartitionOf(status, s.autoMergeLabel())
 	for _, r := range status.Repos {
-		repoName := overviewRepoName(r)
 		e.OverviewOpenIssues += r.Issues
 		e.OverviewOpenPRs += r.PRs
-		e.OverviewHeld += len(r.HeldIssues) + len(r.HeldPrs)
-		for _, item := range r.ActionableIssues {
-			issue, ok := frontendIssue(item)
-			band := ""
-			if ok {
-				issue.Repo = nonEmpty(issue.Repo, repoName)
-				band = IssueBand(issue, false, cfg, now, s.selfAuthorizationHoldActiveForRepo).Band
-			}
-			if !overviewKPIExcludedBand(band) {
-				e.OverviewActionable++
-			}
-			if band == "waiting" || band == "done" {
-				e.OverviewBlockedHuman++
-			}
-		}
-		for _, item := range r.OpenPrs {
-			entry, ok := frontendPullRequest(item)
-			band := ""
-			if ok {
-				band = prBand(entry.pr, entry.verdict, false, cfg, now, s.autoMergeLabel(), status.HiveID).Band
-			}
-			if !overviewKPIExcludedBand(band) {
-				e.OverviewActionable++
-			}
-			if band == "waiting" || band == "blocked" {
-				e.OverviewBlockedHuman++
-			}
-		}
 	}
-	totals := status.OverviewTotals
-	if totals.Issues.Forge == 0 && totals.PRs.Forge == 0 && len(status.Repos) > 0 {
-		totals = overviewTotals(status)
-	}
-	// Match the tile: needs-human and reporter-confirmation issues are blocked, not outside.
-	e.OverviewBlockedHuman += totals.Issues.Breakdown["needs_human"] + totals.Issues.Breakdown["reporter_confirmation"]
-	e.OverviewOutside = max(0, e.OverviewOpenIssues+e.OverviewOpenPRs-e.OverviewActionable-e.OverviewHeld-e.OverviewBlockedHuman)
+	e.OverviewActionable = part.issues.actionable + part.prs.actionable
+	e.OverviewYourTurn = part.issues.yourTurn + part.prs.yourTurn
+	e.OverviewWaiting = part.issues.waiting + part.prs.waiting
+	e.OverviewHeld = part.issues.held + part.prs.held
+	e.OverviewBlocked = part.prs.blocked
+	e.OverviewOutside = max(0, e.OverviewOpenIssues+e.OverviewOpenPRs-e.OverviewActionable-e.OverviewYourTurn-e.OverviewWaiting-e.OverviewHeld-e.OverviewBlocked)
 	if status.OverviewCoverage != nil {
 		e.OverviewCoverageOK = true
 		e.OverviewCoverage = status.OverviewCoverage.Coverage
-	}
-}
-
-func overviewKPIExcludedBand(band string) bool {
-	switch strings.ToLower(band) {
-	case "waiting", "done", "draft", "blocked":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -3972,14 +3937,16 @@ func (s *Server) TrendHistory() []TrendHistoryEntry {
 // Overview fields are pointers so real zero samples are serialized while old
 // trend-history rows from before KPI sampling omit unavailable KPI data.
 type OverviewKPIHistoryEntry struct {
-	Timestamp            int64 `json:"t"`
-	OverviewOpenIssues   *int  `json:"overviewOpenIssues,omitempty"`
-	OverviewOpenPRs      *int  `json:"overviewOpenPrs,omitempty"`
-	OverviewActionable   *int  `json:"overviewActionable,omitempty"`
-	OverviewHeld         *int  `json:"overviewHeld,omitempty"`
-	OverviewBlockedHuman *int  `json:"overviewBlockedHuman,omitempty"`
-	OverviewOutside      *int  `json:"overviewOutside,omitempty"`
-	OverviewCoverage     *int  `json:"overviewCoverage,omitempty"`
+	Timestamp          int64 `json:"t"`
+	OverviewOpenIssues *int  `json:"overviewOpenIssues,omitempty"`
+	OverviewOpenPRs    *int  `json:"overviewOpenPrs,omitempty"`
+	OverviewActionable *int  `json:"overviewActionable,omitempty"`
+	OverviewHeld       *int  `json:"overviewHeld,omitempty"`
+	OverviewYourTurn   *int  `json:"overviewYourTurn,omitempty"`
+	OverviewWaiting    *int  `json:"overviewWaiting,omitempty"`
+	OverviewBlocked    *int  `json:"overviewBlocked,omitempty"`
+	OverviewOutside    *int  `json:"overviewOutside,omitempty"`
+	OverviewCoverage   *int  `json:"overviewCoverage,omitempty"`
 }
 
 // OverviewKPIHistory returns the recent overview KPI samples downsampled to a
@@ -3992,12 +3959,14 @@ func overviewKPIHistoryPayload(entries []TrendHistoryEntry) []OverviewKPIHistory
 	out := make([]OverviewKPIHistoryEntry, 0, len(entries))
 	for _, e := range entries {
 		row := OverviewKPIHistoryEntry{Timestamp: e.Timestamp}
-		if e.OverviewKPI || e.OverviewOpenIssues != 0 || e.OverviewOpenPRs != 0 || e.OverviewActionable != 0 || e.OverviewHeld != 0 || e.OverviewBlockedHuman != 0 || e.OverviewOutside != 0 {
+		if e.OverviewKPI || e.OverviewOpenIssues != 0 || e.OverviewOpenPRs != 0 || e.OverviewActionable != 0 || e.OverviewHeld != 0 || e.OverviewYourTurn != 0 || e.OverviewWaiting != 0 || e.OverviewBlocked != 0 || e.OverviewOutside != 0 {
 			row.OverviewOpenIssues = intPtr(e.OverviewOpenIssues)
 			row.OverviewOpenPRs = intPtr(e.OverviewOpenPRs)
 			row.OverviewActionable = intPtr(e.OverviewActionable)
 			row.OverviewHeld = intPtr(e.OverviewHeld)
-			row.OverviewBlockedHuman = intPtr(e.OverviewBlockedHuman)
+			row.OverviewYourTurn = intPtr(e.OverviewYourTurn)
+			row.OverviewWaiting = intPtr(e.OverviewWaiting)
+			row.OverviewBlocked = intPtr(e.OverviewBlocked)
 			row.OverviewOutside = intPtr(e.OverviewOutside)
 		}
 		if e.OverviewCoverageOK {

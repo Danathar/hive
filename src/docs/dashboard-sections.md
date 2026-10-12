@@ -40,33 +40,32 @@ How many issues and pull requests Hive is tracking right now, and how many of th
 **How the numbers are worked out.**
 
 - **Total open issues** and **Total open PRs** count every open issue and every open pull request in the repositories you selected. Draft pull requests count too.
-- Each total is written as a sum, for example `10 = 2 actionable + 0 held + 1 blocked + 7 outside`.
-- **Actionable now** counts tracked items that Hive could work on now. Tracked means Hive put the item on its work list. Actionable means nothing is waiting on a person.
-- Issues in the "Needs human" and "Confirm & close" bands are left out of Actionable now. A band is a display group named after what the item needs next.
-- Pull requests in the "Needs human" and "Blocked" bands are left out, and so are drafts.
-- **Held** counts issues and pull requests with a hold label. A hold label, such as `hold` or `on-hold`, parks an item on purpose.
-- **Blocked / needs-human** counts work that waits on a person or on something else. For issues, that is the "Needs human" and "Confirm & close" bands. It also counts issues with a `needs-human` label and issues waiting for their reporter. For pull requests, it is the "Needs human" and "Blocked" bands.
-- **Outside** counts open items that Hive's filters kept off its work list. Hover its ⓘ mark to see why each item was kept out. The reasons are labels such as `needs-direction`, `needs-decision` or `needs-spec`, and exempt labels. Others are reporter triage, your project issue filter, standing advisory issues and bot dependency dashboards. Draft pull requests count here too.
+- Each total is written as a sum, for example `10 = 2 actionable + 3 your turn + 1 waiting on someone else + 1 held + 3 outside`. Every open item counts in exactly one part, so the parts always add up to the total.
+- **Your turn** counts every item Hive is stuck on a person for: no agent will move it until someone acts. It is the same set the Your turn list in Projects shows, including the items to close. Parked issues (`needs-decision`, `needs-direction`, `needs-spec`, `needs-human`) count here, not in Outside.
+- **Waiting on someone else** counts items gated on someone other than you: a hold a person or the dashboard pause placed, a Hive pull request still inside the adjudicator's wait, an issue waiting for its reporter, and an issue an open pull request covers.
+- **Held** counts the other items with a hold label. A hold label, such as `hold` or `on-hold`, parks an item on purpose.
+- **Blocked** counts pull requests with a blocked verdict, a merge conflict or failing checks.
+- **Outside** counts open items that Hive's filters kept off its work list, and draft pull requests. Hover its ⓘ mark to see why each item was kept out. The reasons are labels such as `needs-direction`, `needs-decision` or `needs-spec` on items that are not your turn, and exempt labels. Others are reporter triage, your project issue filter, standing advisory issues and bot dependency dashboards.
+- **Actionable now** counts what is left: items Hive could work on now. It no longer includes the items that are your turn, such as unacknowledged agent proposals.
 - **Test coverage** appears at the end of the row when `HIVE_COVERAGE_BADGE_URL` is configured and readable. It shows the primary repository's current coverage and goal, using the same reading as the quality agent.
 - The last part of Outside is **hold-adjacent/other**. It is whatever is left after every named reason is counted. Hive cannot say more about these items.
 - The Outside tile exists on the v5 line only. On v6 the same items are part of the totals but have no tile of their own.
-- **Issues by band** groups tracked and held issues. The bands are Unclaimed, Claimed, Needs triage, Needs human and Confirm & close. The orange chip names the label that put an issue there, with one word per label: HUMAN (`needs-human`), DIRECTION (`needs-direction`), DECISION (`needs-decision`), SPEC (`needs-spec`), REPORTER (`needs-reporter-confirmation`), BLOCKED (`blocked`), DISCUSSING (`2-discussing`), EPIC (`Epic`) and UNTRIAGED (`needs-triage`). An issue in the Needs human band and an issue Hive has parked show the same word for the same label. When an issue has more than one of these labels, the chip uses the first one in that list and the others show as glyphs. Clicking a chip, on a card or in the legend, filters to every issue with that chip. Issues Hive has parked with `needs-human`, `needs-decision`, `needs-direction` or `needs-spec` count toward the "need human review" total in the section header. REPORTER issues are not counted there. The grey FILTERED chip is only for issues skipped by the project issue filter or an exempt label.
-- Unclaimed means nobody is assigned. Claimed means a person or a Hive worker took it. Needs triage means a Hive worker filed it and no person has approved it yet.
-- Needs human means a label such as `blocked` or `needs-decision` asks a person to act. Confirm & close means a worker thinks the issue is already done.
-- **PRs by band** groups open and held pull requests. The bands are Needs human, Merge-eligible, Blocked, In review, Open and Draft.
+- **Issues by band** plots every open issue the decision places in a slice. The slices are Your turn, To close, Waiting on someone else, Unclaimed and Claimed. The repository cards keep the Needs triage, Needs human and Confirm & close bands; the charts do not. A band is a display group named after what the item needs next. The orange chip names the label that put an issue there, with one word per label: HUMAN (`needs-human`), DIRECTION (`needs-direction`), DECISION (`needs-decision`), SPEC (`needs-spec`), REPORTER (`needs-reporter-confirmation`), BLOCKED (`blocked`), DISCUSSING (`2-discussing`), EPIC (`Epic`) and UNTRIAGED (`needs-triage`). An issue in the Needs human band and an issue Hive has parked show the same word for the same label. When an issue has more than one of these labels, the chip uses the first one in that list and the others show as glyphs. Clicking a chip, on a card or in the legend, filters to every issue with that chip. Issues Hive has parked with `needs-human`, `needs-decision`, `needs-direction` or `needs-spec` count toward the "need human review" total in the section header. REPORTER issues are not counted there. The grey FILTERED chip is only for issues skipped by the project issue filter or an exempt label.
+- Your turn plots the items that are your turn, except the ones to close, which are the To close slice. Waiting on someone else is as above. Unclaimed means nobody is assigned. Claimed means a person or a Hive worker took it.
+- **PRs by band** plots every open and held pull request in one slice: Your turn, To close, Waiting on someone else, Merge-eligible, Blocked, In review, Open or Draft.
 - Merge-eligible means the pull request passed every check Hive uses before merging. Blocked means a failed check, a merge conflict, or a blocking review verdict.
-- Hover any band in a chart to see its exact rule.
+- Hover any slice in a chart to see its exact rule. Each slice's ⬇ link exports the rows it counts.
 - The trend lines come from samples the hive takes on each status refresh, roughly every few minutes. Samples are kept for about 30 days and thinned to 96 points.
 - Your browser also keeps its own samples. When you filter by repository, only the browser's samples are used.
 
 **Numbers that look like they should match but do not.**
 
-- The band charts count more than Actionable now. The charts include items in "Needs human" and "Confirm & close". Actionable now leaves those out. So an issue chart can total 3 while Actionable now shows 2 issues.
-- The "PRs by band" chart puts held pull requests in "Needs human". The tiles count the same pull requests as Held. So the chart can show 4 needing a human while the Blocked / needs-human tile shows 0 pull requests.
+- The charts plot more than Actionable now: they include the items that are your turn and the ones waiting on someone else, each in its own slice. So an issue chart can total 8 while Actionable now shows 1 issue.
+- The charts leave out the open items that are neither your turn nor waiting on someone else and that the scanner filtered out; those only count as Outside.
 
-**What it is good for.** Look here first each day. A growing Actionable now means Hive has work to do. A growing Blocked / needs-human means people are the bottleneck. Click a tile to filter the Projects section to the items it counts. Then add the missing decision, remove a stale label, or close finished issues.
+**What it is good for.** Look here first each day. A growing Actionable now means Hive has work to do. A growing Your turn means people are the bottleneck. Click a tile to filter the Projects section to the items it counts. Then add the missing decision, remove a stale label, or close finished issues.
 
-**Example.** The tile reads `10 = 2 actionable + 0 held + 1 blocked + 7 outside`. Hive can work on 2 issues. One waits on a person. Seven were kept out by your filters. Hover the ⓘ mark on Outside to see that 2 are bot dependency dashboards. Those are expected and need no action.
+**Example.** The tile reads `10 = 2 actionable + 1 your turn + 7 outside`. Hive can work on 2 issues. One waits on you. Seven were kept out by your filters. Hover the ⓘ mark on Outside to see that 2 are bot dependency dashboards. Those are expected and need no action.
 
 **When it appears.** Always. The Overview section cannot be hidden.
 

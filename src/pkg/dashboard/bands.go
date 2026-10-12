@@ -213,22 +213,11 @@ func prBand(pr github.PullRequest, verdict *github.MergeVerdict, held bool, cfg 
 	role := prAgentRole(pr)
 	review := prGitHubReview(pr)
 	waiting := held || hasAnyLabel(labels, append(append([]string{}, prHumanGateLabels...), norm.WaitingLabels...)) || len(holdLabels(pr.Labels, hiveID)) > 0
-	eligible := (verdict != nil && verdict.State == github.MergeVerdictEligible) || prQueued(labels, autoMergeLabel)
-	blocked := (verdict != nil && verdict.State == github.MergeVerdictBlocked) || pr.Mergeable == github.MergeableNo || prCIFailing(pr)
-	inReview := (verdict != nil && verdict.State == github.MergeVerdictOutstanding) || pr.ReviewURL != "" || review != nil
+	eligible, blocked, inReview := prBandFlags(pr, verdict, labels, autoMergeLabel, review)
 
-	band := "open"
-	switch {
-	case waiting:
+	band := prMergeStateBand(pr, eligible, blocked, inReview)
+	if waiting {
 		band = "waiting"
-	case eligible:
-		band = "eligible"
-	case blocked:
-		band = "blocked"
-	case inReview:
-		band = "in-review"
-	case pr.Draft:
-		band = "draft"
 	}
 
 	signals := make([]Signal, 0)
@@ -289,6 +278,46 @@ func prBand(pr github.PullRequest, verdict *github.MergeVerdict, held bool, cfg 
 		signals = append(signals, Signal{Glyph: "🕒", Label: fmt.Sprintf("stale: no activity > %dd", norm.StaleDays)})
 	}
 	return PRBandInfo{Band: band, Role: role, Held: held, HoldReason: heldReason(pr.Labels, pr.HiveAttributed, hiveID, pr.ReporterTrustReason), Stale: stale, Signals: signals}
+}
+
+// prBandFlags reports the merge-state facts every PR band is chosen from.
+func prBandFlags(pr github.PullRequest, verdict *github.MergeVerdict, labels map[string]bool, autoMergeLabel string, review *prReviewInfo) (eligible, blocked, inReview bool) {
+	eligible = (verdict != nil && verdict.State == github.MergeVerdictEligible) || prQueued(labels, autoMergeLabel)
+	blocked = (verdict != nil && verdict.State == github.MergeVerdictBlocked) || pr.Mergeable == github.MergeableNo || prCIFailing(pr)
+	inReview = (verdict != nil && verdict.State == github.MergeVerdictOutstanding) || pr.ReviewURL != "" || review != nil
+	return eligible, blocked, inReview
+}
+
+// prMergeStateBand is the PR band once the waiting rule is out of the way.
+func prMergeStateBand(pr github.PullRequest, eligible, blocked, inReview bool) string {
+	switch {
+	case eligible:
+		return "eligible"
+	case blocked:
+		return "blocked"
+	case inReview:
+		return "in-review"
+	case pr.Draft:
+		return "draft"
+	}
+	return "open"
+}
+
+// prChartBand is the band a PR gets with the waiting rule skipped. The
+// Overview charts and the Actionable-now equation use it for PRs the
+// ownership decision leaves in no slice of its own (hivecommons/hive#11507).
+func prChartBand(pr github.PullRequest, verdict *github.MergeVerdict, autoMergeLabel string) string {
+	eligible, blocked, inReview := prBandFlags(pr, verdict, labelSet(pr.Labels), autoMergeLabel, prGitHubReview(pr))
+	return prMergeStateBand(pr, eligible, blocked, inReview)
+}
+
+// issueChartBand is the band an issue gets with the waiting, agent-filed and
+// done rules skipped: Claimed when someone has it, otherwise Unclaimed.
+func issueChartBand(issue github.Issue) string {
+	if len(issue.Assignees) > 0 || issueClaimed(issue.Labels) || issueLinkedPRState(issue).open {
+		return "in-progress"
+	}
+	return "ready"
 }
 
 type prReviewInfo struct{ glyph, label string }
