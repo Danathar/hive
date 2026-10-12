@@ -633,3 +633,71 @@ for (const [slice, want] of [['your-turn', 'your-turn'], ['to-close', 'your-turn
 		t.Fatalf("browser agreement failed: %v\n%s", err, out)
 	}
 }
+
+// The PR term follows the spec's term order from the facts, not the
+// merge-state band: a draft stays outside even when GitHub reports a review
+// decision (which puts it in the in-review band), and a conflicting or
+// failing PR is blocked even when it carries the auto-merge label (which puts
+// it in the eligible band).
+func TestOverviewPRTermClassifiesFromFacts11567(t *testing.T) {
+	at := fixtureTime11567()
+	pr := func(number int, mutate func(*github.PullRequest)) github.PullRequest {
+		p := github.PullRequest{Repo: "o/a", Number: number, Title: "pr", CreatedAt: at, UpdatedAt: at}
+		mutate(&p)
+		return p
+	}
+	reviewRequired := &github.ProtectionFacts{ReviewDecision: github.ReviewDecisionReviewRequired}
+	status := &StatusPayload{Repos: []FrontendRepo{{
+		Name: "a", Full: "o/a", PRs: 5,
+		OpenPrs: []any{
+			FrontendPR{PullRequest: pr(1, func(p *github.PullRequest) {})},
+			FrontendPR{PullRequest: pr(2, func(p *github.PullRequest) { p.Draft = true; p.Protection = reviewRequired })},
+			FrontendPR{PullRequest: pr(3, func(p *github.PullRequest) {
+				p.Labels = []string{github.AutoMergeQueuedLabel}
+				p.Mergeable = github.MergeableNo
+			})},
+			FrontendPR{PullRequest: pr(4, func(p *github.PullRequest) {
+				p.Labels = []string{github.AutoMergeQueuedLabel}
+				p.CIStatus = "failing"
+				p.FailingChecks = []string{"build"}
+			})},
+			FrontendPR{PullRequest: pr(5, func(p *github.PullRequest) { p.Draft = true })},
+		},
+		WorkBreakdown: &github.RepoWorkBreakdown{PRs: github.RepoPRBreakdown{Actionable: 3, Draft: 2}},
+	}}}
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+	resp := newTestServer().statusWithOverviewBands(status, overviewFixtureNow11567)
+
+	if got := overviewPRTerm(nil, false, pr(2, func(p *github.PullRequest) { p.Draft = true; p.Protection = reviewRequired }), nil, ""); got != overviewTermOutside {
+		t.Fatalf("draft with REVIEW_REQUIRED term = %q, want outside", got)
+	}
+	if got := overviewPRTerm(nil, false, pr(3, func(p *github.PullRequest) {
+		p.Labels = []string{github.AutoMergeQueuedLabel}
+		p.Mergeable = github.MergeableNo
+	}), nil, ""); got != overviewTermBlocked {
+		t.Fatalf("auto-merge-labelled conflicting PR term = %q, want blocked", got)
+	}
+
+	wantTerm := map[int]string{1: "actionable", 2: "outside", 3: "blocked", 4: "blocked", 5: "outside"}
+	gotTerm := map[int]string{}
+	for _, raw := range resp.Repos[0].OpenPrs {
+		row, ok := raw.(overviewStatusPR)
+		if !ok {
+			t.Fatalf("open PR row is %T, want overviewStatusPR", raw)
+		}
+		gotTerm[row.Number] = row.OverviewTerm
+	}
+	for number, want := range wantTerm {
+		if gotTerm[number] != want {
+			t.Errorf("PR #%d term = %q, want %s", number, gotTerm[number], want)
+		}
+	}
+	eq := resp.ActionableNow.PREquation
+	if eq == nil {
+		t.Fatal("missing PR equation")
+	}
+	counts := eqTermCounts11567(eq)
+	if eq.Result != 1 || counts["blocked"] != 2 || counts["outside"] != 2 {
+		t.Fatalf("PR equation = %s, want 1 actionable + 2 blocked + 2 outside (counts %v)", eq.Text, counts)
+	}
+}

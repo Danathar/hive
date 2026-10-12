@@ -153,18 +153,23 @@ func overviewNonActionableTerm(o *Ownership) string {
 	return overviewTermOutside
 }
 
-// overviewPRTerm is the equation term of a PR on the open or held list;
-// chartBand is its band with the waiting rule skipped.
-func overviewPRTerm(o *Ownership, held bool, chartBand string) string {
+// overviewPRTerm is the equation term of a PR on the open or held list. After
+// the ownership terms and held, a PR is blocked when it has a blocked verdict,
+// merge conflicts or failing CI, outside when it is a draft, and actionable
+// otherwise. It reads the facts, not the merge-state band, so a draft with a
+// GitHub review decision or an auto-merge-labelled conflicting PR is
+// classified by what it is.
+func overviewPRTerm(o *Ownership, held bool, pr github.PullRequest, verdict *github.MergeVerdict, autoMergeLabel string) string {
 	if term := overviewOwnershipTerm(o); term != "" {
 		return term
 	}
-	switch {
-	case held:
+	if held {
 		return overviewTermHeld
-	case chartBand == "blocked":
+	}
+	if _, blocked, _ := prBandFlags(pr, verdict, labelSet(pr.Labels), autoMergeLabel, prGitHubReview(pr)); blocked {
 		return overviewTermBlocked
-	case chartBand == "draft":
+	}
+	if pr.Draft {
 		return overviewTermOutside
 	}
 	return overviewTermActionable
@@ -319,7 +324,7 @@ func overviewPartitionOf(status *StatusPayload, autoMergeLabel string) overviewP
 					cause = waitingCauseHold
 				}
 				isHeld := held || len(holdLabels(entry.pr.Labels, status.HiveID)) > 0
-				part.prs.add(overviewPRTerm(o, isHeld, prChartBand(entry.pr, entry.verdict, autoMergeLabel)), o, cause)
+				part.prs.add(overviewPRTerm(o, isHeld, entry.pr, entry.verdict, autoMergeLabel), o, cause)
 			}
 		}
 		prRows(repo.OpenPrs, false)

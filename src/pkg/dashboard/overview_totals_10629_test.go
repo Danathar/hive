@@ -56,7 +56,7 @@ func TestOverviewActionableEquationPartitionsOpenWork(t *testing.T) {
 			github.Issue{Repo: "hivecommons/hive", Number: 3, Title: "needs human", Labels: []string{"needs-human"}},
 			github.Issue{Repo: "hivecommons/hive", Number: 4, Title: "covered by PR", Labels: []string{"hive/covered-by-pr"}},
 		},
-		HeldIssues: []any{github.HoldItem{Repo: "hivecommons/hive", Number: 5, Type: "issue", Labels: []string{"hold"}}},
+		HeldIssues: []any{github.HoldItem{Repo: "hivecommons/hive", Number: 5, Type: "issue", Labels: []string{"hold"}, HoldSources: []string{github.HoldSourcePerson}}},
 		OpenPrs: []any{
 			FrontendPR{PullRequest: github.PullRequest{Repo: "hivecommons/hive", Number: 10, Title: "open"}},
 			FrontendPR{PullRequest: github.PullRequest{Repo: "hivecommons/hive", Number: 11, Title: "dependency blocked", Mergeable: github.MergeableNo}},
@@ -70,7 +70,7 @@ func TestOverviewActionableEquationPartitionsOpenWork(t *testing.T) {
 	}}}
 
 	// L5: the parked needs-human issue and the Hive-verified-done issue are
-	// your turn, the held issue (no recorded source) is a person's hold, and
+	// your turn, the held issue is a person's hold (recorded source), and
 	// the held PR's hold source is unknown, so it is your turn.
 	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
 	got := (&Server{}).statusWithOverviewBands(status, now).ActionableNow
@@ -273,7 +273,7 @@ func TestGovernorActionableSplitsShareOverviewPartition(t *testing.T) {
 			github.Issue{Repo: "hivecommons/hive", Number: 3, Title: "needs human", Labels: []string{"needs-human"}},
 			github.Issue{Repo: "hivecommons/hive", Number: 4, Title: "confirm close", Labels: []string{"hive/likely-done"}},
 		},
-		HeldIssues: []any{github.HoldItem{Repo: "hivecommons/hive", Number: 5, Type: "issue", Labels: []string{"hold"}}},
+		HeldIssues: []any{github.HoldItem{Repo: "hivecommons/hive", Number: 5, Type: "issue", Labels: []string{"hold"}, HoldSources: []string{github.HoldSourcePerson}}},
 		OpenPrs: []any{
 			FrontendPR{PullRequest: github.PullRequest{Repo: "hivecommons/hive", Number: 10, Title: "open"}},
 			FrontendPR{PullRequest: github.PullRequest{Repo: "hivecommons/hive", Number: 11, Title: "blocked", Mergeable: github.MergeableNo}},
