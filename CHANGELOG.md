@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-12 (v5.161.5)
+
+### Changed
+
+- images: bump omp 18.9.1 -> 18.10.1 (#11562)
+
 ## 2026-10-12 (v5.161.4)
 
 ### Fixed
