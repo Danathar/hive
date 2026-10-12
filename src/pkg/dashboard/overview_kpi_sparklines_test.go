@@ -192,7 +192,7 @@ function repoItemNeedsHuman(item){ return ((item && item.labels) || []).some(l =
 		"overviewEquationTermCount", "overviewOutsideBreakdownText", "renderOverviewTotalPartitionSubline", "renderOverviewSplitSubline",
 		"overviewEquationTermDefs", "overviewKPICombinedEquation", "overviewKPILocalEquations", "overviewKPIKindEquation", "overviewKPISparkTitle", "overviewKPISpark", "overviewKPICurrentSample",
 		"overviewCoverageInfo", "overviewCoverageState", "overviewCoverageColor", "overviewCoverageInfoHTML", "overviewCoverageBar", "overviewCoverageCard", "renderOverviewCoverageKPI",
-		"overviewProjectFilterSpec", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries", "overviewProjectBucketCount",
+		"overviewProjectFilterSpec", "repoCardParkedIssues", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries", "overviewProjectBucketCount",
 		"overviewNonActionableMoved", "overviewProjectOutsideIssueCount", "overviewProjectOutsidePRCount", "overviewProjectFilterMatchesEntry", "overviewProjectFilterRepoMatches",
 		"overviewProjectFilterSummary", "renderOverviewKPIs",
 	} {

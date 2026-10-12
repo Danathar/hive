@@ -19,9 +19,9 @@ func TestRepoCardIssueBandsStaticWiring(t *testing.T) {
 		"function repoCardIssueRenderedCount(groups)",
 		"const repoIssueGroups = repoCardIssueGroups(r, overviewIssueKeys);",
 		"${r.issues >= 0 ? r.issues : '?'}",
-		"const issuePills = repoIssueGroups.issueGroups.map(g => {",
-		"const nonActionableIssuePills = repoIssueGroups.nonActionableIssueGroups.map(g => {",
-		"repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i))",
+		"const issuePills = collapseView.issueGroups.map(g => {",
+		"const nonActionableIssuePills = collapseView.nonActionableGroups.map(g => {",
+		"repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i), i)",
 		"info.chip || issueBandShortLabel(info.band)",
 		"spec.chip || spec.short",
 		"bucket === 'claimed_by_pr'",
@@ -103,6 +103,7 @@ function issueBandSpec(band) {
   return { label: 'Label ' + band, short: 'band-' + band, rule: 'rule ' + band };
 }
 function issueBandTip(band) { return 'tip ' + band; }
+const YOUR_TURN_GLYPH = '[marker]';
 function repoPillFilterAttrs() { return ''; }
 function repoPillFilterState() { return { mode: 'any', kinds: [] }; }
 function repoPillFilterActive() { return false; }
@@ -115,7 +116,8 @@ function repoPillFilterActive() { return false; }
 renderRepoLegend();
 assert.equal(legendEl.className, 'repo-legend repo-legend-v2');
 const out = legendEl.innerHTML;
-assert.match(out, /needs you/);
+assert.match(out, /waiting \/ gated/);
+assert.doesNotMatch(out, /needs you|needs human|need human review/i);
 assert.match(out, /in progress \/ outstanding/);
 assert.match(out, /ready \/ done/);
 assert.match(out, /agent-filed/);
@@ -127,7 +129,7 @@ assert.match(out, /Review, links &amp; actions/);
 assert.deepEqual(bandCalls.slice(0, OVERVIEW_ISSUE_BAND_ORDER.length), OVERVIEW_ISSUE_BAND_ORDER);
 for (const band of OVERVIEW_ISSUE_BAND_ORDER) assert.match(out, new RegExp('band-' + band));
 assert.match(out, /<span>nobody on it/);
-assert.match(out, /any other waiting label/);
+assert.match(out, /parked by a label/);
 for (const chip of ['HUMAN', 'DIRECTION', 'DECISION', 'SPEC', 'REPORTER', 'BLOCKED', 'DISCUSSING', 'EPIC', 'UNTRIAGED']) {
   assert.equal((out.match(new RegExp('>' + chip + '<', 'g')) || []).length, 1, chip);
   assert.ok(chip.length <= 10, chip);
@@ -159,9 +161,11 @@ func TestRepoCardIssueGroupsCoverHeaderIssueTotal(t *testing.T) {
 	}
 	funcs := []string{
 		"repoItemNeedsHuman",
-		"repoParkedIssueSpecs",
-		"repoParkedIssueReason",
-		"gHasNeedsHuman",
+		"yourTurnOf",
+		"yourTurnFirst",
+		"repoCardParkedIssues",
+		"repoCardTrackedIssues",
+		"repoCardUntrackedIssues",
 		"issueBandRank",
 		"issueUpdatedAt",
 		"groupedRepoIssues",
@@ -176,7 +180,7 @@ const assert = require('node:assert/strict');
 const window = { _lastStatus: { overview_bands: { issues: [
   { key: 'ready', label: 'Ready', short: 'ready', rule: 'ready work' },
   { key: 'in-progress', label: 'In progress', short: 'claimed', rule: 'claimed work' },
-  { key: 'waiting', label: 'Needs human', short: 'human', rule: 'human gate' },
+  { key: 'waiting', label: 'Parked', short: 'parked', rule: 'parked by label' },
   { key: 'agent-filed', label: 'Agent filed', short: 'agent', rule: 'agent filed' },
   { key: 'done', label: 'Done', short: 'done', rule: 'done' }
 ] } } };
@@ -219,13 +223,9 @@ const groups = repoCardIssueGroups(repo, null);
 const headerTotal = Object.values(repo.workBreakdown.issues).reduce((n, v) => n + Number(v || 0), 0);
 assert.equal(headerTotal, repo.issues);
 assert.equal(repoCardIssueRenderedCount(groups), headerTotal);
-assert.deepEqual(groups.issueGroups.map(g => [g.band, g.issues.length]), [['waiting', 1], ['ready', 2], ['in-progress', 2], ['agent-filed', 1], ['done', 1]]);
+assert.deepEqual(groups.issueGroups.map(g => [g.band, g.issues.length]), [['ready', 2], ['in-progress', 2], ['agent-filed', 1], ['waiting', 1], ['done', 1]]);
 assert.deepEqual(groups.nonActionableIssueGroups.map(g => [g.key, g.issues.length]), [['hive_advisory', 1], ['filtered', 3], ['reporter_triage', 1], ['claimed_by_pr', 2]]);
 for (const [reason, key, short, waiting] of [
-  ['needs-human', 'needs_human', 'human', true],
-  ['needs-decision', 'needs_decision', 'decision', true],
-  ['needs-direction', 'needs_direction', 'direction', true],
-  ['needs-spec', 'needs_spec', 'spec', true],
   ['needs-reporter-confirmation', 'reporter_confirmation', 'reporter', true],
   ['Exempt label', 'filtered', 'filtered', undefined],
   ['Project issue filter', 'filtered', 'filtered', undefined],
@@ -236,8 +236,9 @@ for (const [reason, key, short, waiting] of [
   assert.equal(spec.chip, waiting ? short : undefined, reason);
   assert.equal(spec.waiting, waiting, reason);
 }
-assert.equal(repoNonActionableIssueBucketSpec({ bucket: 'filtered', labels: ['needs-human'] }).chip, 'human');
-assert.equal(repoNonActionableIssueBucketSpec({ bucket: 'filtered', labels: ['needs-spec'] }).key, 'needs_spec');
+// No group title says whose turn it is.
+for (const g of groups.nonActionableIssueGroups) assert.doesNotMatch(g.label + ' ' + g.tip, /needs human|need human review|needs you/i);
+assert.equal(repoNonActionableIssueBucketSpec({ bucket: 'filtered', reason: 'Exempt label', labels: ['needs-human'] }).label, 'Labelled needs-human');
 const seen = new Set();
 for (const group of groups.issueGroups) for (const entry of group.issues) assert.equal(seen.has(entry.issue.number), false), seen.add(entry.issue.number);
 for (const group of groups.nonActionableIssueGroups) for (const issue of group.issues) assert.equal(seen.has(issue.number), false), seen.add(issue.number);

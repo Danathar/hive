@@ -644,6 +644,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 		}
 		repo.Ownership = decisions
 		repo.ownershipURLs = urls
+		repo.ACMMLevel = env.levelFor(repoName)
 	}
 	// Grouped by verb; within a group least-recently-active first, ties
 	// broken by repository name and then item number.

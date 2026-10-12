@@ -3,6 +3,7 @@ package dashboard
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
@@ -109,6 +110,22 @@ func nonActionableIssueBand(item github.RepoWorkIssue) string {
 		return "waiting"
 	}
 	return ""
+}
+
+// nonActionableIssueInfo is the band facts of a non-actionable issue row, the
+// same as any other issue row (chip, signals, stale flag, agent role). The
+// hard-suppress bucket decides the band, not the configurable waiting-label
+// list; a parked row with no chip of its own takes its reason's label chip.
+func nonActionableIssueInfo(item github.RepoWorkIssue, repoName string, cfg config.DashboardIssueBandsConfig, now time.Time, selfAuthorizationHoldActive func(string) bool) IssueBandInfo {
+	info := IssueBand(github.Issue{
+		Repo: nonEmpty(item.Repo, repoName), Number: item.Number, Title: item.Title, Author: item.Author,
+		Labels: item.Labels, Assignees: item.Assignees, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, URL: item.URL,
+	}, false, cfg, now, selfAuthorizationHoldActive)
+	info.Band = nonActionableIssueBand(item)
+	if info.Band != "" && info.Chip == "" {
+		info.Chip = issueLabelChip(labelSet([]string{item.Reason}))
+	}
+	return info
 }
 
 // Equation terms. A row's term is the first one it matches, in this order.

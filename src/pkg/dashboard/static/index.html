@@ -1774,8 +1774,48 @@
        "reviewed" chip beside a blocked PR would read as approval. */
     .repo-pr-pill.pill-reviewed { --component-status: var(--status-neutral); --pill-c: var(--status-neutral); flex: 0 0 auto; font-weight: 600; white-space: nowrap; opacity: 0.85; }
     .repo-pr-pill.pill-reviewed:hover { opacity: 1; }
-    /* Section-header counter: "· N need human review" next to the host badge. */
+    /* Section-header counter: "· N your turn · M to close" next to the host badge — the inbox's own counts. */
     .repos-needs-human-count { display: none; font-size: var(--fs-2xs); font-weight: 600; vertical-align: middle; margin-left: var(--sp-3); color: var(--orange); }
+    /* "Your turn" (#11507): the your-turn marker, its menu, the hover/focus tip, the inbox strip and the
+       L5/L6 collapse line. Meaning is carried by the glyph and its accessible name, never by colour
+       or motion alone; nothing here animates. */
+    .repo-pill-lead { display: inline-flex; align-items: center; gap: var(--sp-1); }
+    /* A row that carries the marker widens its chip column by the marker, so the chip is not squeezed. */
+    .repo-issue-pill-wrap:has(> .repo-pill-lead), .repo-pr-pill-wrap:has(> .repo-pill-lead) { grid-template-columns: minmax(6.2rem, max-content) minmax(6rem, 1fr) max-content; }
+    .yt-menu-btn { font: inherit; cursor: pointer; }
+    .yt-marker, .yt-legend-marker { flex: 0 0 auto; border: 1px solid var(--status-attention); border-radius: var(--r-sm, 4px); background: color-mix(in srgb, var(--status-attention) 14%, transparent); color: var(--fg); padding: 0 var(--sp-2); font-size: var(--fs-sm); line-height: 1.3; }
+    .yt-marker:hover, .yt-legend-marker:hover, .yt-marker[aria-expanded="true"] { background: color-mix(in srgb, var(--status-attention) 30%, transparent); }
+    .yt-menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .yt-tip { position: fixed; z-index: 10001; max-width: min(28rem, 90vw); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-md, 6px); background: var(--surface-2); color: var(--fg); font-size: var(--fs-xs); box-shadow: 0 4px 14px rgba(0,0,0,0.35); pointer-events: none; }
+    .yt-tip[hidden] { display: none; }
+    .yt-menu { position: fixed; z-index: 10002; display: flex; flex-direction: column; gap: var(--sp-1); min-width: 14rem; max-width: min(30rem, 92vw); padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-md, 6px); background: var(--surface-2); color: var(--fg); font-size: var(--fs-xs); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+    .yt-menu-head { padding: var(--sp-1) var(--sp-2) var(--sp-2); border-bottom: 1px solid var(--border); }
+    .yt-verb { font-weight: 800; letter-spacing: 0.06em; }
+    .yt-reason { color: var(--muted); }
+    .yt-item { display: block; width: 100%; text-align: left; border: 0; border-radius: var(--r-sm, 4px); background: transparent; color: var(--fg); padding: var(--sp-2); font: inherit; text-decoration: none; cursor: pointer; }
+    .yt-item:hover, .yt-item:focus-visible { background: color-mix(in srgb, var(--accent) 22%, transparent); outline: none; }
+    .yt-copy { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: 0 var(--sp-2); }
+    .yt-copy code { overflow-wrap: anywhere; }
+    .yt-copy .yt-item { width: auto; flex: 0 0 auto; border: 1px solid var(--border); }
+    .yt-note { padding: var(--sp-1) var(--sp-2); color: var(--muted); }
+    .yt-inbox { margin: var(--sp-0) var(--sp-0) var(--sp-4); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); }
+    .yt-inbox-head { font-size: var(--fs-xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .yt-inbox-empty { margin-top: var(--sp-2); color: var(--muted); font-size: var(--fs-sm); }
+    .yt-inbox-body { margin-top: var(--sp-2); max-height: min(24rem, 50vh); overflow-y: auto; }
+    .yt-inbox-group-title { margin: var(--sp-2) var(--sp-0) var(--sp-1); color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .yt-inbox-row { display: grid; grid-template-columns: minmax(7rem, 11rem) minmax(0, 1.4fr) 5.5rem minmax(0, 2fr) 15rem; align-items: baseline; gap: var(--sp-1) var(--sp-3); padding: var(--sp-1) var(--sp-0); font-size: var(--fs-sm); }
+    .yt-inbox-end { display: inline-flex; align-items: baseline; gap: var(--sp-3); justify-self: end; }
+    @media (max-width: 800px) { .yt-inbox-row { grid-template-columns: minmax(0, 1fr) max-content; } .yt-inbox-title, .yt-inbox-reason-cell { grid-column: 1 / -1; } }
+    .yt-inbox-repo { color: var(--muted); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .yt-inbox-title { color: inherit; text-decoration: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .yt-inbox-title:hover { text-decoration: underline; }
+    .yt-verdict { color: var(--muted); font-size: var(--fs-xs); }
+    .yt-inbox-btn { flex: 0 0 auto; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg); color: var(--muted); padding: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); }
+    .yt-inbox-btn:hover, .yt-inbox-btn[aria-expanded="true"] { color: var(--fg); border-color: var(--accent); }
+    .yt-collapse { margin: var(--sp-0) var(--sp-0) var(--sp-2); }
+    .yt-collapse-btn { width: 100%; text-align: left; border: 1px dashed var(--border); border-radius: var(--r-md, 6px); background: transparent; color: var(--muted); padding: var(--sp-2) var(--sp-3); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+    .yt-collapse-btn:hover { color: var(--fg); border-color: var(--accent); }
+    .yt-collapse-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .repo-legend { margin: var(--sp-0) var(--sp-0) var(--sp-4); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); }
     .repo-legend-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); margin-bottom:var(--sp-3); }
     .repo-legend-title { font-size:var(--fs-xs); font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:var(--amber); }
@@ -4977,7 +5017,7 @@
   <div class="cost-usage mb-8" id="cost-panel" data-dashboard-section="cost-panel"></div>
 
   <div class="repos" id="repos-section" data-dashboard-section="repos-section">
-    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Projects section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> Projects <span id="repos-host-badge" title="Every project in this hive is on this provider host" style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:var(--sp-3)"></span> <span id="repos-needs-human" class="repos-needs-human-count" title="Open PRs labeled needs-human: a human-only gate or exhausted fix attempts requires operator review"></span></h2>
+    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><button type="button" class="dashboard-grip" data-dashboard-grip data-stop="1" aria-label="Move Projects section" aria-pressed="false">⠿</button><span class="section-chevron">▼</span> Projects <span id="repos-host-badge" title="Every project in this hive is on this provider host" style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:var(--sp-3)"></span> <span id="repos-needs-human" class="repos-needs-human-count" title="Items that are your turn and, after the second dot, the ones to close — the same counts as the Your turn strip below"></span></h2>
     <div class="section-body">
       <div class="repos-toolbar" id="repos-toolbar" aria-label="Project actions">
         <span id="repos-overview-filter-chip" class="repo-filtered-chip" hidden></span>
@@ -4992,6 +5032,7 @@
            at enumeration — this note only surfaces the active policy. -->
       <div id="repos-issue-filter" style="display:none;font-size:var(--fs-sm);color:var(--muted);margin:var(--sp-0) var(--sp-0) var(--sp-4)"></div>
       <div id="swarm-panel" class="swarm-panel"></div>
+      <div id="repos-inbox" class="yt-inbox" role="region" aria-labelledby="yt-inbox-head"></div>
       <div class="repo-grid" id="repos"></div>
     </div>
   </div>
@@ -14075,9 +14116,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function repoIssueChipKind(chip) {
       return 'issue:chip-' + String(chip || '').toLowerCase();
     }
-    function repoNonActionableIssueKinds(spec) {
+    function repoNonActionableIssueKinds(spec, row) {
       const kinds = ['issue:non-actionable', 'issue:' + spec.key];
       if (spec.chip) kinds.push(repoIssueChipKind(spec.chip));
+      if (yourTurnOf(row)) kinds.push('your-turn');
       return kinds;
     }
     function repoIssueFilterKinds(issue, info, held) {
@@ -14094,12 +14136,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (info && info.role) kinds.push('issue:role');
       if (issueIsStale(issue)) kinds.push('issue:stale');
       if (Array.isArray(issue && issue.linked_prs) && issue.linked_prs.length) kinds.push('issue:linked-pr');
+      if (yourTurnOf(issue)) kinds.push('your-turn');
       return kinds;
     }
     function repoPRFilterKinds(pr, held, info) {
       const labels = prLabelSet(pr || {});
       const kinds = [];
       const mergeState = prMergeState(pr || {});
+      if (yourTurnOf(pr)) kinds.push('your-turn');
       if (mergeState === 'eligible') kinds.push('pr:eligible');
       if (mergeState === 'outstanding') kinds.push('pr:outstanding');
       if (labels.has('needs-human')) kinds.push('needs-human', 'pr:needs-human');
@@ -14132,11 +14176,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       el.className = 'repo-legend repo-legend-v2' + (collapsed ? ' collapsed' : '');
       const cfg = repoIssueBandConfig();
       const issueCaptions = {
-        ready: 'nobody on it — pick up or assign',
+        ready: 'nobody on it',
         'in-progress': 'assigned to a human or agent',
         'agent-filed': 'agent-filed, not yet acknowledged',
-        waiting: 'any other waiting label — known labels show their own chip below',
-        done: 'agent thinks it landed — confirm & close'
+        waiting: 'parked by a label — known labels show their own chip below',
+        done: 'agent thinks it landed'
       };
       const issueBandLegendEntries = OVERVIEW_ISSUE_BAND_ORDER.map(band => {
         const spec = issueBandSpec(band);
@@ -14154,10 +14198,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           title: 'Issues — left chip is the band',
           entries: issueBandLegendEntries.concat([
             { cls: 'repo-issue-pill held', kind: 'issue:filtered', label: 'FILTERED', caption: 'skipped by the issue filter or an exempt label', tip: 'Excluded by the project issue filter or an exempt label' },
-            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('human'), label: 'HUMAN', caption: 'needs-human — waiting on a person', tip: 'Labelled needs-human — waiting on a person' },
-            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('direction'), label: 'DIRECTION', caption: 'needs-direction — parked for maintainer direction', tip: 'Parked by Hive for maintainer direction — reply `/hive approve` or `/hive decision <text>`' },
-            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('decision'), label: 'DECISION', caption: 'needs-decision — parked for a maintainer decision', tip: 'Parked by Hive for a maintainer decision — reply `/hive approve` or `/hive decision <text>`' },
-            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('spec'), label: 'SPEC', caption: 'needs-spec — parked until it has a spec', tip: 'Parked by Hive until it has a spec — reply `/hive approve` or `/hive decision <text>`' },
+            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('human'), label: 'HUMAN', caption: 'needs-human — parked by label', tip: 'Labelled needs-human' },
+            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('direction'), label: 'DIRECTION', caption: 'needs-direction — parked by Hive', tip: 'Labelled needs-direction: Hive parked this issue' },
+            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('decision'), label: 'DECISION', caption: 'needs-decision — parked by Hive', tip: 'Labelled needs-decision: Hive parked this issue' },
+            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('spec'), label: 'SPEC', caption: 'needs-spec — parked until it has a spec', tip: 'Labelled needs-spec: Hive parked this issue until it has a spec' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('reporter'), label: 'REPORTER', caption: 'needs-reporter-confirmation — waiting on the reporter', tip: 'Waiting on the reporter to confirm' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('blocked'), label: 'BLOCKED', caption: 'blocked', tip: 'Labelled blocked' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('discussing'), label: 'DISCUSSING', caption: '2-discussing — still under discussion', tip: 'Labelled 2-discussing' },
@@ -14172,9 +14216,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           entries: [
             { cls: 'repo-pr-pill mergeable', kind: 'pr:eligible', glyph: '✓', glyphCls: 'pill-merge-icon', label: 'eligible', caption: 'sweep would merge now', tip: 'Merge-eligible on the sweep verdict' },
             { cls: 'repo-pr-pill merge-outstanding', kind: 'pr:outstanding', glyph: '◐', glyphCls: 'pill-merge-icon', label: 'outstanding', caption: 'mergeable, sweep still wants something', tip: 'GitHub says mergeable, but the sweep still wants something' },
-            { cls: 'repo-pr-pill sentinel-flagged', kind: 'pr:sentinel', label: 'sentinel', caption: 'sentinel flagged it (possible security override, privilege escalation or codebase damage) — Hive will not merge it until a maintainer reviews it and removes the label; trusted-author PRs usually get a comment, not red', tip: 'The sentinel flagged this PR for a possible security override, privilege escalation or codebase damage. Hive will not merge it until a maintainer reviews it and removes the sentinel label. Red means the PR carries the label, so trusted-author PRs (which normally get a sentinel comment instead of the label) are usually not red.' },
-            { cls: 'repo-pr-pill needs-human pill-icon', kind: 'needs-human', glyph: '⚠', caption: 'fix attempts exhausted — review it', tip: 'Automated fix attempts exhausted — human review required' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:held', glyph: '⏸', caption: 'waiting on a human', tip: 'Held / waiting on a human' },
+            { cls: 'repo-pr-pill sentinel-flagged', kind: 'pr:sentinel', label: 'sentinel', caption: 'sentinel flagged it (possible security override, privilege escalation or codebase damage) — Hive will not merge it while the sentinel label is on; trusted-author PRs usually get a comment, not red', tip: 'The sentinel flagged this PR for a possible security override, privilege escalation or codebase damage. Hive will not merge it while the sentinel label is on. Red means the PR carries the label, so trusted-author PRs (which normally get a sentinel comment instead of the label) are usually not red.' },
+            { cls: 'repo-pr-pill needs-human pill-icon', kind: 'needs-human', glyph: '⚠', caption: 'labelled needs-human — fix attempts exhausted', tip: 'Labelled needs-human: automated fix attempts exhausted' },
+            { cls: 'repo-pr-pill pill-icon', kind: 'pr:held', glyph: '⏸', caption: 'held — automation skips it', tip: 'Held: automation skips it until the hold is released' },
             { cls: 'repo-pr-pill pill-icon', kind: 'pr:ci', label: '✗ CI', caption: 'failing checks (hover lists them)', tip: 'Failing CI; tooltip lists failing checks' },
             { cls: 'repo-pr-pill pill-icon', kind: 'pr:conflict', glyph: '⑂', caption: 'merge conflict', tip: 'Conflicts or not mergeable on GitHub' },
             { cls: 'repo-pr-pill', kind: 'pr:fix', label: 'FIX', labelCls: 'pill-class fix', caption: 'review class — FIX prioritized over FEAT/DOCS/…', tip: 'Review class badge: FIX is red; FEAT/TESTS/DOCS/REFACTOR show why the PR is prioritized' }
@@ -14192,7 +14236,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
             { cls: 'repo-issue-plan pill-icon', kind: 'issue:linked-pr', label: '🔗 #42', caption: 'on an issue: verified linked PR', tip: 'Verified linked pull request' },
             { cls: 'repo-pr-pill pill-icon', kind: 'pr:linked-issue', label: '🔗 #42', caption: 'on a PR: issue it closes on merge', tip: 'Issue this PR closes on merge (GitHub closing reference); opens the issue' },
             { cls: 'repo-issue-plan pill-icon plan-review', kind: 'issue:plan', glyph: '📋 📐', label: '●', caption: 'plan · design · plan awaiting review', tip: 'Plan this issue (clipboard icon); Design this issue before planning (ruler icon); Plan awaiting human review' },
-            { cls: 'repo-pr-pill mergeable pill-icon', kind: 'pr:queued', glyph: '🔀', caption: 'queued for auto-merge', tip: 'Queued for Hive auto-merge' }
+            { cls: 'repo-pr-pill mergeable pill-icon', kind: 'pr:queued', glyph: '🔀', caption: 'queued for auto-merge', tip: 'Queued for Hive auto-merge' },
+            { cls: 'yt-legend-marker', kind: 'your-turn', glyph: YOUR_TURN_GLYPH, caption: 'your turn — hover or focus a row’s marker for the verb and reason, click it for options', tip: 'Your turn: the item waits on you. This entry filters to those rows; the marker on a row opens that item’s menu.' }
           ]
         }
       ];
@@ -14202,7 +14247,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         return `<button type="button" class="${esc(item.cls)} repo-pill-filter-toggle" title="${esc(item.tip)}"${repoPillFilterAttrs(item.kind)}>${glyph}${label}</button><span>${esc(item.caption)}</span>`;
       };
       const colorKey = [
-        { label: 'needs you', colorCls: 'needs-you' },
+        { label: 'waiting / gated', colorCls: 'needs-you' },
         { label: 'in progress / outstanding', colorCls: 'in-progress' },
         { label: 'ready / done', colorCls: 'ready-done' },
         { label: 'agent-filed', colorCls: 'agent-filed' },
@@ -14315,11 +14360,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const parts = [];
       parts.push('On hold' + (held.length ? ' — label ' + held.map(l => '`' + l + '`').join(', ') : '') + ': agents will not act on this until the hold label is removed');
       if (item && item.reporter_trust_reason) {
-        parts.push(item.reporter_trust_reason + ', a maintainer must review this');
+        parts.push(item.reporter_trust_reason);
         return parts.join('; ');
       }
       if (item && item.hive_attributed) parts.push('opened by a hive agent — a generic `hold` here is usually the ACMM level gate; the dashboard hive-pause hold is only removed by an operator');
-      if (needsHuman) parts.push('needs-human: automated fix attempts exhausted, a human must review this');
+      if (needsHuman) parts.push('labelled needs-human: automated fix attempts exhausted');
       return parts.join('; ');
     }
 
@@ -14762,8 +14807,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         groups.get(key).prs.push({ pr: entry.pr, held: entry.held, info });
       });
       const out = Array.from(groups.values());
-      out.forEach(g => g.prs.sort((a, b) => Number(!repoItemNeedsHuman(a.pr)) - Number(!repoItemNeedsHuman(b.pr)) || prUpdatedAt(a.pr) - prUpdatedAt(b.pr) || prReviewClassRank(a.pr) - prReviewClassRank(b.pr) || prCreatedAt(a.pr) - prCreatedAt(b.pr) || Number(a.pr.number || 0) - Number(b.pr.number || 0)));
-      out.sort((a, b) => Number(!gHasNeedsHuman(a, 'prs')) - Number(!gHasNeedsHuman(b, 'prs')) || prBandRank(a.band) - prBandRank(b.band));
+      out.forEach(g => g.prs.sort((a, b) => yourTurnFirst(a.pr, b.pr) || prUpdatedAt(a.pr) - prUpdatedAt(b.pr) || prReviewClassRank(a.pr) - prReviewClassRank(b.pr) || prCreatedAt(a.pr) - prCreatedAt(b.pr) || Number(a.pr.number || 0) - Number(b.pr.number || 0)));
+      out.sort((a, b) => prBandRank(a.band) - prBandRank(b.band));
       return out;
     }
 
@@ -14799,8 +14844,18 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return { ready: 0, 'in-progress': 1, 'agent-filed': 2, waiting: 3, done: 4 }[band] ?? 9;
     }
 
-    function gHasNeedsHuman(group, key) {
-      return ((group && group[key]) || []).some(entry => repoItemNeedsHuman(entry.issue || entry.pr));
+    // The rows a card draws as ordinary issue rows: actionable, held, and the
+    // parked ones (server band `waiting` on a non-actionable row), so a parked
+    // issue gets the same plan, design, hold and linked-PR affordances and the
+    // same stale dimming as any other.
+    function repoCardParkedIssues(repo) {
+      return ((repo && repo.nonActionableIssues) || []).filter(i => i && i.band === 'waiting');
+    }
+    function repoCardTrackedIssues(repo) {
+      return ((repo && repo.actionableIssues) || []).concat((repo && repo.heldIssues) || [], repoCardParkedIssues(repo));
+    }
+    function repoCardUntrackedIssues(repo) {
+      return ((repo && repo.nonActionableIssues) || []).filter(i => i && i.band !== 'waiting');
     }
 
     function groupedRepoIssues(issues) {
@@ -14812,40 +14867,18 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         groups.get(key).issues.push({ issue, info });
       });
       const out = Array.from(groups.values());
-      out.forEach(g => g.issues.sort((a, b) => Number(!repoItemNeedsHuman(a.issue)) - Number(!repoItemNeedsHuman(b.issue)) || issueUpdatedAt(a.issue) - issueUpdatedAt(b.issue) || Number(a.issue.number || 0) - Number(b.issue.number || 0)));
-      out.sort((a, b) => Number(!gHasNeedsHuman(a, 'issues')) - Number(!gHasNeedsHuman(b, 'issues')) || issueBandRank(a.band) - issueBandRank(b.band));
+      out.forEach(g => g.issues.sort((a, b) => yourTurnFirst(a.issue, b.issue) || issueUpdatedAt(a.issue) - issueUpdatedAt(b.issue) || Number(a.issue.number || 0) - Number(b.issue.number || 0)));
+      out.sort((a, b) => issueBandRank(a.band) - issueBandRank(b.band));
       return out;
-    }
-
-    function repoParkedIssueSpecs() {
-      return {
-        'needs-human': { key: 'needs_human', label: 'Needs human', short: 'human', chip: 'human', tip: 'Labelled needs-human — waiting on a person, not dropped by a filter' },
-        'needs-decision': { key: 'needs_decision', label: 'Needs decision', short: 'decision', chip: 'decision', tip: 'Parked by Hive for a maintainer decision — reply `/hive approve` or `/hive decision <text>`' },
-        'needs-direction': { key: 'needs_direction', label: 'Needs direction', short: 'direction', chip: 'direction', tip: 'Parked by Hive for maintainer direction — reply `/hive approve` or `/hive decision <text>`' },
-        'needs-spec': { key: 'needs_spec', label: 'Needs spec', short: 'spec', chip: 'spec', tip: 'Parked by Hive until it has a spec — reply `/hive approve` or `/hive decision <text>`' },
-      };
-    }
-
-    // Reason sent by the server, falling back to the label for payloads without `reason`.
-    function repoParkedIssueReason(issue) {
-      const specs = repoParkedIssueSpecs();
-      const reason = String((issue && issue.reason) || '').toLowerCase();
-      if (specs[reason]) return reason;
-      if (reason) return '';
-      return Object.keys(specs).find(r => ((issue && issue.labels) || []).some(l => String(l).toLowerCase() === r)) || '';
     }
 
     function repoNonActionableIssueBucketSpec(issue) {
       const bucket = String((issue && issue.bucket) || 'other');
-      if (bucket === 'filtered') {
-        const parked = repoParkedIssueSpecs()[repoParkedIssueReason(issue)];
-        if (parked) return Object.assign({ rank: -1, waiting: true }, parked);
-        if (String((issue && issue.reason) || '').toLowerCase() === 'needs-reporter-confirmation') return { key: 'reporter_confirmation', label: 'Waiting on reporter', short: 'reporter', chip: 'reporter', rank: -1, waiting: true, tip: 'Waiting on the reporter to confirm — not dropped by a filter' };
-      }
-      if (bucket === 'filtered' && repoItemNeedsHuman(issue)) return { key: 'needs_human', label: 'Needs human', short: 'human', chip: 'human', rank: -1, waiting: true, tip: 'Labelled needs-human — waiting on a person, not dropped by a filter' };
+      if (bucket === 'filtered' && String((issue && issue.reason) || '').toLowerCase() === 'needs-reporter-confirmation') return { key: 'reporter_confirmation', label: 'Waiting on reporter', short: 'reporter', chip: 'reporter', rank: -1, waiting: true, tip: 'Waiting on the reporter to confirm — not dropped by a filter' };
+      if (bucket === 'filtered' && repoItemNeedsHuman(issue)) return { key: 'needs_human', label: 'Labelled needs-human', short: 'human', chip: 'human', rank: -1, waiting: true, tip: 'Labelled needs-human — not dropped by a filter' };
       if (bucket === 'hive_advisory') return { key: bucket, label: 'Advisory', short: 'advisory', rank: 0, tip: 'Hive advisory report — counted, but not agent work' };
       if (bucket === 'filtered') return { key: bucket, label: 'Filtered', short: 'filtered', rank: 1, tip: 'Excluded by the project issue filter or an exempt label' };
-      if (bucket === 'reporter_triage') return { key: bucket, label: 'Needs triage', short: 'triage', rank: 2, tip: 'Waiting for a maintainer triage/admission label before agents can work it' };
+      if (bucket === 'reporter_triage') return { key: bucket, label: 'Needs triage', short: 'triage', rank: 2, tip: 'Held back until a triage/admission label is added' };
       if (bucket === 'dependency_dashboard') return { key: bucket, label: 'Dependency dashboard', short: 'deps', rank: 3, tip: 'Bot control-panel issue — counted, but not work' };
       if (bucket === 'claimed_by_pr') return { key: bucket, label: 'Claimed by PR', short: 'claimed', rank: 4, tip: 'Originally actionable, but withheld from agent queues because an open PR already claims it' };
       if (bucket === 'claimed') return { key: bucket, label: 'Claimed', short: 'claimed', rank: 5, tip: 'Originally actionable, but withheld from agent queues because another live claim covers it' };
@@ -14867,12 +14900,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     function repoCardIssueGroups(repo, overviewIssueKeys) {
-      const sourceIssues = (repo && (repo.actionableIssues || []) || []).concat(repo && (repo.heldIssues || []) || []);
-      const issueGroups = groupedRepoIssues(sourceIssues).map(g => {
+      const issueGroups = groupedRepoIssues(repoCardTrackedIssues(repo)).map(g => {
         const shown = overviewIssueKeys ? g.issues.filter(entry => overviewIssueKeys.has(String(entry.issue.number))) : g.issues;
         return Object.assign({}, g, { issues: shown });
       }).filter(g => g.issues.length);
-      const nonActionableIssueGroups = overviewIssueKeys ? [] : groupedRepoNonActionableIssues((repo && repo.nonActionableIssues) || []);
+      const nonActionableIssueGroups = overviewIssueKeys ? [] : groupedRepoNonActionableIssues(repoCardUntrackedIssues(repo));
       return { issueGroups, nonActionableIssueGroups };
     }
 
@@ -15041,10 +15073,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return spec ? Object.assign({ key, selectedCount: _overviewProjectFilterCount }, spec) : null;
     }
 
+    // Parked rows (server band `waiting` on a non-actionable row) are ordinary
+    // issue rows on the card, so they are matched by the band filters like any
+    // other. `parked` keeps them out of the Overview's outside-bucket maths,
+    // which counts them through the forge totals.
     function overviewRepoTrackedIssueEntries(repo) {
       const name = overviewRepoName(repo);
       return (repo && repo.actionableIssues || []).map(issue => ({ kind: 'issue', item: issue, issue, repo: name, held: false, band: issue && issue.band }))
-        .concat((repo && repo.heldIssues || []).map(issue => ({ kind: 'issue', item: issue, issue, repo: name, held: true, band: issue && issue.band })));
+        .concat((repo && repo.heldIssues || []).map(issue => ({ kind: 'issue', item: issue, issue, repo: name, held: true, band: issue && issue.band })))
+        .concat(repoCardParkedIssues(repo).map(issue => ({ kind: 'issue', item: issue, issue, repo: name, held: false, band: issue.band, parked: true })));
     }
 
     function overviewRepoTrackedPREntries(repo) {
@@ -15096,17 +15133,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const missing = Math.max(0, Number(overviewRepoOpenPRCount(repo) || 0) - prEntries.length);
         if (missing) buckets.push({ kind: 'pr', count: missing, reason: 'outside buckets', label: 'Open PRs outside Overview bands' });
       } else if (filter.key === 'outside') {
-        const issueOutside = overviewProjectOutsideIssueCount(repo);
+        // Parked rows the decision left in Outside are listed as entries above;
+        // the bucket counts only the rest.
+        const issueOutside = Math.max(0, overviewProjectOutsideIssueCount(repo) - issueEntries.filter(entry => entry.parked).length);
         const prOutside = overviewProjectOutsidePRCount(repo);
         if (issueOutside) buckets.push({ kind: 'issue', count: issueOutside, reason: 'outside buckets', label: 'Issues outside Overview bands' });
         if (prOutside) buckets.push({ kind: 'pr', count: prOutside, reason: 'outside buckets', label: 'PRs outside Overview bands' });
       } else if (filter.term && filter.kinds.includes('issue')) {
-        // Parked rows carry a band and render as ordinary issue rows; the other
+        // Parked rows carry a band and are already listed as entries; the other
         // non-actionable rows in this term have no band, so a count stands in.
-        const matched = overviewNonActionableMoved(repo).filter(issue => issue.overview_term === filter.term);
-        const name = overviewRepoName(repo);
-        matched.filter(issue => issue.band).forEach(issue => issueEntries.push({ kind: 'issue', item: issue, issue, repo: name, held: false, band: issue.band }));
-        const bandless = matched.filter(issue => !issue.band).length;
+        const bandless = overviewNonActionableMoved(repo).filter(issue => issue.overview_term === filter.term && !issue.band).length;
         if (bandless) buckets.push({ kind: 'issue', count: bandless, reason: 'no band on the card', label: filter.label + ' · issues without a band' });
       }
       const count = issueEntries.length + prEntries.length + buckets.reduce((n, b) => n + Number(b.count || 0), 0);
@@ -16439,6 +16475,512 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         : `<span class="pill-state" title="${esc(s.label)}">${esc(s.glyph)}</span>`).join('');
     }
 
+    // ── "Your turn" (hivecommons/hive#11507, part C) ─────────────────────
+    //
+    // The server decides, once per status refresh, whether an issue or pull
+    // request waits on the operator (pkg/dashboard/ownership.go) and stamps the
+    // decision on the row as `ownership`. Everything below READS that decision:
+    // the browser never derives "your turn" from labels or bands. The checkbox glyph
+    // below means "your turn" and nothing else on the dashboard, and this constant
+    // is the only place it is written.
+    const YOUR_TURN_GLYPH = '☐';
+    // The inbox's group order; `inbox_rank` already encodes it, the list is here
+    // only so the strip can name its groups in the same order.
+    const YOUR_TURN_VERB_ORDER = ['INSPECT', 'DECIDE', 'STEER', 'SPEC', 'REVIEW', 'TRIAGE', 'ADMIT', 'CLOSE'];
+    // Cards of repositories at these effective levels show only their
+    // your-turn rows and fold the rest into one summary line.
+    const YOUR_TURN_COLLAPSE_MIN_LEVEL = 5;
+    const YOUR_TURN_EXPANDED_KEY_PREFIX = 'hive-repos-yourturn-expanded:';
+
+    function yourTurnOf(row) {
+      const own = row && row.ownership;
+      return own && own.your_turn ? own : null;
+    }
+
+    // Your-turn rows precede every other row inside a band.
+    function yourTurnFirst(a, b) {
+      return Number(!yourTurnOf(a)) - Number(!yourTurnOf(b));
+    }
+
+    function yourTurnTip(own) {
+      return own.verb + ' — ' + own.reason;
+    }
+
+    function yourTurnKey(repoFull, kind, number) {
+      return String(repoFull || '').toLowerCase() + '|' + kind + '|' + Number(number);
+    }
+
+    // The marker is a menu button, not a checkbox: it opens the item's menu and
+    // does nothing else. Its accessible name carries the verb and the reason;
+    // the same text is shown on hover and focus (yourTurnShowTip). The inbox
+    // rows open the same menu from a plain "Options" button, so the glyph stays
+    // on the card rows.
+    function yourTurnButtonHTML(repoFull, kind, row, variant) {
+      const own = yourTurnOf(row);
+      if (!own || !row.number) return '';
+      const tip = yourTurnTip(own);
+      const open = !!(_yourTurnMenu && _yourTurnMenu.key === yourTurnKey(repoFull, kind, row.number) && _yourTurnMenu.variant === variant);
+      const marker = variant === 'marker';
+      const label = marker ? 'Your turn: ' + tip + '. Opens a menu of options.' : 'Options for ' + repoFull + '#' + row.number + ': ' + tip;
+      return `<button type="button" class="yt-menu-btn ${marker ? 'yt-marker' : 'yt-inbox-btn'}" aria-haspopup="menu" aria-expanded="${open ? 'true' : 'false'}" aria-label="${esc(label)}" data-yt-tip="${esc(tip)}" data-yt-variant="${variant}" data-yt-repo="${esc(repoFull)}" data-yt-kind="${esc(kind)}" data-yt-number="${Number(row.number)}" data-action="openYourTurnMenu" data-arg-types="t" data-stop="1" data-prevent="1">${marker ? YOUR_TURN_GLYPH : 'Options'}</button>`;
+    }
+
+    function yourTurnMarkerHTML(repoFull, kind, row) {
+      return yourTurnButtonHTML(repoFull, kind, row, 'marker');
+    }
+
+    // On a your-turn row the marker sits before the state chip, in the chip's
+    // own grid cell; every other row keeps its markup as it was.
+    function yourTurnLead(marker, chip) {
+      return marker ? `<span class="repo-pill-lead">${marker}${chip}</span>` : chip;
+    }
+
+    // What the menu offers for one item. Pure: every input comes in `ctx`, so the
+    // per-verb table of #11507 can be run against fixtures.
+    //   ctx.own          the row's ownership (verb, reason_code, reason, action)
+    //   ctx.kind         'issue' | 'pr'
+    //   ctx.url          the item on GitHub
+    //   ctx.isOwner      the user holds the owner role
+    //   ctx.planningAllowed  the hive plans (L5+), as for the 📐 button
+    //   ctx.hasPlan      the issue already has a plan (the 📐 button is gone)
+    //   ctx.canToggleHold    the user may use the existing hold toggle here
+    //   ctx.held         the PR is held
+    //   ctx.sentinelLabel, ctx.admissionLabels   names for the notes
+    // Only actions the dashboard already offers, only to a user it already
+    // offers them to, are listed; "Open on GitHub" is always present.
+    function yourTurnMenuModel(ctx) {
+      const own = ctx.own;
+      const actions = [];
+      const after = [];
+      const parkedIssue = ctx.kind === 'issue' && String(own.reason_code || '').indexOf('parked_needs_') === 0;
+      if (own.verb === 'DECIDE' || own.verb === 'STEER' || (own.verb === 'REVIEW' && parkedIssue)) {
+        after.push({ type: 'copy', text: '/hive approve' }, { type: 'copy', text: '/hive decision <text>' });
+      }
+      if (own.verb === 'SPEC') {
+        if (ctx.kind === 'issue' && ctx.isOwner && ctx.planningAllowed && !ctx.hasPlan) actions.push({ type: 'action', id: 'design', label: 'Design before planning' });
+        after.push({ type: 'note', text: 'Adding the spec or removing the label releases it.' });
+      }
+      if (own.verb === 'TRIAGE') {
+        after.push({ type: 'note', text: 'Adding the approved-direction label, assigning a person, or closing it acknowledges it.' });
+      }
+      if (own.verb === 'ADMIT') {
+        const labels = (ctx.admissionLabels || []).filter(Boolean);
+        after.push({ type: 'note', text: labels.length ? 'Add the label ' + labels.join(' or ') + ' to admit it.' : 'Add an admission label to admit it.' });
+      }
+      if (own.verb === 'REVIEW' && ctx.kind === 'pr' && own.action === 'release_hold' && ctx.held && ctx.canToggleHold) {
+        actions.push({ type: 'action', id: 'release_hold', label: 'Release hold' });
+      }
+      if (own.verb === 'INSPECT') {
+        after.push({ type: 'note', text: 'Removing the ' + (ctx.sentinelLabel || 'sentinel') + ' label after review releases it.' });
+      }
+      if (own.verb === 'CLOSE' && own.reason_code === 'reporter_confirmation_stale') {
+        after.push({ type: 'copy', text: '/fixed' });
+      }
+      return {
+        verb: own.verb,
+        reason: own.reason,
+        entries: actions.concat([{ type: 'link', label: 'Open on GitHub', href: ctx.url }], after)
+      };
+    }
+
+    function yourTurnMenuHTML(model, ctx) {
+      const items = model.entries.map(e => {
+        if (e.type === 'action') {
+          return `<button type="button" role="menuitem" tabindex="-1" class="yt-item" data-yt-act="${esc(e.id)}" data-repo="${esc(ctx.repo)}" data-number="${Number(ctx.number)}" data-url="${esc(ctx.url)}" data-title="${esc(ctx.title || '')}">${esc(e.label)}</button>`;
+        }
+        if (e.type === 'link') {
+          return `<a role="menuitem" tabindex="-1" class="yt-item" href="${esc(e.href)}" target="_blank" rel="noopener">${esc(e.label)}</a>`;
+        }
+        if (e.type === 'copy') {
+          return `<div class="yt-copy" role="none"><code>${esc(e.text)}</code><button type="button" role="menuitem" tabindex="-1" class="yt-item yt-copy-btn" data-yt-copy="${esc(e.text)}" aria-label="${esc('Copy ' + e.text)}">Copy</button></div>`;
+        }
+        return `<div class="yt-note" role="none">${esc(e.text)}</div>`;
+      }).join('');
+      return `<div class="yt-menu-head" id="yt-menu-head" role="presentation"><span class="yt-verb">${esc(model.verb)}</span> <span class="yt-reason">${esc(model.reason)}</span></div>${items}`;
+    }
+
+    // Locates the live row behind a marker in the current snapshot, so a menu
+    // opened before a refresh still reads current data.
+    function yourTurnFindRow(repoFull, kind, number) {
+      const repos = (window._lastStatus || {}).repos || [];
+      const repo = repos.find(r => String(r.full || r.name || '').toLowerCase() === String(repoFull || '').toLowerCase());
+      if (!repo) return null;
+      const n = Number(number);
+      const pick = list => (list || []).find(x => Number(x && x.number) === n);
+      if (kind === 'pr') {
+        const held = pick(repo.heldPrs);
+        const row = held || pick(repo.openPrs);
+        return row ? { repo, row, held: !!held } : null;
+      }
+      const held = pick(repo.heldIssues);
+      const row = held || pick(repo.actionableIssues) || pick(repo.nonActionableIssues);
+      return row ? { repo, row, held: !!held } : null;
+    }
+
+    function yourTurnMenuContext(repoFull, kind, number) {
+      const found = yourTurnFindRow(repoFull, kind, number);
+      const own = found && yourTurnOf(found.row);
+      if (!own) return null;
+      const base = (window._githubBaseUrl || 'https://github.com').replace(/\/$/, '');
+      const role = window._hiveRole || 'read';
+      return {
+        repo: repoFull,
+        kind,
+        number: Number(number),
+        title: found.row.title || '',
+        own,
+        held: found.held,
+        url: found.row.url || (base + '/' + repoFull + '/' + (kind === 'pr' ? 'pull' : 'issues') + '/' + number),
+        isOwner: dashboardRoleAtLeast(role, 'owner'),
+        planningAllowed: planningAllowed(),
+        hasPlan: !!planIssueLinks()[repoFull + '#' + number],
+        canToggleHold: repoHoldPermissionKnown(repoFull),
+        sentinelLabel: window._hiveSentinelLabel || '',
+        admissionLabels: (window._lastStatus || {}).admissionLabels || []
+      };
+    }
+
+    // Keyboard rules of the menu: arrows (and Home/End) move between entries,
+    // Escape closes and returns focus to the marker, Tab closes and lets focus
+    // continue from the marker. Enter and Space activate the focused entry
+    // natively (they are buttons and a link).
+    function yourTurnMenuNav(key, index, count) {
+      if (key === 'Escape') return { close: true, refocus: true };
+      if (key === 'Tab') return { close: true, refocus: true };
+      if (!count) return null;
+      if (key === 'ArrowDown') return { index: (index + 1) % count };
+      if (key === 'ArrowUp') return { index: (index - 1 + count) % count };
+      if (key === 'Home') return { index: 0 };
+      if (key === 'End') return { index: count - 1 };
+      return null;
+    }
+
+    let _yourTurnMenu = null;
+
+    function yourTurnMarkerKey(marker) {
+      return yourTurnKey(marker.dataset.ytRepo, marker.dataset.ytKind, marker.dataset.ytNumber);
+    }
+
+    // The button that opened the menu: the very element when it is still on the
+    // page, else the same item's button of the same kind after a repaint.
+    function yourTurnOpenerFor(open) {
+      if (open.opener && open.opener.isConnected) return open.opener;
+      return Array.from(document.querySelectorAll('.yt-menu-btn')).find(m => yourTurnMarkerKey(m) === open.key && m.dataset.ytVariant === open.variant) || null;
+    }
+
+    function closeYourTurnMenu(refocus) {
+      const open = _yourTurnMenu;
+      if (!open) return;
+      _yourTurnMenu = null;
+      open.el.remove();
+      document.removeEventListener('click', yourTurnOutsideClick, true);
+      window.removeEventListener('resize', yourTurnDismiss);
+      document.removeEventListener('scroll', yourTurnDismiss, true);
+      const marker = yourTurnOpenerFor(open);
+      if (marker) {
+        marker.setAttribute('aria-expanded', 'false');
+        if (refocus) marker.focus();
+      }
+    }
+
+    // A resize closes the menu. A scroll closes it only when it moved the
+    // button the menu hangs from: focusing an entry may scroll the page a little
+    // without the menu having drifted from its button.
+    function yourTurnDismiss(e) {
+      if (e && e.type === 'scroll' && _yourTurnMenu) {
+        if (e.target && _yourTurnMenu.el.contains(e.target)) return;
+        const opener = yourTurnOpenerFor(_yourTurnMenu);
+        if (opener) {
+          const now = opener.getBoundingClientRect();
+          if (Math.abs(now.top - _yourTurnMenu.rect.top) < 2 && Math.abs(now.left - _yourTurnMenu.rect.left) < 2) return;
+        }
+      }
+      closeYourTurnMenu(false);
+    }
+
+    function yourTurnOutsideClick(e) {
+      if (!_yourTurnMenu) return;
+      if (_yourTurnMenu.el.contains(e.target)) return;
+      // A click on the marker that owns the menu is its own toggle.
+      const marker = e.target.closest ? e.target.closest('.yt-menu-btn') : null;
+      if (marker && yourTurnMarkerKey(marker) === _yourTurnMenu.key && marker.dataset.ytVariant === _yourTurnMenu.variant) return;
+      closeYourTurnMenu(false);
+    }
+
+    function yourTurnMenuItems(menu) {
+      return Array.from(menu.querySelectorAll('[role="menuitem"]'));
+    }
+
+    function yourTurnMenuKeydown(e) {
+      if (!_yourTurnMenu) return;
+      const items = yourTurnMenuItems(_yourTurnMenu.el);
+      const step = yourTurnMenuNav(e.key, items.indexOf(document.activeElement), items.length);
+      if (!step) return;
+      if (step.close) {
+        if (e.key !== 'Tab') e.preventDefault();
+        closeYourTurnMenu(step.refocus);
+        return;
+      }
+      e.preventDefault();
+      items[step.index].focus();
+    }
+
+    function yourTurnMenuClick(e) {
+      const el = e.target.closest ? e.target.closest('.yt-item') : null;
+      if (!el || !_yourTurnMenu) return;
+      const ctx = _yourTurnMenu.ctx;
+      if (el.dataset.ytCopy) {
+        const text = el.dataset.ytCopy;
+        closeYourTurnMenu(true);
+        writeClipboardText(text).then(ok => showToast(ok ? 'Copied ' + text : 'Could not copy — select and copy it by hand: ' + text, ok ? 'success' : 'error'));
+        return;
+      }
+      if (el.dataset.ytAct) {
+        // The snapshot may have refreshed while the menu was open: perform the
+        // action only if the item's current decision still offers it.
+        const fresh = yourTurnMenuContext(ctx.repo, ctx.kind, ctx.number);
+        const offered = !!fresh && yourTurnMenuModel(fresh).entries.some(e => e.type === 'action' && e.id === el.dataset.ytAct);
+        closeYourTurnMenu(true);
+        if (!offered) {
+          showToast('This item changed since the menu opened — open it again to see its options', 'info');
+          return;
+        }
+        if (el.dataset.ytAct === 'release_hold') toggleRepoItemHold(ctx.repo, ctx.number, 'pr', false, null);
+        else if (el.dataset.ytAct === 'design') designIssue(el);
+        return;
+      }
+      // "Open on GitHub": the link navigates on its own.
+      closeYourTurnMenu(false);
+    }
+
+    // Opens the menu for the marker that was clicked. Nothing else happens on
+    // the click: every effect belongs to an entry the operator then chooses.
+    function openYourTurnMenu(marker) {
+      if (!marker || !marker.dataset) return;
+      const repo = marker.dataset.ytRepo;
+      const kind = marker.dataset.ytKind;
+      const number = Number(marker.dataset.ytNumber);
+      const key = yourTurnKey(repo, kind, number);
+      const variant = marker.dataset.ytVariant;
+      const wasOpen = _yourTurnMenu && _yourTurnMenu.key === key && _yourTurnMenu.variant === variant;
+      closeYourTurnMenu(false);
+      yourTurnHideTip();
+      if (wasOpen) return;
+      const ctx = yourTurnMenuContext(repo, kind, number);
+      if (!ctx) return;
+      const menu = document.createElement('div');
+      menu.className = 'yt-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-labelledby', 'yt-menu-head');
+      menu.innerHTML = yourTurnMenuHTML(yourTurnMenuModel(ctx), ctx);
+      document.body.appendChild(menu);
+      const rect = marker.getBoundingClientRect();
+      const left = Math.max(4, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 4));
+      const below = rect.bottom + 4;
+      const top = below + menu.offsetHeight > window.innerHeight - 4 ? Math.max(4, rect.top - menu.offsetHeight - 4) : below;
+      menu.style.left = left + 'px';
+      menu.style.top = top + 'px';
+      marker.setAttribute('aria-expanded', 'true');
+      menu.addEventListener('keydown', yourTurnMenuKeydown);
+      menu.addEventListener('click', yourTurnMenuClick);
+      _yourTurnMenu = { el: menu, key, variant, opener: marker, ctx, rect: { top: rect.top, left: rect.left } };
+      document.addEventListener('click', yourTurnOutsideClick, true);
+      window.addEventListener('resize', yourTurnDismiss);
+      document.addEventListener('scroll', yourTurnDismiss, true);
+      const first = yourTurnMenuItems(menu)[0];
+      if (first) first.focus();
+    }
+
+    // Hover and keyboard focus both show the verb and the reason (a native
+    // title is not shown on focus), in a tooltip tied to the marker.
+    function yourTurnShowTip(marker) {
+      if (!marker || !marker.dataset.ytTip) return;
+      if (_yourTurnMenu && _yourTurnMenu.key === yourTurnMarkerKey(marker) && _yourTurnMenu.variant === marker.dataset.ytVariant) return;
+      let tip = document.getElementById('yt-tip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'yt-tip';
+        tip.className = 'yt-tip';
+        tip.setAttribute('role', 'tooltip');
+        document.body.appendChild(tip);
+      }
+      tip.textContent = marker.dataset.ytTip;
+      tip.hidden = false;
+      const rect = marker.getBoundingClientRect();
+      tip.style.left = Math.max(4, Math.min(rect.left, window.innerWidth - tip.offsetWidth - 4)) + 'px';
+      const above = rect.top - tip.offsetHeight - 4;
+      tip.style.top = (above >= 4 ? above : rect.bottom + 4) + 'px';
+      marker.setAttribute('aria-describedby', 'yt-tip');
+    }
+
+    function yourTurnHideTip() {
+      const tip = document.getElementById('yt-tip');
+      if (tip) tip.hidden = true;
+      document.querySelectorAll('.yt-menu-btn[aria-describedby]').forEach(m => m.removeAttribute('aria-describedby'));
+    }
+
+    function installYourTurnListeners(doc) {
+      const markerOf = e => (e.target && e.target.closest ? e.target.closest('.yt-menu-btn') : null);
+      doc.addEventListener('mouseover', e => { const m = markerOf(e); if (m) yourTurnShowTip(m); });
+      doc.addEventListener('mouseout', e => { if (markerOf(e)) yourTurnHideTip(); });
+      doc.addEventListener('focusin', e => { const m = markerOf(e); if (m) yourTurnShowTip(m); });
+      doc.addEventListener('focusout', e => { if (markerOf(e)) yourTurnHideTip(); });
+    }
+    installYourTurnListeners(document);
+
+    // ── The inbox ────────────────────────────────────────────────────────
+
+    // Every your-turn item on the repositories shown, in the server's order.
+    // `repos` are the repositories the cards are drawn for; the pill filter and
+    // the Overview filter narrow the rows exactly as they narrow the cards.
+    function yourTurnInboxItems(repos, pillFilter, overviewFilter) {
+      const items = [];
+      (repos || []).forEach(r => {
+        const repoFull = r.full || r.name || '';
+        const matches = overviewFilter ? overviewProjectFilterRepoMatches(r, overviewFilter) : null;
+        const heldIssueKeys = new Set((r.heldIssues || []).map(i => String(i.number)));
+        const issues = matches ? matches.issues.map(entry => entry.issue) : repoCardTrackedIssues(r);
+        issues.forEach(i => {
+          const held = heldIssueKeys.has(String(i.number));
+          if (yourTurnOf(i) && repoPillFilterMatches(repoIssueFilterKinds(i, i, held), pillFilter)) items.push({ repo: repoFull, kind: 'issue', row: i, held });
+        });
+        (matches ? [] : repoCardUntrackedIssues(r)).forEach(i => {
+          if (yourTurnOf(i) && repoPillFilterMatches(repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i), i), pillFilter)) items.push({ repo: repoFull, kind: 'issue', row: i, held: false });
+        });
+        const prs = matches
+          ? matches.prs.map(entry => ({ pr: entry.pr, held: entry.held }))
+          : (r.openPrs || []).map(pr => ({ pr, held: false })).concat((r.heldPrs || []).map(pr => ({ pr, held: true })));
+        prs.forEach(entry => {
+          if (yourTurnOf(entry.pr) && repoPillFilterMatches(repoPRFilterKinds(entry.pr, entry.held, entry.pr), pillFilter)) items.push({ repo: repoFull, kind: 'pr', row: entry.pr, held: entry.held });
+        });
+      });
+      const rank = item => Number(item.row.ownership.inbox_rank) || Number.MAX_SAFE_INTEGER;
+      return items.sort((a, b) => rank(a) - rank(b));
+    }
+
+    // N excludes CLOSE; M is the CLOSE count.
+    function yourTurnCounts(items) {
+      const m = (items || []).filter(item => item.row.ownership.verb === 'CLOSE').length;
+      return { n: (items || []).length - m, m };
+    }
+
+    function yourTurnInboxHeaderText(counts) {
+      return 'Your turn · ' + counts.n + (counts.m ? ' · ' + counts.m + ' to close' : '');
+    }
+
+    // The section counter: hidden only when both numbers are zero.
+    function yourTurnCounterText(counts) {
+      if (!counts.n && !counts.m) return '';
+      return '· ' + counts.n + ' your turn' + (counts.m ? ' · ' + counts.m + ' to close' : '');
+    }
+
+    // Empty-state wording by the effective levels of the repositories shown.
+    function yourTurnEmptyText(levels) {
+      const known = (levels || []).map(Number).filter(l => l > 0);
+      if (known.length && known.every(l => l <= 2)) return 'Hive is advisory at this level, so nothing is routed to you.';
+      if (known.length && known.every(l => l >= 5)) return 'No exceptions: Hive is handling everything at this level.';
+      return 'Nothing is waiting on you.';
+    }
+
+    // The reviewer agent's most recent verdict on a held agent PR, from the
+    // review fields the snapshot already carries.
+    function yourTurnReviewerVerdict(item) {
+      const p = item.row;
+      if (item.kind !== 'pr' || !item.held || !p.role || !(p.review_state || p.review_url)) return '';
+      const state = p.review_state ? String(p.review_state).replace(/_/g, ' ') : 'commented';
+      const when = pillAge(p.reviewed_at);
+      const text = 'Reviewer: ' + state + (when ? ' ' + when : '');
+      return p.review_url
+        ? `<a class="yt-verdict" href="${esc(p.review_url)}" target="_blank" rel="noopener" title="Open the reviewer agent's most recent review">${esc(text)}</a>`
+        : `<span class="yt-verdict">${esc(text)}</span>`;
+    }
+
+    function yourTurnInboxRowHTML(item) {
+      const own = item.row.ownership;
+      const base = (window._githubBaseUrl || 'https://github.com').replace(/\/$/, '');
+      const url = item.row.url || (base + '/' + item.repo + '/' + (item.kind === 'pr' ? 'pull' : 'issues') + '/' + item.row.number);
+      const verdict = yourTurnReviewerVerdict(item);
+      return `<div class="yt-inbox-row"><span class="yt-inbox-repo">${esc(item.repo)}</span><a class="yt-inbox-title" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(item.row.title || '')}"><span class="pill-num">#${Number(item.row.number)}</span> <span class="pill-title">${esc(item.row.title || '')}</span></a><span class="yt-verb">${esc(own.verb)}</span><span class="yt-reason yt-inbox-reason-cell">${esc(own.reason)}</span><span class="yt-inbox-end">${verdict}${yourTurnButtonHTML(item.repo, item.kind, item.row, 'inbox')}</span></div>`;
+    }
+
+    function yourTurnInboxHTML(items, levels) {
+      const counts = yourTurnCounts(items);
+      const head = `<div class="yt-inbox-head" id="yt-inbox-head">${esc(yourTurnInboxHeaderText(counts))}</div>`;
+      if (!items.length) return `${head}<div class="yt-inbox-empty">${esc(yourTurnEmptyText(levels))}</div>`;
+      const groups = YOUR_TURN_VERB_ORDER.map(verb => {
+        const rows = items.filter(item => item.row.ownership.verb === verb);
+        return rows.length ? `<div class="yt-inbox-group" data-yt-verb="${esc(verb)}"><div class="yt-inbox-group-title">${esc(verb)} · ${rows.length}</div>${rows.map(yourTurnInboxRowHTML).join('')}</div>` : '';
+      }).join('');
+      return `${head}<div class="yt-inbox-body">${groups}</div>`;
+    }
+
+    // ── L5/L6 card default ───────────────────────────────────────────────
+
+    function yourTurnExpandedKey() {
+      return YOUR_TURN_EXPANDED_KEY_PREFIX + (((window._lastStatus || {}).hiveId) || 'default');
+    }
+
+    function yourTurnExpandedRepos() {
+      try { const list = JSON.parse(localStorage.getItem(yourTurnExpandedKey()) || '[]'); return Array.isArray(list) ? list.map(v => String(v).toLowerCase()) : []; } catch { return []; }
+    }
+
+    function toggleYourTurnCollapse(repoFull) {
+      const key = String(repoFull || '').toLowerCase();
+      const set = new Set(yourTurnExpandedRepos());
+      if (set.has(key)) set.delete(key); else set.add(key);
+      try {
+        if (set.size) localStorage.setItem(yourTurnExpandedKey(), JSON.stringify(Array.from(set)));
+        else localStorage.removeItem(yourTurnExpandedKey());
+      } catch {}
+      repaintReposForWidth();
+    }
+
+    // A repository's effective level: its own, else the hive's.
+    function repoEffectiveLevel(repo) {
+      return Number((repo && repo.acmmLevel) || (window._lastStatus || {}).acmmLevel || 0);
+    }
+
+    // The card view at L5/L6: your-turn rows stay, every other row is counted
+    // into one summary line per band. Below L5, or when the operator expanded
+    // the card, the groups come back untouched.
+    function repoCardCollapseView(level, expanded, issueGroups, nonActionableGroups, prGroups) {
+      if (level < YOUR_TURN_COLLAPSE_MIN_LEVEL) return { eligible: false, collapsed: false, issueGroups, nonActionableGroups, prGroups, hidden: [], hiddenTotal: 0 };
+      if (expanded) return { eligible: true, collapsed: false, issueGroups, nonActionableGroups, prGroups, hidden: [], hiddenTotal: 0 };
+      const hidden = [];
+      const note = (kind, label, count) => { if (count) hidden.push({ kind, label, count }); };
+      const keepIssues = issueGroups.map(g => {
+        const kept = g.issues.filter(entry => yourTurnOf(entry.issue));
+        note('issues', g.label, g.issues.length - kept.length);
+        return Object.assign({}, g, { issues: kept });
+      }).filter(g => g.issues.length);
+      const keepNonActionable = nonActionableGroups.map(g => {
+        const kept = g.issues.filter(yourTurnOf);
+        note('issues', g.label, g.issues.length - kept.length);
+        return Object.assign({}, g, { issues: kept });
+      }).filter(g => g.issues.length);
+      const keepPrs = prGroups.map(g => {
+        const kept = g.prs.filter(entry => yourTurnOf(entry.pr));
+        note('prs', g.label, g.prs.length - kept.length);
+        return Object.assign({}, g, { prs: kept });
+      }).filter(g => g.prs.length);
+      return { eligible: true, collapsed: true, issueGroups: keepIssues, nonActionableGroups: keepNonActionable, prGroups: keepPrs, hidden, hiddenTotal: hidden.reduce((n, h) => n + h.count, 0) };
+    }
+
+    function repoCardCollapseSummaryText(view) {
+      const part = (kind, title) => {
+        const list = view.hidden.filter(h => h.kind === kind).map(h => h.label + ' ' + h.count);
+        return list.length ? title + ': ' + list.join(' · ') : '';
+      };
+      return view.hiddenTotal + ' more — ' + [part('issues', 'Issues'), part('prs', 'PRs')].filter(Boolean).join(' · ');
+    }
+
+    function repoCardCollapseHTML(repoFull, view) {
+      if (!view.eligible) return '';
+      if (view.collapsed && !view.hiddenTotal) return '';
+      const text = view.collapsed ? repoCardCollapseSummaryText(view) : 'Showing every item';
+      return `<div class="yt-collapse"><button type="button" class="yt-collapse-btn" data-action="toggleYourTurnCollapse" data-arg0="${esc(repoFull)}" data-stop="1" data-prevent="1" aria-expanded="${view.collapsed ? 'false' : 'true'}" title="${view.collapsed ? 'Show the other rows on this card' : 'Collapse the card to its rows that are your turn'}"><span aria-hidden="true">${view.collapsed ? '▸' : '▾'}</span> ${esc(text)}</button></div>`;
+    }
+
     function renderRepos(repos) {
       refreshSectionCardShell('repos-section');
       if (_repoResizeDrag || _repoOrderDrag) return;
@@ -16454,6 +16996,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const overviewFilter = overviewProjectFilterState();
       const overviewFilterSummary = overviewFilter ? overviewProjectFilterSummary(overviewFilter.key, repos) : null;
       const visibleRepos = (repos || []).filter(r => repoPillFilterRepoMatches(r && (r.full || r.name), pillFilter)).filter(r => !overviewFilter || overviewProjectFilterRepoMatches(r, overviewFilter).count > 0);
+      // The inbox and the section counter read the same items, taken from the
+      // repositories the cards below are drawn for and narrowed by the same
+      // pill and Overview filters.
+      const inboxItems = yourTurnInboxItems(visibleRepos, pillFilter, overviewFilter);
+      const inboxCounts = yourTurnCounts(inboxItems);
       renderRepoLegend();
       renderOverviewCharts(repos);
       const activeSwarmRepo = ((status.swarm || {}).active || {}).repo || '';
@@ -16477,27 +17024,17 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         badge.style.color = isPublic ? 'var(--green)' : 'var(--indigo)';
         badge.title = 'Every project in this hive is on ' + hostLabel + (isPublic ? '' : ' (GitHub Enterprise)') + ' — this hive is single-host';
       }
-      // Section-header escalation counter: "· N need human review". Escalated
-      // PRs (needs-human label from the escalation ledger) previously had no
-      // section-level signal — nine parked PRs sat invisible to the operator
-      // for a week (kubestellar/console, 2026-09-01). Hidden at zero so a
-      // healthy hive shows nothing extra.
-      // Held PRs count too: a hold+needs-human PR (a Renovate bump the
-      // ledger gave up on) is waiting on a person exactly as much as an
-      // unheld one is, and it now has a pill on the card to match.
-      const needHumanTotal = repos.reduce((n, r) => n + (r.openPrs || []).concat(r.heldPrs || []).filter(p => (p.labels || []).map(l => String(l)).includes('needs-human')).length
-        + (r.actionableIssues || []).concat(r.heldIssues || []).filter(repoItemNeedsHuman).length
-        + (r.nonActionableIssues || []).filter(i => repoItemNeedsHuman(i) || (String(i.bucket || '') === 'filtered' && repoParkedIssueReason(i))).length, 0);
+      // Section-header counter: "· N your turn" and, when there are any,
+      // "· M to close" — the inbox's own counts, nothing else. Hidden only when
+      // both are zero so a quiet hive shows nothing extra.
       const nhEl = document.getElementById('repos-needs-human');
       if (nhEl) {
-        if (needHumanTotal > 0) {
-          nhEl.textContent = '· ' + needHumanTotal + ' need' + (needHumanTotal === 1 ? 's' : '') + ' human review';
-          nhEl.style.display = 'inline';
-        } else {
-          nhEl.textContent = '';
-          nhEl.style.display = 'none';
-        }
+        const counterText = yourTurnCounterText(inboxCounts);
+        nhEl.textContent = counterText;
+        nhEl.style.display = counterText ? 'inline' : 'none';
       }
+      const inboxEl = document.getElementById('repos-inbox');
+      if (inboxEl) setIfChanged(inboxEl, yourTurnInboxHTML(inboxItems, visibleRepos.map(repoEffectiveLevel)));
       // "Reset layout" only appears once there is a layout to reset (#8000) —
       // a hive whose cards are all at the default has nothing for it to do.
       const resetBtn = document.getElementById('repos-reset-layout-btn');
@@ -16530,8 +17067,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const cardW = repoCardWidth(cardRepo);
         const MAX_PILL_TITLE_LEN = pillTitleLimit(cardW || layoutW);
         const overviewRepoMatches = overviewFilter ? overviewProjectFilterRepoMatches(r, overviewFilter) : null;
-        const filteredIssues = overviewRepoMatches ? overviewRepoMatches.issues.map(entry => entry.issue) : (r.actionableIssues || []).concat(r.heldIssues || []);
-        const filteredNonActionableIssues = overviewRepoMatches ? [] : (r.nonActionableIssues || []);
+        const filteredIssues = overviewRepoMatches ? overviewRepoMatches.issues.map(entry => entry.issue) : repoCardTrackedIssues(r);
+        const filteredNonActionableIssues = overviewRepoMatches ? [] : repoCardUntrackedIssues(r);
         const filteredOpenPrs = overviewRepoMatches ? overviewRepoMatches.prs.filter(entry => !entry.held).map(entry => entry.pr) : (r.openPrs || []);
         const filteredHeldPrs = overviewRepoMatches ? overviewRepoMatches.prs.filter(entry => entry.held).map(entry => entry.pr) : (r.heldPrs || []);
         const filteredBuckets = overviewRepoMatches ? overviewRepoMatches.buckets : [];
@@ -16539,10 +17076,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const overviewPRKeys = overviewRepoMatches ? new Set(filteredOpenPrs.concat(filteredHeldPrs).map(p => String(p.number))) : null;
         const heldIssueKeys = new Set((r.heldIssues || []).map(i => String(i.number)));
         const repoIssueFilterRows = filteredIssues.map(i => ({ kinds: repoIssueFilterKinds(i, i, heldIssueKeys.has(String(i.number))) }));
-        const repoNonActionableFilterRows = filteredNonActionableIssues.map(i => ({ kinds: repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i)) }));
+        const repoNonActionableFilterRows = filteredNonActionableIssues.map(i => ({ kinds: repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i), i) }));
         const repoPRFilterRows = filteredOpenPrs.map(pr => ({ kinds: repoPRFilterKinds(pr, false, pr) })).concat(filteredHeldPrs.map(pr => ({ kinds: repoPRFilterKinds(pr, true, pr) })));
         const repoFilterCounts = repoPillFilterRowCounts(repoIssueFilterRows.concat(repoNonActionableFilterRows, repoPRFilterRows), pillFilter);
         const repoIssueGroups = repoCardIssueGroups(r, overviewIssueKeys);
+        // L5/L6 default: only the your-turn rows stay on the card; the rest fold
+        // into one summary line the operator can expand.
+        const prGroupList = groupedRepoPRs(r.openPrs || [], r.heldPrs || []).map(g => Object.assign({}, g, { prs: overviewPRKeys ? g.prs.filter(entry => overviewPRKeys.has(String(entry.pr.number))) : g.prs })).filter(g => g.prs.length);
+        const collapseView = repoCardCollapseView(repoEffectiveLevel(r), yourTurnExpandedRepos().includes(cardRepo.toLowerCase()), repoIssueGroups.issueGroups, repoIssueGroups.nonActionableIssueGroups, prGroupList);
         const renderIssuePill = (i, info) => {
           const title = pillDisplayTitle(i.title, MAX_PILL_TITLE_LEN);
           const repoFull = r.full || r.name || '';
@@ -16561,7 +17102,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const planBtn = linked && !isHeldIssue
             ? planIssueChip(linked)
             : (!isHeldIssue && showPlan ? `<button class="repo-issue-plan pill-icon" data-action="planIssue" data-repo="${esc(repoFull)}" data-number="${i.number}" data-url="${esc(i.url || '')}" data-title="${esc(i.title || '')}" title="Plan this issue" aria-label="Plan this issue">📋</button>` : '');
-          const designBtn = (!isHeldIssue && !linked && showDesign) ? `<button class="repo-issue-plan pill-icon" data-action="designIssue" data-repo="${esc(repoFull)}" data-number="${i.number}" data-url="${esc(i.url || '')}" data-title="${esc(i.title || '')}" title="Design before planning" aria-label="Design before planning">📐</button>` : '';
+          const designBtn = (!isHeldIssue && !linked && showDesign) ? `<button class="repo-issue-plan pill-icon" data-action="designIssue" data-arg-types="t" data-repo="${esc(repoFull)}" data-number="${i.number}" data-url="${esc(i.url || '')}" data-title="${esc(i.title || '')}" title="Design before planning" aria-label="Design before planning">📐</button>` : '';
           const holdBtn = holdToggleChip(cardRepo, i, 'issue', isHeldIssue, canToggleHold, heldTip);
           const linkedPRs = Array.isArray(i.linked_prs) ? i.linked_prs : [];
           const primaryPR = linkedPRs.find(pr => pr.closing) || linkedPRs.find(pr => pr.state === 'open') || linkedPRs.find(pr => pr.merged) || linkedPRs[0];
@@ -16574,9 +17115,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const issueUrl = i.url || (repoUrl + '/issues/' + i.number);
           const rowKinds = repoIssueFilterKinds(i, info, isHeldIssue);
           const statusKind = isHeldIssue ? 'issue:held' : (info.chip ? repoIssueChipKind(info.chip) : ('issue:' + info.band));
-          return `<span class="repo-issue-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}><button type="button" class="repo-pill-status repo-issue-pill${bandClass}${heldClass}${staleClass} repo-pill-filter-toggle" title="${esc(statusTip)}"${repoPillFilterAttrs(statusKind)}>${esc(isHeldIssue ? 'held' : (info.chip || issueBandShortLabel(info.band)))}</button><a class="repo-issue-pill repo-pill-main${bandClass}${heldClass}${staleClass}" href="${esc(issueUrl)}" target="_blank" rel="noopener" title="${esc(issueTip(i, info) + (isHeldIssue ? ' — ' + heldTip : ''))}"><span class="pill-num">#${i.number}</span><span class="pill-title">${esc(title)}</span>${issueSignalHTML(info)}</a>${repoPillActionCluster([prBadge, planBtn, designBtn, holdBtn])}</span>`;
+          return `<span class="repo-issue-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}>${yourTurnLead(yourTurnMarkerHTML(repoFull, 'issue', i), `<button type="button" class="repo-pill-status repo-issue-pill${bandClass}${heldClass}${staleClass} repo-pill-filter-toggle" title="${esc(statusTip)}"${repoPillFilterAttrs(statusKind)}>${esc(isHeldIssue ? 'held' : (info.chip || issueBandShortLabel(info.band)))}</button>`)}<a class="repo-issue-pill repo-pill-main${bandClass}${heldClass}${staleClass}" href="${esc(issueUrl)}" target="_blank" rel="noopener" title="${esc(issueTip(i, info) + (isHeldIssue ? ' — ' + heldTip : ''))}"><span class="pill-num">#${i.number}</span><span class="pill-title">${esc(title)}</span>${issueSignalHTML(info)}</a>${repoPillActionCluster([prBadge, planBtn, designBtn, holdBtn])}</span>`;
         };
-        const issuePills = repoIssueGroups.issueGroups.map(g => {
+        const issuePills = collapseView.issueGroups.map(g => {
           const items = g.issues.map(entry => renderIssuePill(entry.issue, entry.info)).join('');
           return `<div class="repo-issue-band repo-issue-band-${esc(g.band)}"><div class="repo-issue-band-title" title="${esc(g.tip)}">${esc(g.label)} · ${g.issues.length}</div><div class="repo-issue-band-items">${items}</div></div>`;
         }).join('');
@@ -16587,11 +17128,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const labels = (i.labels || []).map(l => String(l)).filter(Boolean).join(', ');
           const reason = i.reason || spec.tip;
           const tip = (i.title || '') + (i.author ? ' — @' + i.author : '') + (labels ? ' — labels: ' + labels : '') + ' — ' + reason;
-          const rowKinds = repoNonActionableIssueKinds(spec);
+          const rowKinds = repoNonActionableIssueKinds(spec, i);
           const nhClass = spec.waiting ? 'waiting' : 'held';
-          return `<span class="repo-issue-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}><button type="button" class="repo-pill-status repo-issue-pill ${nhClass} repo-pill-filter-toggle" title="${esc(spec.tip)}"${repoPillFilterAttrs(spec.chip ? repoIssueChipKind(spec.chip) : ('issue:' + spec.key))}>${esc(spec.chip || spec.short)}</button><a class="repo-issue-pill repo-pill-main ${nhClass}" href="${esc(issueUrl)}" target="_blank" rel="noopener" title="${esc(tip)}"><span class="pill-num">#${i.number}</span><span class="pill-title">${esc(title)}</span><span class="pill-state" title="${esc(reason)}">ⓘ</span></a></span>`;
+          return `<span class="repo-issue-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}>${yourTurnLead(yourTurnMarkerHTML(cardRepo, 'issue', i), `<button type="button" class="repo-pill-status repo-issue-pill ${nhClass} repo-pill-filter-toggle" title="${esc(spec.tip)}"${repoPillFilterAttrs(spec.chip ? repoIssueChipKind(spec.chip) : ('issue:' + spec.key))}>${esc(spec.chip || spec.short)}</button>`)}<a class="repo-issue-pill repo-pill-main ${nhClass}" href="${esc(issueUrl)}" target="_blank" rel="noopener" title="${esc(tip)}"><span class="pill-num">#${i.number}</span><span class="pill-title">${esc(title)}</span><span class="pill-state" title="${esc(reason)}">ⓘ</span></a></span>`;
         };
-        const nonActionableIssuePills = repoIssueGroups.nonActionableIssueGroups.map(g => {
+        const nonActionableIssuePills = collapseView.nonActionableGroups.map(g => {
           const items = g.issues.map(renderNonActionableIssuePill).join('');
           return `<div class="repo-issue-band repo-issue-band-${esc(g.key)}"><div class="repo-issue-band-title" title="${esc(g.tip)}">${esc(g.label)} · ${g.issues.length}</div><div class="repo-issue-band-items">${items}</div></div>`;
         }).join('');
@@ -16633,7 +17174,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const linkedIssues = prLinkedIssues(p);
           const linkedIssueText = linkedIssues.map(i => (i.repo && i.repo !== cardRepo ? i.repo : '') + '#' + i.number + (i.state ? ' ' + i.state : '')).join(', ');
           const linkedTip = linkedIssueText ? ' [closes: ' + linkedIssueText + ']' : '';
-          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + bandTip + activityTip + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + reviewDecisionTip + requestedTip + convoTip + linkedTip + prMergeNote(p) + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '') + (sentinelFlagged ? ' (sentinel flagged — not merged until a maintainer removes the label)' : '') + (held ? ' (' + heldReason(p) + ')' : '');
+          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + bandTip + activityTip + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + reviewDecisionTip + requestedTip + convoTip + linkedTip + prMergeNote(p) + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (labelled needs-human)' : '') + (sentinelFlagged ? ' (sentinel flagged — not merged while the sentinel label is on)' : '') + (held ? ' (' + heldReason(p) + ')' : '');
           const canQueue = dashboardRoleAtLeast(window._hiveRole || 'read', 'merger') && (window._hiveUser || dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')) && !(p.author && window._hiveUser && p.author.toLowerCase() === window._hiveUser.toLowerCase());
           const parts = (r.full || r.name || '').split('/');
           const owner = parts.length > 1 ? parts[0] : '';
@@ -16641,7 +17182,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const notMergeable = p.mergeable === 'no';
           const notMergeableTip = 'Not mergeable on GitHub' + (p.mergeable_state ? ' (' + String(p.mergeable_state) + ')' : '') + ' — resolve that before queueing for auto-merge';
           const reviewTip = reviewPillTip(p);
-          const needsHumanTip = 'Automated fix attempts exhausted — a human must review this PR. Remove the needs-human label after addressing the root cause to return it to the automated fix lane.';
+          const needsHumanTip = 'Labelled needs-human: automated fix attempts exhausted. ' + YOUR_TURN_GLYPH + ' appears when it is your turn. Remove the label after addressing the root cause to return the PR to the automated fix lane.';
           const reviewPill = p.review_url
             ? `<a class="repo-pr-pill pill-reviewed pill-icon" href="${esc(p.review_url)}" target="_blank" rel="noopener" data-stop="1" title="${esc(reviewTip)}" aria-label="${esc(reviewTip)}">💬${p.review_count > 1 ? '×' + p.review_count : ''}</a>`
             : '';
@@ -16680,15 +17221,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           // not merge the PR until a maintainer removes the label.
           const tintClass = sentinelFlagged ? ' sentinel-flagged' : (needsHuman ? ' needs-human' : mergeClass);
           const prStatusText = reviewClass ? (reviewClass === 'refactor-docs' ? 'refactor' : reviewClass) : (sentinelFlagged ? 'sentinel' : (held ? 'held' : 'PR'));
-          const sentinelTip = sentinelFlagged ? 'Sentinel flagged: possible security override, privilege escalation or codebase damage — Hive will not merge it until a maintainer reviews it and removes the label. ' : '';
+          const sentinelTip = sentinelFlagged ? 'Sentinel flagged: possible security override, privilege escalation or codebase damage — Hive will not merge it while the sentinel label is on. ' : '';
           const prStatusTip = sentinelTip + (reviewClass ? ((held ? 'Held PR — review class: ' : 'Review class: ') + reviewClass) : (held ? heldTip : 'Open pull request'));
           const rowKinds = repoPRFilterKinds(p, held, bandInfo);
           const statusKind = sentinelFlagged ? 'pr:sentinel' : held ? 'pr:held' : (needsHuman ? 'needs-human' : (mergeState === 'eligible' ? 'pr:eligible' : (mergeState === 'outstanding' ? 'pr:outstanding' : ((reviewClass === 'fix') ? 'pr:fix' : 'pr:open'))));
-          return `<span class="repo-pr-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}><button type="button" class="repo-pill-status repo-pr-pill${heldClass}${tintClass} repo-pill-filter-toggle" title="${esc(prStatusTip)}"${repoPillFilterAttrs(statusKind)}>${esc(prStatusText)}</button><a class="repo-pr-pill repo-pill-main${heldClass}${tintClass}${staleClass}" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}${prSignalHTML(bandInfo)}</a>${repoPillActionCluster([reviewPill, queueBtn + stateBadge, issueBadge, holdBtn])}</span>`;
+          return `<span class="repo-pr-pill-wrap repo-pill-row${repoPillFilterHiddenClass(rowKinds, pillFilter)}"${repoPillKindAttr(rowKinds)}>${yourTurnLead(yourTurnMarkerHTML(cardRepo, 'pr', p), `<button type="button" class="repo-pill-status repo-pr-pill${heldClass}${tintClass} repo-pill-filter-toggle" title="${esc(prStatusTip)}"${repoPillFilterAttrs(statusKind)}>${esc(prStatusText)}</button>`)}<a class="repo-pr-pill repo-pill-main${heldClass}${tintClass}${staleClass}" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}${prSignalHTML(bandInfo)}</a>${repoPillActionCluster([reviewPill, queueBtn + stateBadge, issueBadge, holdBtn])}</span>`;
         };
-        const prPills = groupedRepoPRs(r.openPrs || [], r.heldPrs || []).map(g => {
-          const shown = overviewPRKeys ? g.prs.filter(entry => overviewPRKeys.has(String(entry.pr.number))) : g.prs;
-          if (!shown.length) return '';
+        const prPills = collapseView.prGroups.map(g => {
+          const shown = g.prs;
           const items = shown.map(entry => renderPrPill(entry.pr, entry.held, entry.info)).join('');
           return `<div class="repo-pr-band repo-pr-band-${esc(g.band)}"><div class="repo-pr-band-title" title="${esc(g.tip)}">${esc(g.label)} · ${shown.length}</div><div class="repo-pr-band-items">${items}</div></div>`;
         }).join('');
@@ -16703,6 +17243,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const pillsHtml = ((issueCol || prCol)
           ? `<div class="repo-pills${pillColClass}"><div class="repo-pill-col repo-pill-col-issues">${issueCol}</div><div class="repo-pill-col repo-pill-col-prs">${prCol}</div></div>`
           : '') + (bucketHtml ? `<div class="repo-pills repo-pills-issues-only"><div class="repo-pill-col repo-pill-col-issues">${bucketHtml}</div></div>` : '');
+        const collapseHtml = repoCardCollapseHTML(cardRepo, collapseView);
         // Per-repo agent pause (#6203). The tooltip carries the provenance the
         // pill has no room for; without it a paused repo raises "who did this
         // and why" every time someone new looks at the dashboard.
@@ -16781,7 +17322,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           <div class="repo-stats">
             <div class="repo-stat"><a href="${esc(repoUrl)}/issues" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.issues >= 0 ? r.issues : '?'}</span>${iSpark}</div><div class="label">issues</div></a>${issueBreakdown}</div>
             <div class="repo-stat"><a href="${esc(repoUrl)}/pulls" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.prs >= 0 ? r.prs : '?'}</span>${pSpark}</div><div class="label">PRs</div></a>${prBreakdown}</div>
-          </div>${laneHtml}${pillsHtml}
+          </div>${laneHtml}${collapseHtml}${pillsHtml}
         </div>`;
       }).join(''));
     }

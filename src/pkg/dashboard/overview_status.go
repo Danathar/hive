@@ -39,15 +39,42 @@ type overviewStatusPR struct {
 
 // overviewStatusNonActionable is a non-actionable issue row with its
 // your-turn decision. Parked rows (the four hard-suppress buckets) carry band
-// waiting; every other non-actionable row keeps no band and its bucket group.
-// ChartSlice is set only for rows the charts plot: those that are your turn
-// or waiting on someone else.
+// waiting and the same band facts as any other issue row (chip, signals,
+// stale flag, agent role) so the card renders them like every other issue;
+// every other non-actionable row keeps no band and its bucket group.
+// LinkedPRs on a parked row are the open and held pull requests of the same
+// repository whose GitHub closing references name the issue, read from the
+// snapshot's own pull-request rows. ChartSlice is set only for rows the
+// charts plot: those that are your turn or waiting on someone else.
 type overviewStatusNonActionable struct {
 	github.RepoWorkIssue
-	Band         string     `json:"band,omitempty"`
-	Ownership    *Ownership `json:"ownership,omitempty"`
-	ChartSlice   string     `json:"chart_slice,omitempty"`
-	OverviewTerm string     `json:"overview_term,omitempty"`
+	*IssueBandInfo
+	LinkedPRs    []github.IssueLinkedPR `json:"linked_prs,omitempty"`
+	Ownership    *Ownership             `json:"ownership,omitempty"`
+	ChartSlice   string                 `json:"chart_slice,omitempty"`
+	OverviewTerm string                 `json:"overview_term,omitempty"`
+}
+
+// parkedIssueLinkedPRs lists the open and held pull requests of repo whose
+// closing references include the parked issue.
+func parkedIssueLinkedPRs(repo FrontendRepo, repoName string, number int) []github.IssueLinkedPR {
+	var linked []github.IssueLinkedPR
+	for _, rows := range [][]any{repo.OpenPrs, repo.HeldPrs} {
+		for _, raw := range rows {
+			entry, ok := frontendPullRequest(raw)
+			if !ok {
+				continue
+			}
+			for _, closes := range entry.pr.LinkedIssues {
+				if closes.Number != number || (closes.Repo != "" && !strings.EqualFold(closes.Repo, repoName)) {
+					continue
+				}
+				linked = append(linked, github.IssueLinkedPR{Number: entry.pr.Number, Repo: nonEmpty(entry.pr.Repo, repoName), State: "open", URL: entry.pr.URL, Closing: true})
+				break
+			}
+		}
+	}
+	return linked
 }
 
 // statusWithOverviewBands copies response containers, leaving the cached typed
@@ -103,7 +130,7 @@ func (s *Server) statusWithOverviewBands(status *StatusPayload, now time.Time) *
 		}
 		return result
 	}
-	nonActionable := func(items []any, decisions map[string]Ownership) []any {
+	nonActionable := func(items []any, repo FrontendRepo, repoName string) []any {
 		if items == nil {
 			return nil
 		}
@@ -114,10 +141,13 @@ func (s *Server) statusWithOverviewBands(status *StatusPayload, now time.Time) *
 				result = append(result, raw)
 				continue
 			}
-			ownership := ownershipFor(decisions, ownershipKindIssue, item.Number)
-			row := overviewStatusNonActionable{RepoWorkIssue: item, Band: nonActionableIssueBand(item), Ownership: ownership, ChartSlice: overviewNonActionableChartSlice(ownership), OverviewTerm: overviewNonActionableTerm(ownership)}
-			if row.Band != "" {
-				countSlice(out.OverviewBands.Issues, row.Band)
+			ownership := ownershipFor(repo.Ownership, ownershipKindIssue, item.Number)
+			row := overviewStatusNonActionable{RepoWorkIssue: item, Ownership: ownership, ChartSlice: overviewNonActionableChartSlice(ownership), OverviewTerm: overviewNonActionableTerm(ownership)}
+			if nonActionableIssueBand(item) != "" {
+				info := nonActionableIssueInfo(item, repoName, cfg, now, selfAuthorizationHoldActive)
+				row.IssueBandInfo = &info
+				row.LinkedPRs = parkedIssueLinkedPRs(repo, repoName, item.Number)
+				countSlice(out.OverviewBands.Issues, info.Band)
 			}
 			if row.ChartSlice != "" {
 				countSlice(slices.Issues, row.ChartSlice)
@@ -152,7 +182,7 @@ func (s *Server) statusWithOverviewBands(status *StatusPayload, now time.Time) *
 		repoName := overviewRepoName(*repo)
 		repo.ActionableIssues = issues(repo.ActionableIssues, false, repoName, repo.Ownership)
 		repo.HeldIssues = issues(repo.HeldIssues, true, repoName, repo.Ownership)
-		repo.NonActionableIssues = nonActionable(repo.NonActionableIssues, repo.Ownership)
+		repo.NonActionableIssues = nonActionable(repo.NonActionableIssues, *repo, repoName)
 		repo.OpenPrs = prs(repo.OpenPrs, false, repo.Ownership)
 		repo.HeldPrs = prs(repo.HeldPrs, true, repo.Ownership)
 	}

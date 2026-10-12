@@ -514,6 +514,11 @@ type StatusPayload struct {
 	ACMMLevel           int               `json:"acmmLevel"`
 	ACMMLevelConfigured bool              `json:"acmmLevelConfigured"`
 	ACMMPackAgents      []string          `json:"acmmPackAgents"`
+	// AdmissionLabels are the labels a maintainer adds to admit an untrusted
+	// reporter's issue (project.issue_filter.reporter_trust); the "your turn"
+	// menu for an ADMIT item names them. It is read from configuration, with
+	// no GitHub call.
+	AdmissionLabels []string `json:"admissionLabels,omitempty"`
 	// ACMMAdvice is the advisory level-up recommendation (#5225), derived from
 	// the same live signals the /api/acmm-recommendation endpoint serves so the
 	// two surfaces can never drift. It is ADVISORY ONLY: nothing acts on it
@@ -1004,6 +1009,12 @@ type FrontendRepo struct {
 	// filtered, reporter triage, and similar named exclusions). They keep the
 	// repo card's total honest without adding anything to the queues.
 	NonActionableIssues []any `json:"nonActionableIssues,omitempty"`
+	// ACMMLevel is the repository's effective ACMM level
+	// (Config.EffectiveACMMLevelForRepo: the hive level, lowered by a
+	// repository-policy override). The card's L5/L6 collapse and the inbox
+	// empty-state wording read it, because the status payload's own
+	// acmmLevel is hive-wide.
+	ACMMLevel int `json:"acmmLevel"`
 	// Ownership is the your-turn decision for every issue and PR row above,
 	// keyed by ownershipKey and computed once per status refresh
 	// (applyOwnershipDecisions). Response copies attach each decision to its
