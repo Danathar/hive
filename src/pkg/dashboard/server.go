@@ -2565,7 +2565,11 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	// consumption survives the reset that erases the live number.
 	s.ObserveBudgetWindow(status)
 
+	// Hold statusMu through the snapshot: hold moves mutate the published
+	// status under the write lock.
+	s.statusMu.RLock()
 	data, err := json.Marshal(s.statusWithOverviewBands(status, time.Now().UTC()))
+	s.statusMu.RUnlock()
 	if err != nil {
 		s.logger.Warn("failed to marshal status for SSE", "error", err)
 		return true
@@ -3479,15 +3483,17 @@ func (s *Server) inHealthGrace() (bool, time.Duration) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// Build the snapshot under statusMu: hold moves mutate the published
+	// status (including repo.Ownership) under the write lock.
 	s.statusMu.RLock()
-	status := s.status
-	s.statusMu.RUnlock()
-
-	if status == nil {
+	if s.status == nil {
+		s.statusMu.RUnlock()
 		statusJSONResponse(w, r, map[string]string{"status": "initializing"})
 		return
 	}
-	payload := statusWithWebhooks{StatusPayload: s.statusWithOverviewBands(status, time.Now().UTC()), Webhooks: github.WebhookHealthSnapshot()}
+	snapshot := s.statusWithOverviewBands(s.status, time.Now().UTC())
+	s.statusMu.RUnlock()
+	payload := statusWithWebhooks{StatusPayload: snapshot, Webhooks: github.WebhookHealthSnapshot()}
 	statusJSONResponse(w, r, filterStatusPayload(&payload, r.URL.Query().Get("fields"), r.URL.Query().Get("omit")))
 }
 

@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -292,4 +294,29 @@ func TestApplyRepoHoldLeavesPublishedOwnershipMapUntouched11565(t *testing.T) {
 	if _, ok := published[ownershipKey(ownershipKindPR, 11)]; !ok {
 		t.Fatalf("published map was mutated in place: %+v", published)
 	}
+}
+
+// TestApplyRepoHoldNoRaceWithStatusEndpoint11565 overlaps the real /api/status
+// handler with hold moves; go test -race fails if the snapshot is built
+// outside statusMu.
+func TestApplyRepoHoldNoRaceWithStatusEndpoint11565(t *testing.T) {
+	s := newTestServer()
+	status := parityStatus9102(t)
+	status.Repos[0].Ownership = map[string]Ownership{
+		ownershipKey(ownershipKindPR, 11): {YourTurn: true, Verb: OwnershipVerbReview, ReasonCode: OwnershipReasonLevelGateHold},
+		ownershipKey(ownershipKindPR, 12): {YourTurn: true, Verb: OwnershipVerbReview, ReasonCode: OwnershipReasonPersonPRNeedsHuman},
+	}
+	s.UpdateStatus(status)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 300; i++ {
+			rec := httptest.NewRecorder()
+			s.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		s.applyRepoHoldToStatus("octo/demo", 11, "pr", i%2 == 0, "hold", nil)
+	}
+	<-done
 }
