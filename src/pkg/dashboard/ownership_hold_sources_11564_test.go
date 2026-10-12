@@ -143,3 +143,53 @@ func TestOwnershipHoldSourcesEndToEnd11564(t *testing.T) {
 	checkOwnership11565(t, decisions[ownershipKey(ownershipKindIssue, 22)], notYours11565)
 	checkOwnership11565(t, decisions[ownershipKey(ownershipKindIssue, 23)], want11565{OwnershipVerbInspect, OwnershipReasonSentinelFlagged})
 }
+
+// A level-held PR that a non-App bot (a prow bot answering /hold) re-labels is
+// not provably held only by the level gate: it lists level_gate and unknown,
+// the decision is hold_source_unknown, and Release hold is not offered.
+func TestOwnershipHoldSourcesNonAppBotReapplyEndToEnd11564(t *testing.T) {
+	old := github.HoldSourcesPath
+	github.HoldSourcesPath = filepath.Join(t.TempDir(), github.HoldSourcesFile)
+	t.Cleanup(func() { github.HoldSourcesPath = old })
+
+	now := time.Now().UTC().Add(-time.Hour)
+	earlier := now.Add(-time.Minute).Format(time.RFC3339)
+	later := now.Format(time.RFC3339)
+	notice := "<!-- hive:level-hold {\"agent\":\"quality\"} -->\n> Held for human review by the hive's ACMM level gate."
+	srv := holdSourcesE2EServer(t, nil,
+		[]map[string]any{holdSourcesWirePR(7, "hold")},
+		map[string][]map[string]any{
+			"7": {{"body": notice, "user": map[string]string{"login": holdSourcesBotLogin11564}}},
+		},
+		map[string][]map[string]any{
+			"7": {
+				{"event": "labeled", "label": map[string]string{"name": "hold"}, "actor": map[string]string{"login": holdSourcesBotLogin11564}, "created_at": earlier},
+				{"event": "labeled", "label": map[string]string{"name": "hold"}, "actor": map[string]string{"login": "kubestellar-prow[bot]"}, "created_at": later},
+			},
+		},
+	)
+
+	level := 4
+	cfg := &config.Config{
+		ACMMLevel: &level,
+		Project:   config.ProjectConfig{Org: "acme", Repos: []string{"widgets"}},
+	}
+	client := github.NewClientForTest(srv.URL, "acme", []string{"widgets"}, slog.New(slog.DiscardHandler))
+	client.SetAppBotLogin(holdSourcesBotLogin11564)
+
+	actionable, err := client.EnumerateActionable(context.Background())
+	if err != nil {
+		t.Fatalf("EnumerateActionable: %v", err)
+	}
+	repos := buildRepos(cfg, actionable, governor.State{})
+	if len(repos) != 1 {
+		t.Fatalf("repos = %d, want 1", len(repos))
+	}
+	applyOwnershipDecisions(cfg, repos, nil, "idle", time.Now().UTC())
+
+	pr := repos[0].Ownership[ownershipKey(ownershipKindPR, 7)]
+	checkOwnership11565(t, pr, want11565{OwnershipVerbReview, OwnershipReasonHoldSourceUnknown})
+	if pr.Action == OwnershipActionReleaseHold {
+		t.Fatalf("PR re-held by a non-App bot: Release hold must not be offered, got action %q", pr.Action)
+	}
+}

@@ -51,18 +51,28 @@ const (
 const (
 	holdActorApp    = "app"
 	holdActorPerson = "person"
+	// holdActorOther marks a hold applied by a non-App bot or an actor GitHub
+	// did not report; it cannot be attributed to Hive or to a person.
+	holdActorOther = "other"
 )
+
+// holdSourceCheckVersion is the derivation version of a cached check. Bump it
+// when what a check records changes, so older cached checks are re-read once.
+// Version 2 added the "other" latest-hold actor.
+const holdSourceCheckVersion = 2
 
 // holdSourceCheck is the cached result of reading one held PR's comments and
 // hold-label events. Only facts GitHub alone can tell are cached; the label-
 // and record-derived sources are composed on every refresh.
 type holdSourceCheck struct {
+	Version   int       `json:"version,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 	CheckedAt time.Time `json:"checked_at"`
 	// Notices are the sources whose Hive notice is on the PR.
 	Notices []string `json:"notices,omitempty"`
 	// LatestHoldBy is who made the newest hold-label event: "app", "person",
-	// or empty when Hive cannot attribute it.
+	// "other" (a non-App bot or unreported actor), or empty when there is no
+	// such event or it was an unlabel.
 	LatestHoldBy string `json:"latest_hold_by,omitempty"`
 }
 
@@ -285,8 +295,12 @@ func (d *holdSourceDetector) prSources(ctx context.Context, number int, updatedA
 				set[src] = true
 				attributed = true
 			}
-			if check.LatestHoldBy == holdActorPerson {
+			switch check.LatestHoldBy {
+			case holdActorPerson:
 				set[HoldSourcePerson] = true
+				attributed = true
+			case holdActorOther:
+				set[HoldSourceUnknown] = true
 				attributed = true
 			}
 		}
@@ -298,7 +312,7 @@ func (d *holdSourceDetector) prSources(ctx context.Context, number int, updatedA
 }
 
 func (d *holdSourceDetector) check(ctx context.Context, key string, number int, updatedAt time.Time) (holdSourceCheck, bool) {
-	if prev, ok := d.ledger.Checks[key]; ok && !updatedAt.IsZero() && prev.UpdatedAt.Equal(updatedAt) {
+	if prev, ok := d.ledger.Checks[key]; ok && prev.Version == holdSourceCheckVersion && !updatedAt.IsZero() && prev.UpdatedAt.Equal(updatedAt) {
 		return prev, true
 	}
 	// Without the App identity no notice or label event can be attributed
@@ -314,6 +328,7 @@ func (d *holdSourceDetector) check(ctx context.Context, key string, number int, 
 		}
 		return holdSourceCheck{}, false
 	}
+	got.Version = holdSourceCheckVersion
 	got.UpdatedAt = updatedAt
 	got.CheckedAt = time.Now().UTC()
 	if !updatedAt.IsZero() {
@@ -417,9 +432,10 @@ func (c *Client) holdNoticeSources(comments []*gh.IssueComment) map[string]bool 
 
 // latestHoldLabelActor reports who made the newest labeled/unlabeled event of
 // a hold label (other than the pause, sentinel and reporter-trust extra
-// labels): "app" for the Hive App, "person" for a non-bot user, and "" when
-// the event cannot be attributed (no event, an unlabel, another bot, or no
-// known App login).
+// labels): "app" for the Hive App, "person" for a non-bot user, "other" for a
+// label added by any other bot or by an unreported actor (including the App
+// when its login is unknown), and "" when there is no event or the newest
+// event is an unlabel.
 func (c *Client) latestHoldLabelActor(ctx context.Context, owner, repo string, number int) (string, error) {
 	opts := &gh.ListOptions{PerPage: 100}
 	var latest *gh.IssueEvent
@@ -455,11 +471,11 @@ func (c *Client) latestHoldLabelActor(ctx context.Context, owner, repo string, n
 	login := strings.TrimSpace(safeGetLogin(actor))
 	switch {
 	case login == "":
-		return "", nil
+		return holdActorOther, nil
 	case strings.TrimSpace(c.appBotLogin) != "" && strings.EqualFold(login, c.appBotLogin):
 		return holdActorApp, nil
 	case strings.HasSuffix(strings.ToLower(login), "[bot]") || strings.EqualFold(actor.GetType(), "Bot"):
-		return "", nil
+		return holdActorOther, nil
 	default:
 		return holdActorPerson, nil
 	}
