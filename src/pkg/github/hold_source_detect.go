@@ -56,10 +56,16 @@ const (
 	holdActorOther = "other"
 )
 
+// holdSourceCheckVersion is the derivation version of a cached check. Bump it
+// when what a check records changes, so older cached checks are re-read once.
+// Version 2 added the "other" latest-hold actor.
+const holdSourceCheckVersion = 2
+
 // holdSourceCheck is the cached result of reading one held PR's comments and
 // hold-label events. Only facts GitHub alone can tell are cached; the label-
 // and record-derived sources are composed on every refresh.
 type holdSourceCheck struct {
+	Version   int       `json:"version,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 	CheckedAt time.Time `json:"checked_at"`
 	// Notices are the sources whose Hive notice is on the PR.
@@ -306,7 +312,7 @@ func (d *holdSourceDetector) prSources(ctx context.Context, number int, updatedA
 }
 
 func (d *holdSourceDetector) check(ctx context.Context, key string, number int, updatedAt time.Time) (holdSourceCheck, bool) {
-	if prev, ok := d.ledger.Checks[key]; ok && !updatedAt.IsZero() && prev.UpdatedAt.Equal(updatedAt) {
+	if prev, ok := d.ledger.Checks[key]; ok && prev.Version == holdSourceCheckVersion && !updatedAt.IsZero() && prev.UpdatedAt.Equal(updatedAt) {
 		return prev, true
 	}
 	// Without the App identity no notice or label event can be attributed
@@ -322,6 +328,7 @@ func (d *holdSourceDetector) check(ctx context.Context, key string, number int, 
 		}
 		return holdSourceCheck{}, false
 	}
+	got.Version = holdSourceCheckVersion
 	got.UpdatedAt = updatedAt
 	got.CheckedAt = time.Now().UTC()
 	if !updatedAt.IsZero() {

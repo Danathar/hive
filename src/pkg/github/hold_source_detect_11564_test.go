@@ -472,3 +472,42 @@ func TestHoldSources_PersonLatestHoldLabelListsPersonWithLevelGate(t *testing.T)
 	}
 	assertHoldSources(t, detectPRHoldSources(t, c, 18, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourcePerson)
 }
+
+// A check cached before the "other" actor existed recorded an unattributed
+// non-App bot hold as no event. It is re-read once instead of trusted, and a
+// current check is still reused with no API calls.
+func TestHoldSources_LegacyCachedCheckIsReReadOnce(t *testing.T) {
+	f, c := newHoldSourceTest(t)
+	f.comments[19] = []map[string]any{holdSourceComment(testHiveAppBotLogin, levelHoldNotice("quality"))}
+	f.events[19] = []map[string]any{
+		holdSourceEvent("labeled", "hold", testHiveAppBotLogin, holdSourceT0),
+		{
+			"event":      "labeled",
+			"label":      map[string]string{"name": "hold"},
+			"actor":      map[string]string{"login": "some-automation", "type": "Bot"},
+			"created_at": holdSourceT0.Add(time.Minute).UTC().Format(time.RFC3339),
+		},
+	}
+	// Legacy record: same updated_at, no version, latest actor recorded empty.
+	holdSourcesMu.Lock()
+	l := readHoldSourceLedgerLocked(HoldSourcesPath)
+	l.Checks[holdSourceKey(HoldKindPR, "acme/widget", 19)] = holdSourceCheck{
+		UpdatedAt: holdSourceT0,
+		Notices:   []string{HoldSourceLevelGate},
+	}
+	if err := writeHoldSourceLedgerLocked(HoldSourcesPath, l); err != nil {
+		holdSourcesMu.Unlock()
+		t.Fatal(err)
+	}
+	holdSourcesMu.Unlock()
+
+	assertHoldSources(t, detectPRHoldSources(t, c, 19, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourceUnknown)
+	if f.readCount() == 0 {
+		t.Fatal("legacy cached check was trusted without re-reading GitHub")
+	}
+	f.resetReads()
+	assertHoldSources(t, detectPRHoldSources(t, c, 19, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourceUnknown)
+	if n := f.readCount(); n != 0 {
+		t.Fatalf("unchanged refresh of a current check made %d API reads, want 0", n)
+	}
+}
