@@ -432,9 +432,10 @@ func (c *Client) holdNoticeSources(comments []*gh.IssueComment) map[string]bool 
 
 // latestHoldLabelActor reports who made the newest labeled/unlabeled event of
 // a hold label (other than the pause, sentinel and reporter-trust extra
-// labels): "app" for the Hive App, "person" for a non-bot user, and "" when
-// the event cannot be attributed (no event, an unlabel, another bot, or no
-// known App login).
+// labels): "app" for the Hive App, "person" for a non-bot user, "other" for a
+// label added by any other bot or by an unreported actor (including the App
+// when its login is unknown), and "" when there is no event or the newest
+// event is an unlabel.
 func (c *Client) latestHoldLabelActor(ctx context.Context, owner, repo string, number int) (string, error) {
 	opts := &gh.ListOptions{PerPage: 100}
 	var latest *gh.IssueEvent
