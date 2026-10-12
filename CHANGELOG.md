@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-12 (v5.161.6)
+
+### Fixed
+
+- The same-component fold for agent-filed findings now also counts App-bot issues on the shared path that were closed as completed in the last 14 days, so a one-variant-one-PR stream no longer resets the count every time a fix merges ([#11239](https://github.com/hivecommons/hive/issues/11239)). The finding still folds only into the oldest open sibling; `not_planned`/`duplicate` closures stay with the rejected-twin gate.
+- The kick's `ISSUE FILTER` notice is no longer rendered when no issue-label allowlist is configured (for example when only reporter-trust settings are present), so an empty allowlist means "no label filter" instead of reading as deny-all ([#11572](https://github.com/hivecommons/hive/issues/11572)).
+
 ## 2026-10-12 (v5.161.5)
 
 ### Changed
