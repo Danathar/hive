@@ -555,7 +555,15 @@ func (s *Server) applyRepoHoldToStatus(repoFull string, number int, itemType str
 			if itemType == "pr" {
 				kind = ownershipKindPR
 			}
-			delete(repo.Ownership, ownershipKey(kind, number))
+			// Copy-on-write: lock-free status readers share this map.
+			dropKey := ownershipKey(kind, number)
+			trimmed := make(map[string]Ownership, len(repo.Ownership))
+			for k, v := range repo.Ownership {
+				if k != dropKey {
+					trimmed[k] = v
+				}
+			}
+			repo.Ownership = trimmed
 		}
 		break
 	}

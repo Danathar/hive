@@ -1292,11 +1292,11 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		switch standingMetaIssueKindFor(issue.GetTitle(), safeGetLogin(issue.GetUser()), labels) {
 		case standingMetaHiveAdvisory:
 			breakdown.HiveAdvisory++
-			details = append(details, repoWorkIssue(repo, issue, labels, "hive_advisory", "Hive advisory report"))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "hive_advisory", "Hive advisory report"))
 			continue
 		case standingMetaDependencyDashboard:
 			breakdown.DependencyDashboard++
-			details = append(details, repoWorkIssue(repo, issue, labels, "dependency_dashboard", "Dependency dashboard control panel"))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "dependency_dashboard", "Dependency dashboard control panel"))
 			continue
 		}
 
@@ -1329,19 +1329,19 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		if c.isExempt(labels) {
 			breakdown.Filtered++
 			breakdown.Exempt++
-			details = append(details, repoWorkIssue(repo, issue, labels, "filtered", "Exempt label"))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", "Exempt label"))
 			continue
 		}
 		if labelPresent(labels, issueNeedsReporterConfirmationLabel) {
 			breakdown.Filtered++
 			breakdown.ReporterConfirmation++
-			details = append(details, repoWorkIssue(repo, issue, labels, "filtered", issueNeedsReporterConfirmationLabel))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", issueNeedsReporterConfirmationLabel))
 			continue
 		}
 		if suppress := hardSuppressIssueBucket(issueFilter, labels); suppress != "" {
 			breakdown.Filtered++
 			breakdown.addHardSuppress(suppress)
-			details = append(details, repoWorkIssue(repo, issue, labels, "filtered", suppress))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", suppress))
 			continue
 		}
 
@@ -1366,7 +1366,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			if !ra.AdmitsReporter(labels, safeGetLogin(issue.GetUser()), issue.GetAuthorAssociation()) {
 				c.markReporterTrustAwaiting(ctx, repo, issue, labels, ra, reporterTrustWaitBudget)
 				breakdown.ReporterTriage++
-				details = append(details, repoWorkIssue(repo, issue, labels, "reporter_triage", "Awaiting maintainer triage label"))
+				details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "reporter_triage", "Awaiting maintainer triage label"))
 				continue
 			}
 			labels = c.clearReporterTrustAwaiting(ctx, repo, issue, labels, ra)
@@ -1374,7 +1374,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 
 		if !issueFilter.Admits(labels) {
 			breakdown.Filtered++
-			details = append(details, repoWorkIssue(repo, issue, labels, "filtered", "Project issue filter"))
+			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", "Project issue filter"))
 			continue
 		}
 
@@ -3582,6 +3582,17 @@ func repoWorkIssue(repo string, issue *gh.Issue, labels []string, bucket, reason
 		Bucket:    bucket,
 		Reason:    reason,
 	}
+}
+
+// repoWorkIssueAcked is repoWorkIssue plus the cheap human-acknowledgement
+// signal, so non-actionable rows (exempt, project-filter, ...) keep the
+// ownership decision a person's assignment or ack label earned.
+func (c *Client) repoWorkIssueAcked(repo string, issue *gh.Issue, labels []string, bucket, reason string) RepoWorkIssue {
+	row := repoWorkIssue(repo, issue, labels, bucket, reason)
+	if issue != nil {
+		row.HumanAcknowledged = c.issueHasCheapHumanAcknowledgement(issue)
+	}
+	return row
 }
 
 type RepoIssueBreakdown struct {

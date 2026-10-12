@@ -266,3 +266,30 @@ func TestApplyRepoHoldDropsStoredOwnership11565(t *testing.T) {
 		t.Fatalf("unrelated PR lost its decision: %+v", got)
 	}
 }
+
+// TestApplyRepoHoldLeavesPublishedOwnershipMapUntouched11565: status readers
+// hold the published Ownership map without statusMu, so the hold move must
+// replace it rather than delete from it. go test -race fails on an in-place
+// delete.
+func TestApplyRepoHoldLeavesPublishedOwnershipMapUntouched11565(t *testing.T) {
+	s := newTestServer()
+	status := parityStatus9102(t)
+	status.Repos[0].Ownership = map[string]Ownership{
+		ownershipKey(ownershipKindPR, 11): {YourTurn: true, Verb: OwnershipVerbReview, ReasonCode: OwnershipReasonLevelGateHold},
+		ownershipKey(ownershipKindPR, 12): {YourTurn: true, Verb: OwnershipVerbReview, ReasonCode: OwnershipReasonPersonPRNeedsHuman},
+	}
+	s.UpdateStatus(status)
+	published := status.Repos[0].Ownership
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			_ = ownershipFor(published, ownershipKindPR, 11)
+		}
+	}()
+	s.applyRepoHoldToStatus("octo/demo", 11, "pr", true, "hold", nil)
+	<-done
+	if _, ok := published[ownershipKey(ownershipKindPR, 11)]; !ok {
+		t.Fatalf("published map was mutated in place: %+v", published)
+	}
+}

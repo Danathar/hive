@@ -109,3 +109,31 @@ func TestStandingMetaIssueReason(t *testing.T) {
 		})
 	}
 }
+
+// TestNonActionableRowsCarryHumanAcknowledgement11565 pins that exempt and
+// project-filter rows keep a person's acknowledgement (assignment), so the
+// your-turn ownership decision does not treat them as unacknowledged.
+func TestNonActionableRowsCarryHumanAcknowledgement11565(t *testing.T) {
+	const org, repo = "testorg", "testrepo"
+	issues := []wireIssue{
+		{Number: 1, Title: "exempt acked", User: wireUser{"hive[bot]"}, Labels: []wireLabel{{Name: "approved"}, {Name: "no-ai"}}, Assignees: []wireUser{{"dave"}}, CreatedAt: hoursAgo(2)},
+		{Number: 2, Title: "filtered acked", User: wireUser{"hive[bot]"}, Assignees: []wireUser{{"dave"}}, CreatedAt: hoursAgo(1)},
+		{Number: 3, Title: "exempt unacked", User: wireUser{"hive[bot]"}, Labels: []wireLabel{{Name: "approved"}, {Name: "no-ai"}}, CreatedAt: hoursAgo(1)},
+	}
+	server := httptest.NewServer(buildMux(t, org, repo, issues, nil))
+	t.Cleanup(server.Close)
+	c := newTestClient(t, server, org, []string{repo})
+	c.SetExemptLabels([]string{"no-ai"})
+	c.SetIssueFilter(config.IssueFilterConfig{RequireLabels: []string{"approved"}})
+	result, err := c.EnumerateActionable(context.Background())
+	if err != nil {
+		t.Fatalf("EnumerateActionable: %v", err)
+	}
+	got := map[int]bool{}
+	for _, d := range result.WorkDetailsByRepo[repo].Issues {
+		got[d.Number] = d.HumanAcknowledged
+	}
+	if len(got) != 3 || !got[1] || !got[2] || got[3] {
+		t.Fatalf("HumanAcknowledged by issue = %v, want 1,2 true and 3 false", got)
+	}
+}
