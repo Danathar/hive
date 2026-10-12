@@ -292,7 +292,20 @@ func overviewPartitionOf(status *StatusPayload, autoMergeLabel string) overviewP
 				}
 				part.issues.tracked++
 				o := ownershipFor(repo.Ownership, ownershipKindIssue, issue.Number)
-				part.issues.add(overviewIssueTerm(o, held), o, overviewIssueWaitingCause(held, ""))
+				var sources []string
+				switch v := raw.(type) {
+				case github.HoldItem:
+					sources = v.HoldSources
+				case *github.HoldItem:
+					sources = v.HoldSources
+				}
+				// The cause follows the facts the ownership decision used:
+				// rule 1 (a hiding hold), then rule 3 (open linked PR).
+				bucket := ""
+				if !(held && holdSourcesHide(sources)) && issueHasOpenLinkedPR(issue) {
+					bucket = repoWorkBucketClaimedByPR
+				}
+				part.issues.add(overviewIssueTerm(o, held), o, overviewIssueWaitingCause(held && holdSourcesHide(sources), bucket))
 			}
 		}
 		issueRows(repo.ActionableIssues, false)
