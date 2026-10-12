@@ -3520,32 +3520,36 @@ type RepoWorkDetails struct {
 }
 
 type RepoWorkIssue struct {
-	Repo      string    `json:"repo"`
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Author    string    `json:"author,omitempty"`
-	Labels    []string  `json:"labels,omitempty"`
-	Assignees []string  `json:"assignees,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitzero"`
-	UpdatedAt time.Time `json:"updated_at,omitzero"`
-	URL       string    `json:"url,omitempty"`
-	Bucket    string    `json:"bucket"`
-	Reason    string    `json:"reason,omitempty"`
+	Repo      string   `json:"repo"`
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	Author    string   `json:"author,omitempty"`
+	Labels    []string `json:"labels,omitempty"`
+	Assignees []string `json:"assignees,omitempty"`
+	// HumanAcknowledged carries the issue's human acknowledgement so the
+	// your-turn decision can honour it on non-actionable rows.
+	HumanAcknowledged bool      `json:"human_acknowledged,omitempty"`
+	CreatedAt         time.Time `json:"created_at,omitzero"`
+	UpdatedAt         time.Time `json:"updated_at,omitzero"`
+	URL               string    `json:"url,omitempty"`
+	Bucket            string    `json:"bucket"`
+	Reason            string    `json:"reason,omitempty"`
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
 	return RepoWorkIssue{
-		Repo:      issue.Repo,
-		Number:    issue.Number,
-		Title:     issue.Title,
-		Author:    issue.Author,
-		Labels:    append([]string(nil), issue.Labels...),
-		Assignees: append([]string(nil), issue.Assignees...),
-		CreatedAt: issue.CreatedAt,
-		UpdatedAt: issue.UpdatedAt,
-		URL:       issue.URL,
-		Bucket:    bucket,
-		Reason:    reason,
+		Repo:              issue.Repo,
+		Number:            issue.Number,
+		Title:             issue.Title,
+		Author:            issue.Author,
+		Labels:            append([]string(nil), issue.Labels...),
+		Assignees:         append([]string(nil), issue.Assignees...),
+		HumanAcknowledged: issue.HumanAcknowledged,
+		CreatedAt:         issue.CreatedAt,
+		UpdatedAt:         issue.UpdatedAt,
+		URL:               issue.URL,
+		Bucket:            bucket,
+		Reason:            reason,
 	}
 }
 

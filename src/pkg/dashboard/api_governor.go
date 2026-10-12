@@ -76,7 +76,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			full = org + "/" + repo
 			repos = append(repos, full)
 		}
-		entry := map[string]any{"effective": cfg.SelfAuthorizationHoldEnabledForRepoAtLevel(repo, cfg.EffectiveACMMLevelForRepo(repo))}
+		entry := map[string]any{"effective": cfg.SelfAuthorizationHoldEnabledForRepoAtLevel(repo, cfg.ACMMLevelOrZero())}
 		if rp, ok := cfg.RepoPolicyFor(repo); ok && rp.SelfAuthorizationHold != nil {
 			entry["value"] = *rp.SelfAuthorizationHold
 		}

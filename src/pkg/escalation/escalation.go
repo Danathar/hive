@@ -215,6 +215,10 @@ type Store struct {
 	clock func() time.Time
 }
 
+// DefaultLedgerPath is where the hive process keeps the shared escalation
+// ledger; the dashboard reads the same file.
+const DefaultLedgerPath = "/data/metrics/fix-streaks.json"
+
 // Load reads the ledger at path, returning an empty usable store on any error
 // (a missing or corrupt ledger must never block enumeration).
 func Load(path string) *Store {

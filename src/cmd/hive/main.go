@@ -5983,7 +5983,7 @@ func (b *boot) bootLanes() {
 	if b.cfg.Retro.Enabled {
 		retroStore := b.beadStores[retro.Actor]
 		escalationStoreOnce.Do(func() {
-			escalationStore = escalation.Load(escalationLedgerPath)
+			escalationStore = escalation.Load(escalation.DefaultLedgerPath)
 		})
 		b.retroLane = retro.NewLane(b.beadStores, retroStore, b.dashSrv.LifecycleTimeline(), escalationStore, retro.Config{
 			Enabled:             b.cfg.Retro.Enabled,
@@ -8119,8 +8119,6 @@ var (
 	escalationStore     *escalation.Store
 )
 
-const escalationLedgerPath = "/data/metrics/fix-streaks.json"
-
 // getEscalationStore lazily loads the shared fix-loop ledger (staleness clock +
 // distinct-SHA attempt counts + re-engagement caps). It is the SINGLE
 // loop-safety/dedup authority shared by the re-engagement paths (#2 merge
@@ -8129,7 +8127,7 @@ const escalationLedgerPath = "/data/metrics/fix-streaks.json"
 // re-nudged, and which have crossed the human-escalation threshold.
 func getEscalationStore() *escalation.Store {
 	escalationStoreOnce.Do(func() {
-		escalationStore = escalation.Load(escalationLedgerPath)
+		escalationStore = escalation.Load(escalation.DefaultLedgerPath)
 	})
 	return escalationStore
 }

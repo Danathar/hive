@@ -548,6 +548,14 @@ func (s *Server) applyRepoHoldToStatus(repoFull string, number int, itemType str
 		}
 		if didMove {
 			repoHoldAdjustBreakdown(repo, itemType, held)
+			// The stored decision was made while the item sat on the other
+			// side of the hold; never attach it to the moved row. The next
+			// status refresh decides it again.
+			kind := ownershipKindIssue
+			if itemType == "pr" {
+				kind = ownershipKindPR
+			}
+			delete(repo.Ownership, ownershipKey(kind, number))
 		}
 		break
 	}

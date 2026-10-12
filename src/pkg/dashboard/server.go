@@ -970,13 +970,13 @@ type FrontendSession struct {
 }
 
 type FrontendRepo struct {
-	Name             string                    `json:"name"`
-	Full             string                    `json:"full"`
-	Issues           int                       `json:"issues"`
-	PRs              int                       `json:"prs"`
-	Mode             string                    `json:"mode,omitempty"`
-	CountsIncomplete bool                      `json:"countsIncomplete,omitempty"`
-	WorkBreakdown    *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
+	Name             string `json:"name"`
+	Full             string `json:"full"`
+	Issues           int    `json:"issues"`
+	PRs              int    `json:"prs"`
+	Mode             string `json:"mode,omitempty"`
+	CountsIncomplete bool   `json:"countsIncomplete,omitempty"`
+	WorkBreakdown *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
 	// ActionableIssues and OpenPrs are the items the agents may act on: the
 	// enumeration's actionable sets, minus anything held or exempt. Every
 	// automated consumer — the contribute queue, the mergeable counter, the
