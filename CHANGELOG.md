@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-12 (v5.161.4)
+
+### Fixed
+
+- The API budget now also uses the remaining count GitHub returns on every response, so it goes to `conserve` / `critical` even when the `/rate_limit` reading is stale (for example after a restart), instead of staying `normal` while GitHub returns 403 rate-limit errors. Fixes #11539.
+
 ## 2026-10-11 (v5.161.3)
 
 ### Fixed
