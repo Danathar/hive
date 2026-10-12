@@ -100,8 +100,9 @@ var ownershipReasonVerbs = map[string]string{
 const OwnershipActionReleaseHold = "release_hold"
 
 const (
-	// ownershipLanePRMinLevel is the lowest ACMM level at which an agent lane
-	// opens pull requests (no agent opens PRs at L1–L2).
+	// ownershipLanePRMinLevel is the lowest ACMM level at which a hive pull
+	// request is covered by the safety net (no agent opens PRs at L1–L2).
+	// Issues use their routed lane's real push rights instead.
 	ownershipLanePRMinLevel = 3
 	// ownershipAdjudicatorMinLevel is the lowest hive-wide ACMM level with an
 	// adjudicator lane (L5/L6 packs).
@@ -186,6 +187,19 @@ type ownershipEnv struct {
 	selfAuthorizationHold func(repo string) bool
 	reviewerLaneAvailable func(repo string) bool
 	escalatedAt           func(repo string, number int) time.Time
+	// laneCanOpenPR reports whether the running agent serving a routed lane
+	// may open pull requests (its mode's CanPush).
+	laneCanOpenPR func(lane string) bool
+	// leased reports an unexpired contribute task lease on repo#number.
+	leased func(repo string, number int) bool
+}
+
+func (e ownershipEnv) laneCanOpenPRFor(lane string) bool {
+	return lane != "" && e.laneCanOpenPR != nil && e.laneCanOpenPR(lane)
+}
+
+func (e ownershipEnv) leasedFor(repo string, number int) bool {
+	return number > 0 && e.leased != nil && e.leased(repo, number)
 }
 
 func (e ownershipEnv) levelFor(repo string) int {
@@ -355,6 +369,14 @@ type issueOwnershipInput struct {
 	createdAt    time.Time
 	updatedAt    time.Time
 
+	// lane is the lane the classifier routed the issue to.
+	lane string
+	// liveClaim is true while the issue carries an unexpired ClaimedBy claim.
+	liveClaim bool
+	// reporterGate is true when the human-filed-bug reporter-confirmation
+	// gate applies to the issue.
+	reporterGate bool
+
 	actionable  bool
 	held        bool
 	holdSources []string
@@ -418,8 +440,10 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 	if in.bucket == repoWorkBucketReporterTriage {
 		return yourTurn(OwnershipReasonUntrustedReporter, "Reporter is not trusted — add an admission label to let agents work on it")
 	}
-	// (6) awaiting the reporter's confirmation.
-	if labels[ownershipLabelReporterConfirmation] || (in.bucket == repoWorkBucketFiltered && in.bucketReason == ownershipLabelReporterConfirmation) {
+	// (6) awaiting the reporter's confirmation: the label or bucket, or a
+	// likely-done issue the reporter-confirmation gate applies to.
+	if labels[ownershipLabelReporterConfirmation] || (in.bucket == repoWorkBucketFiltered && in.bucketReason == ownershipLabelReporterConfirmation) ||
+		(in.reporterGate && labels[ownershipLabelLikelyDone]) {
 		if env.stale(in.createdAt, in.updatedAt) {
 			return yourTurn(OwnershipReasonReporterConfirmationStale, fmt.Sprintf("Reporter has not confirmed for %d days — close it", env.untouchedDays(in.createdAt, in.updatedAt)))
 		}
@@ -444,7 +468,7 @@ func ownershipVerifiedDone(in issueOwnershipInput, labels map[string]bool, env o
 	if labels[ownershipLabelAlreadyDone] {
 		return true
 	}
-	if labels[ownershipLabelLikelyDone] && (in.held || !in.actionable || env.levelFor(in.repo) < ownershipLanePRMinLevel) {
+	if labels[ownershipLabelLikelyDone] && (in.held || !in.actionable || !env.laneCanOpenPRFor(in.lane)) {
 		return true
 	}
 	return labels[ownershipLabelCoveredByPR] && !in.openLinkedPR
@@ -452,13 +476,13 @@ func ownershipVerifiedDone(in issueOwnershipInput, labels map[string]bool, env o
 
 // issueSafetyNetCovers reports whether the safety net applies to an issue: an
 // unheld actionable issue in the Unclaimed or Claimed band, or an actionable
-// hive/likely-done issue, whose lane may open PRs at the repository's level
-// and which no lane has claimed.
+// hive/likely-done issue, whose routed lane may open PRs and which no lane
+// has claimed (label, live claim or unexpired task lease).
 func issueSafetyNetCovers(in issueOwnershipInput, labels map[string]bool, env ownershipEnv) bool {
-	if !in.actionable || in.held || env.levelFor(in.repo) < ownershipLanePRMinLevel {
+	if !in.actionable || in.held || !env.laneCanOpenPRFor(in.lane) {
 		return false
 	}
-	if issueClaimed(in.labels) {
+	if issueClaimed(in.labels) || in.liveClaim || env.leasedFor(in.repo, in.number) {
 		return false
 	}
 	return in.band == "ready" || in.band == "in-progress" || labels[ownershipLabelLikelyDone]
@@ -511,13 +535,27 @@ func decidePROwnership(pr github.PullRequest, held bool, env ownershipEnv) Owner
 	}
 	// (10) otherwise not your turn; the safety net covers non-draft, unheld
 	// hive PRs at L3 and above that no lane has claimed.
-	if hive && !pr.Draft && env.levelFor(pr.Repo) >= ownershipLanePRMinLevel && !issueClaimed(pr.Labels) && env.stale(pr.CreatedAt, pr.UpdatedAt) {
+	if hive && !pr.Draft && env.levelFor(pr.Repo) >= ownershipLanePRMinLevel && !prClaimed(pr, env) && env.stale(pr.CreatedAt, pr.UpdatedAt) {
 		return safetyNetOwnership(env.untouchedDays(pr.CreatedAt, pr.UpdatedAt))
 	}
 	if withinAdjudicatorWait {
 		return waitingElsewhere()
 	}
 	return notYourTurn()
+}
+
+// prClaimed reports whether a lane holds a claim on a pull request: a claim
+// label, or an unexpired task lease on the PR or on an issue it claims.
+func prClaimed(pr github.PullRequest, env ownershipEnv) bool {
+	if issueClaimed(pr.Labels) || env.leasedFor(pr.Repo, pr.Number) {
+		return true
+	}
+	for _, linked := range pr.LinkedIssues {
+		if env.leasedFor(nonEmpty(linked.Repo, pr.Repo), linked.Number) {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -593,6 +631,9 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 					openLinkedPR: issueHasOpenLinkedPR(issue),
 					createdAt:    issue.CreatedAt,
 					updatedAt:    issue.UpdatedAt,
+					lane:         issue.Lane,
+					liveClaim:    issue.ClaimedBy != "" && issue.ClaimExpiresAt != nil && issue.ClaimExpiresAt.After(env.now),
+					reporterGate: issue.ReporterConfirmationGate,
 					actionable:   !held,
 					held:         held,
 					holdSources:  sources,
@@ -615,6 +656,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 				acknowledged: item.HumanAcknowledged,
 				createdAt:    item.CreatedAt,
 				updatedAt:    item.UpdatedAt,
+				reporterGate: item.ReporterConfirmationGate,
 				bucket:       item.Bucket,
 				bucketReason: item.Reason,
 			}
@@ -686,8 +728,15 @@ func repoWorkIssueRow(raw any) (github.RepoWorkIssue, bool) {
 
 // newOwnershipEnv resolves the decision's inputs from configuration and the
 // agent runtime once per status refresh.
-func newOwnershipEnv(cfg *config.Config, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time) ownershipEnv {
+func newOwnershipEnv(cfg *config.Config, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time, hub *ContributeWSHub) ownershipEnv {
 	env := ownershipEnv{now: now, hiveLevel: 1}
+	env.laneCanOpenPR = func(lane string) bool {
+		proc, ok := agentStatuses[strings.ToLower(strings.TrimSpace(lane))]
+		return ok && proc != nil && proc.State == agent.StateRunning && proc.LaunchedMode.CanPush()
+	}
+	if leased := hub.leasedWorkItems(now); len(leased) > 0 {
+		env.leased = func(repo string, number int) bool { return leased[leaseItemKey(repo, number)] }
+	}
 	if cfg == nil {
 		return env
 	}
@@ -846,8 +895,8 @@ func recordEscalationFirstSeen(repos []FrontendRepo, now time.Time) func(repo st
 
 // applyOwnershipDecisions computes the your-turn decision for every row of a
 // freshly built snapshot, using the snapshot's generated time as now.
-func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time) {
-	env := newOwnershipEnv(cfg, agentStatuses, currentMode, now)
+func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time, hub *ContributeWSHub) {
+	env := newOwnershipEnv(cfg, agentStatuses, currentMode, now, hub)
 	if env.hiveLevel >= ownershipAdjudicatorMinLevel {
 		env.escalatedAt = recordEscalationFirstSeen(repos, now)
 	}

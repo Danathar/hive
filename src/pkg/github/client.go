@@ -604,6 +604,11 @@ type Issue struct {
 	ClaimedBy      string     `json:"claimed_by,omitempty"`
 	ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
 	ClaimSource    string     `json:"claim_source,omitempty"`
+	// ReporterConfirmationGate records, from the list payload at enumeration,
+	// that the human-filed-bug reporter-confirmation gate applies to this issue
+	// (the check close-on-merge uses). The your-turn decision reads it for
+	// likely-done issues (hivecommons/hive#11592).
+	ReporterConfirmationGate bool `json:"reporter_confirmation_gate,omitempty"`
 }
 
 // IssueDependency is the transport form of a source-aware work dependency.
@@ -1015,6 +1020,9 @@ type HoldItem struct {
 	// HoldSources is the set of sources currently requiring this hold
 	// (HoldSource* constants), as on PullRequest.HoldSources.
 	HoldSources []string `json:"hold_sources,omitempty"`
+	// ReporterConfirmationGate mirrors Issue.ReporterConfirmationGate for a
+	// held issue.
+	ReporterConfirmationGate bool `json:"reporter_confirmation_gate,omitempty"`
 }
 
 type IssueCluster struct {
@@ -1335,11 +1343,11 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		switch standingMetaIssueKindFor(issue.GetTitle(), safeGetLogin(issue.GetUser()), labels) {
 		case standingMetaHiveAdvisory:
 			breakdown.HiveAdvisory++
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "hive_advisory", "Hive advisory report"))
+			details = append(details, c.workIssue(repo, issue, labels, "hive_advisory", "Hive advisory report"))
 			continue
 		case standingMetaDependencyDashboard:
 			breakdown.DependencyDashboard++
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "dependency_dashboard", "Dependency dashboard control panel"))
+			details = append(details, c.workIssue(repo, issue, labels, "dependency_dashboard", "Dependency dashboard control panel"))
 			continue
 		}
 
@@ -1355,16 +1363,17 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		if c.isHeld(labels) {
 			breakdown.Hold++
 			held = append(held, HoldItem{
-				Number:            issue.GetNumber(),
-				Repo:              repo,
-				Title:             issue.GetTitle(),
-				Type:              "issue",
-				CreatedAt:         issue.GetCreatedAt().Time,
-				URL:               issue.GetHTMLURL(),
-				Labels:            labels,
-				Assignees:         extractAssignees(issue.Assignees),
-				HumanAcknowledged: c.issueHasCheapHumanAcknowledgement(issue),
-				HoldSources:       holdSources.issueSources(issue.GetNumber(), labels),
+				Number:                   issue.GetNumber(),
+				Repo:                     repo,
+				Title:                    issue.GetTitle(),
+				Type:                     "issue",
+				CreatedAt:                issue.GetCreatedAt().Time,
+				URL:                      issue.GetHTMLURL(),
+				Labels:                   labels,
+				Assignees:                extractAssignees(issue.Assignees),
+				HumanAcknowledged:        c.issueHasCheapHumanAcknowledgement(issue),
+				HoldSources:              holdSources.issueSources(issue.GetNumber(), labels),
+				ReporterConfirmationGate: c.reporterConfirmationGateApplies(issue),
 			})
 			continue
 		}
@@ -1372,19 +1381,19 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		if c.isExempt(labels) {
 			breakdown.Filtered++
 			breakdown.Exempt++
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", "Exempt label"))
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", "Exempt label"))
 			continue
 		}
 		if labelPresent(labels, issueNeedsReporterConfirmationLabel) {
 			breakdown.Filtered++
 			breakdown.ReporterConfirmation++
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", issueNeedsReporterConfirmationLabel))
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", issueNeedsReporterConfirmationLabel))
 			continue
 		}
 		if suppress := hardSuppressIssueBucket(issueFilter, labels); suppress != "" {
 			breakdown.Filtered++
 			breakdown.addHardSuppress(suppress)
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", suppress))
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", suppress))
 			continue
 		}
 
@@ -1409,7 +1418,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			if !ra.AdmitsReporter(labels, safeGetLogin(issue.GetUser()), issue.GetAuthorAssociation()) {
 				c.markReporterTrustAwaiting(ctx, repo, issue, labels, ra, reporterTrustWaitBudget)
 				breakdown.ReporterTriage++
-				details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "reporter_triage", "Awaiting maintainer triage label"))
+				details = append(details, c.workIssue(repo, issue, labels, "reporter_triage", "Awaiting maintainer triage label"))
 				continue
 			}
 			labels = c.clearReporterTrustAwaiting(ctx, repo, issue, labels, ra)
@@ -1417,7 +1426,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 
 		if !issueFilter.Admits(labels) {
 			breakdown.Filtered++
-			details = append(details, c.repoWorkIssueAcked(repo, issue, labels, "filtered", "Project issue filter"))
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", "Project issue filter"))
 			continue
 		}
 
@@ -1465,6 +1474,8 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			URL:               issue.GetHTMLURL(),
 			IsTracker:         isTracker(issue.GetTitle(), labels, issue.GetBody()),
 			DependsOn:         dependsOn,
+
+			ReporterConfirmationGate: c.reporterConfirmationGateApplies(issue),
 		})
 	}
 	dropMutualBlocks(actionable, c.logger)
@@ -3578,6 +3589,8 @@ type RepoWorkIssue struct {
 	URL               string    `json:"url,omitempty"`
 	Bucket            string    `json:"bucket"`
 	Reason            string    `json:"reason,omitempty"`
+	// ReporterConfirmationGate mirrors Issue.ReporterConfirmationGate.
+	ReporterConfirmationGate bool `json:"reporter_confirmation_gate,omitempty"`
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
@@ -3594,6 +3607,8 @@ func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
 		URL:               issue.URL,
 		Bucket:            bucket,
 		Reason:            reason,
+
+		ReporterConfirmationGate: issue.ReporterConfirmationGate,
 	}
 }
 
@@ -3607,6 +3622,21 @@ func appendRepoWorkIssueDetail(result *ActionableResult, issue Issue, bucket, re
 	details := result.WorkDetailsByRepo[issue.Repo]
 	details.Issues = append(details.Issues, repoWorkIssueFromIssue(issue, bucket, reason))
 	result.WorkDetailsByRepo[issue.Repo] = details
+}
+
+// workIssue is repoWorkIssueAcked plus the reporter-confirmation gate flag,
+// read from the list payload already in hand.
+func (c *Client) workIssue(repo string, issue *gh.Issue, labels []string, bucket, reason string) RepoWorkIssue {
+	out := c.repoWorkIssueAcked(repo, issue, labels, bucket, reason)
+	out.ReporterConfirmationGate = c.reporterConfirmationGateApplies(issue)
+	return out
+}
+
+// reporterConfirmationGateApplies reports whether the human-filed-bug
+// reporter-confirmation gate applies to issue, using the same check
+// close-on-merge uses.
+func (c *Client) reporterConfirmationGateApplies(issue *gh.Issue) bool {
+	return issue != nil && c.reporterConfirmationCloseGateReason(issue) != ""
 }
 
 func repoWorkIssue(repo string, issue *gh.Issue, labels []string, bucket, reason string) RepoWorkIssue {
