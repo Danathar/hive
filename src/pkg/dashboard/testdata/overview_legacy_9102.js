@@ -124,9 +124,9 @@
       const cfg = repoIssueBandConfig();
       switch (band) {
         case 'in-progress': return { label: 'Claimed', short: 'claimed', rule: 'assigned or claimed by an agent — nothing needed unless it stalls' };
-        case 'agent-filed': return { label: 'Needs triage', short: 'triage', rule: 'filed by an agent (agent/<role> label) with no approved-direction label, no human assignee, and self-authorization hold is on for the repo (ACMM < 6 or github.self_authorization_hold=true) — add the label, assign a human, or close it. A human comment also acknowledges for #5117 but is not in the snapshot, so a commented-on proposal still shows here' };
+        case 'agent-filed': return { label: 'Needs triage', short: 'triage', rule: 'filed by an agent (agent/<role> label) with no approved-direction label, no human assignee, and self-authorization hold is on for the repo (ACMM < 6 or github.self_authorization_hold=true) — agents do not pick it up until it is labelled, assigned to a human, or closed. A human comment also acknowledges for #5117 but is not in the snapshot, so a commented-on proposal still shows here' };
         case 'waiting': return { label: 'Parked', short: 'parked', rule: 'labelled ' + (cfg.waitingLabels || []).join(', ') + ' — parked: agents do not continue until the label is removed or the question it names is answered' };
-        case 'done': return { label: 'Confirm & close', short: 'close?', rule: 'an agent applied ' + (cfg.doneLabels || []).join(', ') + ' — verify the work landed and close the issue' };
+        case 'done': return { label: 'Confirm & close', short: 'close?', rule: 'an agent applied ' + (cfg.doneLabels || []).join(', ') + ' — the agent reports the work as landed, and the issue is still open' };
         default: return { label: 'Unclaimed', short: 'unclaimed', rule: 'no other band matched — nobody is assigned, nothing claimed it, and no human gate applies; this does not by itself mean agents will pick it up' };
       }
     }
@@ -335,7 +335,7 @@
       switch (band) {
         case 'waiting': return { label: 'Gated', rule: 'held, or labelled ' + Array.from(new Set(PR_HUMAN_GATE_LABELS.concat(cfg.waitingLabels || []).map(l => String(l).toLowerCase()))).join(', ') + ' — gated: automation does not continue until the hold is released or the label is removed' };
         case 'eligible': return { label: 'Merge-eligible', rule: 'sweep verdict eligible, or queued for Hive auto-merge — nothing needed; it merges on its own' };
-        case 'blocked': return { label: 'Blocked', rule: 'blocked sweep verdict, merge conflicts, or failing CI — read the verdict, rebase, or fix the checks' };
+        case 'blocked': return { label: 'Blocked', rule: 'blocked sweep verdict, merge conflicts, or failing CI' };
         case 'in-review': return { label: 'In review', rule: 'outstanding sweep verdict, a Hive review posted, or a GitHub review decision — nothing needed until the review resolves' };
         case 'draft': return { label: 'Draft', rule: 'draft on GitHub — nothing needed until it is marked ready for review' };
         default: return { label: 'Open', rule: 'no verdict, review, hold, or draft flag yet — an ordinary open PR' };

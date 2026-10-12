@@ -14894,7 +14894,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         groups.get(spec.key).issues.push(issue);
       });
       const out = Array.from(groups.values());
-      out.forEach(g => g.issues.sort((a, b) => issueUpdatedAt(a) - issueUpdatedAt(b) || Number(a.number || 0) - Number(b.number || 0)));
+      out.forEach(g => g.issues.sort((a, b) => yourTurnFirst(a, b) || issueUpdatedAt(a) - issueUpdatedAt(b) || Number(a.number || 0) - Number(b.number || 0)));
       out.sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label));
       return out;
     }

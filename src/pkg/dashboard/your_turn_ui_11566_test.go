@@ -685,6 +685,26 @@ assert.deepEqual(pg[1].prs.map(e => e.pr.number), [11, 10]);
 	runYourTurnNode(t, script)
 }
 
+// A card's non-actionable groups (Filtered, Waiting on reporter, ...) carry the
+// marker too, so a your-turn row sorts ahead of unmarked rows there as well.
+func TestYourTurnRowsSortFirstInNonActionableGroups11566(t *testing.T) {
+	script := yourTurnPageScript(t, nil, `
+const own = { your_turn: true, verb: 'INSPECT', reason: 'why' };
+const issues = [
+  { number: 1, bucket: 'filtered', updated_at: '2026-01-01T00:00:00Z', ownership: { your_turn: false } },
+  { number: 2, bucket: 'filtered', updated_at: '2026-01-02T00:00:00Z', ownership: { your_turn: false } },
+  { number: 3, bucket: 'filtered', updated_at: '2026-01-09T00:00:00Z', ownership: own },
+  { number: 4, bucket: 'reporter_triage', updated_at: '2026-01-05T00:00:00Z', ownership: { your_turn: false } },
+  { number: 5, bucket: 'reporter_triage', updated_at: '2026-01-08T00:00:00Z', ownership: own },
+];
+const groups = groupedRepoNonActionableIssues(issues);
+assert.deepEqual(groups.map(g => g.label), ['Filtered', 'Needs triage']);
+assert.deepEqual(groups[0].issues.map(i => i.number), [3, 1, 2], 'the newer your-turn row leads the Filtered group');
+assert.deepEqual(groups[1].issues.map(i => i.number), [5, 4]);
+`, "groupedRepoNonActionableIssues", "repoNonActionableIssueBucketSpec")
+	runYourTurnNode(t, script)
+}
+
 func TestYourTurnMenuPerVerb11566(t *testing.T) {
 	script := yourTurnPageScript(t, nil, `
 const base = { kind: 'issue', url: 'https://github.com/o/r/issues/1', isOwner: true, planningAllowed: true, hasPlan: false, canToggleHold: true, held: false, sentinelLabel: 'sentinel-alert', admissionLabels: ['triage-ok'] };
@@ -926,6 +946,20 @@ func TestYourTurnGlyphIsWrittenOnceAndOnlyAsTheMarker11566(t *testing.T) {
 // issue, a level-held agent PR and a hive needs-human PR within the
 // adjudicator wait rule.
 func TestOneOwnershipSignalOnAnL5Hive11566(t *testing.T) {
+	// Band rules are the tooltips on band titles: they describe the band and
+	// never order the operator to act, which is the marker's job.
+	imperative := regexp.MustCompile(`(?i)(^|[—;:.]|\bor\b)\s*(add|assign|verify|confirm|close|read|rebase|fix|review|merge|pick up|approve|label|resolve|check)\b`)
+	cfg := config.DashboardIssueBandsConfig{}
+	for _, key := range []string{"ready", "in-progress", "agent-filed", "waiting", "done"} {
+		if rule := issueBandSpec(key, cfg).Rule; imperative.MatchString(rule) {
+			t.Errorf("issue band %q rule instructs the operator: %q", key, rule)
+		}
+	}
+	for _, key := range []string{"eligible", "blocked", "in-review", "draft", "waiting", "open"} {
+		if rule := prBandSpec(key, cfg).Rule; imperative.MatchString(rule) {
+			t.Errorf("PR band %q rule instructs the operator: %q", key, rule)
+		}
+	}
 	repos := ladderRepos11566()
 	repos[0].OpenPrs = repos[0].OpenPrs[:1] // keep the hive needs-human PR #3 only
 	repos[0].ActionableIssues = nil
