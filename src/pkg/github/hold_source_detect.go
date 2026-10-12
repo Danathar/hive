@@ -51,6 +51,9 @@ const (
 const (
 	holdActorApp    = "app"
 	holdActorPerson = "person"
+	// holdActorOther marks a hold applied by a non-App bot or an actor GitHub
+	// did not report; it cannot be attributed to Hive or to a person.
+	holdActorOther = "other"
 )
 
 // holdSourceCheck is the cached result of reading one held PR's comments and
@@ -62,7 +65,8 @@ type holdSourceCheck struct {
 	// Notices are the sources whose Hive notice is on the PR.
 	Notices []string `json:"notices,omitempty"`
 	// LatestHoldBy is who made the newest hold-label event: "app", "person",
-	// or empty when Hive cannot attribute it.
+	// "other" (a non-App bot or unreported actor), or empty when there is no
+	// such event or it was an unlabel.
 	LatestHoldBy string `json:"latest_hold_by,omitempty"`
 }
 
@@ -285,8 +289,12 @@ func (d *holdSourceDetector) prSources(ctx context.Context, number int, updatedA
 				set[src] = true
 				attributed = true
 			}
-			if check.LatestHoldBy == holdActorPerson {
+			switch check.LatestHoldBy {
+			case holdActorPerson:
 				set[HoldSourcePerson] = true
+				attributed = true
+			case holdActorOther:
+				set[HoldSourceUnknown] = true
 				attributed = true
 			}
 		}
@@ -455,11 +463,11 @@ func (c *Client) latestHoldLabelActor(ctx context.Context, owner, repo string, n
 	login := strings.TrimSpace(safeGetLogin(actor))
 	switch {
 	case login == "":
-		return "", nil
+		return holdActorOther, nil
 	case strings.TrimSpace(c.appBotLogin) != "" && strings.EqualFold(login, c.appBotLogin):
 		return holdActorApp, nil
 	case strings.HasSuffix(strings.ToLower(login), "[bot]") || strings.EqualFold(actor.GetType(), "Bot"):
-		return "", nil
+		return holdActorOther, nil
 	default:
 		return holdActorPerson, nil
 	}

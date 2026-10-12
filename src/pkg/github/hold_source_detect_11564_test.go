@@ -438,3 +438,37 @@ func TestFetchPRs_HeldRowsCarryHoldSources(t *testing.T) {
 	assertHoldSources(t, held[0].HoldSources, HoldSourceLevelGate)
 	assertHoldSources(t, heldPRs[0].HoldSources, HoldSourceLevelGate)
 }
+
+// A level-hold notice followed by a hold label from a bot other than the App
+// (for example a prow bot answering a maintainer's /hold) is not provably only
+// the level gate: the label's origin is unattributed, so `unknown` is listed
+// with it.
+func TestHoldSources_NonAppBotLatestHoldLabelListsUnknownWithLevelGate(t *testing.T) {
+	f, c := newHoldSourceTest(t)
+	f.comments[16] = []map[string]any{holdSourceComment(testHiveAppBotLogin, levelHoldNotice("quality"))}
+	f.events[16] = []map[string]any{
+		holdSourceEvent("labeled", "hold", testHiveAppBotLogin, holdSourceT0),
+		holdSourceEvent("labeled", "hold", "kubestellar-prow[bot]", holdSourceT0.Add(time.Minute)),
+	}
+	assertHoldSources(t, detectPRHoldSources(t, c, 16, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourceUnknown)
+}
+
+func TestHoldSources_BlankActorLatestHoldLabelListsUnknownWithLevelGate(t *testing.T) {
+	f, c := newHoldSourceTest(t)
+	f.comments[17] = []map[string]any{holdSourceComment(testHiveAppBotLogin, levelHoldNotice("quality"))}
+	f.events[17] = []map[string]any{
+		holdSourceEvent("labeled", "hold", testHiveAppBotLogin, holdSourceT0),
+		holdSourceEvent("labeled", "hold", "", holdSourceT0.Add(time.Minute)),
+	}
+	assertHoldSources(t, detectPRHoldSources(t, c, 17, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourceUnknown)
+}
+
+func TestHoldSources_PersonLatestHoldLabelListsPersonWithLevelGate(t *testing.T) {
+	f, c := newHoldSourceTest(t)
+	f.comments[18] = []map[string]any{holdSourceComment(testHiveAppBotLogin, levelHoldNotice("quality"))}
+	f.events[18] = []map[string]any{
+		holdSourceEvent("labeled", "hold", testHiveAppBotLogin, holdSourceT0),
+		holdSourceEvent("labeled", "hold", "alice", holdSourceT0.Add(time.Minute)),
+	}
+	assertHoldSources(t, detectPRHoldSources(t, c, 18, holdSourceT0, "hold"), HoldSourceLevelGate, HoldSourcePerson)
+}
