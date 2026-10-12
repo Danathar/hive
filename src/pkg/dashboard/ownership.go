@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -923,11 +922,7 @@ func recordEscalationFirstSeen(repos []FrontendRepo, now time.Time) func(repo st
 // freshly built snapshot, using the snapshot's generated time as now.
 func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time, hub *ContributeWSHub) {
 	env := newOwnershipEnv(cfg, agentStatuses, currentMode, now, hub)
-	sweepCtx, cancelSweep := classify.SweepContext(context.Background())
-	defer cancelSweep()
-	env.routeLane = func(issue github.Issue) string {
-		return classify.ClassifyAll(sweepCtx, []github.Issue{issue})[0].Lane
-	}
+	env.routeLane = classify.KeywordLane
 	if env.hiveLevel >= ownershipAdjudicatorMinLevel {
 		env.escalatedAt = recordEscalationFirstSeen(repos, now)
 	}
