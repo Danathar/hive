@@ -128,7 +128,7 @@ func recordOwnershipTransitions(repos []FrontendRepo, now time.Time) {
 		delete(state.Identities, id)
 		changed = true
 		if old.YourTurn {
-			transitions = append(transitions, ownershipTransition{repo: repoName, kind: kind, number: num, url: ownershipItemURL(repoName, kind, num), from: old, reason: "no longer in the open list (closed, merged, draft or exempt)"})
+			transitions = append(transitions, ownershipTransition{repo: repoName, kind: kind, number: num, url: ownershipItemURL(repoName, kind, num), from: old, reason: "no longer in the open list (closed/merged/draft/exempt)"})
 		}
 	}
 	if !changed {
