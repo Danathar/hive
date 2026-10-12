@@ -88,8 +88,8 @@ func TestRecordOwnershipTransitions11571(t *testing.T) {
 		{"new item starting your turn", []FrontendRepo{repo11571("r", map[string]Ownership{"pr#1": review, "issue#7": review}, nil)},
 			[]entry{{new: true, newVerb: OwnershipVerbReview, newCode: OwnershipReasonHivePRNeedsHuman, reason: review.Reason, url: "https://github.com/o/r/issues/7", repo: "o/r", number: 7}}},
 		{"new item not your turn", []FrontendRepo{repo11571("r", map[string]Ownership{"pr#1": review, "issue#7": review, "issue#8": none}, nil)}, nil},
-		{"closed or merged while your turn carries the URL", []FrontendRepo{repo11571("r", map[string]Ownership{"pr#1": review, "issue#8": none}, nil)},
-			[]entry{{old: true, oldVerb: OwnershipVerbReview, oldCode: OwnershipReasonHivePRNeedsHuman, reason: "closed or merged", url: "https://github.com/o/r/issues/7", repo: "o/r", number: 7}}},
+		{"departed while your turn carries the URL", []FrontendRepo{repo11571("r", map[string]Ownership{"pr#1": review, "issue#8": none}, nil)},
+			[]entry{{old: true, oldVerb: OwnershipVerbReview, oldCode: OwnershipReasonHivePRNeedsHuman, reason: "no longer in the open list (closed, merged, draft or exempt)", url: "https://github.com/o/r/issues/7", repo: "o/r", number: 7}}},
 		{"closed while not your turn", []FrontendRepo{repo11571("r", pr1(review), nil)}, nil},
 	}
 
