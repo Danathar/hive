@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-12 (v5.162.0)
+
+### Added
+
+- Kick work lists now surface open folded-tracker issues (`<!-- hive-finding-folded -->`) so agents comment on the tracker instead of filing new issues (#11587).
+
+### Changed
+
+- Scanner and sec-check prompts now batch findings by shared root cause, check closed issues and PRs before filing, cap new issues at 5 per run, and reference the `<!-- hive-finding-folded -->` tracker (#11586).
+
 ## 2026-10-12 (v5.161.6)
 
 ### Fixed

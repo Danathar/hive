@@ -1,1 +1,0 @@
-- Kick work lists now surface open folded-tracker issues (`<!-- hive-finding-folded -->`) so agents comment on the tracker instead of filing new issues (#11587).
