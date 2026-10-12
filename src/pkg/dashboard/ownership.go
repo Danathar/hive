@@ -337,6 +337,9 @@ type issueOwnershipInput struct {
 	number       int
 	labels       []string
 	acknowledged bool
+	// openLinkedPR is set when the issue has an open (unmerged) linked PR or
+	// open PR claim context.
+	openLinkedPR bool
 	createdAt    time.Time
 	updatedAt    time.Time
 
@@ -349,6 +352,18 @@ type issueOwnershipInput struct {
 	// non-actionable row.
 	bucket       string
 	bucketReason string
+}
+
+// issueHasOpenLinkedPR reports whether an actionable issue carries an open
+// linked PR or an open PR claim context (the duplicate-PR guard's
+// weak/stale claims keep the issue actionable but still covered).
+func issueHasOpenLinkedPR(issue github.Issue) bool {
+	for _, link := range issue.LinkedPRs {
+		if !link.Merged && strings.EqualFold(strings.TrimSpace(link.State), "open") {
+			return true
+		}
+	}
+	return issue.ClaimContext != nil && !issue.ClaimContext.MergedPR
 }
 
 // decideIssueOwnership applies the precedence rules of #11507 to an issue;
@@ -364,14 +379,23 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 	if env.sentinelLabel != "" && labels[strings.ToLower(env.sentinelLabel)] {
 		return yourTurn(OwnershipReasonSentinelFlagged, "Flagged by the sentinel — inspect it")
 	}
-	// (3) covered by an open PR: the PR closes it on merge.
-	if in.bucket == repoWorkBucketClaimedByPR {
+	// (3) covered by an open PR: the PR closes it on merge. Not yours, and
+	// the safety net does not cover it.
+	if in.bucket == repoWorkBucketClaimedByPR || in.openLinkedPR {
 		return notYourTurn()
 	}
 	// (4) parking buckets.
 	var parking string
 	if !in.actionable && !in.held {
+		// The enumeration recorded one bucket per issue by label order;
+		// the ordered label check decides the verb, and the recorded
+		// bucket is the fallback when the labels no longer say.
 		parking = repoWorkIssueParkingBucket(github.RepoWorkIssue{Bucket: in.bucket, Reason: in.bucketReason})
+		if parking != "" {
+			if ordered := env.parkingBucket(in.labels); ordered != "" {
+				parking = ordered
+			}
+		}
 	} else {
 		parking = env.parkingBucket(in.labels)
 	}
@@ -411,8 +435,7 @@ func ownershipVerifiedDone(in issueOwnershipInput, labels map[string]bool, env o
 	if labels[ownershipLabelLikelyDone] && (in.held || !in.actionable || env.levelFor(in.repo) < ownershipLanePRMinLevel) {
 		return true
 	}
-	// Rule (3) already returned for an issue an open PR covers.
-	return labels[ownershipLabelCoveredByPR]
+	return labels[ownershipLabelCoveredByPR] && !in.openLinkedPR
 }
 
 // issueSafetyNetCovers reports whether the safety net applies to an issue: an
@@ -550,6 +573,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 					number:       issue.Number,
 					labels:       issue.Labels,
 					acknowledged: issue.HumanAcknowledged,
+					openLinkedPR: issueHasOpenLinkedPR(issue),
 					createdAt:    issue.CreatedAt,
 					updatedAt:    issue.UpdatedAt,
 					actionable:   !held,
@@ -571,6 +595,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 				repo:         nonEmpty(item.Repo, repoName),
 				number:       item.Number,
 				labels:       item.Labels,
+				acknowledged: item.HumanAcknowledged,
 				createdAt:    item.CreatedAt,
 				updatedAt:    item.UpdatedAt,
 				bucket:       item.Bucket,
@@ -691,6 +716,11 @@ func reviewerLaneAvailable(cfg *config.Config, agentStatuses map[string]*agent.A
 		if proc, ok := agentStatuses[name]; ok && proc != nil && proc.Paused {
 			continue
 		}
+		// An explicit pause/off cadence in the current mode means the
+		// governor never kicks the agent (the status builder's offByCadence).
+		if cadence := cfg.CadenceValueForMode(name, currentMode); cadence != "" && cadence.IsPaused() && !agentCfg.OnDemand {
+			continue
+		}
 		if unscheduled, _ := agentUnscheduledInMode(cfg, name, currentMode, agentCfg.Enabled, agentCfg.OnDemand, agentCfg.UsesGovernorKick()); unscheduled {
 			continue
 		}
@@ -706,8 +736,8 @@ func reviewerLaneAvailable(cfg *config.Config, agentStatuses map[string]*agent.A
 var ownershipStatePath = "/data/ownership-state.json"
 
 // ownershipEscalationLedgerPath is the escalation ledger the escalation sweep
-// writes (cmd/hive escalationLedgerPath); read only.
-var ownershipEscalationLedgerPath = "/data/metrics/fix-streaks.json"
+// writes; read only.
+var ownershipEscalationLedgerPath = escalation.DefaultLedgerPath
 
 var ownershipStateMu sync.Mutex
 
@@ -756,7 +786,7 @@ func recordEscalationFirstSeen(repos []FrontendRepo, now time.Time) func(repo st
 	changed := false
 	for _, repo := range repos {
 		repoName := overviewRepoName(repo)
-		if !repo.CountsIncomplete {
+		if ownershipRowsComplete(repo) {
 			complete[repo.Full] = true
 			complete[repo.Name] = true
 		}

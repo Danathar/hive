@@ -85,7 +85,7 @@ func recordOwnershipTransitions(repos []FrontendRepo, now time.Time) {
 	changed := false
 	for _, repo := range repos {
 		repoName := overviewRepoName(repo)
-		if repo.CountsIncomplete || repo.Paused || repo.ownershipDataMissing {
+		if !ownershipRowsComplete(repo) {
 			// Rows may be missing: neither infer departures nor record
 			// entries from a partial view.
 			for key := range repo.Ownership {
@@ -173,6 +173,13 @@ func ownershipItemURL(repo, kind string, number int) string {
 		path = "pull"
 	}
 	return "https://github.com/" + repo + "/" + path + "/" + strconv.Itoa(number)
+}
+
+// ownershipRowsComplete reports whether this snapshot enumerated the repo
+// fully, so a missing row means the item left. Paused repos, repos built
+// without enumeration data and repos with incomplete counts are not complete.
+func ownershipRowsComplete(repo FrontendRepo) bool {
+	return !repo.CountsIncomplete && !repo.Paused && !repo.ownershipDataMissing
 }
 
 func splitOwnershipKey(key string) (string, int) {

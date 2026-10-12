@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -368,8 +369,12 @@ func repoHoldRemoveFirst(items []any, number int) ([]any, any, bool) {
 	for i, item := range items {
 		if repoHoldItemNumber(item) == number {
 			removed := item
-			copy(items[i:], items[i+1:])
-			return items[:len(items)-1], removed, true
+			// Build a new slice: status snapshots share the old backing
+			// array and are marshaled after statusMu is released.
+			kept := make([]any, 0, len(items)-1)
+			kept = append(kept, items[:i]...)
+			kept = append(kept, items[i+1:]...)
+			return kept, removed, true
 		}
 	}
 	return items, nil, false
@@ -424,8 +429,10 @@ func repoHoldSummaryHas(items []any, repoFull string, number int, itemType strin
 func repoHoldRemoveSummary(items []any, repoFull string, number int, itemType string) ([]any, bool) {
 	for i, item := range items {
 		if repoHoldSummaryMatches(item, repoFull, number, itemType) {
-			copy(items[i:], items[i+1:])
-			return items[:len(items)-1], true
+			kept := make([]any, 0, len(items)-1)
+			kept = append(kept, items[:i]...)
+			kept = append(kept, items[i+1:]...)
+			return kept, true
 		}
 	}
 	return items, false
@@ -505,16 +512,16 @@ func (s *Server) applyRepoHoldToStatus(repoFull string, number int, itemType str
 				repo.OpenPrs, moved, didMove = repoHoldRemoveFirst(repo.OpenPrs, number)
 				if didMove {
 					moved = repoHoldSetItemLabels(moved, repoHoldLabelsAfter(moved, true, label, nil, label))
-					repo.HeldPrs = append(repo.HeldPrs, moved)
+					repo.HeldPrs = append(slices.Clip(repo.HeldPrs), moved)
 				}
 			} else {
 				repo.ActionableIssues, moved, didMove = repoHoldRemoveFirst(repo.ActionableIssues, number)
 				if didMove {
-					repo.HeldIssues = append(repo.HeldIssues, repoHoldItemForSummary(moved, repoFull, number, itemType, label))
+					repo.HeldIssues = append(slices.Clip(repo.HeldIssues), repoHoldItemForSummary(moved, repoFull, number, itemType, label))
 				}
 			}
 			if didMove && !repoHoldSummaryHas(status.Hold.Items, repoFull, number, itemType) {
-				status.Hold.Items = append(status.Hold.Items, repoHoldItemForSummary(moved, repoFull, number, itemType, label))
+				status.Hold.Items = append(slices.Clip(status.Hold.Items), repoHoldItemForSummary(moved, repoFull, number, itemType, label))
 				if itemType == "pr" {
 					status.Hold.PRs++
 				} else {
@@ -527,13 +534,13 @@ func (s *Server) applyRepoHoldToStatus(repoFull string, number int, itemType str
 				repo.HeldPrs, moved, didMove = repoHoldRemoveFirst(repo.HeldPrs, number)
 				if didMove {
 					moved = repoHoldSetItemLabels(moved, repoHoldLabelsAfter(moved, false, label, removed, label))
-					repo.OpenPrs = append(repo.OpenPrs, moved)
+					repo.OpenPrs = append(slices.Clip(repo.OpenPrs), moved)
 				}
 			} else {
 				repo.HeldIssues, moved, didMove = repoHoldRemoveFirst(repo.HeldIssues, number)
 				if didMove {
 					moved = repoHoldSetItemLabels(moved, repoHoldLabelsAfter(moved, false, label, removed, label))
-					repo.ActionableIssues = append(repo.ActionableIssues, moved)
+					repo.ActionableIssues = append(slices.Clip(repo.ActionableIssues), moved)
 				}
 			}
 			if didMove {
@@ -548,6 +555,22 @@ func (s *Server) applyRepoHoldToStatus(repoFull string, number int, itemType str
 		}
 		if didMove {
 			repoHoldAdjustBreakdown(repo, itemType, held)
+			// The stored decision was made while the item sat on the other
+			// side of the hold; never attach it to the moved row. The next
+			// status refresh decides it again.
+			kind := ownershipKindIssue
+			if itemType == "pr" {
+				kind = ownershipKindPR
+			}
+			// Copy-on-write: lock-free status readers share this map.
+			dropKey := ownershipKey(kind, number)
+			trimmed := make(map[string]Ownership, len(repo.Ownership))
+			for k, v := range repo.Ownership {
+				if k != dropKey {
+					trimmed[k] = v
+				}
+			}
+			repo.Ownership = trimmed
 		}
 		break
 	}
