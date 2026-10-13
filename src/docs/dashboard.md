@@ -404,7 +404,10 @@ in exactly one band, while non-winning states remain as badges on the pill:
    the pill legend entry points there.
 5. **Confirm & close** (`close?`) — labels such as `hive/already-done`,
    `hive/covered-by-pr`, and `hive/likely-done`: an agent believes the work
-   landed; verify and close.
+   landed; verify and close. An issue also labelled `hive/verified-open` (the
+   agent's verdict that the referenced PR did not finish the work) is not in
+   this band because of `hive/likely-done`; it falls through to its usual band.
+   Other done labels still apply.
 
 Precedence is confirm & close → parked → claimed → needs triage → unclaimed,
 so a label that parks an issue beats an assignment and done beats all other display states.
