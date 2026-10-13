@@ -155,7 +155,52 @@ func (c *Client) reservedLabelRefusal(add, remove []string) (string, bool) {
 		return "", false
 	}
 	sort.Strings(bad)
+	if hint := verifiedOpenResendHint(add, remove, bad); hint != "" {
+		return "label request names hive-controlled label(s) " + strings.Join(bad, ", ") + ": " + hint, true
+	}
 	return "label request names hive-controlled label(s) " + strings.Join(bad, ", ") +
 		": these drive hive automation or record a human decision and cannot be set by an agent. " +
 		"Use the claim relay for ownership, and ask a maintainer for merge, hold and decision labels.", true
+}
+
+// verifiedOpenResendHint returns a usable next step when the only refused part
+// of a request is removing hive/likely-done or hive/covered-by-pr alongside an
+// add of hive/verified-open. The request is still refused as a whole; hive
+// removes those labels itself once hive/verified-open is present, so the agent
+// should resend just the add.
+func verifiedOpenResendHint(add, remove, bad []string) string {
+	addsVerified := false
+	for _, label := range add {
+		if strings.EqualFold(strings.TrimSpace(label), VerifiedOpenLabel) {
+			addsVerified = true
+			break
+		}
+	}
+	if !addsVerified {
+		return ""
+	}
+	for _, label := range bad {
+		name := strings.ToLower(label)
+		if name != LikelyDoneLabel && name != CoveredByPRLabel {
+			return ""
+		}
+		for _, a := range add {
+			if strings.EqualFold(strings.TrimSpace(a), label) {
+				return ""
+			}
+		}
+		removed := false
+		for _, r := range remove {
+			if strings.EqualFold(strings.TrimSpace(r), label) {
+				removed = true
+				break
+			}
+		}
+		if !removed {
+			return ""
+		}
+	}
+	return "nothing in this request was applied. Hive removes " + LikelyDoneLabel + " and " + CoveredByPRLabel +
+		" itself once " + VerifiedOpenLabel + " is on the issue, so do not remove them. " +
+		"Resend a label request that adds only " + VerifiedOpenLabel + "."
 }
