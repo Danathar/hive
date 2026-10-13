@@ -16844,7 +16844,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const held = heldIssueKeys.has(String(i.number));
           if (yourTurnOf(i) && repoPillFilterMatches(repoIssueFilterKinds(i, i, held), pillFilter)) items.push({ repo: repoFull, kind: 'issue', row: i, held });
         });
-        (matches ? [] : repoCardUntrackedIssues(r)).forEach(i => {
+        // Bandless rows are not entries of the filter match; they pass the same
+        // kind/term test the tile and the card bucket count them by.
+        repoCardUntrackedIssues(r).filter(i => !overviewFilter || overviewProjectFilterMatchesEntry({ kind: 'issue', item: i }, overviewFilter)).forEach(i => {
           if (yourTurnOf(i) && repoPillFilterMatches(repoNonActionableIssueKinds(repoNonActionableIssueBucketSpec(i), i), pillFilter)) items.push({ repo: repoFull, kind: 'issue', row: i, held: false });
         });
         const prs = matches

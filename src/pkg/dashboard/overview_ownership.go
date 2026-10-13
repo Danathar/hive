@@ -120,6 +120,7 @@ func nonActionableIssueInfo(item github.RepoWorkIssue, repoName string, cfg conf
 	info := IssueBand(github.Issue{
 		Repo: nonEmpty(item.Repo, repoName), Number: item.Number, Title: item.Title, Author: item.Author,
 		Labels: item.Labels, Assignees: item.Assignees, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, URL: item.URL,
+		HumanAcknowledged: item.HumanAcknowledged,
 	}, false, cfg, now, selfAuthorizationHoldActive)
 	info.Band = nonActionableIssueBand(item)
 	if info.Band != "" && info.Chip == "" {

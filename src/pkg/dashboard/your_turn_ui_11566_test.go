@@ -616,6 +616,48 @@ assert.equal(numbersIn(els['repos-inbox'].innerHTML).length, total);
 	runYourTurnNode(t, script)
 }
 
+// With the Overview Your turn filter active, the strip and the counter keep the
+// bandless your-turn rows (an ADMIT reporter-triage row, a reporter-confirmation
+// CLOSE row) that the tile and the card bucket count, so N and M add up to the
+// tile's number.
+func TestYourTurnInboxKeepsBandlessRowsUnderOverviewFilter11566(t *testing.T) {
+	repos := []FrontendRepo{{
+		Name: "f", Full: "o/f", Issues: 3,
+		ActionableIssues: []any{
+			github.Issue{Repo: "o/f", Number: 1, Title: "plain ready issue", CreatedAt: ago11566(2 * time.Hour), UpdatedAt: ago11566(2 * time.Hour)},
+		},
+		NonActionableIssues: []any{
+			github.RepoWorkIssue{Repo: "o/f", Number: 3, Title: "stranger report", Bucket: repoWorkBucketReporterTriage, Reason: "Awaiting maintainer triage label", CreatedAt: ago11566(8 * time.Hour), UpdatedAt: ago11566(8 * time.Hour)},
+			github.RepoWorkIssue{Repo: "o/f", Number: 5, Title: "confirm fix", Labels: []string{"needs-reporter-confirmation"}, Bucket: repoWorkBucketFiltered, Reason: "needs-reporter-confirmation", CreatedAt: ago11566(90 * 24 * time.Hour), UpdatedAt: ago11566(60 * 24 * time.Hour)},
+		},
+	}}
+	env := ownershipEnv11565(5)
+	env.repoLevel = func(string) int { return 0 }
+	decideRepoOwnership(repos, config.DashboardIssueBandsConfig{}, env)
+	s := newTestServer()
+	resp := s.statusWithOverviewBands(&StatusPayload{HiveID: "h", ACMMLevel: 5, AdmissionLabels: []string{"triage-ok"}, Repos: repos}, ownershipNow11565)
+	tile := overviewTermCount(resp.ActionableNow.Equation, "your_turn")
+	if tile != 2 {
+		t.Fatalf("Your turn tile = %d, want the ADMIT row and the CLOSE row", tile)
+	}
+	script := yourTurnPageScript(t, map[string]bool{"renderOverviewCharts": true, "refreshSectionCardShell": true, "ensureRepoHoldPermission": true, "renderRepoLegend": true},
+		`
+function renderOverviewCharts() {} function refreshSectionCardShell() {} function ensureRepoHoldPermission() {} function renderRepoLegend() {}
+window._lastStatus = `+yourTurnJSON(t, resp)+`;
+const numbersIn = html => [...html.matchAll(/<div class="yt-inbox-row">.*?<span class="pill-num">#(\d+)<\/span>/gs)].map(m => Number(m[1]));
+const rows = window._lastStatus.repos[0].nonActionableIssues;
+assert.deepEqual(rows.map(r => [r.number, r.overview_term, r.ownership.verb]), [[3, 'your_turn', 'ADMIT'], [5, 'your_turn', 'CLOSE']]);
+_overviewProjectFilterKey = 'your-turn';
+renderRepos(window._lastStatus.repos);
+const strip = els['repos-inbox'].innerHTML;
+assert.deepEqual(numbersIn(strip).sort((a, b) => a - b), [3, 5]);
+// The counter N/M equals the tile.
+assert.equal(els['repos-needs-human'].textContent, '· 1 your turn · 1 to close');
+assert.equal(1 + 1, `+yourTurnJSON(t, tile)+`);
+`, "renderRepos")
+	runYourTurnNode(t, script)
+}
+
 func TestYourTurnCountsCounterAndEmptyState11566(t *testing.T) {
 	script := yourTurnPageScript(t, nil, `
 const item = verb => ({ repo: 'o/r', kind: 'issue', row: { number: 1, title: 't', ownership: { your_turn: true, verb, reason: 'why', inbox_rank: 1 } } });
