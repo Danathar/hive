@@ -60,6 +60,10 @@ type GitHubConfig struct {
 	// GraphQLPRBatchPageSize controls the pullRequests(first:) page size.
 	// Zero uses DefaultGraphQLPRBatchPageSize.
 	GraphQLPRBatchPageSize int `yaml:"graphql_pr_batch_page_size,omitempty" json:"graphql_pr_batch_page_size,omitempty"`
+	// AdditionalBotLogins lists other App-bot accounts (e.g. a second hive's
+	// "<slug>[bot]") whose issues count as hive-filed for twin, fold and
+	// rejected-twin dedupe. Also the only identity source for PAT-auth hives.
+	AdditionalBotLogins []string `yaml:"additional_bot_logins,omitempty" json:"additional_bot_logins,omitempty"`
 	// AgentReserveFloor reserves hourly GitHub REST calls for the hive itself
 	// before per-agent proxy budgets spend the remainder.
 	AgentReserveFloor int `yaml:"agent_reserve_floor,omitempty" json:"agent_reserve_floor,omitempty"`
