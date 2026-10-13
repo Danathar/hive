@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -144,8 +145,13 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 	}
 
 	signals := make([]Signal, 0)
-	if labels["blocked"] {
-		signals = append(signals, Signal{Glyph: "⛔", Label: "blocked"})
+	// The label records no reason; GitHub's native "blocked by" links
+	// (Issue.DependsOn, #9839) are the only structured one. Name the open
+	// ones, and with only the label say plainly that none is recorded.
+	if open := slices.Compact(issue.OpenBlockers()); len(open) > 0 {
+		signals = append(signals, Signal{Glyph: "⛔", Label: "blocked by " + strings.Join(open, ", ")})
+	} else if labels["blocked"] {
+		signals = append(signals, Signal{Glyph: "⛔", Label: "labelled blocked — the label records no reason; see the issue"})
 	}
 	if labels["needs-decision"] || labels["2-discussing"] {
 		signals = append(signals, Signal{Glyph: "❓", Label: "needs decision"})

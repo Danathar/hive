@@ -14564,7 +14564,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('decision'), label: 'DECISION', caption: 'needs-decision — parked by Hive', tip: 'Labelled needs-decision: Hive parked this issue' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('spec'), label: 'SPEC', caption: 'needs-spec — parked until it has a spec', tip: 'Labelled needs-spec: Hive parked this issue until it has a spec' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('reporter'), label: 'REPORTER', caption: 'needs-reporter-confirmation — waiting on the reporter', tip: 'Waiting on the reporter to confirm' },
-            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('blocked'), label: 'BLOCKED', caption: 'blocked', tip: 'Labelled blocked' },
+            { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('blocked'), label: 'BLOCKED', caption: 'blocked — labelled blocked; contributors skip it', tip: 'Labelled blocked. Hover a card\'s pill for its open "blocked by" links, if any; the label itself records no reason.' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('discussing'), label: 'DISCUSSING', caption: '2-discussing — still under discussion', tip: 'Labelled 2-discussing' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('epic'), label: 'EPIC', caption: 'Epic', tip: 'Labelled Epic' },
             { cls: 'repo-issue-pill waiting', kind: repoIssueChipKind('untriaged'), label: 'UNTRIAGED', caption: 'needs-triage — no maintainer triage yet', tip: 'Labelled needs-triage' },
@@ -15199,6 +15199,23 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function issueBandTip(band) {
       const spec = issueBandSpec(band);
       return spec.label + ': ' + spec.rule;
+    }
+
+    // Hover text of an issue row's state pill. A non-held BLOCKED pill leads
+    // with the server's blocked signal verbatim (its open "blocked by" links,
+    // or that the label records no reason), then the row's other signals;
+    // held rows (their pill says "held") and every other pill keep the band
+    // rule and signals.
+    function issueStatusTip(info, held) {
+      const signals = info.signals || [];
+      if (!held && info.chip === 'blocked') {
+        const blocked = signals.find(s => s.glyph === '⛔');
+        if (blocked) {
+          const rest = signals.filter(s => s !== blocked);
+          return blocked.label + (rest.length ? ' — ' + rest.map(s => s.label).join(', ') : '');
+        }
+      }
+      return issueBandTip(info.band) + (signals.length ? ' — ' + signals.map(s => s.label).join(', ') : '');
     }
 
     function issueBandRank(band) {
@@ -17474,7 +17491,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const bandClass = info.band === 'ready' ? '' : ' ' + info.band;
           const heldClass = isHeldIssue ? ' held' : '';
           const staleClass = issueIsStale(i) ? ' stale' : '';
-          const statusTip = (isHeldIssue ? heldTip + ' — band: ' : '') + issueBandTip(info.band) + (info.signals.length ? ' — ' + info.signals.map(s => s.label).join(', ') : '');
+          const statusTip = (isHeldIssue ? heldTip + ' — band: ' : '') + issueStatusTip(info, isHeldIssue);
           const issueUrl = i.url || (repoUrl + '/issues/' + i.number);
           const rowKinds = repoIssueFilterKinds(i, info, isHeldIssue);
           const statusKind = isHeldIssue ? 'issue:held' : (info.chip ? repoIssueChipKind(info.chip) : ('issue:' + info.band));
