@@ -97,11 +97,22 @@ func TestHelpTooltipsUseBodyFixedPortal11269(t *testing.T) {
 			t.Fatalf("tooltip anchoring regression guard missing %q", want)
 		}
 	}
-	portalRule := cssRule(t, html, ".config-tooltip-portal")
+	// The shared ".config-info .config-tooltip, .config-tooltip-portal" rule
+	// also ends in ".config-tooltip-portal {", so match the standalone rule.
+	portalRule := regexp.MustCompile(`(?m)^\s*\.config-tooltip-portal \{[^}]*\}`).FindString(html)
+	if portalRule == "" {
+		t.Fatal("static/index.html has no standalone .config-tooltip-portal CSS rule")
+	}
 	for _, want := range []string{"display: block", "position: fixed"} {
 		if !strings.Contains(portalRule, want) {
 			t.Fatalf("tooltip portal must be body-level fixed positioning, missing %q in %s", want, portalRule)
 		}
+	}
+	// #11705: the author "display: block" above beats the user-agent
+	// "[hidden] { display: none }", so hideConfigTooltip()'s portal.hidden = true
+	// is a no-op on screen unless the portal has its own [hidden] rule.
+	if hiddenRule := cssRule(t, html, ".config-tooltip-portal[hidden]"); !strings.Contains(hiddenRule, "display: none") {
+		t.Fatalf("hidden tooltip portal must be display: none, got %s", hiddenRule)
 	}
 	if strings.Contains(jsFunc(t, html, "positionConfigTooltip"), "pageX") || strings.Contains(jsFunc(t, html, "positionConfigTooltip"), "offsetParent") {
 		t.Fatal("tooltip positioning must use trigger viewport rects, not page coordinates or offset parents")
