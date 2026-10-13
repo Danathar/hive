@@ -29,12 +29,12 @@ ones to:
 
 1. **A truncated list must say it is truncated.** Every kick list that is cut
    ends with an explicit "… and N more" line
-   (`prListOverflowLine`, `src/pkg/scheduler/kickmessage.go:250-252`). A silent slice
+   (`prListOverflowLine`, `src/pkg/scheduler/kickmessage.go:252-254`). A silent slice
    reads to the agent as "this is the complete list".
 2. **Truncation must preserve the prioritization signal, not cut an arbitrary slice.**
    This holds today and is easy to assume backwards:
    - Issues are sorted by actionable rank tier, then **oldest first** within each tier before any cap is applied
-     (`RankActionableIssues`, `src/pkg/github/client.go:3684-3694`, descending `AgeMinutes`).
+     (`RankActionableIssues`, `src/pkg/github/client.go:3694-3700`, descending `AgeMinutes`).
    - PRs are sorted by **review class then oldest-first within class**
      (`SortPullRequestsForReview`, `src/pkg/github/review_priority.go:181`;
      fixes → refactors/docs → tests).
