@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-13 (v5.165.2)
+
+### Fixed
+
+- Hub-managed upgrades now patch a spoke Deployment directly after the heartbeat fallback stays armed too long, so a crash-looping spoke that never reaches its self-upgrade minimum uptime can still receive the target image.
+
 ## 2026-10-13 (v5.165.1)
 
 ### Fixed
