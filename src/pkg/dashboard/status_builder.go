@@ -316,6 +316,7 @@ func BuildFrontendStatus(
 		IssueToMerge:          issueToMerge,
 		IssuesDisabledRepos:   metricsCollector.GetIssuesDisabledRepos(),
 		ACMMLevel:             detectACMMLevel(cfg),
+		AdmissionLabels:       cfg.Project.IssueFilter.ReporterTrustRequiredLabelsForNotice(),
 		ACMMLevelConfigured:   cfg.ACMMLevel != nil,
 		ACMMPackAgents:        buildACMMPackAgents(cfg),
 		SystemResources:       collectSystemResources(),

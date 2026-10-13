@@ -586,7 +586,7 @@ const OVERVIEW_PROJECT_FILTERS = {
 };
 `)
 	for _, name := range []string{"issueUpdatedAt", "prUpdatedAt", "prCreatedAt", "prReviewClassRank", "overviewRepoName", "overviewSliceSpecs", "overviewIssueBandSlices", "overviewPRBandSlices",
-		"overviewRepoNumber", "overviewRepoOpenIssueCount", "overviewRepoOpenPRCount", "overviewProjectFilterSpec", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries",
+		"overviewRepoNumber", "overviewRepoOpenIssueCount", "overviewRepoOpenPRCount", "overviewProjectFilterSpec", "repoCardParkedIssues", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries",
 		"overviewNonActionableMoved", "overviewProjectOutsideIssueCount", "overviewProjectOutsidePRCount", "overviewProjectFilterMatchesEntry", "overviewProjectFilterRepoMatches",
 		"overviewProjectFilterState", "overviewProjectFilterKeyFromURL", "overviewProjectFilterSummary", "overviewNavigateBand"} {
 		script.WriteString(jsFunc(t, html, name))
@@ -699,5 +699,37 @@ func TestOverviewPRTermClassifiesFromFacts11567(t *testing.T) {
 	counts := eqTermCounts11567(eq)
 	if eq.Result != 1 || counts["blocked"] != 2 || counts["outside"] != 2 {
 		t.Fatalf("PR equation = %s, want 1 actionable + 2 blocked + 2 outside (counts %v)", eq.Text, counts)
+	}
+}
+
+// A parked agent-filed issue a person acknowledged by a path other than the
+// approved-direction label (a parent-issue acknowledgement, say) is reported
+// acknowledged in the status payload and in the export.
+func TestParkedRowCarriesHumanAcknowledgement11567(t *testing.T) {
+	at := fixtureTime11567()
+	status := &StatusPayload{HiveID: "hive-test", Repos: []FrontendRepo{{
+		Name: "a", Full: "o/a", Issues: 2,
+		NonActionableIssues: []any{
+			github.RepoWorkIssue{Repo: "o/a", Number: 1, Title: "acked", Labels: []string{"agent/strategist", "needs-decision"}, Bucket: repoWorkBucketFiltered, Reason: "needs-decision", HumanAcknowledged: true, CreatedAt: at, UpdatedAt: at},
+			github.RepoWorkIssue{Repo: "o/a", Number: 2, Title: "not acked", Labels: []string{"agent/strategist", "needs-decision"}, Bucket: repoWorkBucketFiltered, Reason: "needs-decision", CreatedAt: at, UpdatedAt: at},
+		},
+	}}}
+	s := newTestServer()
+	s.deps = &Dependencies{Config: &config.Config{HiveID: "hive-test"}}
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+
+	rows := wireRows11567(t, s.statusWithOverviewBands(status, overviewFixtureNow11567))
+	for number, want := range map[int]bool{1: true, 2: false} {
+		if got := rows["issues"][number]["acknowledged"]; got != want {
+			t.Errorf("status row #%d acknowledged = %v, want %v", number, got, want)
+		}
+	}
+
+	got := map[int]bool{}
+	for _, item := range overviewIssueItems(status, config.DashboardIssueBandsConfig{}, overviewFilters{}, overviewFixtureNow11567, s.selfAuthorizationHoldActiveForRepo) {
+		got[item.issue.Number] = item.info.Acknowledged
+	}
+	if want := map[int]bool{1: true, 2: false}; got[1] != want[1] || got[2] != want[2] || len(got) != 2 {
+		t.Errorf("export acknowledged = %v, want %v", got, want)
 	}
 }

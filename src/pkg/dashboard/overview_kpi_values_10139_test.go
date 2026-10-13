@@ -94,6 +94,7 @@ const OVERVIEW_PR_BREAKDOWN_LABELS = { hold: 'held', draft: 'draft', filtered: '
 ` + jsFunc(t, html, "overviewRepoOpenIssueCount") + `
 ` + jsFunc(t, html, "overviewRepoOpenPRCount") + `
 ` + jsFunc(t, html, "overviewProjectFilterSpec") + `
+` + jsFunc(t, html, "repoCardParkedIssues") + `
 ` + jsFunc(t, html, "overviewRepoTrackedIssueEntries") + `
 ` + jsFunc(t, html, "overviewRepoTrackedPREntries") + `
 ` + jsFunc(t, html, "overviewProjectBucketCount") + `

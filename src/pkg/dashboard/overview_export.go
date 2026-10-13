@@ -256,8 +256,7 @@ func overviewIssueItems(status *StatusPayload, cfg config.DashboardIssueBandsCon
 				continue
 			}
 			issue := github.Issue{Repo: nonEmpty(row.Repo, repoName), Number: row.Number, Title: row.Title, Author: row.Author, URL: row.URL, Labels: row.Labels, Assignees: row.Assignees, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
-			info := IssueBand(issue, false, cfg, now, selfAuthorizationHoldActive)
-			info.Band = nonActionableIssueBand(row)
+			info := nonActionableIssueInfo(row, repoName, cfg, now, selfAuthorizationHoldActive)
 			if info.Band == "" {
 				info.Band = overviewBandOutside
 			}

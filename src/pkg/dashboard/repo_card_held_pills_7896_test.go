@@ -178,8 +178,8 @@ func TestRepoCardHeldPillStructure(t *testing.T) {
 		".repo-issue-pill.held, .repo-pr-pill.held { --pill-c: var(--muted); border-style: dashed; }",
 		"const heldIssueKeys = new Set((r.heldIssues || []).map(i => String(i.number)));",
 		"const repoIssueGroups = repoCardIssueGroups(r, overviewIssueKeys);",
-		"const issuePills = repoIssueGroups.issueGroups.map(g => {",
-		"const prPills = groupedRepoPRs(r.openPrs || [], r.heldPrs || []).map(g => {",
+		"const issuePills = collapseView.issueGroups.map(g => {",
+		"const prPills = collapseView.prGroups.map(g => {",
 		`<a class="repo-pr-pill repo-pill-main${heldClass}${tintClass}${staleClass}"`,
 		`<a class="repo-issue-pill repo-pill-main${bandClass}${heldClass}${staleClass}"`,
 		// The state chip: ⚠ for the escalation kind of hold, ⏸ otherwise.
@@ -192,8 +192,8 @@ func TestRepoCardHeldPillStructure(t *testing.T) {
 		// The tooltip reasons from the labels.
 		"function holdLabels(labels) {",
 		"function heldReason(item) {",
-		// The section-header counter sees held needs-human PRs too.
-		"(r.openPrs || []).concat(r.heldPrs || []).filter(p => (p.labels || []).map(l => String(l)).includes('needs-human'))",
+		// The section-header counter counts the inbox's items, held ones included.
+		"const inboxItems = yourTurnInboxItems(visibleRepos, pillFilter, overviewFilter);",
 	} {
 		if !strings.Contains(html, snippet) {
 			t.Errorf("index.html is missing %q", snippet)

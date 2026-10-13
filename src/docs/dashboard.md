@@ -286,7 +286,7 @@ the item's band. The slices, in plot order, are listed in `/api/status` as
 
 Parked issues are plotted (they are `nonActionableIssues` rows), and so is every
 other non-actionable row that is your turn or waiting on someone else; other
-non-actionable rows stay unplotted. The charts no longer have Needs human, Needs
+non-actionable rows stay unplotted. The charts no longer have Parked, Needs
 triage or Confirm & close slices; the repository cards keep those bands.
 Hovering a chart element, an Overview legend row, or a repository-card band
 header shows its rule from the Go specs carried in `/api/status` as
@@ -380,18 +380,23 @@ in exactly one band, while non-winning states remain as badges on the pill:
    satisfies the PR-time gate and is not in the payload). Acknowledge it, or
    close it. Once acknowledged the issue falls through to Unclaimed/Claimed
    with the role badge still on the pill.
-4. **Needs human** (`needs human`) — the four parking labels by default:
+4. **Parked** (`parked`) — the four parking labels by default:
    `needs-human`, `needs-direction`, `needs-decision` and `needs-spec`.
    `blocked`, `2-discussing`, `Epic` and `needs-triage` no longer place an
    issue here by default; their row glyphs remain. Parked issues listed under
-   `nonActionableIssues` carry band `waiting` too.
+   `nonActionableIssues` carry band `waiting` too, and the card draws them as
+   ordinary issue rows: the same plan, design, hold and linked-PR controls and
+   the same stale dimming as an unclaimed row, and they stay listed when an
+   Overview band filter covers the band. The band key is still `waiting`; the
+   title says the state, not whose turn it is.
 5. **Confirm & close** (`close?`) — labels such as `hive/already-done`,
    `hive/covered-by-pr`, and `hive/likely-done`: an agent believes the work
    landed; verify and close.
 
-Precedence is confirm & close → needs human → claimed → needs triage → unclaimed,
-so a human gate beats an assignment and done beats all other display states.
-Within each band, issues sort by `updated_at` oldest first. The issue breakdown
+Precedence is confirm & close → parked → claimed → needs triage → unclaimed,
+so a label that parks an issue beats an assignment and done beats all other display states.
+Within each band, issues the server marked your turn come first, then issues
+sort by `updated_at` oldest first. The issue breakdown
 also shows `N no activity > 14d` for actionable issues older than the stale
 threshold.
 
@@ -414,7 +419,7 @@ PR pills are also grouped client-side for display only. Open and held PRs appear
 in exactly one band; held PRs are no longer appended after the actionable list.
 First match wins for classification:
 
-1. **Needs human** — `needs-human`, held, `needs-decision`,
+1. **Gated** — `needs-human`, held, `needs-decision`,
    `2-discussing`, or configured `dashboard.issue_bands.waiting_labels`.
 2. **Merge-eligible** — merge verdict `eligible`, or queued for Hive
    auto-merge.
@@ -425,8 +430,9 @@ First match wins for classification:
 5. **Draft** — draft PRs.
 6. **Open** — everything else.
 
-The display order is needs human → merge-eligible → blocked → in review →
-open → draft. Within a band, PRs sort by oldest `updated_at`, then review class
+The display order is gated → merge-eligible → blocked → in review →
+open → draft. Within a band, PRs the server marked your turn come first, then
+PRs sort by oldest `updated_at`, then review class
 (`fix`, refactor/docs or unknown, `tests`), oldest `created_at`, and PR number.
 The PR snapshot includes `updated_at` specifically so this order can match issue
 band aging without extra GitHub API calls. The existing
@@ -448,6 +454,59 @@ from labels or bands. The decision makes no GitHub API calls; the only local
 write is the first time a refresh saw a hive PR with `needs-human`, kept in
 `/data/ownership-state.json` so the adjudicator's four-hour wait survives a
 restart.
+
+### The ☐ marker, the inbox and the section counter
+
+The Projects section renders the decision above and derives nothing from labels
+or bands (hivecommons/hive#11566).
+
+- **The marker.** A row that is your turn shows a ☐ glyph before its state
+  chip. It is a menu button (`aria-haspopup="menu"`), reachable by keyboard:
+  Enter or Space opens the menu, the arrow keys, Home and End move between
+  entries, Escape closes it and returns focus to the marker, Tab closes it and
+  carries on from the marker. Hovering or focusing the marker shows the verb and
+  the one-line reason; the opened menu repeats both at its top. Nothing
+  happens on the click itself. The glyph means "your turn" and appears nowhere
+  else on the dashboard except the legend entry that explains it; the rest of
+  the row behaves as before (number and title open the item on GitHub, the
+  state chip toggles the pill filter).
+- **The menu** lists only actions the dashboard already offers to the viewer,
+  always offers "Open on GitHub", and gives reply commands a copy control:
+  `DECIDE`, `STEER` and `REVIEW` on a parked issue offer `/hive approve` and
+  `/hive decision <text>`; `SPEC` offers "Design before planning" to an owner
+  at L5 and above (it hands the issue to the architect) and says that adding
+  the spec or removing the label releases it; `TRIAGE` and `ADMIT` and
+  `INSPECT` say what releases the item (the admission label comes from
+  `project.issue_filter.reporter_trust`); `REVIEW` on a held agent PR whose only
+  hold source is the level gate offers "Release hold" (the existing hold
+  toggle, with its existing permission check, re-checked against the current
+  snapshot when chosen); a reporter-confirmation `CLOSE` offers `/fixed`.
+- **Sort.** Within each band, your-turn rows precede all others.
+- **The Your turn strip.** Above the cards, the strip lists every your-turn item
+  of the repositories shown, grouped by verb (`INSPECT`, `DECIDE`, `STEER`,
+  `SPEC`, `REVIEW`, `TRIAGE`, `ADMIT`, `CLOSE`) in the server's `inbox_rank`
+  order. Each row shows repository, number, title, verb and reason, an
+  "Options" button that opens the same menu, and, for a held agent PR, the
+  reviewer agent's most recent verdict. The strip follows the same repository
+  selection and pill filters as the cards (the ☐ legend entry filters to your-turn
+  rows). The header reads `Your turn · N`, with `· M to close` added when there
+  are `CLOSE` items; N excludes them. With nothing to show, the strip says why:
+  Hive is advisory when every repository shown is at L1–L2, there are no
+  exceptions when every one is at L5–L6, and otherwise that nothing is waiting.
+- **The section counter** beside the Projects title reads `· N your turn`, plus
+  `· M to close` when M is non-zero: the strip's own counts, hidden only when
+  both are zero.
+- **L5 and L6 cards.** A repository whose effective ACMM level
+  (`acmmLevel` on each repository in the payload: the hive level, lowered by a
+  repository-policy override) is L5 or L6 shows its your-turn rows and folds
+  every other row into one summary line with per-band counts; the operator can
+  expand it, and the choice is remembered per browser. Repositories at L1–L4
+  draw every band as before.
+- **Legend and wording.** The pill legend has one entry for the marker, and its
+  former "needs you" colour key now reads "waiting / gated" (same colour). The
+  needs-human badge tooltip names the label ("Labelled needs-human: automated
+  fix attempts exhausted. ☐ appears when it is your turn."); band titles, chip
+  words and tooltips say what state or label an item has, never whose turn it is.
 
 ## Linked PR issue signals
 

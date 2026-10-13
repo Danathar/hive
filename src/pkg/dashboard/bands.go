@@ -151,7 +151,7 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 		signals = append(signals, Signal{Glyph: "❓", Label: "needs decision"})
 	}
 	if labels["needs-human"] {
-		signals = append(signals, Signal{Glyph: "⚠", Label: "needs human review"})
+		signals = append(signals, Signal{Glyph: "⚠", Label: "labelled needs-human"})
 	}
 	if labels["epic"] {
 		signals = append(signals, Signal{Glyph: "◆", Label: "epic"})
@@ -225,7 +225,7 @@ func prBand(pr github.PullRequest, verdict *github.MergeVerdict, held bool, cfg 
 		signals = append(signals, Signal{Role: role, Label: "agent-authored by " + role})
 	}
 	if labels["needs-human"] {
-		reason := "needs human review"
+		reason := "labelled needs-human"
 		if pr.ReporterTrustReason != "" {
 			reason = pr.ReporterTrustReason
 		}
@@ -390,11 +390,11 @@ func issueBandSpec(key string, cfg config.DashboardIssueBandsConfig) BandSpec {
 	case "in-progress":
 		return BandSpec{Key: key, Label: "Claimed", Short: "claimed", Rule: "assigned or claimed by an agent — nothing needed unless it stalls"}
 	case "agent-filed":
-		return BandSpec{Key: key, Label: "Needs triage", Short: "triage", Rule: "filed by an agent (agent/<role> label) with no approved-direction label, no human assignee, and self-authorization hold is on for the repo (ACMM < 6 or github.self_authorization_hold=true) — add the label, assign a human, or close it. A human comment also acknowledges for #5117 but is not in the snapshot, so a commented-on proposal still shows here"}
+		return BandSpec{Key: key, Label: "Needs triage", Short: "triage", Rule: "filed by an agent (agent/<role> label) with no approved-direction label, no human assignee, and self-authorization hold is on for the repo (ACMM < 6 or github.self_authorization_hold=true) — agents do not pick it up until it is labelled, assigned to a human, or closed. A human comment also acknowledges for #5117 but is not in the snapshot, so a commented-on proposal still shows here"}
 	case "waiting":
-		return BandSpec{Key: key, Label: "Needs human", Short: "needs human", Rule: "labelled " + strings.Join(norm.WaitingLabels, ", ") + " — a human must unblock or decide before agents continue"}
+		return BandSpec{Key: key, Label: "Parked", Short: "parked", Rule: "labelled " + strings.Join(norm.WaitingLabels, ", ") + " — parked: agents do not continue until the label is removed or the question it names is answered"}
 	case "done":
-		return BandSpec{Key: key, Label: "Confirm & close", Short: "close?", Rule: "an agent applied " + strings.Join(norm.DoneLabels, ", ") + " — verify the work landed and close the issue"}
+		return BandSpec{Key: key, Label: "Confirm & close", Short: "close?", Rule: "an agent applied " + strings.Join(norm.DoneLabels, ", ") + " — the agent reports the work as landed, and the issue is still open"}
 	default:
 		return BandSpec{Key: "ready", Label: "Unclaimed", Short: "unclaimed", Rule: "no other band matched — nobody is assigned, nothing claimed it, and no human gate applies; this does not by itself mean agents will pick it up"}
 	}
@@ -405,11 +405,11 @@ func prBandSpec(key string, cfg config.DashboardIssueBandsConfig) BandSpec {
 	switch key {
 	case "waiting":
 		labels := uniqueLowerLabels(append(append([]string{}, prHumanGateLabels...), norm.WaitingLabels...))
-		return BandSpec{Key: key, Label: "Needs human", Rule: "held, or labelled " + strings.Join(labels, ", ") + " — a human must review, decide, or release the hold before automation continues"}
+		return BandSpec{Key: key, Label: "Gated", Rule: "held, or labelled " + strings.Join(labels, ", ") + " — gated: automation does not continue until the hold is released or the label is removed"}
 	case "eligible":
 		return BandSpec{Key: key, Label: "Merge-eligible", Rule: "sweep verdict eligible, or queued for Hive auto-merge — nothing needed; it merges on its own"}
 	case "blocked":
-		return BandSpec{Key: key, Label: "Blocked", Rule: "blocked sweep verdict, merge conflicts, or failing CI — read the verdict, rebase, or fix the checks"}
+		return BandSpec{Key: key, Label: "Blocked", Rule: "blocked sweep verdict, merge conflicts, or failing CI"}
 	case "in-review":
 		return BandSpec{Key: key, Label: "In review", Rule: "outstanding sweep verdict, a Hive review posted, or a GitHub review decision — nothing needed until the review resolves"}
 	case "draft":
