@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-13 (v5.163.1)
+
+### Fixed
+
+- Hub: an assigned hive that stops heartbeating now keeps its critical `offline` alert after the hub prunes its registry entry (24h), and its My Hives / Fleet row says "offline since …" instead of looking un-provisioned. The went-offline time comes from the hive's persisted timeline ([#11644](https://github.com/hivecommons/hive/issues/11644)).
+
 ## 2026-10-13 (v5.163.0)
 
 ### Added
