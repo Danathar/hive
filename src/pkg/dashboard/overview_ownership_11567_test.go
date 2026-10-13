@@ -586,7 +586,7 @@ const OVERVIEW_PROJECT_FILTERS = {
 };
 `)
 	for _, name := range []string{"issueUpdatedAt", "prUpdatedAt", "prCreatedAt", "prReviewClassRank", "overviewRepoName", "overviewSliceSpecs", "overviewIssueBandSlices", "overviewPRBandSlices",
-		"overviewRepoNumber", "overviewRepoOpenIssueCount", "overviewRepoOpenPRCount", "overviewProjectFilterSpec", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries",
+		"overviewRepoNumber", "overviewRepoOpenIssueCount", "overviewRepoOpenPRCount", "overviewProjectFilterSpec", "repoCardParkedIssues", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries",
 		"overviewNonActionableMoved", "overviewProjectOutsideIssueCount", "overviewProjectOutsidePRCount", "overviewProjectFilterMatchesEntry", "overviewProjectFilterRepoMatches",
 		"overviewProjectFilterState", "overviewProjectFilterKeyFromURL", "overviewProjectFilterSummary", "overviewNavigateBand"} {
 		script.WriteString(jsFunc(t, html, name))
