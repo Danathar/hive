@@ -77,10 +77,10 @@ type AdvisoryQueueHealthConfig struct {
 	// BlockedPRPct: Blocked PRs at or above this share of open PRs fire
 	// "Reduce the blocked PR queue". Default 50.
 	BlockedPRPct int `yaml:"blocked_pr_pct,omitempty" json:"blocked_pr_pct,omitempty"`
-	// NeedsHumanPRPct: Needs-human PRs at or above this share of open PRs
+	// NeedsHumanPRPct: your-turn PRs (the inbox's N plus M) at or above this share of open PRs
 	// fire "Clear the human gate on PRs". Default 25.
 	NeedsHumanPRPct int `yaml:"needs_human_pr_pct,omitempty" json:"needs_human_pr_pct,omitempty"`
-	// NeedsHumanIssuePct: Needs-human issues at or above this share of open
+	// NeedsHumanIssuePct: your-turn issues (the inbox's N plus M) at or above this share of open
 	// issues fire "Unblock the human queue". Default 30.
 	NeedsHumanIssuePct int `yaml:"needs_human_issue_pct,omitempty" json:"needs_human_issue_pct,omitempty"`
 	// StaleBlockedPRs: this many Blocked PRs past dashboard.issue_bands.stale_days

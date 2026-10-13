@@ -506,12 +506,15 @@ func TestReadProviderReviewQueueMergesIssuesAndPRs(t *testing.T) {
 		case "/api/overview/issues.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bands": []any{map[string]any{"key": "done", "label": "Confirm & close"}},
-				"rows":  []any{map[string]any{"repo": "o/a", "number": 1, "band": "Confirm & close", "updated_at": "2026-01-01T00:00:00Z"}},
+				"rows": []any{
+					map[string]any{"repo": "o/a", "number": 1, "band": "Confirm & close", "updated_at": "2026-01-01T00:00:00Z", "your_turn": true, "verb": "CLOSE", "reason_code": "verified_done", "reason": "verified done", "inbox_rank": 2},
+					map[string]any{"repo": "o/a", "number": 3, "band": "outside", "updated_at": "2026-01-01T00:00:00Z", "your_turn": false},
+				},
 			})
 		case "/api/overview/prs.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bands": []any{map[string]any{"key": "waiting", "label": "Needs human"}},
-				"rows":  []any{map[string]any{"repo": "o/a", "number": 2, "band": "Needs human", "held": true, "hold_reason": "hold", "updated_at": "2026-01-02T00:00:00Z"}},
+				"rows":  []any{map[string]any{"repo": "o/a", "number": 2, "band": "Needs human", "held": true, "hold_reason": "hold", "updated_at": "2026-01-02T00:00:00Z", "your_turn": true, "verb": "REVIEW", "reason_code": "level_gate_hold", "reason": "held by the level gate", "inbox_rank": 1}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -539,8 +542,48 @@ func TestReadProviderReviewQueueMergesIssuesAndPRs(t *testing.T) {
 	if err := json.Unmarshal(encoded, &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Rows) != 2 || body.Rows[0].Kind != "pr" || body.Rows[0].ReasonCode != adminmcp.ReviewReasonHold || body.Rows[1].ReasonCode != adminmcp.ReviewReasonConfirmClose {
-		t.Fatalf("queue = %s, want the held PR before the confirm-and-close issue", encoded)
+	if len(body.Rows) != 2 || body.Rows[0].Kind != "pr" || body.Rows[0].ReasonCode != "level_gate_hold" || body.Rows[1].ReasonCode != "verified_done" {
+		t.Fatalf("queue = %s, want the your-turn rows only, in inbox_rank order", encoded)
+	}
+}
+
+func TestReadProviderReviewQueueRereadsAfterSnapshotChange(t *testing.T) {
+	// The first PR export comes from a newer snapshot than the first issues
+	// export; the re-read of both agrees.
+	issueSeqs := []int{3, 4}
+	prSeqs := []int{4, 4}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var seq int
+		var row map[string]any
+		switch r.URL.Path {
+		case "/api/overview/issues.json":
+			seq, issueSeqs = issueSeqs[0], issueSeqs[1:]
+			row = map[string]any{"repo": "o/a", "number": 1, "band": "outside", "your_turn": true, "verb": "CLOSE", "reason_code": "verified_done", "reason": "verified done", "inbox_rank": 2}
+		case "/api/overview/prs.json":
+			seq, prSeqs = prSeqs[0], prSeqs[1:]
+			row = map[string]any{"repo": "o/a", "number": 2, "band": "outside", "your_turn": true, "verb": "REVIEW", "reason_code": "level_gate_hold", "reason": "held", "inbox_rank": 1}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"snapshot_instance": "i1", "snapshot_seq": seq, "snapshot_at": "2026-10-13T00:00:00Z", "bands": []any{}, "rows": []any{row}})
+	}))
+	defer server.Close()
+	r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+	result, err := (readProvider{roster: r}).Read(context.Background(), adminmcp.ToolReviewQueue, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil || body.Total != 2 {
+		t.Fatalf("queue = %s (err %v), want both rows from the matching re-read", encoded, err)
 	}
 }
 

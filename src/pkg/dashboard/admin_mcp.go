@@ -61,16 +61,7 @@ func (p dashboardAdminMCPProvider) Read(_ context.Context, tool string, args map
 		return nil, fmt.Errorf("%w: dashboard server unavailable", adminmcp.ErrForbidden)
 	}
 	if tool == adminmcp.ToolReviewQueue {
-		issuesPath, prsPath := adminmcp.ReviewQueueReadPaths(args)
-		issues, err := p.get(tool, issuesPath)
-		if err != nil {
-			return nil, err
-		}
-		prs, err := p.get(tool, prsPath)
-		if err != nil {
-			return nil, err
-		}
-		return adminmcp.ReviewQueueResult(issues, prs, args)
+		return adminmcp.ReadReviewQueue(func(path string) (any, error) { return p.get(tool, path) }, args)
 	}
 	path, ok := adminMCPReadPath(tool, args)
 	if !ok {

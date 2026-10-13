@@ -316,7 +316,11 @@ One card per repository Hive looks after, listing its open issues and pull reque
 - The cards use the same bands as the Overview charts. See the Overview entry for each band's meaning.
 - Small pills on each item show signals, such as a hold, a failing check or no recent activity.
 - A red pull-request pill means the sentinel flagged it for a possible security override, privilege escalation or codebase damage. Hive will not merge it until a maintainer reviews it and removes the sentinel label. Pull requests from trusted authors usually get a sentinel comment instead of the label, so they are usually not red.
-- The **needs-human** count in the header counts open pull requests that need a person to review or decide. Needs-human means waiting on a person.
+- A ☐ marker before an item's chip means it is your turn: Hive is stuck on a person and no agent will move it until you act. Hover or focus it for the verb and reason, or click it for a menu of what you can do. The verbs are `DECIDE`, `STEER`, `SPEC`, `REVIEW`, `TRIAGE`, `ADMIT`, `INSPECT` and `CLOSE`.
+- The **Your turn** strip above the cards lists every your-turn item of the repositories shown, grouped by verb, with the reason and the same menu. Its header reads "Your turn · N", plus "· M to close" when items are waiting to be closed.
+- The counter beside the Projects title reads "· N your turn · M to close" and matches the strip. It is hidden only when both numbers are zero.
+- The band called **Parked** holds issues carrying a parking label. The band called **Gated** holds held pull requests and pull requests carrying a human-gate label such as `needs-human`. Both titles describe the item's state. Only the ☐ marker says it is your turn.
+- Hold sources, the level table that decides whose turn it is at each autonomy level, and the safety net that surfaces forgotten items are described in [Dashboard](dashboard.md#your-turn-decision).
 
 **What it is good for.** Use it to act on single items. Open the legend above the cards to learn what each pill means.
 
