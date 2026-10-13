@@ -35,13 +35,21 @@ type overviewFilters struct {
 	held   *bool
 }
 
+// overviewJSONResponse is the typed JSON export. GeneratedAt is request time;
+// SnapshotAt, SnapshotSeq and SnapshotInstance identify the status snapshot
+// the rows were read from (StatusPayload.Timestamp, StatusSeq and
+// StatusInstance), so a caller that reads two exports can tell whether both
+// came from the same snapshot.
 type overviewJSONResponse struct {
-	Kind        string     `json:"kind"`
-	GeneratedAt time.Time  `json:"generated_at"`
-	HiveID      string     `json:"hive_id"`
-	StaleDays   int        `json:"stale_days"`
-	Bands       []BandSpec `json:"bands"`
-	Rows        []any      `json:"rows"`
+	Kind             string     `json:"kind"`
+	GeneratedAt      time.Time  `json:"generated_at"`
+	SnapshotAt       string     `json:"snapshot_at,omitempty"`
+	SnapshotSeq      uint64     `json:"snapshot_seq"`
+	SnapshotInstance string     `json:"snapshot_instance,omitempty"`
+	HiveID           string     `json:"hive_id"`
+	StaleDays        int        `json:"stale_days"`
+	Bands            []BandSpec `json:"bands"`
+	Rows             []any      `json:"rows"`
 }
 
 func (s *Server) handleOverviewIssuesCSV(w http.ResponseWriter, r *http.Request) {
@@ -88,17 +96,31 @@ func (s *Server) handleOverviewExport(w http.ResponseWriter, r *http.Request, ki
 		return
 	}
 	now := time.Now().UTC()
+	// Rows and snapshot identity are read under one read lock:
+	// applyRepoHoldToStatus rewrites the shared status in place and bumps its
+	// identity under the write lock, so reading either outside it could pair
+	// old rows with a newer identity and let review_queue accept a mixed read.
+	s.statusMu.RLock()
+	status = s.status
+	if status == nil {
+		s.statusMu.RUnlock()
+		w.Header().Set("Content-Type", overviewJSONType)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "initializing"})
+		return
+	}
 	rows, bands := s.overviewRows(status, kind, cfg, filters, now)
+	snapshotAt, snapshotSeq, snapshotInstance, hiveID := status.Timestamp, status.StatusSeq, status.StatusInstance, status.HiveID
+	s.statusMu.RUnlock()
 	if format == "json" {
 		w.Header().Set("Content-Type", overviewJSONType)
-		resp := overviewJSONResponse{Kind: kind, GeneratedAt: now, HiveID: status.HiveID, StaleDays: normalizeIssueBandsConfig(cfg).StaleDays, Bands: bands, Rows: rows}
+		resp := overviewJSONResponse{Kind: kind, GeneratedAt: now, SnapshotAt: snapshotAt, SnapshotSeq: snapshotSeq, SnapshotInstance: snapshotInstance, HiveID: hiveID, StaleDays: normalizeIssueBandsConfig(cfg).StaleDays, Bands: bands, Rows: rows}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			slogWarnOverviewEncode(err)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", overviewCSVType)
-	w.Header().Set("Content-Disposition", `inline; filename="`+overviewFilename(status.HiveID, kind, filters, bands, now)+`"`)
+	w.Header().Set("Content-Disposition", `inline; filename="`+overviewFilename(hiveID, kind, filters, bands, now)+`"`)
 	if _, err := w.Write([]byte(overviewCSV(rows, overviewCSVColumns(kind)))); err != nil {
 		slogWarnOverviewEncode(err)
 	}

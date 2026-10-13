@@ -360,6 +360,16 @@ whole hive. Pages are `limit` rows (cap 50) from `offset`; a capped page sets
 `rows_truncated`, `_admin_mcp.total` and `next_offset`. It is read-only: `queue-automerge`
 stays excluded.
 
+The two exports are separate GETs and each reads the hive's status snapshot on its own, so a
+status refresh between them could pair `inbox_rank`s and decisions from different snapshots.
+Both JSON exports therefore carry the snapshot they read (`snapshot_instance`,
+`snapshot_seq`, `snapshot_at`: the status payload's `statusInstance`, `statusSeq` and
+`timestamp`). `review_queue` compares them; on a mismatch it reads both exports again once, and
+if they still differ the call fails with an error saying the status snapshot changed during the
+read and to retry, rather than answer from mixed snapshots. A hive that predates these fields
+reports none on either export, which never counts as a mismatch. The same
+`adminmcp.ReadReviewQueue` serves the dashboard endpoint and the stdio server.
+
 **`governor_setup_proposal`** (hive#10034) answers "set up these governors for me" for a new
 hive. It reads `GET /api/config/governor`, which already carries the repo count, cadence
 scope, scaling curve, effective and operator-pinned thresholds and budget, and returns one

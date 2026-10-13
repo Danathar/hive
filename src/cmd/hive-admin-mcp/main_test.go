@@ -547,6 +547,46 @@ func TestReadProviderReviewQueueMergesIssuesAndPRs(t *testing.T) {
 	}
 }
 
+func TestReadProviderReviewQueueRereadsAfterSnapshotChange(t *testing.T) {
+	// The first PR export comes from a newer snapshot than the first issues
+	// export; the re-read of both agrees.
+	issueSeqs := []int{3, 4}
+	prSeqs := []int{4, 4}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var seq int
+		var row map[string]any
+		switch r.URL.Path {
+		case "/api/overview/issues.json":
+			seq, issueSeqs = issueSeqs[0], issueSeqs[1:]
+			row = map[string]any{"repo": "o/a", "number": 1, "band": "outside", "your_turn": true, "verb": "CLOSE", "reason_code": "verified_done", "reason": "verified done", "inbox_rank": 2}
+		case "/api/overview/prs.json":
+			seq, prSeqs = prSeqs[0], prSeqs[1:]
+			row = map[string]any{"repo": "o/a", "number": 2, "band": "outside", "your_turn": true, "verb": "REVIEW", "reason_code": "level_gate_hold", "reason": "held", "inbox_rank": 1}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"snapshot_instance": "i1", "snapshot_seq": seq, "snapshot_at": "2026-10-13T00:00:00Z", "bands": []any{}, "rows": []any{row}})
+	}))
+	defer server.Close()
+	r := &roster{hives: []hiveConfig{{Name: "active", Address: server.URL, Token: "token"}}, active: 0, timeout: time.Second}
+	result, err := (readProvider{roster: r}).Read(context.Background(), adminmcp.ToolReviewQueue, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil || body.Total != 2 {
+		t.Fatalf("queue = %s (err %v), want both rows from the matching re-read", encoded, err)
+	}
+}
+
 func TestReadPathGovernorSetup(t *testing.T) {
 	path, ok := readPath(adminmcp.ToolGovernorSetup, map[string]any{})
 	if !ok || path != "/api/config/governor" {

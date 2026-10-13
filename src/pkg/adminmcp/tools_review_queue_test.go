@@ -1,6 +1,10 @@
 package adminmcp
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 // The sample exports mirror the Overview export shape: rows carry the band
 // display label (mapped back through bands[]) and the server's stored
@@ -175,5 +179,75 @@ func TestReviewQueueAndGovernorSetupToolsAreListedAsReadOnly(t *testing.T) {
 	}
 	if _, ok := ReadPath(ToolReviewQueue, 0); ok {
 		t.Fatal("review_queue reads two endpoints through ReviewQueueReadPaths, not ReadPath")
+	}
+}
+
+func withSnapshot(export map[string]any, seq float64) map[string]any {
+	export["snapshot_instance"] = "i1"
+	export["snapshot_seq"] = seq
+	export["snapshot_at"] = "2026-10-13T00:00:00Z"
+	return export
+}
+
+func TestReviewQueueResultReportsExportsFromDifferentSnapshots(t *testing.T) {
+	issues := withSnapshot(sampleReviewQueueIssues(), 4)
+	prs := withSnapshot(sampleReviewQueuePRs(), 5)
+	out, err := ReviewQueueResult(issues, prs, map[string]any{})
+	if !errors.Is(err, ErrReviewQueueSnapshotChanged) || out != nil {
+		t.Fatalf("out = %#v err = %v, want ErrReviewQueueSnapshotChanged", out, err)
+	}
+	if !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("err = %q, want it to tell the caller to retry", err)
+	}
+}
+
+func TestReviewQueueResultMergesExportsFromOneSnapshot(t *testing.T) {
+	out, err := ReviewQueueResult(withSnapshot(sampleReviewQueueIssues(), 4), withSnapshot(sampleReviewQueuePRs(), 4), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := reviewQueueRows(t, out); len(rows) != 5 {
+		t.Fatalf("rows = %d, want the 5 your-turn rows", len(rows))
+	}
+}
+
+// snapshotFetcher serves the two exports from scripted snapshot sequences, one
+// entry consumed per GET of that export.
+func snapshotFetcher(issueSeqs, prSeqs []float64, calls *int) func(string) (any, error) {
+	return func(path string) (any, error) {
+		*calls++
+		if strings.Contains(path, "issues.json") {
+			seq := issueSeqs[0]
+			issueSeqs = issueSeqs[1:]
+			return withSnapshot(sampleReviewQueueIssues(), seq), nil
+		}
+		seq := prSeqs[0]
+		prSeqs = prSeqs[1:]
+		return withSnapshot(sampleReviewQueuePRs(), seq), nil
+	}
+}
+
+func TestReadReviewQueueRereadsOnceAfterASnapshotMismatch(t *testing.T) {
+	calls := 0
+	out, err := ReadReviewQueue(snapshotFetcher([]float64{4, 5}, []float64{5, 5}, &calls), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 {
+		t.Fatalf("GETs = %d, want both exports read twice", calls)
+	}
+	if rows := reviewQueueRows(t, out); len(rows) != 5 {
+		t.Fatalf("rows = %d, want the queue from the matching second read", len(rows))
+	}
+}
+
+func TestReadReviewQueueRefusesAfterTwoMismatches(t *testing.T) {
+	calls := 0
+	_, err := ReadReviewQueue(snapshotFetcher([]float64{4, 6}, []float64{5, 7}, &calls), map[string]any{})
+	if !errors.Is(err, ErrReviewQueueSnapshotChanged) {
+		t.Fatalf("err = %v, want ErrReviewQueueSnapshotChanged", err)
+	}
+	if calls != 4 {
+		t.Fatalf("GETs = %d, want exactly one re-read", calls)
 	}
 }

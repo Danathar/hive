@@ -1,6 +1,8 @@
 package adminmcp
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -32,6 +34,48 @@ func ReviewQueueReadPaths(args map[string]any) (issuesPath, prsPath string) {
 	return BandReadPath(ToolIssuesByBand, scoped), BandReadPath(ToolPrsByBand, scoped)
 }
 
+// ErrReviewQueueSnapshotChanged means the issues and pull-request exports came
+// from different status snapshots on both attempts, so merging them could mix
+// inbox ranks and ownership decisions from two moments.
+var ErrReviewQueueSnapshotChanged = errors.New("review_queue: the hive status snapshot changed while the issue and pull-request exports were being read; retry the call")
+
+// ReadReviewQueue runs the review_queue read for a provider: fetch GETs one
+// export path and returns its decoded JSON. The two exports are read
+// separately and each reads the status snapshot on its own, so a refresh
+// between them could pair rows from different snapshots. When their snapshot
+// identities differ both are read again once; a second mismatch is
+// ErrReviewQueueSnapshotChanged.
+func ReadReviewQueue(fetch func(path string) (any, error), args map[string]any) (any, error) {
+	issuesPath, prsPath := ReviewQueueReadPaths(args)
+	for range 2 {
+		issues, err := fetch(issuesPath)
+		if err != nil {
+			return nil, err
+		}
+		prs, err := fetch(prsPath)
+		if err != nil {
+			return nil, err
+		}
+		out, err := ReviewQueueResult(issues, prs, args)
+		if errors.Is(err, ErrReviewQueueSnapshotChanged) {
+			continue
+		}
+		return out, err
+	}
+	return nil, ErrReviewQueueSnapshotChanged
+}
+
+// exportSnapshot names the status snapshot an export was read from: the
+// instance, sequence and timestamp the export carries. An export from a hive
+// that predates these fields yields an empty identity and so never reports a
+// mismatch against another such export.
+func exportSnapshot(data any) string {
+	body, _ := data.(map[string]any)
+	instance, _ := body["snapshot_instance"].(string)
+	at, _ := body["snapshot_at"].(string)
+	return fmt.Sprintf("%s/%v/%s", instance, body["snapshot_seq"], at)
+}
+
 type reviewQueueRow struct {
 	Kind       string `json:"kind"`
 	Repo       string `json:"repo"`
@@ -51,6 +95,9 @@ type reviewQueueRow struct {
 // rows in inbox_rank order, paged by the tool's offset/limit with truncation
 // disclosed the way BandReadResult does.
 func ReviewQueueResult(issues, prs any, args map[string]any) (any, error) {
+	if exportSnapshot(issues) != exportSnapshot(prs) {
+		return nil, ErrReviewQueueSnapshotChanged
+	}
 	offset, err := OffsetFromArgs(args)
 	if err != nil {
 		return RefusalData{Type: "refusal", Operation: ToolReviewQueue, Kind: RefusalKindInvalidArgument, Reason: err.Error()}, nil

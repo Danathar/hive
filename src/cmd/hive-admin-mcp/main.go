@@ -242,16 +242,7 @@ func (p readProvider) Read(ctx context.Context, tool string, args map[string]any
 		if err != nil {
 			return nil, err
 		}
-		issuesPath, prsPath := adminmcp.ReviewQueueReadPaths(args)
-		issues, err := getPath(ctx, client, issuesPath)
-		if err != nil {
-			return nil, err
-		}
-		prs, err := getPath(ctx, client, prsPath)
-		if err != nil {
-			return nil, err
-		}
-		return adminmcp.ReviewQueueResult(issues, prs, args)
+		return adminmcp.ReadReviewQueue(func(path string) (any, error) { return getPath(ctx, client, path) }, args)
 	}
 	path, ok := readPath(tool, args)
 	if !ok {
