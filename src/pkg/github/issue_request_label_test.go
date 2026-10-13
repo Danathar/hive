@@ -470,7 +470,7 @@ func TestIssueRequestWatcher_LabelMixedVerifiedOpenRemoveLikelyDoneRefused(t *te
 	resp := readIssueResultFile(t, reqPath)
 	if resp.OK || !strings.Contains(resp.Error, LikelyDoneLabel) ||
 		!strings.Contains(resp.Error, "adds only "+VerifiedOpenLabel) ||
-		!strings.Contains(resp.Error, "removes") {
+		!strings.Contains(resp.Error, "do not remove") {
 		t.Errorf("refusal does not tell the agent what to send: %+v", resp)
 	}
 }

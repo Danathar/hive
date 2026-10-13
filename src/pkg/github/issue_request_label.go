@@ -165,9 +165,10 @@ func (c *Client) reservedLabelRefusal(add, remove []string) (string, bool) {
 
 // verifiedOpenResendHint returns a usable next step when the only refused part
 // of a request is removing hive/likely-done or hive/covered-by-pr alongside an
-// add of hive/verified-open. The request is still refused as a whole; hive
-// removes those labels itself once hive/verified-open is present, so the agent
-// should resend just the add.
+// add of hive/verified-open. The request is still refused as a whole. Hive
+// manages both labels itself (likely-done is dropped once hive/verified-open is
+// present; covered-by-pr follows open-PR evidence), so the agent should resend
+// just the add.
 func verifiedOpenResendHint(add, remove, bad []string) string {
 	addsVerified := false
 	for _, label := range add {
@@ -200,7 +201,6 @@ func verifiedOpenResendHint(add, remove, bad []string) string {
 			return ""
 		}
 	}
-	return "nothing in this request was applied. Hive removes " + LikelyDoneLabel + " and " + CoveredByPRLabel +
-		" itself once " + VerifiedOpenLabel + " is on the issue, so do not remove them. " +
-		"Resend a label request that adds only " + VerifiedOpenLabel + "."
+	return "nothing in this request was applied. Hive manages these labels itself, so do not remove them: " +
+		strings.Join(bad, ", ") + ". Resend a label request that adds only " + VerifiedOpenLabel + "."
 }
