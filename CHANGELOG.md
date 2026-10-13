@@ -11,6 +11,37 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-13 (v5.163.0)
+
+### Added
+
+- `CreatePR` now redirects to an existing PR instead of opening a duplicate when an open PR already closes the same issue, an open App-bot PR edits an overlapping file set (checked synchronously via dupsweep), or a merged PR already fixed an issue that is still closed (#11577).
+
+### Changed
+
+- Issue dedupe now folds high-confidence pairs (shared primary path and near-identical subject) at two issues instead of three, and twin, fold and rejected-twin checks recognise every login in the new `github.additional_bot_logins`; with no bot identity at all the checks stay off with a warning (#11575).
+- Scanner dedupe now folds findings into human-filed open issues that share the exact file set or canonical subject, posting a comment instead of filing a twin (#11576).
+- The hub dashboard bulk-action bar now reads "Bulk hive actions, N hive(s) selected:" and lists its buttons in a clearer order with clearer labels: Clear, Restart, Upgrade to latest, Set instant upgrade, Set daily upgrade, Set Tue 1pm ET upgrade, Set auto-upgrade off, Switch branch. Behaviour is unchanged. ([#11615](https://github.com/hivecommons/hive/issues/11615))
+- Broaden issue-title dedupe canonicalization to strip role prefixes, parenthetical counts and colon qualifiers.
+
+### Fixed
+
+- Review-backlog and fleet-report filings now consolidate into open twins like the agent lane, and the review-backlog ledger no longer appends re-raised findings to closed issues but re-files them ([#11578](https://github.com/hivecommons/hive/issues/11578)).
+- Convergence publisher findings and dashboard ACMM gap issues now go through the consolidating issue create, reusing an open issue for the same subject or file set instead of filing a twin ([#11578](https://github.com/hivecommons/hive/issues/11578)).
+- A "fixed by merged PR" claim now holds its issue for as long as the issue stays open instead of lapsing 30 days after the merge ([#11580](https://github.com/hivecommons/hive/issues/11580)). The settled-claim retention introduced for [#8003](https://github.com/hivecommons/hive/issues/8003) was still a calendar clock from the merge, so an issue whose fix had landed but that nobody closed went back into the contribute queue and the agent kick pool on day 31 — the same wasted "already resolved" cycle, just slower. The duplicate-PR guard now records when the enumeration last listed the claimed issue as open (`IssueClaim.IssueOpenAt`, persisted in `/data/pr-claims.json`) and counts retention from that sighting, so a settled claim on an open issue is carried indefinitely (the queue keeps withholding it under `merged_claim_stale` so a maintainer closes it) and the 30-day bound only prunes claims whose issue has actually closed. Pre-existing ledgers upgrade in place: entries without the new field keep their previous merge-anchored expiry until the next enumeration pass stamps them.
+- Folded-finding trackers are now recognised by what actually happens at fold time ([#11587](https://github.com/hivecommons/hive/issues/11587)): the watcher posts the `<!-- hive-finding-folded -->` marker as a *comment* on the tracker, so the body-marker check that #11595 added never matched a real tracker. The client records every issue a finding folds into (in-memory; repopulates as findings fold after a restart) and flags it on the enumerated issue, and both the scanner kick's `[FOLDED-TRACKER]` tag/summary line and the generic kick's "Folded trackers" note honour that flag alongside the body marker.
+- Docs: the Docker Compose quick start now tells operators to set `project.org`/`project.repos` in `src/hive.yaml` and `dashboard.port: 3002` before first `up` (the container healthcheck probes 3002), and the example config marks its project placeholders as replace-before-use (#11606, #11621).
+- fix(github): make API-budget tests deterministic under shuffle (#11618)
+- fix(dashboard): make Codex results-feed retention test deterministic (#11619)
+- `hive-gateway` no longer restart-loops on hosts whose kernel has no IPv6 ([#11622](https://github.com/hivecommons/hive/issues/11622)). `src/deploy/nginx.conf` hardcoded `listen [::]:3001;`, and nginx exits at startup when it cannot open that socket, so nothing answered on host port 3001 even though `hive` was healthy. The config is mounted over `/etc/nginx/nginx.conf`, where the nginx image's conditional IPv6 fixup does not apply, so the IPv6 listen is removed and the gateway listens on IPv4 `3001` (the healthcheck already dials `127.0.0.1`). The same file is used by the Compose and Quadlet deployments; Quadlet hosts pick it up with `bin/hive-podman-update.sh reconcile apply`.
+- fix(dashboard): de-flake TestHandleBackendsDoesNotBlockRoleOnCLIProbe (#11624)
+- fix(omp/fixture): wait for the workbench queued frame before ticking so it cannot overwrite a running state (#11632)
+- Spoke dashboard: responsive layout for phone and tablet widths (#11635)
+- fix(github): make shared REST accounting store swap race-free (#11641)
+- fix(hub): stable hives at the promoted stable commit no longer read "N behind · building" — the stable line follows the channel stable is promoted from (v5), `:stable` targets are promotion-gated (no walk-forward past the promoted commit), the fleet Version cell explains an empty version ("no heartbeat yet" / "push-only cluster · awaiting spoke heartbeat" / "heartbeat carries no version · last seen …") instead of "—", and the upgrade control is shown whenever a published target differs and disabled with "image for <sha> still building" while it builds (#11645)
+- Fixed a rare test-only data race in Codex model discovery that made the results-feed retention test flaky in CI.
+- Auto-resolve the v6 top-up modify/delete conflict for the removed Discord syntax workflow.
+
 ## 2026-10-12 (v5.162.0)
 
 ### Added

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gh "github.com/google/go-github/v72/github"
 )
 
 // openTwin is one open issue served by consolidationMockServer.
@@ -27,6 +29,8 @@ type closedTwin struct {
 	title, body, author string
 	stateReason         string
 	closedAgo           time.Duration
+	// isPR marks the entry as a pull request in the issues list.
+	isPR bool
 }
 
 // consolidationMock records what a create attempt did: issues created, and
@@ -38,6 +42,10 @@ type consolidationMock struct {
 	commentsStatus int // non-zero, non-200: every comment POST fails with it
 	closed         []closedTwin
 	closedLists    int // closed-issue list requests served
+	// closedSiblingStatus, when non-zero, fails the closed-sibling count
+	// list (the only closed list filtered by creator) with that status while
+	// the rejected-twin closed list keeps working.
+	closedSiblingStatus int
 }
 
 // consolidationMockServer serves open issues newest-first (the order the
@@ -68,15 +76,23 @@ func consolidationMockServer(t *testing.T, open []openTwin, m *consolidationMock
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/issues"):
 			if r.URL.Query().Get("state") != "open" {
 				m.closedLists++
+				if m.closedSiblingStatus != 0 && r.URL.Query().Get("creator") != "" {
+					w.WriteHeader(m.closedSiblingStatus)
+					return
+				}
 				out := make([]map[string]any, 0, len(m.closed))
 				for _, c := range m.closed {
 					at := time.Now().Add(-c.closedAgo).UTC().Format(time.RFC3339)
-					out = append(out, map[string]any{
+					entry := map[string]any{
 						"number": c.number, "title": c.title, "body": c.body, "state": "closed",
 						"state_reason": c.stateReason, "closed_at": at, "updated_at": at,
 						"html_url": "https://github.example/o/r/issues/" + strconv.Itoa(c.number),
 						"user":     map[string]any{"login": c.author},
-					})
+					}
+					if c.isPR {
+						entry["pull_request"] = map[string]any{"url": "https://github.example/o/r/pull/" + strconv.Itoa(c.number)}
+					}
+					out = append(out, entry)
 				}
 				b, _ := json.Marshal(out)
 				_, _ = w.Write(b)
@@ -198,9 +214,9 @@ func TestIssueRequestWatcher_FilesWhenNoOpenTwin(t *testing.T) {
 			title: "[scanner] bug spanning x.go and y.go", body: "pkg/x.go:3 and pkg/y.go:8",
 		},
 		{
-			name:  "human-filed issue",
+			name:  "human-filed issue with a different file set",
 			open:  openTwin{number: 41, author: "maintainer", title: "x.go is confusing", body: "pkg/x.go:3"},
-			title: "[scanner] bug in x.go", body: "pkg/x.go:3",
+			title: "[scanner] bug spanning x.go and y.go", body: "pkg/x.go:3 and pkg/y.go:8",
 		},
 		{
 			name:  "no file references",
@@ -221,6 +237,47 @@ func TestIssueRequestWatcher_FilesWhenNoOpenTwin(t *testing.T) {
 			})
 			if m.created != 1 || len(m.commentedOn) != 0 || res.Consolidated || res.Number != 99 {
 				t.Fatalf("created=%d comments=%v result=%+v, want a fresh issue #99", m.created, m.commentedOn, res)
+			}
+		})
+	}
+}
+
+// dakota #415 (human) vs #1648 (bot): the same firmware bug, once by file set
+// and once by canonical subject. The bot must comment on the human's issue
+// instead of filing a twin or silently skipping.
+func TestIssueRequestWatcher_FoldsIntoHumanFiledIssue(t *testing.T) {
+	cases := []struct {
+		name        string
+		open        openTwin
+		title, body string
+	}{
+		{
+			name:  "file set",
+			open:  openTwin{number: 415, author: "human", title: "HP ZBook black screen", body: "see build/esp.sh:12"},
+			title: "[scanner] ESP path length too long", body: "build/esp.sh:40 overflows",
+		},
+		{
+			name:  "canonical subject",
+			open:  openTwin{number: 415, author: "human", title: "HP ZBook black screen on boot", body: "no files"},
+			title: "[scanner] HP ZBook black screen on boot", body: "no files either",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &consolidationMock{}
+			srv := consolidationMockServer(t, []openTwin{tc.open}, m)
+			defer srv.Close()
+			c := issueTestClient(t, srv.URL)
+			c.appBotLogin = testBot
+
+			_, res := fileRequest(t, c, withIssueDir(t), IssueRequest{
+				Repo: "o/r", Agent: "scanner", Title: tc.title, Body: tc.body,
+			})
+			if m.created != 0 || len(m.commentedOn) != 1 || m.commentedOn[0] != 415 {
+				t.Fatalf("created=%d comments=%v, want one comment on human issue #415", m.created, m.commentedOn)
+			}
+			if !res.OK || !res.Consolidated || res.Number != 415 {
+				t.Errorf("result = %+v, want consolidated into #415", res)
 			}
 		})
 	}
@@ -390,6 +447,166 @@ func TestIssueRequestWatcher_RecentlyClosedSiblingCountsTowardFold(t *testing.T)
 	}
 }
 
+// The closed list is paged by creator, but a merged PR by the bot and an
+// issue by someone else can still appear in it; neither counts as a sibling.
+func TestIssueRequestWatcher_ClosedSiblingCountIgnoresPRsAndOtherAuthors(t *testing.T) {
+	m := &consolidationMock{closed: []closedTwin{
+		{number: 55, author: testBot, title: "[sec-check] entity bypass", body: "scripts/lib/gate.mjs and test/fixtures/entity.svg", stateReason: "completed", closedAgo: 3 * 24 * time.Hour},
+		{number: 54, author: testBot, title: "fix: entity bypass", body: "scripts/lib/gate.mjs", stateReason: "completed", closedAgo: 2 * 24 * time.Hour, isPR: true},
+		{number: 53, author: "someone-else", title: "gate.mjs cleanup", body: "scripts/lib/gate.mjs", stateReason: "completed", closedAgo: 1 * 24 * time.Hour},
+	}}
+	srv := consolidationMockServer(t, []openTwin{
+		{number: 61, author: testBot, title: "[sec-check] CDATA bypass", body: "scripts/lib/gate.mjs and test/fixtures/cdata.svg"},
+		{number: 58, author: testBot, title: "[sec-check] DOCTYPE bypass", body: "scripts/lib/gate.mjs and test/fixtures/doctype.svg"},
+	}, m)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	c.appBotLogin = testBot
+
+	_, res := fileRequest(t, c, withIssueDir(t), IssueRequest{
+		Repo: "o/r", Agent: "sec-check",
+		Title: "[sec-check] image-set() bypass",
+		Body:  "scripts/lib/gate.mjs:88 misses image-set(); see test/fixtures/imageset.svg",
+	})
+	if m.created != 0 || len(m.commentedOn) != 1 || m.commentedOn[0] != 58 {
+		t.Fatalf("created=%d comments=%v, want the variant folded into #58", m.created, m.commentedOn)
+	}
+	if want := "(plus 1 closed as completed in the last 14 days)"; !strings.Contains(m.commentBodies[0], want) {
+		t.Errorf("folded comment should count only the bot-filed issue, lacks %q:\n%s", want, m.commentBodies[0])
+	}
+	if !res.OK || !res.Consolidated || res.Number != 58 {
+		t.Errorf("result = %+v, want ok/consolidated naming #58", res)
+	}
+}
+
+// When the recently-closed sibling lookup fails, the fold decision is made on
+// open issues only: below the threshold the finding files normally, the
+// failure is not surfaced and the request is not left queued.
+func TestIssueRequestWatcher_ClosedSiblingLookupFailureFoldsOnOpenOnly(t *testing.T) {
+	m := &consolidationMock{
+		closed:              []closedTwin{{number: 55, author: testBot, title: "[sec-check] x", body: "scripts/lib/gate.mjs and test/x.svg", stateReason: "completed", closedAgo: 24 * time.Hour}},
+		closedSiblingStatus: http.StatusBadGateway,
+	}
+	srv := consolidationMockServer(t, []openTwin{
+		{number: 61, author: testBot, title: "[sec-check] a", body: "scripts/lib/gate.mjs and test/a.svg"},
+		{number: 58, author: testBot, title: "[sec-check] b", body: "scripts/lib/gate.mjs and test/b.svg"},
+	}, m)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	c.appBotLogin = testBot
+
+	reqPath, res := fileRequest(t, c, withIssueDir(t), IssueRequest{
+		Repo: "o/r", Agent: "sec-check", Title: "[sec-check] new bypass", Body: "scripts/lib/gate.mjs and test/c.svg",
+	})
+	if m.created != 1 || len(m.commentedOn) != 0 {
+		t.Fatalf("created=%d comments=%v, want a fresh issue (two open siblings alone are below the fold threshold)", m.created, m.commentedOn)
+	}
+	if !res.OK || res.Consolidated || res.Number != 99 {
+		t.Errorf("result = %+v, want ok, not consolidated, #99", res)
+	}
+	if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+		t.Errorf("request should be consumed after a successful create, stat err = %v", err)
+	}
+}
+
+// A failed fold comment — onto a human-filed twin or onto the oldest open
+// same-component sibling — must neither drop the finding nor file the
+// duplicate: the request stays queued for retry, as for a file-set twin.
+func TestIssueRequestWatcher_FoldCommentFailureRetries(t *testing.T) {
+	cases := []struct {
+		name        string
+		open        []openTwin
+		title, body string
+	}{
+		{
+			name:  "human-filed subject twin",
+			open:  []openTwin{{number: 415, author: "human", title: "HP ZBook black screen on boot", body: "no files"}},
+			title: "[scanner] HP ZBook black screen on boot", body: "no files either",
+		},
+		{
+			name: "same-component stream",
+			open: []openTwin{
+				{number: 63, author: testBot, title: "[scanner] CDATA bypass", body: "build/esp.sh and test/fixtures/cdata.svg"},
+				{number: 61, author: testBot, title: "[scanner] DOCTYPE bypass", body: "build/esp.sh and test/fixtures/doctype.svg"},
+				{number: 58, author: testBot, title: "[scanner] CSS escape bypass", body: "build/esp.sh and test/fixtures/escape.svg"},
+			},
+			title: "[scanner] ESP path length too long", body: "build/esp.sh:40 overflows; see test/fixtures/long.svg",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &consolidationMock{commentsStatus: http.StatusBadGateway}
+			srv := consolidationMockServer(t, tc.open, m)
+			defer srv.Close()
+			c := issueTestClient(t, srv.URL)
+			c.appBotLogin = testBot
+
+			reqPath, res := fileRequest(t, c, withIssueDir(t), IssueRequest{
+				Repo: "o/r", Agent: "scanner", Title: tc.title, Body: tc.body,
+			})
+			if m.created != 0 {
+				t.Fatalf("created %d issues after a failed fold comment, want 0", m.created)
+			}
+			if res.OK || res.Consolidated {
+				t.Errorf("result = %+v, want not ok", res)
+			}
+			if _, err := os.Stat(reqPath); err != nil {
+				t.Errorf("request must stay queued for retry: %v", err)
+			}
+		})
+	}
+}
+
+func TestPickFoldComponent(t *testing.T) {
+	a, b := &gh.Issue{Number: gh.Ptr(1)}, &gh.Issue{Number: gh.Ptr(2)}
+	cases := []struct {
+		name         string
+		open, closed map[string]int
+		oldest       map[string]*gh.Issue
+		wantTarget   *gh.Issue
+		wantPath     string
+		wantOpen     int
+		wantClosed   int
+	}{
+		{
+			name: "nothing reaches the threshold",
+			open: map[string]int{"x.go": 1}, closed: map[string]int{"x.go": 1}, oldest: map[string]*gh.Issue{"x.go": a},
+		},
+		{
+			name: "closed siblings top up the open count",
+			open: map[string]int{"x.go": 1}, closed: map[string]int{"x.go": 2}, oldest: map[string]*gh.Issue{"x.go": a},
+			wantTarget: a, wantPath: "x.go", wantOpen: 1, wantClosed: 2,
+		},
+		{
+			name: "a path with no open sibling never wins, however many closed",
+			open: map[string]int{"x.go": 0, "y.go": 3}, closed: map[string]int{"x.go": 9}, oldest: map[string]*gh.Issue{"x.go": a, "y.go": b},
+			wantTarget: b, wantPath: "y.go", wantOpen: 3,
+		},
+		{
+			name: "a path without an oldest open issue is skipped",
+			open: map[string]int{"x.go": 5}, oldest: map[string]*gh.Issue{},
+		},
+		{
+			name: "most-cited path wins",
+			open: map[string]int{"x.go": 3, "y.go": 4}, oldest: map[string]*gh.Issue{"x.go": a, "y.go": b},
+			wantTarget: b, wantPath: "y.go", wantOpen: 4,
+		},
+		{
+			name: "ties go to the lexically smallest path",
+			open: map[string]int{"y.go": 3, "x.go": 3}, oldest: map[string]*gh.Issue{"x.go": a, "y.go": b},
+			wantTarget: a, wantPath: "x.go", wantOpen: 3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target, path, openCount, closedCount := pickFoldComponent(tc.open, tc.closed, tc.oldest)
+			if target != tc.wantTarget || path != tc.wantPath || openCount != tc.wantOpen || closedCount != tc.wantClosed {
+				t.Errorf("got (%v, %q, %d, %d), want (%v, %q, %d, %d)", target, path, openCount, closedCount, tc.wantTarget, tc.wantPath, tc.wantOpen, tc.wantClosed)
+			}
+		})
+	}
+}
+
 // Closed siblings that are not completed, or completed outside the window,
 // do not count; with no open sibling at all nothing folds — a finding is
 // never folded into a closed issue.
@@ -442,4 +659,101 @@ func TestIssueRequestWatcher_ClosedSiblingsThatDoNotCountFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pair is enough when the primary path is shared and the subject matches:
+// the endusers #1210/#1253 and #1267/#1276 shapes.
+func TestIssueRequestWatcher_FoldsHighConfidencePair(t *testing.T) {
+	cases := []struct {
+		name         string
+		openTitle    string
+		openBody     string
+		title, body  string
+		wantFold     bool
+		wantOnNumber int
+	}{
+		{
+			name:      "unreachable guard remeasured",
+			openTitle: "[scanner] Unreachable guard in src/lib/walk.ts (12 branches)",
+			openBody:  "src/lib/walk.ts:40 has an unreachable guard",
+			title:     "[sec-check] Unreachable guard remeasured in src/lib/walk.ts (14 branches)",
+			body:      "src/lib/walk.ts:41 unreachable guard, remeasured",
+			wantFold:  true, wantOnNumber: 1210,
+		},
+		{
+			name:      "unguarded isDirectory at two sites",
+			openTitle: "[scanner] Unguarded isDirectory() call in src/fs/scan.ts",
+			openBody:  "src/fs/scan.ts:10 and src/fs/other.ts",
+			title:     "[scanner]: Unguarded isDirectory() call in src/fs/scan.ts: second site",
+			body:      "src/fs/scan.ts:99 and src/fs/extra.ts",
+			wantFold:  true, wantOnNumber: 1210,
+		},
+		{
+			// File sets differ (an identical set is already the #9376
+			// file-set twin), so only the shared primary path links them.
+			name:      "path-only overlap keeps the higher bar",
+			openTitle: "[scanner] Missing timeout in src/lib/walk.ts",
+			openBody:  "src/lib/walk.ts:5 and src/lib/timer.ts:9",
+			title:     "[scanner] Unreachable guard in src/lib/walk.ts",
+			body:      "src/lib/walk.ts:41 and src/lib/guard.ts:3",
+		},
+		{
+			name:      "shared path is only secondary",
+			openTitle: "[scanner] Unreachable guard in src/lib/a.ts",
+			openBody:  "src/lib/a.ts and src/lib/walk.ts",
+			title:     "[scanner] Unreachable guard in src/lib/b.ts",
+			body:      "src/lib/b.ts and src/lib/walk.ts",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &consolidationMock{}
+			srv := consolidationMockServer(t, []openTwin{{number: 1210, author: testBot, title: tc.openTitle, body: tc.openBody}}, m)
+			defer srv.Close()
+			c := issueTestClient(t, srv.URL)
+			c.appBotLogin = testBot
+
+			_, res := fileRequest(t, c, withIssueDir(t), IssueRequest{Repo: "o/r", Agent: "scanner", Title: tc.title, Body: tc.body})
+			if tc.wantFold {
+				if m.created != 0 || len(m.commentedOn) != 1 || m.commentedOn[0] != tc.wantOnNumber || !res.Consolidated {
+					t.Fatalf("created=%d comments=%v result=%+v, want fold into #%d", m.created, m.commentedOn, res, tc.wantOnNumber)
+				}
+				return
+			}
+			if m.created != 1 || len(m.commentedOn) != 0 {
+				t.Fatalf("created=%d comments=%v, want a fresh issue", m.created, m.commentedOn)
+			}
+		})
+	}
+}
+
+// A second hive's App bot is a hive-filed author too; with no identity at all
+// the checks stay off (and say so) instead of folding into a human's issue.
+func TestIssueRequestWatcher_AdditionalBotLoginsAndEmptyIdentity(t *testing.T) {
+	open := []openTwin{{number: 7, author: "other-hive[bot]", title: "[scanner] Unreachable guard in src/lib/walk.ts", body: "src/lib/walk.ts"}}
+	req := IssueRequest{Repo: "o/r", Agent: "scanner", Title: "[scanner] Unreachable guard again in src/lib/walk.ts", Body: "src/lib/walk.ts"}
+
+	t.Run("additional login folds", func(t *testing.T) {
+		m := &consolidationMock{}
+		srv := consolidationMockServer(t, open, m)
+		defer srv.Close()
+		c := issueTestClient(t, srv.URL)
+		c.appBotLogin = testBot
+		c.SetAdditionalBotLogins([]string{" Other-Hive[bot] "})
+		_, res := fileRequest(t, c, withIssueDir(t), req)
+		if m.created != 0 || !res.Consolidated || res.Number != 7 {
+			t.Fatalf("created=%d result=%+v, want fold into #7", m.created, res)
+		}
+	})
+	t.Run("empty identity files", func(t *testing.T) {
+		m := &consolidationMock{}
+		srv := consolidationMockServer(t, open, m)
+		defer srv.Close()
+		c := issueTestClient(t, srv.URL)
+		c.appBotLogin = ""
+		_, res := fileRequest(t, c, withIssueDir(t), req)
+		if m.created != 1 || res.Consolidated {
+			t.Fatalf("created=%d result=%+v, want a fresh issue", m.created, res)
+		}
+	})
 }
