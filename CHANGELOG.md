@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-13 (v5.165.1)
+
+### Fixed
+
+- The arm64 agent image now ships an arm64 Go toolchain; it previously copied the amd64 build-platform toolchain, so `go` failed in-pod with `Exec format error`. The toolchain now comes from a target-platform `agent-go` stage, and a `go-real version` build step fails the image build on any arch mismatch. ([#11726](https://github.com/hivecommons/hive/issues/11726))
+- Clicking an agent's terminal action opens the terminal directly again. #11262 had replaced the new-tab open with an unconditional "Terminal URL for <agent>" modal that made every terminal session a two-click affair; the tab is now reserved synchronously in the click handler (so browsers do not popup-block it after the handoff await) and the URL modal remains only as the fallback when the popup is genuinely blocked (#11738)
+- Fixed the image build broken by the arm64 Go toolchain fix (#11726): the new `agent-go` stage was declared between `builder`'s `FROM` and its build steps, so `/hive`, `/bd` and `/hivectl` were never built and `COPY --from=builder` failed. The stage is now declared before `builder`.
+- Keep the Governor NEXT RUN tile aligned with the effective eval interval and label active-loop lag as delayed instead of stale overdue.
+
+### Security
+
+- The sentinel sweep now reads its per-head state (which head was alerted on and whether a maintainer cleared `sentinel-alert`) only from comments one of the hive's own accounts wrote. Previously any comment containing the `<!-- hive-sentinel --> <head>` marker counted, so a PR author could post one carrying the alert heading and the sweep would treat the unlabelled head as already cleared and never apply the label; the sweep also edited that comment in place instead of posting its own. A hive that cannot name its own accounts keeps the previous any-author rule, matching the label-approval marker check.
+
 ## 2026-10-13 (v5.165.0)
 
 ### Added

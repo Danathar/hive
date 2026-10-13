@@ -1,1 +1,0 @@
-- Keep the Governor NEXT RUN tile aligned with the effective eval interval and label active-loop lag as delayed instead of stale overdue.
