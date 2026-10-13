@@ -117,6 +117,7 @@ const (
 
 const (
 	ownershipLabelLikelyDone           = "hive/likely-done"
+	ownershipLabelVerifiedOpen         = "hive/verified-open"
 	ownershipLabelAlreadyDone          = "hive/already-done"
 	ownershipLabelCoveredByPR          = "hive/covered-by-pr"
 	ownershipLabelApprovedDirection    = "approved-direction"
@@ -448,8 +449,10 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 	}
 	// (6) awaiting the reporter's confirmation: the label or bucket, or a
 	// likely-done issue the reporter-confirmation gate applies to.
+	// hive/verified-open cancels likely-done: the agent found the work not
+	// finished, so nothing awaits the reporter's confirmation.
 	if labels[ownershipLabelReporterConfirmation] || (in.bucket == repoWorkBucketFiltered && in.bucketReason == ownershipLabelReporterConfirmation) ||
-		(in.reporterGate && labels[ownershipLabelLikelyDone]) {
+		(in.reporterGate && ownershipLikelyDone(labels)) {
 		if env.stale(in.createdAt, in.updatedAt) {
 			return yourTurn(OwnershipReasonReporterConfirmationStale, fmt.Sprintf("Reporter has not confirmed for %d days — close it", env.untouchedDays(in.createdAt, in.updatedAt)))
 		}
@@ -470,11 +473,18 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 	return notYourTurn()
 }
 
+// ownershipLikelyDone is the effective hive/likely-done: the label without
+// hive/verified-open, the agent's verdict that the referenced PR did not
+// finish the issue and which overrides likely-done.
+func ownershipLikelyDone(labels map[string]bool) bool {
+	return labels[ownershipLabelLikelyDone] && !labels[ownershipLabelVerifiedOpen]
+}
+
 func ownershipVerifiedDone(in issueOwnershipInput, labels map[string]bool, env ownershipEnv) bool {
 	if labels[ownershipLabelAlreadyDone] {
 		return true
 	}
-	if labels[ownershipLabelLikelyDone] && (in.held || !in.actionable || !env.laneCanOpenPRFor(in.lane, in.repo)) {
+	if ownershipLikelyDone(labels) && (in.held || !in.actionable || !env.laneCanOpenPRFor(in.lane, in.repo)) {
 		return true
 	}
 	return labels[ownershipLabelCoveredByPR] && !in.openLinkedPR
@@ -482,8 +492,9 @@ func ownershipVerifiedDone(in issueOwnershipInput, labels map[string]bool, env o
 
 // issueSafetyNetCovers reports whether the safety net applies to an issue: an
 // unheld actionable issue in the Unclaimed or Claimed band, or an actionable
-// hive/likely-done issue, whose routed lane may open PRs and which no lane
-// has claimed (label, live claim or unexpired task lease).
+// hive/likely-done issue (hive/verified-open cancels likely-done), whose
+// routed lane may open PRs and which no lane has claimed (label, live claim or
+// unexpired task lease).
 func issueSafetyNetCovers(in issueOwnershipInput, labels map[string]bool, env ownershipEnv) bool {
 	if !in.actionable || in.held || !env.laneCanOpenPRFor(in.lane, in.repo) {
 		return false
@@ -491,7 +502,7 @@ func issueSafetyNetCovers(in issueOwnershipInput, labels map[string]bool, env ow
 	if issueClaimed(in.labels) || in.liveClaim || env.leasedFor(in.repo, in.number) {
 		return false
 	}
-	return in.band == "ready" || in.band == "in-progress" || labels[ownershipLabelLikelyDone]
+	return in.band == "ready" || in.band == "in-progress" || ownershipLikelyDone(labels)
 }
 
 func safetyNetOwnership(days int) Ownership {
