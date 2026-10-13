@@ -67,6 +67,13 @@ func TestOwnershipCoveredByOpenLinkedPR11565(t *testing.T) {
 	checkOwnership11565(t, decideIssueOwnership(stale, env), notYours11565)
 	stale.openLinkedPR = false
 	checkOwnership11565(t, decideIssueOwnership(stale, env), want11565{OwnershipVerbReview, OwnershipReasonStaleSafetyNet})
+	// Rule 3 is someone else's move, so the Overview equation counts it as
+	// waiting elsewhere (part D1).
+	stale.openLinkedPR = true
+	if got := decideIssueOwnership(stale, env); !got.WaitingElsewhere {
+		t.Fatalf("open linked PR: WaitingElsewhere = false, want true (%+v)", got)
+	}
+	stale.openLinkedPR = false
 
 	tests := []struct {
 		name  string

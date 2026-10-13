@@ -218,31 +218,48 @@ rule.
 
 ## Repository card legend, issue bands, and PR bands
 
-The collapsible **Overview** section above Projects summarizes the same
-client-side issue and PR bands across the selected repository view. Its SVG
-charts reuse the repository-card classifiers for actionable plus held
-issues/PRs, so their totals match the visible band counters and respect the
-Overview settings repo filter without a separate API call. A compact KPI strip
-renders the partition as an equation: **Total open issues + Total open PRs =
-Actionable now + Held + Blocked/needs-human + Outside**. This is the same
-partition used by the Governor actionable issue/PR subtitles. **Total open
-issues** and **Total open PRs** are forge totals for the selected configured
-repositories from the existing scanner tick: open GitHub issues exclude pull
-requests, while open GitHub pull requests include drafts. Their subtitles show
-the per-kind terms without repeating the headline total. **Actionable now** is
-the shared server-side count used by the Overview KPI and the Governor collapsed
-split: open enumerated issues plus open enumerated PRs after hold/exempt
-filters, excluding items in the waiting, done, draft, or blocked Overview
-bands. The following tiles expose issue/PR splits such as `13 = 5 issues + 8
-PRs`, and the operator glyphs between cards make the full strip read like
-`41 TOTAL OPEN ISSUES + 17 TOTAL OPEN PRS = 13 ACTIONABLE NOW + 13 HELD + 10
-BLOCKED / NEEDS-HUMAN + 22 OUTSIDE`. The `outside` tile is server-side and is
-broken down in `/api/status` as `actionableNow.outside.breakdown[]`, with each
-row naming the count, rule, current setting, and how to change it for this
-hive. The rows cover hard-suppress labels (`needs-direction`,
-`needs-decision`, `needs-spec`; `needs-human` is counted under
-blocked/needs-human), exempt labels from `governor.labels.exempt` plus permanent
-exempt labels, reporter-trust triage from
+The collapsible **Overview** section above Projects summarizes the issues and
+PRs of the selected repository view. Its SVG charts take every slice from the
+server's your-turn decision (see below), so their totals match the Overview
+tiles and respect the Overview settings repo filter without a separate API
+call. A compact KPI strip renders the partition as an equation: **Total open
+issues + Total open PRs = Actionable now + Your turn + Waiting on someone else
++ Held + Blocked + Outside**. This is the same partition used by the Governor
+actionable issue/PR subtitles. **Total open issues** and **Total open PRs** are
+forge totals for the selected configured repositories from the existing scanner
+tick: open GitHub issues exclude pull requests, while open GitHub pull requests
+include drafts. Their subtitles show the per-kind terms without repeating the
+headline total.
+
+The equation is an exact partition: every open issue and pull request counts in
+the first term it matches, so the issue equation and the PR equation each sum to
+their open counts. The terms, in the order they are tried:
+
+1. **Your turn** — every item the server decided is waiting on a person (the
+   N plus M of the Projects inbox), including held, parked, outside and
+   agent-filed items. A parked `needs-decision` issue counts here, not in
+   Outside.
+2. **Waiting on someone else** — the items the charts put in the slice of the
+   same name: a hold whose sources include `person` or `dashboard_pause`, a hive
+   `needs-human` PR still within the adjudicator wait, an issue awaiting reporter
+   confirmation, and an issue an open PR covers.
+3. **Held** — any other item with a hold.
+4. **Blocked** — a PR with a blocked verdict, merge conflicts or failing CI.
+5. **Outside** — the remaining items the scanner filters out, and draft PRs.
+6. **Actionable now** — the rest; the shared server-side count the Overview KPI
+   and the Governor collapsed split read.
+
+The following tiles expose issue/PR splits such as `13 = 5 issues + 8 PRs`, and
+the operator glyphs between cards make the full strip read like `41 TOTAL OPEN
+ISSUES + 17 TOTAL OPEN PRS = 13 ACTIONABLE NOW + 4 YOUR TURN + 6 WAITING ON
+SOMEONE ELSE + 13 HELD + 2 BLOCKED + 22 OUTSIDE`. The Your turn, Waiting on
+someone else and Outside terms carry a ⓘ breakdown in `/api/status` as
+`actionableNow.equation.terms[].breakdown[]`; `actionableNow.outside.breakdown[]`
+has each Outside row naming the count, rule, current setting, and how to change
+it for this hive. The Outside rows cover hard-suppress labels
+(`needs-direction`, `needs-decision`, `needs-spec`, and `needs-human`) only for
+items that are not your turn, exempt labels from `governor.labels.exempt` plus
+permanent exempt labels, reporter-trust triage from
 `project.issue_filter.reporter_trust`, require-label filtering from
 `project.issue_filter.require_labels`, standing hive advisory/meta issues,
 bot Dependency Dashboard issues, draft PRs, exempt PR labels, and
@@ -250,15 +267,33 @@ hold-adjacent/other remainder rows. See [Outside buckets](#outside-buckets)
 for the bucket-by-bucket rules and [labels-and-control-signals.md](labels-and-control-signals.md)
 for the label semantics behind hold, exempt, and hard-suppress signals. Its
 `actionableNow.issues` and `actionableNow.prs` splits always sum to
-`actionableNow.total`. Operators can
-view each Issues or PRs panel as a donut,
-pie, horizontal bar, single 100% stacked bar, line/spark trend, or age
-histogram. Every shape is still driven by the same band slices and
-server-provided classifications. Hovering a chart element, an Overview legend
-row, or a repository-card band header shows its rule from the Go band specs
-carried in `/api/status` as `overview_bands`. Each actionable/held issue and PR
-carries `band`, `signals`, `stale`, and `held`; the browser does not classify
-labels or timestamps again. Full SSE updates carry the same fields.
+`actionableNow.total`. Clicking the **Your turn** tile filters Projects to the
+items it counts; no tile or filter on the Overview is labelled
+blocked/needs-human any more.
+
+Operators can view each Issues or PRs panel as a donut, pie, horizontal bar,
+single 100% stacked bar, line/spark trend, or age histogram. Every shape plots
+every item in exactly one slice, taken from the server decision rather than from
+the item's band. The slices, in plot order, are listed in `/api/status` as
+`overview_slices`, and each issue and PR row carries its slice as `chart_slice`:
+
+- **Your turn** — the items of that kind that are your turn, except `CLOSE`.
+- **To close** — the `CLOSE` items (the inbox header's `· M to close`).
+- **Waiting on someone else** — not your turn, and gated as under term 2 above.
+- otherwise the band the item gets with the waiting, agent-filed and done rules
+  skipped: Unclaimed or Claimed for an issue; Merge-eligible, Blocked, In review,
+  Open or Draft for a PR.
+
+Parked issues are plotted (they are `nonActionableIssues` rows), and so is every
+other non-actionable row that is your turn or waiting on someone else; other
+non-actionable rows stay unplotted. The charts no longer have Needs human, Needs
+triage or Confirm & close slices; the repository cards keep those bands.
+Hovering a chart element, an Overview legend row, or a repository-card band
+header shows its rule from the Go specs carried in `/api/status` as
+`overview_slices` (charts) and `overview_bands` (cards). Each issue and PR row
+carries `band`, `signals`, `stale`, `held`, `chart_slice` and `overview_term`
+(its equation term); the browser does not classify labels or timestamps again.
+Full SSE updates carry the same fields.
 
 
 ### Outside buckets
@@ -282,12 +317,17 @@ and exposes the editable rows.
 
 The Issues and PRs panels link directly to `/api/overview/issues.csv` and
 `/api/overview/prs.csv` by default, or to the matching `.json` endpoints when
-JSON export is selected; non-empty legend rows add a `band` query filter and
-repo-filtered views add one or more `repo` query filters.
-Exports use the current cached snapshot and the same Go classifier as the
-page, so a download reflects the latest server state even between page updates.
-Automation can use the corresponding `.json` endpoints and optional `band`,
-`repo`, `stale`, and `held` filters. Cookie sessions work directly; token-authenticated
+JSON export is selected; non-empty legend rows add a `slice` query filter (the
+rows that slice counts) and repo-filtered views add one or more `repo` query
+filters. Exports use the current cached snapshot and the same Go classifier as
+the page, so a download reflects the latest server state even between page
+updates. Automation can use the corresponding `.json` endpoints and optional
+`band`, `slice`, `repo`, `stale`, and `held` filters. The issue export lists every
+open issue, including the non-actionable rows (parked, reporter-triage,
+reporter-confirmation, covered-by-PR, exempt and the like): a row with no band of
+its own is exported with band `outside` and its `bucket`. Every row of both
+exports carries its ownership decision as `your_turn`, `verb`, `reason_code`,
+`reason` and `waiting_elsewhere`, plus its chart `slice`. Cookie sessions work directly; token-authenticated
 pages include their API token in the download link's query string.
 
 The Overview header's ⚙️ popover stores browser-local chart preferences under

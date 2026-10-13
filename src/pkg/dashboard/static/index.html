@@ -1844,10 +1844,10 @@
     .overview-repo-filter { display: grid; gap: var(--sp-2); max-height: min(16rem, 32vh); overflow: auto; padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); }
     .overview-settings-links { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
     .overview-headline { display: grid; gap: var(--sp-3); margin-bottom: var(--sp-4); }
-    .overview-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr) auto) minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--sp-3); align-items: stretch; }
+    .overview-kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr) auto) minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--sp-3); align-items: stretch; }
     .overview-kpi-operator { display: inline-flex; align-items: center; justify-content: center; align-self: start; padding-top: var(--sp-3); color: var(--muted); font-size: var(--fs-lg); font-weight: 800; line-height: 1; }
     .overview-kpi-coverage-spacer { width: 1px; min-height: 100%; background: var(--border); opacity: 0.8; }
-    @media (max-width: 1399px) { .overview-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overview-kpi-operator, .overview-kpi-coverage-spacer { display: none; } }
+    @media (max-width: 1799px) { .overview-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overview-kpi-operator, .overview-kpi-coverage-spacer { display: none; } }
     @media (max-width: 720px) { .overview-kpis { grid-template-columns: minmax(0, 1fr); } }
     .overview-kpi-range { display: inline-flex; gap: var(--sp-1); }
     .overview-kpi-range-btn { min-width: 2rem; height: 1.25rem; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg); color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; cursor: pointer; }
@@ -1985,6 +1985,9 @@
     .overview-issue-agent-filed { --slice-c: var(--band-agent-filed); }
     .overview-issue-waiting { --slice-c: var(--band-needs-human); }
     .overview-issue-done { --slice-c: var(--band-confirm-close); }
+    .overview-issue-your-turn, .overview-pr-your-turn { --slice-c: var(--band-needs-human); }
+    .overview-issue-to-close, .overview-pr-to-close { --slice-c: var(--band-confirm-close); }
+    .overview-issue-waiting-elsewhere, .overview-pr-waiting-elsewhere { --slice-c: var(--muted); }
     .overview-pr-waiting { --slice-c: var(--band-needs-human); }
     .overview-pr-eligible { --slice-c: var(--band-merge-eligible); }
     .overview-pr-blocked { --slice-c: var(--band-blocked); }
@@ -14927,85 +14930,85 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return Array.from(new Set(overviewAllRepoNames(repos).map(name => name.split('/')[0]).filter(Boolean))).sort((a, b) => a.localeCompare(b));
     }
 
+    // The chart slices come from the server's ownership decision: every row
+    // carries its slice as chart_slice (Your turn, To close, Waiting on someone
+    // else, otherwise a band with the waiting, agent-filed and done rules
+    // skipped) and window._lastStatus.overview_slices lists them in plot
+    // order, so every plotted item sits in exactly one slice (#11507).
+    function overviewSliceSpecs(kind) {
+      const specs = ((window._lastStatus || {}).overview_slices || {})[kind === 'issue' ? 'issues' : 'prs'];
+      return Array.isArray(specs) ? specs : [];
+    }
+
     function overviewIssueBandSlices(repos) {
-      const counts = new Map(OVERVIEW_ISSUE_BAND_ORDER.map(band => [band, 0]));
-      const items = new Map(OVERVIEW_ISSUE_BAND_ORDER.map(band => [band, []]));
+      const specs = overviewSliceSpecs('issue');
+      const items = new Map(specs.map(spec => [spec.key, []]));
       (repos || []).forEach(r => {
         const repo = overviewRepoName(r);
-        const actionable = (r.actionableIssues || []).map(issue => ({ issue, held: false }));
-        const held = (r.heldIssues || []).map(issue => ({ issue, held: true }));
-        const meta = new Map(actionable.concat(held).map(entry => [entry.issue, entry]));
-        groupedRepoIssues(actionable.concat(held).map(entry => entry.issue)).forEach(g => {
-          counts.set(g.band, (counts.get(g.band) || 0) + g.issues.length);
-          const next = g.issues.map(entry => {
-            const source = meta.get(entry.issue) || {};
-            return Object.assign({}, entry.issue || {}, {
-              item: entry.issue,
-              issue: entry.issue,
-              repo,
-              held: !!source.held,
-              info: entry.info,
-              updated_at: (entry.issue && entry.issue.updated_at) || '',
-              created_at: (entry.issue && entry.issue.created_at) || '',
-              number: entry.issue && entry.issue.number
-            });
-          });
-          items.set(g.band, (items.get(g.band) || []).concat(next));
-        });
+        const place = (issue, held) => {
+          const list = items.get(issue && issue.chart_slice);
+          if (!list) return;
+          list.push(Object.assign({}, issue || {}, {
+            item: issue,
+            issue,
+            repo,
+            held,
+            info: issue,
+            updated_at: (issue && issue.updated_at) || '',
+            created_at: (issue && issue.created_at) || '',
+            number: issue && issue.number
+          }));
+        };
+        (r.actionableIssues || []).forEach(issue => place(issue, false));
+        (r.heldIssues || []).forEach(issue => place(issue, true));
+        (r.nonActionableIssues || []).forEach(issue => place(issue, false));
       });
-      OVERVIEW_ISSUE_BAND_ORDER.forEach(band => {
-        items.set(band, (items.get(band) || []).sort((a, b) => issueUpdatedAt(a.item || a.issue || a) - issueUpdatedAt(b.item || b.issue || b) || Number((a.item || a.issue || a).number || 0) - Number((b.item || b.issue || b).number || 0)));
+      return specs.map(spec => {
+        const sorted = items.get(spec.key).sort((a, b) => issueUpdatedAt(a.item || a.issue || a) - issueUpdatedAt(b.item || b.issue || b) || Number((a.item || a.issue || a).number || 0) - Number((b.item || b.issue || b).number || 0));
+        return { key: spec.key, label: spec.label, rule: spec.rule, count: sorted.length, className: 'overview-issue-' + spec.key, items: sorted };
       });
-      return OVERVIEW_ISSUE_BAND_ORDER.map(band => ({
-        key: band,
-        label: issueBandLabel(band),
-        rule: issueBandRule(band),
-        count: counts.get(band) || 0,
-        className: 'overview-issue-' + band,
-        items: items.get(band) || []
-      }));
     }
 
     function overviewPRBandSlices(repos) {
-      const counts = new Map(PR_BAND_ORDER.map(band => [band, 0]));
-      const items = new Map(PR_BAND_ORDER.map(band => [band, []]));
+      const specs = overviewSliceSpecs('pr');
+      const items = new Map(specs.map(spec => [spec.key, []]));
       (repos || []).forEach(r => {
         const repo = overviewRepoName(r);
-        groupedRepoPRs(r.openPrs || [], r.heldPrs || []).forEach(g => {
-          counts.set(g.band, (counts.get(g.band) || 0) + g.prs.length);
-          const next = g.prs.map(entry => Object.assign({}, entry.pr || {}, {
-            item: entry.pr,
-            pr: entry.pr,
+        const place = (pr, held) => {
+          const list = items.get(pr && pr.chart_slice);
+          if (!list) return;
+          list.push(Object.assign({}, pr || {}, {
+            item: pr,
+            pr,
             repo,
-            held: !!entry.held,
-            info: entry.info,
-            updated_at: (entry.pr && entry.pr.updated_at) || '',
-            created_at: (entry.pr && entry.pr.created_at) || '',
-            number: entry.pr && entry.pr.number
+            held,
+            info: pr,
+            updated_at: (pr && pr.updated_at) || '',
+            created_at: (pr && pr.created_at) || '',
+            number: pr && pr.number
           }));
-          items.set(g.band, (items.get(g.band) || []).concat(next));
-        });
+        };
+        (r.openPrs || []).forEach(pr => place(pr, false));
+        (r.heldPrs || []).forEach(pr => place(pr, true));
       });
-      PR_BAND_ORDER.forEach(band => {
-        items.set(band, (items.get(band) || []).sort((a, b) => prUpdatedAt(a.item || a.pr || a) - prUpdatedAt(b.item || b.pr || b) || prReviewClassRank(a.item || a.pr || a) - prReviewClassRank(b.item || b.pr || b) || prCreatedAt(a.item || a.pr || a) - prCreatedAt(b.item || b.pr || b) || Number((a.item || a.pr || a).number || 0) - Number((b.item || b.pr || b).number || 0)));
+      return specs.map(spec => {
+        const sorted = items.get(spec.key).sort((a, b) => prUpdatedAt(a.item || a.pr || a) - prUpdatedAt(b.item || b.pr || b) || prReviewClassRank(a.item || a.pr || a) - prReviewClassRank(b.item || b.pr || b) || prCreatedAt(a.item || a.pr || a) - prCreatedAt(b.item || b.pr || b) || Number((a.item || a.pr || a).number || 0) - Number((b.item || b.pr || b).number || 0));
+        return { key: spec.key, label: spec.label, rule: spec.rule, count: sorted.length, className: 'overview-pr-' + spec.key, items: sorted };
       });
-      return PR_BAND_ORDER.map(band => ({
-        key: band,
-        label: prBandLabel(band),
-        rule: prBandRule(band),
-        count: counts.get(band) || 0,
-        className: 'overview-pr-' + band,
-        items: items.get(band) || []
-      }));
     }
 
+    // Each Overview tile filters the Projects cards to the rows the server
+    // stamped with that equation term (overview_term); the browser never
+    // re-derives a term from labels or bands.
     const OVERVIEW_PROJECT_FILTERS = {
-      'open-issues': { label: 'Total open issues', kinds: ['issue'], issueBands: OVERVIEW_ISSUE_BAND_ORDER, bucketKind: 'issues' },
-      'open-prs': { label: 'Total open PRs', kinds: ['pr'], prBands: PR_BAND_ORDER, bucketKind: 'prs' },
-      'actionable-now': { label: 'Actionable now', kinds: ['issue', 'pr'], issueBands: OVERVIEW_ISSUE_BAND_ORDER.filter(b => !['waiting', 'done'].includes(b)), prBands: PR_BAND_ORDER.filter(b => !['waiting', 'draft', 'blocked'].includes(b)) },
-      'held': { label: 'Held', kinds: ['issue', 'pr'], held: true },
-      'blocked-needs-human': { label: 'Blocked / needs-human', kinds: ['issue', 'pr'], issueBands: ['waiting', 'done'], prBands: ['waiting', 'blocked'], issueBuckets: ['needs_human'] },
-      'outside': { label: 'Outside', kinds: ['issue', 'pr'], outside: true }
+      'open-issues': { label: 'Total open issues', kinds: ['issue'], bucketKind: 'issues' },
+      'open-prs': { label: 'Total open PRs', kinds: ['pr'], bucketKind: 'prs' },
+      'actionable-now': { label: 'Actionable now', kinds: ['issue', 'pr'], term: 'actionable' },
+      'your-turn': { label: 'Your turn', kinds: ['issue', 'pr'], term: 'your_turn' },
+      'waiting-elsewhere': { label: 'Waiting on someone else', kinds: ['issue', 'pr'], term: 'waiting_elsewhere' },
+      'held': { label: 'Held', kinds: ['issue', 'pr'], term: 'held' },
+      'blocked': { label: 'Blocked', kinds: ['pr'], term: 'blocked' },
+      'outside': { label: 'Outside', kinds: ['issue', 'pr'], term: 'outside', outside: true }
     };
     let _overviewProjectFilterKey = null;
     let _overviewProjectFilterCount = null;
@@ -15055,11 +15058,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return (keys || []).reduce((n, key) => n + Number(bd[key] || 0), 0);
     }
 
-    function overviewProjectOutsideIssueCount(repo, trackedBlocked) {
+    // Non-actionable issue rows the decision moved out of Outside (they are
+    // your turn or waiting on someone else); the rest stay in Outside.
+    function overviewNonActionableMoved(repo) {
+      return ((repo && repo.nonActionableIssues) || []).filter(issue => issue && issue.overview_term && issue.overview_term !== 'outside');
+    }
+
+    function overviewProjectOutsideIssueCount(repo) {
       const raw = overviewRepoOpenIssueCount(repo);
       const tracked = (repo && repo.actionableIssues || []).length + (repo && repo.heldIssues || []).length;
-      const needsHuman = overviewProjectBucketCount(repo, 'issues', ['needs_human']);
-      return Math.max(0, Number(raw || tracked) - tracked - Math.max(0, needsHuman - Number(trackedBlocked || 0)));
+      return Math.max(0, Number(raw || tracked) - tracked - overviewNonActionableMoved(repo).length);
     }
 
     function overviewProjectOutsidePRCount(repo) {
@@ -15071,12 +15079,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function overviewProjectFilterMatchesEntry(entry, filter) {
       if (!filter) return true;
       if (filter.kinds && !filter.kinds.includes(entry.kind)) return false;
-      if (filter.held) return !!entry.held;
-      const band = String(entry.band || '');
-      if (filter.outside) return entry.kind === 'pr' && band === 'draft';
-      if (entry.kind === 'issue' && filter.issueBands) return filter.issueBands.includes(band);
-      if (entry.kind === 'pr' && filter.prBands) return filter.prBands.includes(band);
-      return filter.key === 'open-issues' || filter.key === 'open-prs';
+      if (filter.term) return String((entry.item && entry.item.overview_term) || '') === filter.term;
+      return true;
     }
 
     function overviewProjectFilterRepoMatches(repo, filter) {
@@ -15091,43 +15095,30 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       } else if (filter.key === 'open-prs') {
         const missing = Math.max(0, Number(overviewRepoOpenPRCount(repo) || 0) - prEntries.length);
         if (missing) buckets.push({ kind: 'pr', count: missing, reason: 'outside buckets', label: 'Open PRs outside Overview bands' });
-      } else if (filter.key === 'blocked-needs-human') {
-        const trackedNeedsHuman = issueEntries.filter(entry => repoItemNeedsHuman(entry.issue)).length;
-        const missingNeedsHuman = Math.max(0, overviewProjectBucketCount(repo, 'issues', ['needs_human']) - trackedNeedsHuman);
-        if (missingNeedsHuman) buckets.push({ kind: 'issue', count: missingNeedsHuman, reason: 'needs-human outside Overview bands', label: 'Needs-human issue bucket' });
       } else if (filter.key === 'outside') {
-        const issueBlocked = overviewRepoTrackedIssueEntries(repo).filter(entry => ['waiting', 'done'].includes(String(entry.band || '')) || repoItemNeedsHuman(entry.issue)).length;
-        const issueOutside = overviewProjectOutsideIssueCount(repo, issueBlocked);
+        const issueOutside = overviewProjectOutsideIssueCount(repo);
         const prOutside = overviewProjectOutsidePRCount(repo);
         if (issueOutside) buckets.push({ kind: 'issue', count: issueOutside, reason: 'outside buckets', label: 'Issues outside Overview bands' });
         if (prOutside) buckets.push({ kind: 'pr', count: prOutside, reason: 'outside buckets', label: 'PRs outside Overview bands' });
+      } else if (filter.term && filter.kinds.includes('issue')) {
+        // Parked rows carry a band and render as ordinary issue rows; the other
+        // non-actionable rows in this term have no band, so a count stands in.
+        const matched = overviewNonActionableMoved(repo).filter(issue => issue.overview_term === filter.term);
+        const name = overviewRepoName(repo);
+        matched.filter(issue => issue.band).forEach(issue => issueEntries.push({ kind: 'issue', item: issue, issue, repo: name, held: false, band: issue.band }));
+        const bandless = matched.filter(issue => !issue.band).length;
+        if (bandless) buckets.push({ kind: 'issue', count: bandless, reason: 'no band on the card', label: filter.label + ' · issues without a band' });
       }
       const count = issueEntries.length + prEntries.length + buckets.reduce((n, b) => n + Number(b.count || 0), 0);
       return { issues: issueEntries, prs: prEntries, buckets, count };
     }
 
-    function overviewProjectFilterSummary(key, repos, issueSlices, prSlices) {
+    function overviewProjectFilterSummary(key, repos) {
       const filter = overviewProjectFilterSpec(key) ? Object.assign({ key }, overviewProjectFilterSpec(key)) : null;
       if (!filter) return { key: '', label: '', count: 0 };
-      const repoCount = (repos || []).reduce((n, repo) => n + overviewProjectFilterRepoMatches(repo, filter).count, 0);
-      const issueCount = bandKeys => (issueSlices || []).filter(s => bandKeys.includes(s.key)).reduce((n, s) => n + Number(s.count || 0), 0);
-      const prCount = bandKeys => (prSlices || []).filter(s => bandKeys.includes(s.key)).reduce((n, s) => n + Number(s.count || 0), 0);
-      let count = repoCount;
-      if (issueSlices || prSlices) {
-        if (key === 'open-issues') count = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenIssueCount(r) || 0), 0);
-        else if (key === 'open-prs') count = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenPRCount(r) || 0), 0);
-        else if (key === 'actionable-now') count = issueCount(filter.issueBands || []) + prCount(filter.prBands || []);
-        else if (key === 'held') count = (repos || []).reduce((n, r) => n + (r.heldIssues || []).length + (r.heldPrs || []).length, 0);
-        else if (key === 'blocked-needs-human') count = issueCount(filter.issueBands || []) + prCount(filter.prBands || []) + (repos || []).reduce((n, r) => n + overviewProjectBucketCount(r, 'issues', ['needs_human']), 0);
-        else if (key === 'outside') {
-          const openIssues = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenIssueCount(r) || 0), 0);
-          const openPRs = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenPRCount(r) || 0), 0);
-          const actionable = issueCount(OVERVIEW_PROJECT_FILTERS['actionable-now'].issueBands) + prCount(OVERVIEW_PROJECT_FILTERS['actionable-now'].prBands);
-          const held = (repos || []).reduce((n, r) => n + (r.heldIssues || []).length + (r.heldPrs || []).length, 0);
-          const blocked = issueCount(OVERVIEW_PROJECT_FILTERS['blocked-needs-human'].issueBands) + prCount(OVERVIEW_PROJECT_FILTERS['blocked-needs-human'].prBands) + (repos || []).reduce((n, r) => n + overviewProjectBucketCount(r, 'issues', ['needs_human']), 0);
-          count = Math.max(0, openIssues + openPRs - actionable - held - blocked);
-        }
-      }
+      let count = (repos || []).reduce((n, repo) => n + overviewProjectFilterRepoMatches(repo, filter).count, 0);
+      if (key === 'open-issues') count = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenIssueCount(r) || 0), 0);
+      else if (key === 'open-prs') count = (repos || []).reduce((n, r) => n + Number(overviewRepoOpenPRCount(r) || 0), 0);
       return { key, label: filter.label, count };
     }
 
@@ -15188,7 +15179,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return base + '/' + repo + '/' + (kind === 'pr' ? 'pull' : 'issues') + '/' + raw.number;
     }
 
-    function overviewExportURL(kind, band) {
+    // key is a card band by default; by='slice' names a chart slice instead,
+    // so a slice's export link returns exactly the rows the slice counts.
+    function overviewExportURL(kind, key, by) {
       let format = 'csv';
       try {
         const saved = JSON.parse(localStorage.getItem(OVERVIEW_CHARTS_KEY) || '{}') || {};
@@ -15196,7 +15189,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       } catch {}
       const path = '/api/overview/' + (kind === 'pr' || kind === 'prs' ? 'prs' : 'issues') + '.' + format;
       const params = new URLSearchParams();
-      if (band) params.set('band', band);
+      if (key) params.set(by === 'slice' ? 'slice' : 'band', key);
       const repos = typeof _overviewLastRepos !== 'undefined' ? _overviewLastRepos : [];
       const selected = overviewSelectedRepoNames(repos);
       const all = overviewAllRepoNames(repos);
@@ -15616,7 +15609,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const percent = (s.count / total) * OVERVIEW_CHART_PERCENT_SCALE;
         const percentLabel = percent.toFixed(OVERVIEW_CHART_DECIMAL_PLACES) + '%';
         const format = ((state && state.exportFormat) || 'csv').toUpperCase();
-        const download = kind ? `<button type="button" class="overview-band-download" data-action="overviewOpenExport" data-prevent="1" data-stop="1" data-arg0="${esc(overviewExportURL(kind, s.key))}" title="Export ${esc(s.label)} as ${format}" aria-label="Export ${esc(s.label)} as ${format}">⬇</button>` : '';
+        const download = kind ? `<button type="button" class="overview-band-download" data-action="overviewOpenExport" data-prevent="1" data-stop="1" data-arg0="${esc(overviewExportURL(kind, s.key, 'slice'))}" title="Export ${esc(s.label)} as ${format}" aria-label="Export ${esc(s.label)} as ${format}">⬇</button>` : '';
         return `<div class="overview-chart-legend-row" data-action="overviewNavigateBand" data-arg0="${esc(kind || '')}" data-arg1="${esc(s.key)}" data-stop="1" title="${esc(s.label + (s.rule ? ': ' + s.rule : ''))}"><span class="overview-chart-swatch ${esc(s.className)}"></span><span class="overview-chart-legend-label">${esc(s.label)}</span><span class="overview-chart-legend-count">${esc(overviewSliceLabel(s.count, percentLabel, state))}</span>${download}</div>`;
       }).join('');
     }
@@ -15906,9 +15899,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 'other':
           return 'Outside: items Hive is configured to leave alone.';
         case 'held':
-          return 'Held: work intentionally paused for a maintainer.';
-        case 'blocked_needs_human':
-          return 'Blocked: work waiting on a person or dependency.';
+          return 'Held: work intentionally paused by a hold label.';
+        case 'your_turn':
+          return 'Your turn: Hive is stuck on a person for these items.';
+        case 'waiting_elsewhere':
+          return 'Waiting on someone else: gated on a person\'s hold, a pause, the adjudicator, a reporter or an open PR.';
+        case 'blocked':
+          return 'Blocked: pull requests with a blocked verdict, merge conflicts or failing CI.';
         case 'waiting-on-reporter':
           return 'Waiting on reporter: issues labeled needs-reporter-confirmation (search label:needs-reporter-confirmation).';
         default:
@@ -15931,8 +15928,6 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 'draft-prs': return 'draft until ready';
         case 'issue-hold-labels':
         case 'pr-hold-labels': return 'hold label';
-        case 'needs-human': return 'needs human';
-        case 'issue-waiting-band': return 'waiting issue gate';
         case 'pr-blocked-band': return 'blocked PR gate';
         default: return 'fixed bucket';
       }
@@ -15987,7 +15982,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     function overviewActionableTermHTML(term, context) {
       const text = `${Number(term?.count || 0)} ${term?.label || ''}`;
-      if (!term || !['outside', 'held', 'blocked_needs_human'].includes(term.key)) return esc(text);
+      if (!term || !['outside', 'held', 'blocked', 'your_turn', 'waiting_elsewhere'].includes(term.key)) return esc(text);
       return `<span class="overview-equation-term overview-equation-term-${esc(term.key)}">${esc(text)}${overviewPartitionInfo(term, context)}</span>`;
     }
 
@@ -16019,36 +16014,31 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     function renderOverviewTotalPartitionSubline(equation) {
       if (!equation) return '';
-      const total = Number(equation.open || equation.totalOpen || 0);
-      const actionable = Number(equation.result || 0);
-      const held = overviewEquationTermCount(equation, 'held');
-      const blocked = overviewEquationTermCount(equation, 'blocked_needs_human');
-      const outside = overviewEquationTermCount(equation, 'outside') + overviewEquationTermCount(equation, 'other');
+      const count = key => overviewEquationTermCount(equation, key);
+      const parts = [`${esc(String(Number(equation.result || 0)))} actionable`];
+      [['your_turn', 'your turn'], ['waiting_elsewhere', 'waiting on someone else'], ['held', 'held'], ['blocked', 'blocked']].forEach(([key, label]) => {
+        if (count(key) > 0) parts.push(`${esc(String(count(key)))} ${esc(label)}`);
+      });
+      const outside = count('outside') + count('other');
       const detail = overviewOutsideBreakdownText(equation);
-      return `${esc(String(actionable))} actionable + ${esc(String(held))} held + ${esc(String(blocked))} blocked + ${esc(String(outside))} outside${detail ? ': ' + esc(detail) : ''}`;
+      parts.push(`${esc(String(outside))} outside${detail ? ': ' + esc(detail) : ''}`);
+      return parts.join(' + ');
     }
 
     function renderOverviewSplitSubline(total, issueCount, prCount, label) {
       return `${esc(String(Number(total || 0)))} = ${esc(String(Number(issueCount || 0)))} issues + ${esc(String(Number(prCount || 0)))} PRs`;
     }
 
-    function overviewKPIEquation(openIssues, openPRs, actionable, held, blockedNeedsHuman, issueSlices, prSlices, forgeTotals) {
-      const draft = (prSlices || []).filter(s => s.key === 'draft').reduce((n, s) => n + Number(s.count || 0), 0);
-      const totalOpen = Number(openIssues || 0) + Number(openPRs || 0);
-      const outsideNeedsHuman = Number(forgeTotals?.issues?.breakdown?.needs_human || 0);
-      const confirmClose = (issueSlices || []).filter(s => s.key === 'done').reduce((n, s) => n + Number(s.count || 0), 0);
-      const blockedTerm = Number(blockedNeedsHuman || 0) + outsideNeedsHuman + confirmClose;
-      const outside = Math.max(0, totalOpen - Number(actionable || 0) - Number(held || 0) - blockedTerm);
-      const terms = [
-        { key: 'actionable', label: 'actionable', count: actionable },
-        { key: 'held', label: 'held', count: held },
-        { key: 'blocked_needs_human', label: 'blocked/needs-human', count: blockedTerm },
+    // Equation terms in the order the first-match rule applies; actionable is
+    // what is left.
+    function overviewEquationTermDefs() {
+      return [
+        { key: 'your_turn', label: 'Your turn' },
+        { key: 'waiting_elsewhere', label: 'Waiting on someone else' },
+        { key: 'held', label: 'held' },
+        { key: 'blocked', label: 'blocked' },
+        { key: 'outside', label: 'outside' }
       ];
-      terms.push({ key: 'outside', label: 'outside', count: outside });
-      const sum = terms.reduce((n, t) => n + Number(t.count || 0), 0);
-      if (totalOpen > sum) terms.push({ key: 'other', label: 'other', count: totalOpen - sum });
-      const text = `${openIssues} issues + ${openPRs} PRs = ` + terms.filter(t => Number(t.count || 0) > 0).map(t => `${Number(t.count || 0)} ${t.label}`).join(' + ');
-      return { openIssues, openPrs: openPRs, totalOpen, terms, text, title: text };
     }
 
     function overviewKPIKindEquation(kind, open, actionable, terms) {
@@ -16060,23 +16050,51 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return { kind, open, result: actionable, terms: kept, text, title: text };
     }
 
+    function overviewKPICombinedEquation(issueEq, prEq) {
+      const terms = overviewEquationTermDefs().map(def => ({ key: def.key, label: def.label, count: overviewEquationTermCount(issueEq, def.key) + overviewEquationTermCount(prEq, def.key) }));
+      const result = Number(issueEq?.result || 0) + Number(prEq?.result || 0);
+      terms.push({ key: 'actionable', label: 'actionable', count: result });
+      const other = overviewEquationTermCount(issueEq, 'other') + overviewEquationTermCount(prEq, 'other');
+      if (other > 0) terms.push({ key: 'other', label: 'other', count: other });
+      const openIssues = Number(issueEq?.open || 0);
+      const openPRs = Number(prEq?.open || 0);
+      const text = `${openIssues} issues + ${openPRs} PRs = ` + terms.filter(t => Number(t.count || 0) > 0).map(t => `${Number(t.count || 0)} ${t.label}`).join(' + ');
+      return { openIssues, openPrs: openPRs, totalOpen: openIssues + openPRs, result, terms, text, title: text };
+    }
+
+    // The same partition for the repos selected in the Overview, counted from
+    // the server-stamped overview_term of each row. Outside is what no other
+    // term claims.
+    function overviewKPILocalEquations(repos, forgeTotals) {
+      const counts = { issues: {}, prs: {} };
+      const bump = (kind, row) => { const term = String((row && row.overview_term) || ''); if (term) counts[kind][term] = (counts[kind][term] || 0) + 1; };
+      let listedIssues = 0;
+      let listedPRs = 0;
+      (repos || []).forEach(r => {
+        (r.actionableIssues || []).concat(r.heldIssues || [], r.nonActionableIssues || []).forEach(row => { listedIssues++; bump('issues', row); });
+        (r.openPrs || []).concat(r.heldPrs || []).forEach(row => { listedPRs++; bump('prs', row); });
+      });
+      const build = (kind, open, c, listed) => {
+        const terms = overviewEquationTermDefs().filter(def => def.key !== 'outside' && (kind === 'PRs' || def.key !== 'blocked')).map(def => ({ key: def.key, label: def.label, count: c[def.key] || 0 }));
+        const actionable = c.actionable || 0;
+        const named = terms.reduce((n, t) => n + t.count, actionable);
+        terms.push({ key: 'outside', label: 'outside', count: Math.max(0, Math.max(open, listed) - named) });
+        return overviewKPIKindEquation(kind, Math.max(open, named), actionable, terms);
+      };
+      const issueEq = build('issues', Number(forgeTotals?.issues?.forge ?? listedIssues), counts.issues, listedIssues);
+      const prEq = build('PRs', Number(forgeTotals?.prs?.forge ?? listedPRs), counts.prs, listedPRs);
+      return { equation: overviewKPICombinedEquation(issueEq, prEq), issueEq, prEq };
+    }
+
+    // The governor card's equations when the status carries none: held and
+    // actionable from the totals, the rest shown as one remainder.
     function overviewKPIGovernorFallbackEquations(data, issueCount, prCount) {
       const totals = data?.overviewTotals || {};
-      const bands = data?.overview_bands || {};
-      const issueCounts = Object.fromEntries((bands.issues || []).map(b => [b.key, Number(b.count || 0)]));
-      const prCounts = Object.fromEntries((bands.prs || []).map(b => [b.key, Number(b.count || 0)]));
-      const issueHeld = Number(totals.issues?.held || 0);
-      const prHeld = Number(totals.prs?.held || 0);
-      const outsideNeedsHuman = Number(totals.issues?.breakdown?.needs_human || 0);
       const issueEq = overviewKPIKindEquation('issues', Number(totals.issues?.forge || issueCount || 0), Number(issueCount || 0), [
-        { key: 'held', label: 'held', count: issueHeld },
-        { key: 'blocked_needs_human', label: 'blocked/needs-human', count: Number(issueCounts.waiting || 0) + Number(issueCounts.done || 0) + outsideNeedsHuman },
-        { key: 'outside', label: 'outside', count: Math.max(0, Number(totals.issues?.outside || 0) - outsideNeedsHuman) },
+        { key: 'held', label: 'held', count: Number(totals.issues?.held || 0) },
       ]);
       const prEq = overviewKPIKindEquation('PRs', Number(totals.prs?.forge || prCount || 0), Number(prCount || 0), [
-        { key: 'held', label: 'held', count: prHeld },
-        { key: 'blocked_needs_human', label: 'blocked/needs-human', count: Number(prCounts.waiting || 0) + Number(prCounts.blocked || 0) },
-        { key: 'outside', label: 'outside', count: Number(totals.prs?.outside || 0) + Number(prCounts.draft || 0) },
+        { key: 'held', label: 'held', count: Number(totals.prs?.held || 0) },
       ]);
       return { issueEq, prEq };
     }
@@ -16085,80 +16103,53 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (!state.showKPIs) return '';
       _overviewKPILocalScope = overviewKPIRepoScope(repos);
       const forgeTotals = overviewKPIForgeTotals(repos);
-      const trackedIssues = (issueSlices || []).reduce((n, s) => n + Number(s.count || 0), 0);
-      const trackedPRs = (prSlices || []).reduce((n, s) => n + Number(s.count || 0), 0);
-      const actionableIssues = (issueSlices || []).filter(s => !['waiting', 'done'].includes(s.key)).reduce((n, s) => n + Number(s.count || 0), 0);
-      const actionablePRs = (prSlices || []).filter(s => !['waiting', 'draft', 'blocked'].includes(s.key)).reduce((n, s) => n + Number(s.count || 0), 0);
-      const openIssues = Number(forgeTotals?.issues?.forge ?? trackedIssues);
-      const openPRs = Number(forgeTotals?.prs?.forge ?? trackedPRs);
-      const computedActionableNow = actionableIssues + actionablePRs;
-      const serverActionableNow = Number(window._lastStatus?.actionableNow?.total);
-      const actionableNow = _overviewKPILocalScope === 'all' && Number.isFinite(serverActionableNow) ? serverActionableNow : computedActionableNow;
-      const serverActionableIssues = Number(window._lastStatus?.actionableNow?.issues);
-      const serverActionablePRs = Number(window._lastStatus?.actionableNow?.prs);
-      const actionableIssueSplit = _overviewKPILocalScope === 'all' && Number.isFinite(serverActionableIssues) ? serverActionableIssues : actionableIssues;
-      const actionablePRSplit = _overviewKPILocalScope === 'all' && Number.isFinite(serverActionablePRs) ? serverActionablePRs : actionablePRs;
-      const computedHeld = (repos || []).reduce((n, r) => n + (r.heldIssues || []).length + (r.heldPrs || []).length, 0);
-      const computedBlockedNeedsHuman = (prSlices || []).filter(s => s.key === 'blocked' || s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0)
-        + (issueSlices || []).filter(s => s.key === 'waiting').reduce((n, s) => n + Number(s.count || 0), 0);
-      const serverEquation = _overviewKPILocalScope === 'all' ? window._lastStatus?.actionableNow?.equation : null;
-      const equation = serverEquation || overviewKPIEquation(openIssues, openPRs, actionableNow, computedHeld, computedBlockedNeedsHuman, issueSlices, prSlices, forgeTotals);
-      const serverIssueEq = _overviewKPILocalScope === 'all' ? window._lastStatus?.actionableNow?.issueEquation : null;
-      const serverPREq = _overviewKPILocalScope === 'all' ? window._lastStatus?.actionableNow?.prEquation : null;
-      const issueCounts = Object.fromEntries((issueSlices || []).map(s => [s.key, Number(s.count || 0)]));
-      const prCounts = Object.fromEntries((prSlices || []).map(s => [s.key, Number(s.count || 0)]));
-      const issueHeldLocal = (repos || []).reduce((n, r) => n + (r.heldIssues || []).length, 0);
-      const prHeldLocal = (repos || []).reduce((n, r) => n + (r.heldPrs || []).length, 0);
-      const localOutsideNeedsHuman = Number(forgeTotals?.issues?.breakdown?.needs_human || 0);
-      const issueBlockedLocal = Number(issueCounts.waiting || 0) + Number(issueCounts.done || 0) + localOutsideNeedsHuman;
-      const prBlockedLocal = Number(prCounts.waiting || 0) + Number(prCounts.blocked || 0);
-      const issueOutsideLocal = Math.max(0, openIssues - actionableIssues - issueHeldLocal - issueBlockedLocal);
-      const prOutsideLocal = Math.max(0, openPRs - actionablePRs - prHeldLocal - prBlockedLocal);
-      const issueEq = serverIssueEq || overviewKPIKindEquation('issues', openIssues, actionableIssues, [
-        { key: 'held', label: 'held', count: issueHeldLocal },
-        { key: 'blocked_needs_human', label: 'blocked/needs-human', count: issueBlockedLocal },
-        { key: 'outside', label: 'outside', count: issueOutsideLocal },
-      ]);
-      const prEq = serverPREq || overviewKPIKindEquation('PRs', openPRs, actionablePRs, [
-        { key: 'held', label: 'held', count: prHeldLocal },
-        { key: 'blocked_needs_human', label: 'blocked/needs-human', count: prBlockedLocal },
-        { key: 'outside', label: 'outside', count: prOutsideLocal },
-      ]);
-      const held = overviewKPITerm(equation, 'held', computedHeld);
-      const blockedNeedsHuman = overviewKPITerm(equation, 'blocked_needs_human', computedBlockedNeedsHuman);
+      const serverActionable = window._lastStatus?.actionableNow;
+      const useServerEquation = _overviewKPILocalScope === 'all' && !!(serverActionable?.equation && serverActionable?.issueEquation && serverActionable?.prEquation);
+      const local = useServerEquation ? null : overviewKPILocalEquations(repos, forgeTotals);
+      const equation = useServerEquation ? serverActionable.equation : local.equation;
+      const issueEq = useServerEquation ? serverActionable.issueEquation : local.issueEq;
+      const prEq = useServerEquation ? serverActionable.prEquation : local.prEq;
+      const openIssues = Number(forgeTotals?.issues?.forge ?? issueEq.open);
+      const openPRs = Number(forgeTotals?.prs?.forge ?? prEq.open);
+      const actionableIssueSplit = Number(issueEq.result || 0);
+      const actionablePRSplit = Number(prEq.result || 0);
+      const actionableNow = actionableIssueSplit + actionablePRSplit;
+      const term = key => overviewKPITerm(equation, key, 0);
+      const split = key => [overviewEquationTermCount(issueEq, key), overviewEquationTermCount(prEq, key)];
+      const yourTurn = term('your_turn');
+      const waiting = term('waiting_elsewhere');
+      const held = term('held');
+      const blocked = term('blocked');
       const equationText = equation?.text || '';
       const equationHTML = equationText ? renderActionableEquationSubline(equation) : '';
       const equationTitle = equation?.title || equationText || 'Items in bands that can move without waiting.';
-      const heldIssues = overviewEquationTermCount(issueEq, 'held');
-      const heldPRs = overviewEquationTermCount(prEq, 'held');
-      const blockedIssues = overviewEquationTermCount(issueEq, 'blocked_needs_human');
-      const blockedPRs = overviewEquationTermCount(prEq, 'blocked_needs_human');
+      const [yourTurnIssues, yourTurnPRs] = split('your_turn');
+      const [waitingIssues, waitingPRs] = split('waiting_elsewhere');
+      const [heldIssues, heldPRs] = split('held');
+      const [, blockedPRs] = split('blocked');
       const outside = overviewEquationTermCount(equation, 'outside') + overviewEquationTermCount(equation, 'other');
       const outsideIssues = overviewEquationTermCount(issueEq, 'outside') + overviewEquationTermCount(issueEq, 'other');
       const outsidePRs = overviewEquationTermCount(prEq, 'outside') + overviewEquationTermCount(prEq, 'other');
       const outsideTermBase = (equation?.terms || []).find(t => t && t.key === 'outside');
       const outsideTerm = Object.assign({ key: 'outside', label: 'outside', count: outside, rule: "Open items excluded before they enter Overview bands by this hive's scanner settings." }, outsideTermBase || {});
       const outsideInfo = overviewPartitionInfo(outsideTerm, 'overview-kpi-outside');
+      const termInfo = (key, context) => overviewPartitionInfo((equation?.terms || []).find(t => t && t.key === key), context);
       const useServerHistory = _overviewKPILocalScope === 'all';
-      const kpiFilterSummary = key => overviewProjectFilterSummary(key, repos, issueSlices, prSlices);
-      const openIssueFilter = kpiFilterSummary('open-issues');
-      const openPRFilter = kpiFilterSummary('open-prs');
-      const actionableFilter = kpiFilterSummary('actionable-now');
-      const heldFilter = kpiFilterSummary('held');
-      const blockedFilter = kpiFilterSummary('blocked-needs-human');
       const cards = [
-        { key: 'open-issues', field: 'overviewOpenIssues', label: 'Total open issues', value: openIssues, rawValue: openIssues, color: 'var(--orange)', tip: 'All open GitHub issues (pull requests excluded) across the selected configured repos. In Overview bands means actionable + held + blocked/needs-human. Click to filter Projects to matching issues.', subline: renderOverviewTotalPartitionSubline(issueEq) },
-        { key: 'open-prs', field: 'overviewOpenPrs', label: 'Total open PRs', value: openPRs, rawValue: openPRs, color: 'var(--green)', tip: 'All open GitHub pull requests across the selected configured repos, including drafts. In Overview bands means actionable + held + blocked/needs-human; draft PRs are outside until ready. Click to filter Projects to matching PRs.', subline: renderOverviewTotalPartitionSubline(prEq) },
-        { key: 'actionable-now', field: 'overviewActionable', label: 'Actionable now', value: actionableNow, rawValue: actionableNow, color: 'var(--accent)', tip: equationTitle + ' Click to filter Projects to this band.', subline: renderOverviewSplitSubline(actionableNow, actionableIssueSplit, actionablePRSplit, 'actionable') },
-        { key: 'held', field: 'overviewHeld', label: 'Held', value: held, rawValue: held, color: 'color-mix(in srgb, var(--orange) 65%, var(--muted))', tip: `${held} held = ${heldIssues} issues + ${heldPRs} PRs. Issues and PRs deliberately paused by a hold. Click to filter Projects.`, subline: renderOverviewSplitSubline(held, heldIssues, heldPRs, 'held') },
-        { key: 'blocked-needs-human', field: 'overviewBlockedHuman', label: 'Blocked / needs-human', value: blockedNeedsHuman, rawValue: blockedNeedsHuman, color: 'var(--red)', tip: `${blockedNeedsHuman} blocked/needs-human = ${blockedIssues} issues + ${blockedPRs} PRs. Waiting, blocked, confirm/close, or escalated work needing a person or dependency. Click to filter Projects.`, subline: renderOverviewSplitSubline(blockedNeedsHuman, blockedIssues, blockedPRs, 'blocked') },
-        { key: 'outside', field: 'overviewOutside', label: 'Outside', value: outside, rawValue: outside, color: 'var(--muted)', tip: `${outside} outside = ${outsideIssues} issues + ${outsidePRs} PRs. Open items excluded before they enter Overview bands by this hive's scanner settings. Click to filter Projects.`, subline: renderOverviewSplitSubline(outside, outsideIssues, outsidePRs, 'outside'), infoHTML: outsideInfo }
+        { key: 'open-issues', field: 'overviewOpenIssues', label: 'Total open issues', value: openIssues, rawValue: openIssues, color: 'var(--orange)', tip: 'All open GitHub issues (pull requests excluded) across the selected configured repos. Each one counts in exactly one term: your turn, waiting on someone else, held, outside, or actionable. Click to filter Projects to matching issues.', subline: renderOverviewTotalPartitionSubline(issueEq) },
+        { key: 'open-prs', field: 'overviewOpenPrs', label: 'Total open PRs', value: openPRs, rawValue: openPRs, color: 'var(--green)', tip: 'All open GitHub pull requests across the selected configured repos, including drafts. Each one counts in exactly one term: your turn, waiting on someone else, held, blocked, outside (drafts are outside until ready), or actionable. Click to filter Projects to matching PRs.', subline: renderOverviewTotalPartitionSubline(prEq) },
+        { key: 'actionable-now', field: 'overviewActionable', label: 'Actionable now', value: actionableNow, rawValue: actionableNow, color: 'var(--accent)', tip: equationTitle + ' Click to filter Projects to this term.', subline: renderOverviewSplitSubline(actionableNow, actionableIssueSplit, actionablePRSplit, 'actionable') },
+        { key: 'your-turn', field: 'overviewYourTurn', label: 'Your turn', value: yourTurn, rawValue: yourTurn, color: 'var(--red)', tip: `${yourTurn} your turn = ${yourTurnIssues} issues + ${yourTurnPRs} PRs. Items Hive is stuck on a person for, including the ones to close. Click to filter Projects.`, subline: renderOverviewSplitSubline(yourTurn, yourTurnIssues, yourTurnPRs, 'your turn'), infoHTML: termInfo('your_turn', 'overview-kpi-your-turn') },
+        { key: 'waiting-elsewhere', field: 'overviewWaiting', label: 'Waiting on someone else', value: waiting, rawValue: waiting, color: 'var(--muted)', tip: `${waiting} waiting on someone else = ${waitingIssues} issues + ${waitingPRs} PRs. Gated on a person's hold or a pause, the adjudicator, a reporter, or an open PR. Click to filter Projects.`, subline: renderOverviewSplitSubline(waiting, waitingIssues, waitingPRs, 'waiting'), infoHTML: termInfo('waiting_elsewhere', 'overview-kpi-waiting') },
+        { key: 'held', field: 'overviewHeld', label: 'Held', value: held, rawValue: held, color: 'color-mix(in srgb, var(--orange) 65%, var(--muted))', tip: `${held} held = ${heldIssues} issues + ${heldPRs} PRs. Issues and PRs paused by a hold that no earlier term claimed. Click to filter Projects.`, subline: renderOverviewSplitSubline(held, heldIssues, heldPRs, 'held') },
+        { key: 'blocked', field: 'overviewBlocked', label: 'Blocked', value: blocked, rawValue: blocked, color: 'var(--red)', tip: `${blocked} blocked PRs. Pull requests with a blocked verdict, merge conflicts or failing CI. Click to filter Projects.`, subline: renderOverviewSplitSubline(blocked, 0, blockedPRs, 'blocked') },
+        { key: 'outside', field: 'overviewOutside', label: 'Outside', value: outside, rawValue: outside, color: 'var(--muted)', tip: `${outside} outside = ${outsideIssues} issues + ${outsidePRs} PRs. Open items excluded before they enter Overview bands by this hive's scanner settings, and draft PRs. Click to filter Projects.`, subline: renderOverviewSplitSubline(outside, outsideIssues, outsidePRs, 'outside'), infoHTML: outsideInfo }
       ];
       const coverageCard = overviewCoverageCard();
       const snapshotComplete = !(repos || []).some(r => r && r.countsIncomplete) && !(_overviewKPILocalScope === 'all' && window._lastStatus?.overviewKPIIncomplete);
       if (snapshotComplete) overviewKPIRecordLocal(overviewKPICurrentSample(coverageCard ? cards.concat([coverageCard]) : cards));
-      const ops = ['+', '=', '+', '+', '+'];
-      const equationLabel = `${openIssues} total open issues + ${openPRs} total open PRs = ${actionableNow} actionable now + ${held} held + ${blockedNeedsHuman} blocked or needs-human + ${outside} outside`;
+      const ops = ['+', '=', '+', '+', '+', '+', '+'];
+      const equationLabel = `${openIssues} total open issues + ${openPRs} total open PRs = ${actionableNow} actionable now + ${yourTurn} your turn + ${waiting} waiting on someone else + ${held} held + ${blocked} blocked + ${outside} outside`;
       return `<div class="overview-headline sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}<div class="overview-kpis" aria-label="${esc(equationLabel)}">${cards.map((card, i) => {
         const value = card.value;
         const n = Number(card.rawValue);
@@ -16295,8 +16286,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       renderOverviewCharts(_overviewLastRepos || []);
     }
 
-    function overviewNavigateBand(kind, band) {
-      const key = kind === 'issue' ? (band === 'waiting' || band === 'done' ? 'blocked-needs-human' : 'actionable-now') : (band === 'waiting' || band === 'blocked' ? 'blocked-needs-human' : (band === 'draft' ? 'outside' : 'actionable-now'));
+    // A legend row opens the card filter of the tile that counts the same rows.
+    function overviewNavigateBand(kind, slice) {
+      const key = { 'your-turn': 'your-turn', 'to-close': 'your-turn', 'waiting-elsewhere': 'waiting-elsewhere', blocked: 'blocked', draft: 'outside' }[slice] || 'actionable-now';
       overviewApplyKPIProjectFilter(key);
     }
 
@@ -16411,7 +16403,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const total = issueSlices.concat(prSlices).reduce((n, s) => n + s.count, 0);
       const kpis = renderOverviewKPIs(selectedRepos, issueSlices, prSlices, state);
       const html = total
-        ? `${kpis}<div class="overview-grid">${renderOverviewPanel('issue', 'Issues by band', 'Actionable and held issues ' + repoSuffix + ' · hover a band for its rule', issueSlices, state)}${renderOverviewPanel('pr', 'PRs by band', 'Open and held pull requests ' + repoSuffix + ' · hover a band for its rule', prSlices, state)}</div>`
+        ? `${kpis}<div class="overview-grid">${renderOverviewPanel('issue', 'Issues by band', 'Open issues ' + repoSuffix + ' · hover a slice for its rule', issueSlices, state)}${renderOverviewPanel('pr', 'PRs by band', 'Open and held pull requests ' + repoSuffix + ' · hover a slice for its rule', prSlices, state)}</div>`
         : `${kpis}<div class="overview-empty">Nothing actionable — the hive is caught up</div>`;
       if (sampled) saveOverviewChartsState(state);
       setIfChanged(el, html);

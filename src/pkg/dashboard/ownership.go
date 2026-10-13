@@ -139,16 +139,28 @@ const (
 // Reason and Action are display only. InboxRank is the item's 1-based
 // position in the "Your turn" inbox across every repository in the
 // snapshot, and is zero when the item is not your turn.
+//
+// WaitingElsewhere marks a not-your-turn item that is gated on someone other
+// than the operator: a hold whose sources include a person or the dashboard's
+// pause, a hive needs-human PR still within the adjudicator wait, a pending
+// reporter confirmation, or an issue an open PR covers. The Overview equation
+// and charts read it; it is never set on a your-turn item and is not part of
+// the ownership identity.
 type Ownership struct {
-	YourTurn   bool   `json:"your_turn"`
-	Verb       string `json:"verb,omitempty"`
-	ReasonCode string `json:"reason_code,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Action     string `json:"action,omitempty"`
-	InboxRank  int    `json:"inbox_rank,omitempty"`
+	YourTurn         bool   `json:"your_turn"`
+	Verb             string `json:"verb,omitempty"`
+	ReasonCode       string `json:"reason_code,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Action           string `json:"action,omitempty"`
+	InboxRank        int    `json:"inbox_rank,omitempty"`
+	WaitingElsewhere bool   `json:"waiting_elsewhere,omitempty"`
 }
 
 func notYourTurn() Ownership { return Ownership{} }
+
+// waitingElsewhere is the not-your-turn decision for an item gated on someone
+// other than the operator.
+func waitingElsewhere() Ownership { return Ownership{WaitingElsewhere: true} }
 
 func yourTurn(code, reason string) Ownership {
 	return Ownership{YourTurn: true, Verb: ownershipReasonVerbs[code], ReasonCode: code, Reason: reason}
@@ -373,16 +385,16 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 	labels := labelSet(in.labels)
 	// (1) a person's hold or the dashboard's pause.
 	if in.held && holdSourcesHide(in.holdSources) {
-		return notYourTurn()
+		return waitingElsewhere()
 	}
 	// (2) sentinel-flagged.
 	if env.sentinelLabel != "" && labels[strings.ToLower(env.sentinelLabel)] {
 		return yourTurn(OwnershipReasonSentinelFlagged, "Flagged by the sentinel — inspect it")
 	}
-	// (3) covered by an open PR: the PR closes it on merge. Not yours, and
-	// the safety net does not cover it.
+	// (3) covered by an open PR: the PR closes it on merge. Someone else's
+	// move, and the safety net does not cover it.
 	if in.bucket == repoWorkBucketClaimedByPR || in.openLinkedPR {
-		return notYourTurn()
+		return waitingElsewhere()
 	}
 	// (4) parking buckets.
 	var parking string
@@ -411,7 +423,7 @@ func decideIssueOwnership(in issueOwnershipInput, env ownershipEnv) Ownership {
 		if env.stale(in.createdAt, in.updatedAt) {
 			return yourTurn(OwnershipReasonReporterConfirmationStale, fmt.Sprintf("Reporter has not confirmed for %d days — close it", env.untouchedDays(in.createdAt, in.updatedAt)))
 		}
-		return notYourTurn()
+		return waitingElsewhere()
 	}
 	// (7) verified done but not closed.
 	if ownershipVerifiedDone(in, labels, env) {
@@ -464,7 +476,7 @@ func decidePROwnership(pr github.PullRequest, held bool, env ownershipEnv) Owner
 		sources = pr.HoldSources
 		// (1) a person's hold or the dashboard's pause.
 		if holdSourcesHide(sources) {
-			return notYourTurn()
+			return waitingElsewhere()
 		}
 	}
 	// (2) sentinel-flagged.
@@ -480,6 +492,7 @@ func decidePROwnership(pr github.PullRequest, held bool, env ownershipEnv) Owner
 	if hive && adjudicated && labels[ownershipLabelReviewerRecommendClose] {
 		return yourTurn(OwnershipReasonAdjudicatorRecommendedClose, "The adjudicator recommended closing this pull request")
 	}
+	withinAdjudicatorWait := false
 	if labels[ownershipLabelNeedsHuman] {
 		switch {
 		case !hive:
@@ -494,11 +507,15 @@ func decidePROwnership(pr github.PullRequest, held bool, env ownershipEnv) Owner
 		if at := env.escalatedAtFor(pr.Repo, pr.Number); !at.IsZero() && env.now.Sub(at) >= ownershipAdjudicatorWait {
 			return yourTurn(OwnershipReasonAdjudicatorWaitElapsed, fmt.Sprintf("The adjudicator has not acted within %d hours of escalation", int(ownershipAdjudicatorWait/time.Hour)))
 		}
+		withinAdjudicatorWait = true
 	}
 	// (10) otherwise not your turn; the safety net covers non-draft, unheld
 	// hive PRs at L3 and above that no lane has claimed.
 	if hive && !pr.Draft && env.levelFor(pr.Repo) >= ownershipLanePRMinLevel && !issueClaimed(pr.Labels) && env.stale(pr.CreatedAt, pr.UpdatedAt) {
 		return safetyNetOwnership(env.untouchedDays(pr.CreatedAt, pr.UpdatedAt))
+	}
+	if withinAdjudicatorWait {
+		return waitingElsewhere()
 	}
 	return notYourTurn()
 }
