@@ -1,1 +1,0 @@
-- Fixed the hub stable-promotion evaluator timing out on every GitHub runs fetch (5s per page over thousands of docker.yml runs): one overall fetch deadline, early stop at the current stable's PromotedAt, truncated fetches no longer drive eligibility, and the WARN is logged once per transition (#11684).
