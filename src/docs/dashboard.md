@@ -557,7 +557,10 @@ but not closed → `CLOSE`; (8) agent-filed and unacknowledged where
 acknowledgment is required → `TRIAGE`; (9) for a pull request with a hold, the
 hold sources decide and no later row applies; for any other pull request, the
 PR rows of the table; (10) otherwise Not yours. The safety net then applies
-only to items that came out Not yours.
+only to items that came out Not yours. `hive/verified-open` (the agent found
+the work unfinished) cancels `hive/likely-done` for rules (6) and (7) and for
+the safety net, so an issue carrying both is neither awaiting the reporter nor
+verified done; `hive/already-done` and `hive/covered-by-pr` are unaffected.
 
 **Hold sources.** Every held issue or PR carries the set of sources currently
 requiring its hold (`hold_sources` in the payload): `level_gate` (the ACMM
@@ -589,12 +592,13 @@ removes `needs-human`, the rows for an adjudicated PR apply instead.
 **Safety net.** Anything Hive should be progressing can wait unnoticed at most
 one stale period (`dashboard.issue_bands.stale_days`, default 14; there is no
 separate setting). The net covers only (a) an issue in the Unclaimed or Claimed
-band, or an actionable `hive/likely-done` issue, whose routed lane may open
-pull requests at the repository's level, and (b) a non-draft, unheld
-hive-authored PR at L3 or above. Such an item that came out Not yours, has no
-lane claim (no claims-ledger entry and no unexpired contribute task lease) and
-has had no activity for longer than the stale period is your turn with `REVIEW`
-and `stale_safety_net`, and the reason "untouched for N days". "Activity" means
+band, or an actionable `hive/likely-done` issue without `hive/verified-open`,
+whose routed lane may open pull requests at the repository's level, and (b) a
+non-draft, unheld hive-authored PR at L3 or above. Such an item that came out
+Not yours, has no lane claim (no claims-ledger entry and no unexpired
+contribute task lease) and has had no activity for longer than the stale period
+is your turn with `REVIEW` and `stale_safety_net`, and the reason "untouched
+for N days". "Activity" means
 a change to the item's GitHub `updated_at`, which Hive's own comments and labels
 also move. Held items, issues covered by an open PR, issues awaiting reporter
 confirmation, and backlog an agent lane may not take at the repository's level
