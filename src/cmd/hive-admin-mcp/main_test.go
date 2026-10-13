@@ -506,12 +506,15 @@ func TestReadProviderReviewQueueMergesIssuesAndPRs(t *testing.T) {
 		case "/api/overview/issues.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bands": []any{map[string]any{"key": "done", "label": "Confirm & close"}},
-				"rows":  []any{map[string]any{"repo": "o/a", "number": 1, "band": "Confirm & close", "updated_at": "2026-01-01T00:00:00Z"}},
+				"rows": []any{
+					map[string]any{"repo": "o/a", "number": 1, "band": "Confirm & close", "updated_at": "2026-01-01T00:00:00Z", "your_turn": true, "verb": "CLOSE", "reason_code": "verified_done", "reason": "verified done", "inbox_rank": 2},
+					map[string]any{"repo": "o/a", "number": 3, "band": "outside", "updated_at": "2026-01-01T00:00:00Z", "your_turn": false},
+				},
 			})
 		case "/api/overview/prs.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"bands": []any{map[string]any{"key": "waiting", "label": "Needs human"}},
-				"rows":  []any{map[string]any{"repo": "o/a", "number": 2, "band": "Needs human", "held": true, "hold_reason": "hold", "updated_at": "2026-01-02T00:00:00Z"}},
+				"rows":  []any{map[string]any{"repo": "o/a", "number": 2, "band": "Needs human", "held": true, "hold_reason": "hold", "updated_at": "2026-01-02T00:00:00Z", "your_turn": true, "verb": "REVIEW", "reason_code": "level_gate_hold", "reason": "held by the level gate", "inbox_rank": 1}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -539,8 +542,8 @@ func TestReadProviderReviewQueueMergesIssuesAndPRs(t *testing.T) {
 	if err := json.Unmarshal(encoded, &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Rows) != 2 || body.Rows[0].Kind != "pr" || body.Rows[0].ReasonCode != adminmcp.ReviewReasonHold || body.Rows[1].ReasonCode != adminmcp.ReviewReasonConfirmClose {
-		t.Fatalf("queue = %s, want the held PR before the confirm-and-close issue", encoded)
+	if len(body.Rows) != 2 || body.Rows[0].Kind != "pr" || body.Rows[0].ReasonCode != "level_gate_hold" || body.Rows[1].ReasonCode != "verified_done" {
+		t.Fatalf("queue = %s, want the your-turn rows only, in inbox_rank order", encoded)
 	}
 }
 

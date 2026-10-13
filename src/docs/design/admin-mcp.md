@@ -345,19 +345,20 @@ Overview rows carry the band's display label ("Confirm & close"), not its key; t
 each row back to the key through `bands[]` inside `pkg/adminmcp`, so `band=<key>` matches on
 both the dashboard endpoint and stdio (hive#10018).
 
-**`review_queue`** (hive#10019) answers "give me things to review": one list merged across
-issues and pull requests of what needs a human now, each row carrying `reason_code` and a
-one-line `reason`. It reads both Overview exports unfiltered (only `repo` is forwarded) and
-selects rows in priority order: `hold` (held, waiting on a maintainer to release it),
-`needs_human` (the `waiting` band — labelled for a human decision), `sweep_outstanding` (a PR
-in review whose merge-sweep verdict is outstanding), `confirm_close` (the issue `done` band)
-and `agent_filed` (the issue `agent-filed` band). Within a reason, the oldest `updated_at`
-comes first, then pull requests before issues, then repo and number, so the order is
-deterministic; the answer repeats it in `ordering`. Everything else — unclaimed, claimed,
-merge-eligible, blocked, draft, ordinary open — needs no human yet and is left out. Pages are
-`limit` rows (cap 50) from `offset`; a capped page sets `rows_truncated`,
-`_admin_mcp.total` and `next_offset`, and `counts` gives the per-reason totals for the
-whole queue. It is read-only: `queue-automerge` stays excluded.
+**`review_queue`** (hive#10019, hive#11569) answers "give me things to review": exactly the
+your-turn items of the hive (the dashboard inbox's N plus M, hive#11507), including parked
+issues, merged across issues and pull requests. It reads both Overview exports unfiltered
+(only `repo` is forwarded) and keeps the rows whose stored ownership decision says
+`your_turn`; the queue never recomputes the decision from labels or bands. Each row carries
+the server's `verb`, `reason_code`, `reason` and `inbox_rank`, and rows come back in
+`inbox_rank` order (`INSPECT`, `DECIDE`, `STEER`, `SPEC`, `REVIEW`, `TRIAGE`, `ADMIT`, then
+`CLOSE`; within a verb, least recently active first, then repository name, then item
+number); the answer repeats this in `ordering`. `counts.your_turn` is the inbox header's N
+(every verb except `CLOSE`), `counts.to_close` its M, and `verbs` counts each verb. With
+`repo` set only that repository's items are listed, each keeping its position across the
+whole hive. Pages are `limit` rows (cap 50) from `offset`; a capped page sets
+`rows_truncated`, `_admin_mcp.total` and `next_offset`. It is read-only: `queue-automerge`
+stays excluded.
 
 **`governor_setup_proposal`** (hive#10034) answers "set up these governors for me" for a new
 hive. It reads `GET /api/config/governor`, which already carries the repo count, cadence

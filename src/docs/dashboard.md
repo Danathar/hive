@@ -326,7 +326,7 @@ updates. Automation can use the corresponding `.json` endpoints and optional
 open issue, including the non-actionable rows (parked, reporter-triage,
 reporter-confirmation, covered-by-PR, exempt and the like): a row with no band of
 its own is exported with band `outside` and its `bucket`. Every row of both
-exports carries its ownership decision as `your_turn`, `verb`, `reason_code`,
+exports carries its ownership decision as `your_turn`, `verb`, `reason_code`, `inbox_rank`,
 `reason` and `waiting_elsewhere`, plus its chart `slice`. Cookie sessions work directly; token-authenticated
 pages include their API token in the download link's query string.
 
@@ -455,6 +455,142 @@ write is the first time a refresh saw a hive PR with `needs-human`, kept in
 `/data/ownership-state.json` so the adjudicator's four-hour wait survives a
 restart.
 
+### What "your turn" means
+
+An item is your turn only when no agent lane will move it at the repository's
+current autonomy level without a human action. The decision accounts for the
+repository's effective ACMM level (the hive level, lowered by a
+repository-policy override), whether agent-filed proposals need acknowledgment
+(the self-authorization hold, resolved at the hive-wide level), the sources of
+any hold, reporter trust, which parking label an issue carries, whether an
+issue Hive verified as done could not be closed, and whether the adjudicator
+lane has already passed on a pull request. It reads only the status snapshot,
+so it never calls GitHub, and it never changes how Hive admits, routes, claims,
+reviews, merges or closes anything: it only decides what the dashboard shows.
+
+**Verbs.** Exactly one of: `DECIDE` (parked for a decision), `STEER` (parked
+for direction), `SPEC` (parked until it has a spec), `REVIEW` (a person must
+review: a `needs-human` issue, an agent PR held by the level gate, a
+human-authored `needs-human` PR, an agent PR re-escalated after the
+adjudicator's pass, or an item the safety net surfaced), `TRIAGE` (an
+agent-filed proposal awaiting acknowledgment), `ADMIT` (an untrusted
+reporter's issue awaiting an admission label), `INSPECT` (a sentinel-flagged
+PR) and `CLOSE` (an issue Hive verified as done but could not close, an issue
+whose reporter confirmation has gone unanswered for the stale period, or a PR
+the adjudicator recommended closing). `CLOSE` items always sort after every
+other verb.
+
+**Reason codes.** Every your-turn decision carries exactly one code from a
+fixed set; tests, the review-queue tool and the audit entries key on the code,
+so the reason text can change without breaking them.
+
+| Reason code | Verb |
+|---|---|
+| `sentinel_flagged` | `INSPECT` |
+| `parked_needs_human` | `REVIEW` |
+| `parked_needs_direction` | `STEER` |
+| `parked_needs_decision` | `DECIDE` |
+| `parked_needs_spec` | `SPEC` |
+| `untrusted_reporter` | `ADMIT` |
+| `reporter_confirmation_stale` | `CLOSE` |
+| `verified_done` | `CLOSE` |
+| `agent_filed_unacknowledged` | `TRIAGE` |
+| `level_gate_hold`, `outreach_hold`, `policy_hold`, `hold_source_unknown` | `REVIEW` |
+| `hive_pr_needs_human` (L3–L4) | `REVIEW` |
+| `adjudicator_wait_elapsed`, `reviewer_unavailable` | `REVIEW` |
+| `adjudicator_recommended_close` | `CLOSE` |
+| `adjudicator_reescalated` | `REVIEW` |
+| `person_pr_needs_human` | `REVIEW` |
+| `stale_safety_net` | `REVIEW` |
+
+**Ownership by level.** "Parked" means an issue in one of the four hard-suppress
+buckets the scanner records (`needs_human`, `needs_direction`,
+`needs_decision`, `needs_spec`; default labels `needs-human`, `needs-direction`,
+`needs-decision`, `needs-spec`, which owners can rename: the bucket decides).
+**Yours** is your turn with the verb shown; **Not yours** shows no marker; **—**
+means the situation cannot occur at that level.
+
+| Item | L1–L2 | L3–L4 | L5 | L6 |
+|---|---|---|---|---|
+| Unclaimed issue filed by a person | Not yours — backlog | Not yours — backlog, or a lane will act | Not yours — a lane will act | same |
+| Issue filed by an agent, not yet acknowledged, while the self-authorization hold is active (by default below L6) | — (no agent files issues) | Yours — `TRIAGE` | Yours — `TRIAGE` | Not yours by default (agents self-authorize); Yours — `TRIAGE` when the hold is configured on |
+| Issue from an untrusted reporter awaiting an admission label | Yours — `ADMIT` | same | same | same |
+| Parked: `needs-decision` / `needs-direction` / `needs-human` | Yours — `DECIDE` / `STEER` / `REVIEW` | same | same | same — no lane ever takes a parked issue |
+| Parked: `needs-spec` | Yours — `SPEC` | same | same | same |
+| Agent PR held by the level gate (decided from the hold's recorded source, not from the repository's level) | — (no agent opens PRs) | Yours — `REVIEW` | Yours — `REVIEW` | A level hold placed before the level was raised stays until released: Yours — `REVIEW`. Outreach-lane PRs keep their hold: Yours — `REVIEW` |
+| PR with a hold whose sources include `person` | Not yours — own parking | same | same | same |
+| Hive PR with `needs-human`, adjudicator has not passed | — | Yours — `REVIEW` | Not yours until the adjudicator wait rule elapses, then Yours — `REVIEW` | same |
+| Hive PR with `needs-human`, adjudicator recommended close, PR still open | — | — (no adjudicator lane below L5) | Yours — `CLOSE` | same |
+| Hive PR re-escalated with `needs-human` after an adjudicator pass | — | — | Yours — `REVIEW` | same |
+| Person's PR with `needs-human` | Yours — `REVIEW` | same | same | same |
+| Sentinel-flagged PR | Yours — `INSPECT` | same | same | same |
+| Issue Hive verified as done but could not close | Yours — `CLOSE` | same | same | same |
+| Issue covered by an open PR | Not yours — the PR closes it on merge | same | same | same |
+| `blocked` · `Epic` · `2-discussing` · `needs-triage` | As the unclaimed row — still in the agent queue | same | same | same |
+| `needs-reporter-confirmation` | Not yours — the reporter's turn; after the stale period with no activity, Yours — `CLOSE` | same | same | same |
+
+**Precedence.** When an item matches more than one row, the first matching rule
+decides: (1) a hold whose sources include `person` or `dashboard_pause` → Not
+yours; (2) sentinel-flagged → `INSPECT`; (3) covered by an open PR → Not yours;
+(4) on an issue, a parking bucket, checked in the order `needs_human`,
+`needs_direction`, `needs_decision`, `needs_spec` → `REVIEW`, `STEER`,
+`DECIDE`, `SPEC`; (5) untrusted reporter awaiting admission → `ADMIT`; (6)
+awaiting reporter confirmation → Not yours until it has had no activity for the
+stale period, then `CLOSE` (`reporter_confirmation_stale`); (7) verified done
+but not closed → `CLOSE`; (8) agent-filed and unacknowledged where
+acknowledgment is required → `TRIAGE`; (9) for a pull request with a hold, the
+hold sources decide and no later row applies; for any other pull request, the
+PR rows of the table; (10) otherwise Not yours. The safety net then applies
+only to items that came out Not yours.
+
+**Hold sources.** Every held issue or PR carries the set of sources currently
+requiring its hold (`hold_sources` in the payload): `level_gate` (the ACMM
+level gate), `outreach` (the outreach lane's hold), `self_authorization`,
+`reporter_trust`, `sha_hold`, `holdguard`, `human_merge_path` (a PR touching a
+path only a person may merge), `standby_donation`, `dashboard_pause` (the
+dashboard's pause hold, label `hive-pause/<hive-id>`), `person` (a person
+applied or re-applied the hold) and `unknown` (Hive cannot establish who
+applied it). A hold can have several sources. For a PR, ownership follows the
+set: a set including `person` or `dashboard_pause` is Not yours; a set of only
+`level_gate` is `REVIEW` with `level_gate_hold`, only `outreach` is `REVIEW`
+with `outreach_hold`; any other set including `unknown` is `REVIEW` with
+`hold_source_unknown`; any other set is `REVIEW` with `policy_hold`. "Release
+hold" is offered only when `level_gate` is the hold's only source, and an
+`unknown` source never hides a PR and never offers it. A held issue is decided
+by precedence rules 1 to 8 and is otherwise Not yours; a hold Hive's own record
+does not attribute to a Hive source counts as `person`.
+
+**Adjudicator wait rule.** A hive-authored `needs-human` PR on a hive whose
+hive-wide level is L5 or L6 is your turn immediately, with `reviewer_unavailable`,
+when no agent that runs the reviewer lane serves the repository or every such
+agent is paused or unscheduled in the current mode (the advisory `reviewer`
+agent does not count). Otherwise it becomes your turn four hours after
+escalation, with `adjudicator_wait_elapsed`. Escalation time is the escalation
+ledger's label-applied time, or the first status refresh that saw the label.
+Once the adjudicator adds `reviewer-passed` or `reviewer-recommend-close`, or
+removes `needs-human`, the rows for an adjudicated PR apply instead.
+
+**Safety net.** Anything Hive should be progressing can wait unnoticed at most
+one stale period (`dashboard.issue_bands.stale_days`, default 14; there is no
+separate setting). The net covers only (a) an issue in the Unclaimed or Claimed
+band, or an actionable `hive/likely-done` issue, whose routed lane may open
+pull requests at the repository's level, and (b) a non-draft, unheld
+hive-authored PR at L3 or above. Such an item that came out Not yours, has no
+lane claim (no claims-ledger entry and no unexpired contribute task lease) and
+has had no activity for longer than the stale period is your turn with `REVIEW`
+and `stale_safety_net`, and the reason "untouched for N days". "Activity" means
+a change to the item's GitHub `updated_at`, which Hive's own comments and labels
+also move. Held items, issues covered by an open PR, issues awaiting reporter
+confirmation, and backlog an agent lane may not take at the repository's level
+(for example any issue at L1–L2) are excluded.
+
+**Level changes and the audit log.** After a change to the ACMM level, a
+repository's level override, or a lane's mode or pause state, the next status
+refresh recomputes every item. Each time an item's ownership identity (your
+turn or not, verb, reason code) changes, the refresh records an
+`ownership_transition` audit entry; a change of reason text alone records
+nothing.
+
 ### The ☐ marker, the inbox and the section counter
 
 The Projects section renders the decision above and derives nothing from labels
@@ -507,6 +643,36 @@ or bands (hivecommons/hive#11566).
   needs-human badge tooltip names the label ("Labelled needs-human: automated
   fix attempts exhausted. ☐ appears when it is your turn."); band titles, chip
   words and tooltips say what state or label an item has, never whose turn it is.
+
+### Other consumers of the decision
+
+The Your turn set is the same on every surface. With every repository selected,
+no pill filter and the Overview scope set to all, these all describe the same
+N plus M items: the ☐ markers on the cards, the strip's rows, the Overview
+**Your turn** term, the Overview chart slices (Your turn plus To close), the
+admin MCP `review_queue` tool, the weekly owner advice, and the Projects counter
+(which shows that set's N and M). The automated agreement check
+(`TestYourTurnSurfacesAgreeOnTheSameSet11569`) drives each of them through its
+own code path over the level table at every level and a mixed fixture, and fails
+on any difference.
+
+- **Admin MCP `review_queue`** ("give me things to review") returns exactly the
+  your-turn items, parked issues included, each with its `verb`, `reason_code`
+  and `reason`, in `inbox_rank` order, from the same Overview export rows the
+  CSV/JSON endpoints serve. It filters on the stored decision and never
+  recomputes it from labels or bands. `counts.your_turn` is the strip header's N
+  and `counts.to_close` its M; `verbs` counts each verb. With `repo` set it lists
+  only that repository's items, each still carrying its position across the whole
+  hive.
+- **Weekly owner advice** (`GET /api/hive-advice`, the advisory digest) counts
+  the items that need a human from the same stored decision: the
+  `clear-human-gate-prs` and `unblock-human-issues` rules fire when the your-turn
+  share of open PRs or issues reaches `needs_human_pr_pct` or
+  `needs_human_issue_pct`, quote the per-verb split, and link the your-turn and
+  to-close slices of the Overview export. `counts.yourTurn` and `counts.toClose`
+  are the inbox's N and M for the snapshot the advice was computed from. Open
+  issues now include parked and other non-actionable rows, which are open issues
+  and can be your turn.
 
 ## Linked PR issue signals
 

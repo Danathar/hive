@@ -505,7 +505,7 @@ func overviewOutsideBandSpec(count int) BandSpec {
 
 // overviewOwnershipCells are the ownership columns every export row carries.
 func overviewOwnershipCells(o *Ownership) map[string]any {
-	cells := map[string]any{"your_turn": false, "verb": "", "reason_code": "", "reason": "", "waiting_elsewhere": false}
+	cells := map[string]any{"your_turn": false, "verb": "", "reason_code": "", "reason": "", "inbox_rank": 0, "waiting_elsewhere": false}
 	if o == nil {
 		return cells
 	}
@@ -513,6 +513,7 @@ func overviewOwnershipCells(o *Ownership) map[string]any {
 	cells["verb"] = o.Verb
 	cells["reason_code"] = o.ReasonCode
 	cells["reason"] = o.Reason
+	cells["inbox_rank"] = o.InboxRank
 	cells["waiting_elsewhere"] = o.WaitingElsewhere
 	return cells
 }
@@ -579,7 +580,7 @@ func overviewPRCSVRow(item overviewPRItem, cfg config.DashboardIssueBandsConfig,
 	return row
 }
 
-var overviewOwnershipColumns = []string{"your_turn", "verb", "reason_code", "reason", "waiting_elsewhere"}
+var overviewOwnershipColumns = []string{"your_turn", "verb", "reason_code", "reason", "inbox_rank", "waiting_elsewhere"}
 
 func overviewCSVColumns(kind string) []string {
 	if kind == overviewKindPRs || kind == "pr" {

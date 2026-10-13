@@ -395,8 +395,8 @@ Two families of rules feed the block:
 | `reduce-blocked-prs` | Blocked PRs ≥ `blocked_pr_pct` of open PRs | the dominant cause and the first action: *"41 of 70 fail check `go-security-analysis` — fix the check before touching cadence"*, *"N have merge conflicts — rebase or close the oldest"*, or the top blocked-verdict reason |
 | `fix-failing-check` | one check fails on ≥ `check_share_pct` of CI-blocked PRs (at least 2) | the check name and how many PRs it holds |
 | `throttle-lane` | one agent lane produced ≥ `lane_share_pct` of Blocked PRs (at least 2) | the lane to slow down |
-| `clear-human-gate-prs` | Needs-human PRs ≥ `needs_human_pr_pct` of open PRs | how many are held, labelled `needs-human`, or `needs-decision` |
-| `unblock-human-issues` | Needs-human issues ≥ `needs_human_issue_pct` of open issues | the `needs-decision` / `blocked` / `2-discussing` split |
+| `clear-human-gate-prs` | PRs that are your turn (the inbox's N plus M) ≥ `needs_human_pr_pct` of open PRs | the per-verb split of those PRs |
+| `unblock-human-issues` | Issues that are your turn (the inbox's N plus M, parked issues included) ≥ `needs_human_issue_pct` of open issues | the per-verb split of those issues |
 | `review-stale-prs` | Blocked PRs past `dashboard.issue_bands.stale_days` ≥ `stale_blocked_prs` | stale = no activity past the threshold, not proven dead |
 | `confirm-and-close` | any issue in Confirm & close | how much of the backlog confirming them removes |
 
@@ -447,8 +447,8 @@ governor:
   advisory:
     queue_health:
       blocked_pr_pct: 50         # Blocked PRs as % of open PRs
-      needs_human_pr_pct: 25     # Needs-human PRs as % of open PRs
-      needs_human_issue_pct: 30  # Needs-human issues as % of open issues
+      needs_human_pr_pct: 25     # your-turn PRs as % of open PRs
+      needs_human_issue_pct: 30  # your-turn issues as % of open issues
       stale_blocked_prs: 10      # count of Blocked PRs past stale_days
       lane_share_pct: 50         # one lane's share of Blocked PRs
       check_share_pct: 50        # one check's share of CI-blocked PRs

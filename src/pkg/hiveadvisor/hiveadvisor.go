@@ -115,6 +115,7 @@ func Recommend(req Request) Result {
 		OverviewIssues: len(req.Signals.Queue.Issues),
 		OverviewPRs:    len(req.Signals.Queue.PRs),
 	}
+	counts.YourTurn, counts.ToClose = YourTurnCounts(req.Signals.Queue)
 
 	if req.Previous != nil && !req.Previous.Start.IsZero() && normalizeMode(req.Previous.Mode) == mode && now.Before(req.Previous.Start.Add(EpochLength)) && !placeholderOnly(req.Previous.Recommendations, fresh) {
 		epoch := copyEpoch(*req.Previous)
