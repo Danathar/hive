@@ -43,6 +43,7 @@ func TestRepoLegendRedesign(t *testing.T) {
 	for _, want := range []string{
 		".repo-legend-v2 .repo-legend-body { display:grid;",
 		".repo-legend-items { display:grid; grid-template-columns:max-content 1fr;",
+		".repo-legend-items .repo-pill-filter-toggle { text-transform:uppercase; }",
 		"@media (max-width:640px) { .repo-legend-v2 .repo-legend-body { grid-template-columns:1fr; } }",
 		"const legendGroups = [",
 		"title: 'Issues — left chip is the band'",
@@ -130,8 +131,9 @@ assert.deepEqual(bandCalls.slice(0, OVERVIEW_ISSUE_BAND_ORDER.length), OVERVIEW_
 for (const band of OVERVIEW_ISSUE_BAND_ORDER) assert.match(out, new RegExp('band-' + band));
 assert.match(out, /<span>nobody on it/);
 assert.match(out, /parked by a label/);
+const issueGroup = out.slice(out.indexOf('Issues — left chip is the band'), out.indexOf('Pull requests — merge state'));
 for (const chip of ['HUMAN', 'DIRECTION', 'DECISION', 'SPEC', 'REPORTER', 'BLOCKED', 'DISCUSSING', 'EPIC', 'UNTRIAGED']) {
-  assert.equal((out.match(new RegExp('>' + chip + '<', 'g')) || []).length, 1, chip);
+  assert.equal((issueGroup.match(new RegExp('>' + chip + '<', 'g')) || []).length, 1, chip);
   assert.ok(chip.length <= 10, chip);
 }
 for (const gone of ['NEEDS HUMAN', 'NEEDS DECISION', 'WAITING ON REPORTER', 'issue:needs_decision']) assert.equal(out.includes(gone), false, gone);
@@ -147,6 +149,14 @@ assert.equal((out.match(/Release held item/g) || []).length, 0);
 assert.equal((out.match(/PR bands/g) || []).length, 0);
 assert.equal((out.match(/SCANNER/g) || []).length, 0);
 assert.equal((out.match(/aligned row/g) || []).length, 0);
+// Every legend pill carries a word, never an icon alone, and every word the
+// legend hardcodes is uppercase; the server band words are uppercased by CSS (#11718).
+const pillTexts = [...out.matchAll(/<button type="button" class="[^"]*repo-pill-filter-toggle"[^>]*>([\s\S]*?)<\/button>/g)].map(m => m[1].replace(/<[^>]*>/g, ''));
+assert.equal(pillTexts.length, (out.match(/repo-pill-filter-toggle/g) || []).length);
+for (const text of pillTexts) {
+  assert.match(text, /[A-Za-z]{2,}/, 'icon-only legend pill: ' + text);
+  if (!text.includes('band-')) assert.doesNotMatch(text.replace(YOUR_TURN_GLYPH, ''), /[a-z]/, 'lowercase legend pill: ' + text);
+}
 `)
 	if out, err := exec.Command(node, "-e", script.String()).CombinedOutput(); err != nil {
 		t.Fatalf("repository legend redesign check failed: %v\n%s", err, strings.TrimSpace(string(out)))

@@ -353,7 +353,10 @@ tooltip), issue held pills, plan chips, hold/release controls, issue state
 glyphs (`⛔`, `❓`, `👤`, `✓`, role badges, stale `🕒`) and PR states (`✓`,
 `◐`, `⚠`, held `⏸`, failing CI `✗ CI`, conflicts `⑂`, stale `🕒`,
 reviewed `💬`, auto-merge `🔀`, agent role badges, review-class badges
-such as `FIX`, and the red `sentinel` pill). A PR that carries the configured
+such as `FIX`, and the red `sentinel` pill). Every legend pill shows its glyph,
+if it has one, followed by an uppercase word (for example `⚠ HUMAN`,
+`⏸ HELD`, `⑂ CONFLICT`, `👍 APPROVED`); the card rows keep the compact
+glyph-only form. A PR that carries the configured
 sentinel alert label (`sentinel.label`, default `sentinel-alert`, matched
 case-insensitively) is drawn red on its card, status chip and main pill, whether
 it is listed as held or open; red wins over the held, needs-human and merge
