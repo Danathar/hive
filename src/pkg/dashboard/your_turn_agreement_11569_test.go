@@ -253,8 +253,8 @@ type pageSurfaces11569 struct {
 	Header  string              `json:"header"`
 	Counter string              `json:"counter"`
 	Slices  struct {
-		Issues map[string][]int `json:"issues"`
-		PRs    map[string][]int `json:"prs"`
+		Issues map[string][]string `json:"issues"`
+		PRs    map[string][]string `json:"prs"`
 	} `json:"slices"`
 }
 
@@ -298,7 +298,7 @@ const inbox = (strip.match(/<div class="yt-inbox-row">.*?<\/div>/gs) || []).map(
   return a;
 });
 const header = (strip.match(/id="yt-inbox-head">([^<]*)</) || [])[1] || '';
-const sliceItems = slices => Object.fromEntries(slices.map(s => [s.key, s.items.map(e => e.number)]));
+const sliceItems = slices => Object.fromEntries(slices.map(s => [s.key, s.items.map(e => e.repo + '#' + e.number)]));
 process.stdout.write(JSON.stringify({
   markers: markerAttrs, inbox, header, counter: els['repos-needs-human'].textContent,
   slices: { issues: sliceItems(overviewIssueBandSlices(window._lastStatus.repos)), prs: sliceItems(overviewPRBandSlices(window._lastStatus.repos)) }
@@ -531,10 +531,28 @@ func TestYourTurnSurfacesAgreeOnTheSameSet11569(t *testing.T) {
 			if page.Header != wantHeader || page.Counter != wantCounter {
 				t.Fatalf("inbox header %q and Projects counter %q, want %q and %q", page.Header, page.Counter, wantHeader, wantCounter)
 			}
-			if len(page.Slices.Issues[overviewSliceYourTurn])+len(page.Slices.PRs[overviewSliceYourTurn]) != n ||
-				len(page.Slices.Issues[overviewSliceToClose])+len(page.Slices.PRs[overviewSliceToClose]) != m {
-				t.Fatalf("the page's chart slices hold %d/%d your-turn/to-close items, want N/M = %d/%d", len(page.Slices.Issues[overviewSliceYourTurn])+len(page.Slices.PRs[overviewSliceYourTurn]), len(page.Slices.Issues[overviewSliceToClose])+len(page.Slices.PRs[overviewSliceToClose]), n, m)
+			// Slice membership, not just totals: the page's Your turn and To
+			// close slices hold exactly the your-turn items, each in the slice
+			// its verb names.
+			pageSlices := agreementSet{}
+			add := func(kind string, slices map[string][]string) {
+				for _, slice := range []string{overviewSliceYourTurn, overviewSliceToClose} {
+					for _, id := range slices[slice] {
+						repo, num, _ := strings.Cut(id, "#")
+						item := agreementItem{Repo: repo, Kind: kind, Number: atoiOrFail(t, num)}
+						if _, dup := pageSlices[item]; dup {
+							t.Fatalf("%s is plotted in more than one slice", item)
+						}
+						if (slice == overviewSliceToClose) != (want[item] == OwnershipVerbClose) {
+							t.Fatalf("%s is in page slice %s with verb %s", item, slice, want[item])
+						}
+						pageSlices[item] = want[item]
+					}
+				}
 			}
+			add("issue", page.Slices.Issues)
+			add("pr", page.Slices.PRs)
+			requireSameSet11569(t, "the page's chart slices", pageSlices, want)
 		})
 	}
 }
