@@ -60,7 +60,7 @@ func TestOwnershipCoveredByOpenLinkedPR11565(t *testing.T) {
 	checkOwnership11565(t, decideIssueOwnership(covered(false), env), want11565{OwnershipVerbClose, OwnershipReasonVerifiedDone})
 
 	// An open linked PR is rule 3: the safety net never covers the issue.
-	stale := freshIssue11565()
+	stale := inLane11592(freshIssue11565(), "quality")
 	stale.openLinkedPR = true
 	stale.createdAt = ownershipNow11565.AddDate(0, 0, -60)
 	stale.updatedAt = stale.createdAt
@@ -189,7 +189,7 @@ func TestOwnershipConfigBackedLevels11565(t *testing.T) {
 	agentIssueTurn := func(cfg *config.Config, name string) Ownership {
 		t.Helper()
 		repos := []FrontendRepo{agentIssueRepo11565(name, 1)}
-		applyOwnershipDecisions(cfg, repos, nil, "idle", ownershipNow11565)
+		applyOwnershipDecisions(cfg, repos, nil, "idle", ownershipNow11565, nil)
 		return decision11565(t, repos[0], ownershipKindIssue, 1)
 	}
 
@@ -224,7 +224,7 @@ func TestOwnershipConfigBackedAdjudicator11565(t *testing.T) {
 	decide := func(cfg *config.Config, statuses map[string]*agent.AgentProcess) Ownership {
 		t.Helper()
 		repos := prRepo()
-		applyOwnershipDecisions(cfg, repos, statuses, "idle", ownershipNow11565)
+		applyOwnershipDecisions(cfg, repos, statuses, "idle", ownershipNow11565, nil)
 		return decision11565(t, repos[0], ownershipKindPR, 8)
 	}
 	agents := map[string]config.AgentConfig{"adjudicator": {Enabled: true, Role: "reviewer"}}
@@ -241,11 +241,11 @@ func TestOwnershipEscalationFirstSeenOnlyAtL5Plus11565(t *testing.T) {
 	repos := func() []FrontendRepo {
 		return []FrontendRepo{{Name: "r", Full: "o/r", OpenPrs: []any{FrontendPR{PullRequest: github.PullRequest{Repo: "o/r", Number: 8, HiveAgent: "scanner", Labels: []string{"needs-human"}}}}}}
 	}
-	applyOwnershipDecisions(ownershipCfg11565(4, nil), repos(), nil, "idle", ownershipNow11565)
+	applyOwnershipDecisions(ownershipCfg11565(4, nil), repos(), nil, "idle", ownershipNow11565, nil)
 	if got := loadOwnershipState(statePath); len(got.EscalationFirstSeen) != 0 {
 		t.Fatalf("first-seen recorded at L4: %v", got.EscalationFirstSeen)
 	}
-	applyOwnershipDecisions(ownershipCfg11565(5, nil), repos(), nil, "idle", ownershipNow11565)
+	applyOwnershipDecisions(ownershipCfg11565(5, nil), repos(), nil, "idle", ownershipNow11565, nil)
 	if got := loadOwnershipState(statePath); len(got.EscalationFirstSeen) != 1 {
 		t.Fatalf("first-seen not recorded at L5: %v", got.EscalationFirstSeen)
 	}

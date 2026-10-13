@@ -130,7 +130,7 @@ func TestOwnershipHoldSourcesEndToEnd11564(t *testing.T) {
 	if len(repos) != 1 {
 		t.Fatalf("repos = %d, want 1", len(repos))
 	}
-	applyOwnershipDecisions(cfg, repos, nil, "idle", time.Now().UTC())
+	applyOwnershipDecisions(cfg, repos, nil, "idle", time.Now().UTC(), nil)
 
 	decisions := repos[0].Ownership
 	pr := decisions[ownershipKey(ownershipKindPR, 7)]
@@ -185,7 +185,7 @@ func TestOwnershipHoldSourcesNonAppBotReapplyEndToEnd11564(t *testing.T) {
 	if len(repos) != 1 {
 		t.Fatalf("repos = %d, want 1", len(repos))
 	}
-	applyOwnershipDecisions(cfg, repos, nil, "idle", time.Now().UTC())
+	applyOwnershipDecisions(cfg, repos, nil, "idle", time.Now().UTC(), nil)
 
 	pr := repos[0].Ownership[ownershipKey(ownershipKindPR, 7)]
 	checkOwnership11565(t, pr, want11565{OwnershipVerbReview, OwnershipReasonHoldSourceUnknown})

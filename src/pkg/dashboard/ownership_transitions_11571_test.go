@@ -217,12 +217,12 @@ func TestApplyOwnershipDecisionsWritesTransitionToAuditLog11571(t *testing.T) {
 	}
 	now := ownershipNow11565
 	first := repos("needs-human")
-	applyOwnershipDecisions(cfg, first, nil, "", now)
+	applyOwnershipDecisions(cfg, first, nil, "", now, nil)
 	if d := first[0].Ownership["pr#5"]; !d.YourTurn {
 		t.Fatalf("setup: PR not your turn: %+v", d)
 	}
 	second := repos()
-	applyOwnershipDecisions(cfg, second, nil, "", now.Add(time.Minute))
+	applyOwnershipDecisions(cfg, second, nil, "", now.Add(time.Minute), nil)
 
 	var found []AuditEntry
 	for _, e := range s.audit.Recent(50) {

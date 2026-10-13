@@ -32,7 +32,7 @@ func TestActionableNowSplitEqualsTotalWithSuppressedItems10561(t *testing.T) {
 	// L5: the parked needs-human issue and the held PR (unknown hold source)
 	// are your turn; the failing and draft PRs and the held issue are not
 	// actionable; what is left is actionable.
-	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, qualityRoutedEnv11592(5))
 
 	got := s.statusWithOverviewBands(status, now).ActionableNow
 	if got.Issues != 2 || got.PRs != 1 || got.Total != 3 {

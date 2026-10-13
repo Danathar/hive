@@ -330,7 +330,7 @@ func TestFrontendRepoCarriesEffectiveLevel11566(t *testing.T) {
 	five, three := 5, 3
 	cfg := &config.Config{ACMMLevel: &five, Project: config.ProjectConfig{Org: "o", RepoPolicies: []config.RepoPolicy{{Repo: "o/low", ACMMLevel: &three}}}}
 	repos := []FrontendRepo{{Name: "high", Full: "o/high"}, {Name: "low", Full: "o/low"}}
-	decideRepoOwnership(repos, config.DashboardIssueBandsConfig{}, newOwnershipEnv(cfg, nil, "", ownershipNow11565))
+	decideRepoOwnership(repos, config.DashboardIssueBandsConfig{}, newOwnershipEnv(cfg, nil, "", ownershipNow11565, nil))
 	if repos[0].ACMMLevel != 5 || repos[1].ACMMLevel != 3 {
 		t.Fatalf("effective levels = %d, %d; want 5 (hive) and 3 (override on an L5 hive)", repos[0].ACMMLevel, repos[1].ACMMLevel)
 	}
