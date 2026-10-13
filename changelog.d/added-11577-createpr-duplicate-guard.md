@@ -1,1 +1,0 @@
-- `CreatePR` now redirects to an existing PR instead of opening a duplicate when an open PR already closes the same issue, an open App-bot PR edits an overlapping file set (checked synchronously via dupsweep), or a merged PR already fixed an issue that is still closed (#11577).
