@@ -389,6 +389,17 @@ in exactly one band, while non-winning states remain as badges on the pill:
    the same stale dimming as an unclaimed row, and they stay listed when an
    Overview band filter covers the band. The band key is still `waiting`; the
    title says the state, not whose turn it is.
+   The `blocked` row signal (⛔) says where the reason comes from. With open
+   GitHub "blocked by" links (the snapshot's `depends_on`, filled for
+   actionable issues only) it reads `blocked by owner/repo#12, owner/repo#15`:
+   open links only, in a stable order, with the bare label signal dropped. With
+   only the `blocked` label it reads `labelled blocked — the label records no
+   reason; see the issue`, which stays true when the links were not read:
+   blocked-by links are read for actionable issues only, so a held or parked
+   issue shows the label-only text even if it has open links. The card's
+   BLOCKED pill (drawn when `blocked` is a waiting label, not on held rows)
+   shows that server text first on hover, followed by the row's other signals;
+   the pill legend entry points there.
 5. **Confirm & close** (`close?`) — labels such as `hive/already-done`,
    `hive/covered-by-pr`, and `hive/likely-done`: an agent believes the work
    landed; verify and close.
