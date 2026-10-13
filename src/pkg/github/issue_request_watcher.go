@@ -477,7 +477,19 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		// item in between. A failure leaves the request on the retry path; the
 		// GitHub calls are idempotent (adding a present label and removing an
 		// absent one are both no-ops), so a retry converges.
-		err = c.AddLabels(ctx, req.Repo, req.Number, addLabels)
+		// An agent-recordable label may not exist on the repo yet; create it
+		// first so the add does not depend on GitHub creating it implicitly.
+		for _, label := range addLabels {
+			if !agentRecordableHiveStateLabel(label) {
+				continue
+			}
+			if err = c.EnsureIssueLabel(ctx, req.Repo, VerifiedOpenLabel, VerifiedOpenLabelColor, VerifiedOpenLabelDescription); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			err = c.AddLabels(ctx, req.Repo, req.Number, addLabels)
+		}
 		if err == nil {
 			resp.LabelsAdded = addLabels
 			for _, label := range removeLabels {

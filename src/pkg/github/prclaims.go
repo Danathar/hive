@@ -111,6 +111,11 @@ const (
 	// VerifiedOpenLabel records that verification found the issue still open/not
 	// done, suppressing renewed likely-done labeling from the same stale claim.
 	VerifiedOpenLabel = "hive/verified-open"
+	// VerifiedOpenLabelColor and VerifiedOpenLabelDescription define the
+	// label wherever hive creates it: SyncIssuePRClaimLabels and the label
+	// relay both ensure it with these values.
+	VerifiedOpenLabelColor       = "6a737d"
+	VerifiedOpenLabelDescription = "Hive verified that a likely/already-done claim did not finish this issue; keep open for more work"
 
 	// claimLedgerFileMode is the permission mode for the ledger file. It holds
 	// no secrets (issue and PR numbers only), so it is world-readable like the
@@ -1682,7 +1687,7 @@ func SyncIssuePRClaimLabels(ctx context.Context, client *Client, result *Actiona
 		coveredWanted := ok && claim.PRNumber > 0 && !claim.MergedPR
 		verifiedOpen := issueHasLabel(originalLabels, VerifiedOpenLabel)
 		if verifiedOpen {
-			if err := client.EnsureIssueLabel(ctx, issue.Repo, VerifiedOpenLabel, "6a737d", "Hive verified that a likely/already-done claim did not finish this issue; keep open for more work"); err != nil && logger != nil {
+			if err := client.EnsureIssueLabel(ctx, issue.Repo, VerifiedOpenLabel, VerifiedOpenLabelColor, VerifiedOpenLabelDescription); err != nil && logger != nil {
 				logger.Warn("ensuring verified-open label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
 			}
 		}

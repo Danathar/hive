@@ -16,6 +16,10 @@ func newLabelMockServer(t *testing.T, added *[]string, removed *[]string) *httpt
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/labels/"):
+			// Label definitions already exist; creation is covered by newEnsureLabelMockServer.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"name":"x"}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/labels"):
 			var body []string
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -302,5 +306,200 @@ func TestNormalizeLabelList(t *testing.T) {
 	}
 	if normalizeLabelList(nil) != nil || normalizeLabelList([]string{" ", ","}) != nil {
 		t.Error("an empty list must normalize to nil")
+	}
+}
+
+// newEnsureLabelMockServer is a label relay server that also models label
+// definitions: GET /labels/{name} is 404 until created, and creation is recorded.
+func newEnsureLabelMockServer(t *testing.T, existing bool, ensureCalls *int, created *[]map[string]string, added *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/labels/"):
+			*ensureCalls++
+			if existing {
+				_, _ = io.WriteString(w, `{"name":"hive/verified-open"}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/issues/9/labels"):
+			var body []string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(*created) == 0 && !existing && len(body) > 0 && strings.EqualFold(body[0], VerifiedOpenLabel) {
+				t.Errorf("label added before it was created")
+			}
+			*added = append(*added, body...)
+			_, _ = io.WriteString(w, `[{"name":"x"}]`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/labels"):
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			*created = append(*created, body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"hive/verified-open"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// The label relay creates hive/verified-open with the shared definition on a
+// repo that lacks it, then adds it.
+func TestIssueRequestWatcher_LabelCreatesMissingVerifiedOpen(t *testing.T) {
+	var ensureCalls int
+	var created []map[string]string
+	var added []string
+	srv := newEnsureLabelMockServer(t, false, &ensureCalls, &created, &added)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	reqPath, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 9, Agent: "scanner",
+		Labels: []string{VerifiedOpenLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if len(created) != 1 {
+		t.Fatalf("label creations = %v, want exactly one", created)
+	}
+	if created[0]["name"] != VerifiedOpenLabel || created[0]["color"] != VerifiedOpenLabelColor || created[0]["description"] != VerifiedOpenLabelDescription {
+		t.Errorf("created label = %v, want the shared verified-open definition", created[0])
+	}
+	if strings.Join(added, ",") != VerifiedOpenLabel {
+		t.Errorf("labels added = %v, want %s", added, VerifiedOpenLabel)
+	}
+	if resp := readIssueResultFile(t, reqPath); !resp.OK {
+		t.Errorf("result = %+v, want ok", resp)
+	}
+}
+
+// A failed label ensure leaves the request on the retry path, with no add.
+func TestIssueRequestWatcher_LabelEnsureFailureRetries(t *testing.T) {
+	var added []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/issues/9/labels") {
+			var body []string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			added = append(added, body...)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	}))
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	reqPath, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 9, Agent: "scanner",
+		Labels: []string{VerifiedOpenLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if len(added) != 0 {
+		t.Errorf("label added despite failed ensure: %v", added)
+	}
+	if _, err := os.Stat(reqPath); err != nil {
+		t.Errorf("request should stay queued for retry: %v", err)
+	}
+	if _, err := os.Stat(reqPath + ".denied"); err == nil {
+		t.Error("a failed ensure must not deny the request")
+	}
+}
+
+// A request with only plain labels never touches label definitions.
+func TestIssueRequestWatcher_LabelPlainLabelsSkipEnsure(t *testing.T) {
+	var ensureCalls int
+	var created []map[string]string
+	var added []string
+	srv := newEnsureLabelMockServer(t, false, &ensureCalls, &created, &added)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	if _, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 9, Agent: "scanner",
+		Labels: []string{"bug", "area/proxy"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if ensureCalls != 0 || len(created) != 0 {
+		t.Errorf("plain labels triggered ensure: lookups=%d created=%v", ensureCalls, created)
+	}
+	if strings.Join(added, ",") != "bug,area/proxy" {
+		t.Errorf("labels added = %v", added)
+	}
+}
+
+// Adding verified-open while removing likely-done is still refused whole, and
+// the refusal names the add-only request to send instead.
+func TestIssueRequestWatcher_LabelMixedVerifiedOpenRemoveLikelyDoneRefused(t *testing.T) {
+	var ensureCalls int
+	var created []map[string]string
+	var added []string
+	srv := newEnsureLabelMockServer(t, false, &ensureCalls, &created, &added)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	reqPath, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 9, Agent: "scanner",
+		Labels: []string{VerifiedOpenLabel}, RemoveLabels: []string{LikelyDoneLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if len(added) != 0 || len(created) != 0 || ensureCalls != 0 {
+		t.Fatalf("refused request reached GitHub: added=%v created=%v lookups=%d", added, created, ensureCalls)
+	}
+	if _, err := os.Stat(reqPath + ".denied"); err != nil {
+		t.Errorf("refused request was not quarantined: %v", err)
+	}
+	resp := readIssueResultFile(t, reqPath)
+	if resp.OK || !strings.Contains(resp.Error, LikelyDoneLabel) ||
+		!strings.Contains(resp.Error, "adds only "+VerifiedOpenLabel) ||
+		!strings.Contains(resp.Error, "do not remove") {
+		t.Errorf("refusal does not tell the agent what to send: %+v", resp)
+	}
+}
+
+// Without an add of verified-open (or with another refused label) the generic
+// refusal is kept: no resend advice.
+func TestReservedLabelRefusal_ResendHintOnlyForVerifiedOpenWithHiveRemovals(t *testing.T) {
+	c := &Client{}
+	cases := []struct {
+		name        string
+		add, remove []string
+		wantHint    bool
+	}{
+		{"add+remove likely-done", []string{VerifiedOpenLabel}, []string{LikelyDoneLabel}, true},
+		{"add+remove covered-by-pr", []string{VerifiedOpenLabel}, []string{CoveredByPRLabel}, true},
+		{"remove only", nil, []string{LikelyDoneLabel}, false},
+		{"also removes hold", []string{VerifiedOpenLabel}, []string{LikelyDoneLabel, "hold"}, false},
+		{"also adds likely-done", []string{VerifiedOpenLabel, LikelyDoneLabel}, []string{LikelyDoneLabel}, false},
+		{"removes verified-open", []string{VerifiedOpenLabel}, []string{VerifiedOpenLabel}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, refused := c.reservedLabelRefusal(tc.add, tc.remove)
+			if !refused {
+				t.Fatal("request must be refused")
+			}
+			if got := strings.Contains(reason, "Resend a label request that adds only"); got != tc.wantHint {
+				t.Errorf("resend hint = %v, want %v; reason: %s", got, tc.wantHint, reason)
+			}
+		})
 	}
 }

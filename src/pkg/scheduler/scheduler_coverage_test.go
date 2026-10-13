@@ -81,8 +81,13 @@ func TestFormatIssueList_IncludesMergedClaimContext(t *testing.T) {
 	if !strings.Contains(result, "merged in repo1#99 (https://github.com/org/repo1/pull/99); verify once: close the issue if resolved") {
 		t.Fatalf("missing merged PR verification instruction in issue list: %s", result)
 	}
-	if !strings.Contains(result, "label it `"+github.VerifiedOpenLabel+"`") {
+	if !strings.Contains(result, "add only the label `"+github.VerifiedOpenLabel+"`") {
 		t.Fatalf("missing verified-open labeling instruction in issue list: %s", result)
+	}
+	if !strings.Contains(result, "add only the label `"+github.VerifiedOpenLabel+"`") ||
+		!strings.Contains(result, "do not remove any `hive/` label") ||
+		!strings.Contains(result, "only after the label request's result says ok") {
+		t.Fatalf("verify-once text must say to add only the verified-open label and wait for the relay result: %s", result)
 	}
 	if !strings.Contains(result, "context: referenced without a closing keyword") {
 		t.Fatalf("missing merged PR context reason in issue list: %s", result)

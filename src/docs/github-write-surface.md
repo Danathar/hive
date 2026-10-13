@@ -86,7 +86,12 @@ as fact (`issue_request_label.go`):
   `blocked`.
 
 One reserved label refuses the whole request — nothing in it is applied — so a
-batch can never partially land. The refusal is a policy denial like any other:
+batch can never partially land. When the only refused part is removing
+`hive/likely-done` or `hive/covered-by-pr` alongside an add of
+`hive/verified-open`, the refusal tells the agent to resend the add on its own,
+because the hive removes those labels itself. `hive/verified-open`, the one
+`hive/` label an agent may add, is created on the repository first when it does
+not exist. The refusal is a policy denial like any other:
 `.denied`, a result file naming the labels, and an audit entry. A lane
 allowlist can narrow `label` further but can never widen it to these.
 
