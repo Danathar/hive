@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -235,17 +234,7 @@ func wireStatus11569(t *testing.T, s *Server, status *StatusPayload) map[string]
 	return wire
 }
 
-var agreementAttrRe = regexp.MustCompile(`([a-z-]+)="([^"]*)"`)
-
-func agreementAttrs(tag string) map[string]string {
-	attrs := map[string]string{}
-	for _, m := range agreementAttrRe.FindAllStringSubmatch(tag, -1) {
-		attrs[m[1]] = m[2]
-	}
-	return attrs
-}
-
-// browserSurfaces11569 is what the page's own functions draw from the wire
+// pageSurfaces11569 is what the page's own functions draw from the wire
 // payload with every repository selected and no filter.
 type pageSurfaces11569 struct {
 	Markers []map[string]string `json:"markers"`
