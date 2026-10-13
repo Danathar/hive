@@ -72,7 +72,7 @@ func TestOverviewActionableEquationPartitionsOpenWork(t *testing.T) {
 	// L5: the parked needs-human issue and the Hive-verified-done issue are
 	// your turn, the held issue is a person's hold (recorded source), and
 	// the held PR's hold source is unknown, so it is your turn.
-	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, qualityRoutedEnv11592(5))
 	got := (&Server{}).statusWithOverviewBands(status, now).ActionableNow
 	if got.Equation == nil {
 		t.Fatal("missing actionable equation")
@@ -111,7 +111,7 @@ func TestOverviewActionableEquationSurfacesWaitingOnReporter(t *testing.T) {
 			Issues: github.RepoIssueBreakdown{Actionable: 1, Filtered: 1, ReporterConfirmation: 1},
 		},
 	}}}
-	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, qualityRoutedEnv11592(5))
 
 	got := (&Server{}).statusWithOverviewBands(status, ownershipNow11565).ActionableNow
 	waiting := overviewTerm(got.IssueEquation, "waiting_elsewhere")
@@ -286,7 +286,7 @@ func TestGovernorActionableSplitsShareOverviewPartition(t *testing.T) {
 		},
 	}}}
 
-	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, ownershipEnv11565(5))
+	decideRepoOwnership(status.Repos, config.DashboardIssueBandsConfig{}, qualityRoutedEnv11592(5))
 	got := (&Server{}).statusWithOverviewBands(status, now).ActionableNow
 	if got.IssueEquation == nil || got.PREquation == nil || got.Equation == nil {
 		t.Fatalf("missing equations: %+v", got)

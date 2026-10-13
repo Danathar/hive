@@ -15,6 +15,15 @@ func inLane11592(in issueOwnershipInput, lane string) issueOwnershipInput {
 	return in
 }
 
+// qualityRoutedEnv11592 is ownershipEnv11565 with every issue routed to the
+// quality lane, which opens PRs from L3 up, so repo-level decisions see a lane
+// whose push rights cover the safety net.
+func qualityRoutedEnv11592(level int) ownershipEnv {
+	env := ownershipEnv11565(level)
+	env.routeLane = func(github.Issue) string { return "quality" }
+	return env
+}
+
 func staleIssue11592(lane string, labels ...string) issueOwnershipInput {
 	in := inLane11592(freshIssue11565(labels...), lane)
 	stale := ownershipNow11565.AddDate(0, 0, -20)
