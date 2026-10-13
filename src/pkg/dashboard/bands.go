@@ -123,7 +123,7 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 	role := issueAgentRole(issue.Labels)
 	acknowledged := issue.HumanAcknowledged || labels["approved-direction"]
 	linked := issueLinkedPRState(issue)
-	done := hasAnyLabel(labels, norm.DoneLabels) || linked.merged
+	done := issueDoneLabel(labels, norm.DoneLabels) || linked.merged
 	waiting := hasAnyLabel(labels, norm.WaitingLabels)
 	inProgress := len(issue.Assignees) > 0 || issueClaimed(issue.Labels) || linked.open
 	selfAuthorizationHeld := true
@@ -206,6 +206,23 @@ func issueLabelChip(labels map[string]bool) string {
 }
 
 type linkedPRState struct{ open, merged bool }
+
+// issueDoneLabel reports whether a configured done label is set. The agent's
+// hive/verified-open verdict (the referenced PR did not finish the
+// issue) cancels hive/likely-done; every other done label still counts
+// (hivecommons/hive#11722).
+func issueDoneLabel(labels map[string]bool, doneLabels []string) bool {
+	if !labels[github.VerifiedOpenLabel] {
+		return hasAnyLabel(labels, doneLabels)
+	}
+	for _, label := range doneLabels {
+		lower := strings.ToLower(label)
+		if lower != github.LikelyDoneLabel && labels[lower] {
+			return true
+		}
+	}
+	return false
+}
 
 func issueLinkedPRState(github.Issue) linkedPRState { return linkedPRState{} }
 
