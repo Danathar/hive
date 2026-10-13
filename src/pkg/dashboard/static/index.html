@@ -1893,7 +1893,8 @@
     .repo-legend-group { display:flex; flex-direction:column; gap:var(--sp-2); }
     .repo-legend-group-title { color:var(--muted); font-size:var(--fs-2xs); font-weight:800; letter-spacing:0.08em; text-transform:uppercase; }
     .repo-legend-items { display:grid; grid-template-columns:max-content 1fr; gap:var(--sp-1) var(--sp-3); align-items:center; color:var(--muted); font-size:var(--fs-xs); }
-    .repo-legend-items .repo-issue-pill, .repo-legend-items .repo-pr-pill, .repo-legend-items .repo-issue-plan { display:inline-flex; align-items:center; justify-content:center; gap:var(--sp-1); }
+    .repo-legend-items .repo-issue-pill, .repo-legend-items .repo-pr-pill, .repo-legend-items .repo-issue-plan, .repo-legend-items .yt-legend-marker { display:inline-flex; align-items:center; justify-content:center; gap:var(--sp-1); }
+    .repo-legend-items .repo-pill-filter-toggle { text-transform:uppercase; }
     .repo-pill-filter-toolbar { display:inline-flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
     .repo-pill-filter-mode { display:inline-flex; align-items:center; gap:var(--sp-1); color:var(--muted); font-size:var(--fs-xs); }
     .repo-pill-filter-mode button { border:1px solid var(--border); border-radius:var(--r-pill); background:var(--bg); color:var(--muted); padding:var(--sp-1) var(--sp-3); font:inherit; cursor:pointer; }
@@ -14575,30 +14576,30 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         {
           title: 'Pull requests — merge state',
           entries: [
-            { cls: 'repo-pr-pill mergeable', kind: 'pr:eligible', glyph: '✓', glyphCls: 'pill-merge-icon', label: 'eligible', caption: 'sweep would merge now', tip: 'Merge-eligible on the sweep verdict' },
-            { cls: 'repo-pr-pill merge-outstanding', kind: 'pr:outstanding', glyph: '◐', glyphCls: 'pill-merge-icon', label: 'outstanding', caption: 'mergeable, sweep still wants something', tip: 'GitHub says mergeable, but the sweep still wants something' },
-            { cls: 'repo-pr-pill sentinel-flagged', kind: 'pr:sentinel', label: 'sentinel', caption: 'sentinel flagged it (possible security override, privilege escalation or codebase damage) — Hive will not merge it while the sentinel label is on; trusted-author PRs usually get a comment, not red', tip: 'The sentinel flagged this PR for a possible security override, privilege escalation or codebase damage. Hive will not merge it while the sentinel label is on. Red means the PR carries the label, so trusted-author PRs (which normally get a sentinel comment instead of the label) are usually not red.' },
-            { cls: 'repo-pr-pill needs-human pill-icon', kind: 'needs-human', glyph: '⚠', caption: 'labelled needs-human — fix attempts exhausted', tip: 'Labelled needs-human: automated fix attempts exhausted' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:held', glyph: '⏸', caption: 'held — automation skips it', tip: 'Held: automation skips it until the hold is released' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:ci', label: '✗ CI', caption: 'failing checks (hover lists them)', tip: 'Failing CI; tooltip lists failing checks' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:conflict', glyph: '⑂', caption: 'merge conflict', tip: 'Conflicts or not mergeable on GitHub' },
+            { cls: 'repo-pr-pill mergeable', kind: 'pr:eligible', glyph: '✓', glyphCls: 'pill-merge-icon', label: 'ELIGIBLE', caption: 'sweep would merge now', tip: 'Merge-eligible on the sweep verdict' },
+            { cls: 'repo-pr-pill merge-outstanding', kind: 'pr:outstanding', glyph: '◐', glyphCls: 'pill-merge-icon', label: 'OUTSTANDING', caption: 'mergeable, sweep still wants something', tip: 'GitHub says mergeable, but the sweep still wants something' },
+            { cls: 'repo-pr-pill sentinel-flagged', kind: 'pr:sentinel', label: 'SENTINEL', caption: 'sentinel flagged it (possible security override, privilege escalation or codebase damage) — Hive will not merge it while the sentinel label is on; trusted-author PRs usually get a comment, not red', tip: 'The sentinel flagged this PR for a possible security override, privilege escalation or codebase damage. Hive will not merge it while the sentinel label is on. Red means the PR carries the label, so trusted-author PRs (which normally get a sentinel comment instead of the label) are usually not red.' },
+            { cls: 'repo-pr-pill needs-human', kind: 'needs-human', glyph: '⚠', label: 'HUMAN', caption: 'labelled needs-human — fix attempts exhausted', tip: 'Labelled needs-human: automated fix attempts exhausted' },
+            { cls: 'repo-pr-pill', kind: 'pr:held', glyph: '⏸', label: 'HELD', caption: 'held — automation skips it', tip: 'Held: automation skips it until the hold is released' },
+            { cls: 'repo-pr-pill', kind: 'pr:ci', label: '✗ CI', caption: 'failing checks (hover lists them)', tip: 'Failing CI; tooltip lists failing checks' },
+            { cls: 'repo-pr-pill', kind: 'pr:conflict', glyph: '⑂', label: 'CONFLICT', caption: 'merge conflict', tip: 'Conflicts or not mergeable on GitHub' },
             { cls: 'repo-pr-pill', kind: 'pr:fix', label: 'FIX', labelCls: 'pill-class fix', caption: 'review class — FIX prioritized over FEAT/DOCS/…', tip: 'Review class badge: FIX is red; FEAT/TESTS/DOCS/REFACTOR show why the PR is prioritized' }
           ]
         },
         {
           title: 'Review, links & actions',
           entries: [
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:approved', glyph: '👍', caption: 'approved on GitHub', tip: 'Approved on GitHub; tooltip counts the approvals' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:changes-requested', glyph: '👎', caption: 'changes requested', tip: 'Changes requested on GitHub; tooltip names the reviewers' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:approval-required', glyph: '👀', caption: 'approval required, not yet given', tip: 'Approving review required by branch protection and not yet given' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:review-requested', glyph: '👥', caption: 'review requested from someone', tip: 'Review requested; tooltip lists the reviewers and teams' },
-            { cls: 'repo-pr-pill pill-reviewed pill-icon', kind: 'pr:hive-review', glyph: '💬', caption: 'hive posted a review', tip: 'Hive review posted; opens the recorded review' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:comments', label: '🗨 3', caption: 'comment / thread count', tip: 'Comments and review threads on GitHub' },
-            { cls: 'repo-issue-plan pill-icon', kind: 'issue:linked-pr', label: '🔗 #42', caption: 'on an issue: verified linked PR', tip: 'Verified linked pull request' },
-            { cls: 'repo-pr-pill pill-icon', kind: 'pr:linked-issue', label: '🔗 #42', caption: 'on a PR: issue it closes on merge', tip: 'Issue this PR closes on merge (GitHub closing reference); opens the issue' },
-            { cls: 'repo-issue-plan pill-icon plan-review', kind: 'issue:plan', glyph: '📋 📐', label: '●', caption: 'plan · design · plan awaiting review', tip: 'Plan this issue (clipboard icon); Design this issue before planning (ruler icon); Plan awaiting human review' },
-            { cls: 'repo-pr-pill mergeable pill-icon', kind: 'pr:queued', glyph: '🔀', caption: 'queued for auto-merge', tip: 'Queued for Hive auto-merge' },
-            { cls: 'yt-legend-marker', kind: 'your-turn', glyph: YOUR_TURN_GLYPH, caption: 'your turn — hover or focus a row’s marker for the verb and reason, click it for options', tip: 'Your turn: the item waits on you. This entry filters to those rows; the marker on a row opens that item’s menu.' }
+            { cls: 'repo-pr-pill', kind: 'pr:approved', glyph: '👍', label: 'APPROVED', caption: 'approved on GitHub', tip: 'Approved on GitHub; tooltip counts the approvals' },
+            { cls: 'repo-pr-pill', kind: 'pr:changes-requested', glyph: '👎', label: 'CHANGES', caption: 'changes requested', tip: 'Changes requested on GitHub; tooltip names the reviewers' },
+            { cls: 'repo-pr-pill', kind: 'pr:approval-required', glyph: '👀', label: 'PENDING', caption: 'approval required, not yet given', tip: 'Approving review required by branch protection and not yet given' },
+            { cls: 'repo-pr-pill', kind: 'pr:review-requested', glyph: '👥', label: 'REVIEWERS', caption: 'review requested from someone', tip: 'Review requested; tooltip lists the reviewers and teams' },
+            { cls: 'repo-pr-pill pill-reviewed', kind: 'pr:hive-review', glyph: '💬', label: 'HIVE REVIEW', caption: 'hive posted a review', tip: 'Hive review posted; opens the recorded review' },
+            { cls: 'repo-pr-pill', kind: 'pr:comments', glyph: '🗨', label: 'COMMENTS', caption: 'comment / thread count', tip: 'Comments and review threads on GitHub' },
+            { cls: 'repo-issue-plan', kind: 'issue:linked-pr', glyph: '🔗', label: 'LINKED PR', caption: 'on an issue: verified linked PR', tip: 'Verified linked pull request' },
+            { cls: 'repo-pr-pill', kind: 'pr:linked-issue', glyph: '🔗', label: 'CLOSES', caption: 'on a PR: issue it closes on merge', tip: 'Issue this PR closes on merge (GitHub closing reference); opens the issue' },
+            { cls: 'repo-issue-plan plan-review', kind: 'issue:plan', glyph: '📋 📐 ●', label: 'PLAN', caption: 'plan · design · plan awaiting review', tip: 'Plan this issue (clipboard icon); Design this issue before planning (ruler icon); Plan awaiting human review' },
+            { cls: 'repo-pr-pill mergeable', kind: 'pr:queued', glyph: '🔀', label: 'QUEUED', caption: 'queued for auto-merge', tip: 'Queued for Hive auto-merge' },
+            { cls: 'yt-legend-marker', kind: 'your-turn', glyph: YOUR_TURN_GLYPH, label: 'YOUR TURN', caption: 'your turn — hover or focus a row’s marker for the verb and reason, click it for options', tip: 'Your turn: the item waits on you. This entry filters to those rows; the marker on a row opens that item’s menu.' }
           ]
         }
       ];
