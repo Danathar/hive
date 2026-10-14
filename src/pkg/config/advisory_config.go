@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,6 +49,11 @@ type AdvisoryConfig struct {
 	// so a user-lengthened interval never false-alarms as a wedge — pinned by
 	// TestAdvisoryStaleThresholdCoversMaxUpdateInterval in pkg/hub.
 	UpdateIntervalS int `yaml:"update_interval_s,omitempty" json:"update_interval_s,omitempty"`
+	// PostRetryBackoffS is how long, in seconds, the digest write is paused
+	// after GitHub refuses it with 403 "Resource not accessible by
+	// integration" (#11791). 0/unset uses DefaultAdvisoryPostRetryBackoffS;
+	// a negative value disables the backoff.
+	PostRetryBackoffS int `yaml:"post_retry_backoff_s,omitempty" json:"post_retry_backoff_s,omitempty"`
 	// Target selects where the digest comment lives: AdvisoryTargetGitHub
 	// (the pinned advisory issue on the primary repo — the default, and the
 	// only behavior before this key existed) or AdvisoryTargetLinear (one
@@ -150,4 +157,34 @@ func (a AdvisoryConfig) UpdateInterval() time.Duration {
 		s = MaxAdvisoryUpdateIntervalS
 	}
 	return time.Duration(s) * time.Second
+}
+
+const (
+	// DefaultAdvisoryPostRetryBackoffS is the default pause after a
+	// write-forbidden digest post.
+	DefaultAdvisoryPostRetryBackoffS = 3600
+	// AdvisoryPostRetryBackoffEnvVar overrides DefaultAdvisoryPostRetryBackoffS
+	// (seconds) when governor.advisory.post_retry_backoff_s is unset.
+	AdvisoryPostRetryBackoffEnvVar = "HIVE_ADVISORY_POST_RETRY_BACKOFF_S"
+)
+
+// PostRetryBackoff resolves PostRetryBackoffS: a positive value wins, 0/absent
+// falls back to AdvisoryPostRetryBackoffEnvVar and then the default, and a
+// negative value disables the backoff.
+func (a AdvisoryConfig) PostRetryBackoff() time.Duration {
+	if a.PostRetryBackoffS < 0 {
+		return 0
+	}
+	if a.PostRetryBackoffS > 0 {
+		return time.Duration(a.PostRetryBackoffS) * time.Second
+	}
+	if v := strings.TrimSpace(os.Getenv(AdvisoryPostRetryBackoffEnvVar)); v != "" {
+		if s, err := strconv.Atoi(v); err == nil {
+			if s < 0 {
+				return 0
+			}
+			return time.Duration(s) * time.Second
+		}
+	}
+	return DefaultAdvisoryPostRetryBackoffS * time.Second
 }
