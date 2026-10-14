@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.166.4)
+
+### Fixed
+
+- The dashboard agent card now shows the full inference backend error from hive's proxy while Claude Code is still retrying, instead of the single truncated pane line Claude Code renders beside its "Retrying in Ns" countdown ([#11761](https://github.com/hivecommons/hive/issues/11761)).
+
 ## 2026-10-14 (v5.166.3)
 
 ### Fixed
