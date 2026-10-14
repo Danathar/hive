@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"syscall"
 	"testing"
 	"time"
 
@@ -68,6 +69,33 @@ func TestRestartStormBreakerPausesAfterWindowCap(t *testing.T) {
 	}
 	if want := "restart-storm: copilot hung with no output (diagnostic timed out)"; plan.pauseReason != want {
 		t.Fatalf("pause reason = %q, want %q", plan.pauseReason, want)
+	}
+}
+
+func TestRestartStormBreakerPausesCopilotWhenDataFull(t *testing.T) {
+	old := statfsForPath
+	statfsForPath = func(_ string, st *syscall.Statfs_t) error {
+		st.Blocks = 100
+		st.Bavail = 1
+		return nil
+	}
+	t.Cleanup(func() { statfsForPath = old })
+	m := NewManager(map[string]config.AgentConfig{"scanner": {Backend: "copilot"}}, slog.Default(), ProjectContext{})
+
+	plan := m.planAutomaticRestart("scanner", "crashed agent recovery", "agent CLI crashed or tmux session disappeared", time.Now())
+	if plan.pauseTrigger != DiskFullTrigger || plan.pauseReason == "" || plan.allowed {
+		t.Fatalf("plan = %+v, want disk-full pause", plan)
+	}
+}
+
+func TestRestartStormDiskFullReasonAndPaneTail(t *testing.T) {
+	reason := diskFullPauseReason("copilot hang diagnostic timed out", "TAR_ENTRY_ERROR(Unknown system error -122)")
+	if reason != "disk-full: TAR_ENTRY_ERROR(Unknown system error -122)" {
+		t.Fatalf("diskFullPauseReason = %q", reason)
+	}
+	tail := compactPaneTail("\nfirst\n\nsecond\nthird\n", 2)
+	if tail != "second | third" {
+		t.Fatalf("compactPaneTail = %q", tail)
 	}
 }
 
