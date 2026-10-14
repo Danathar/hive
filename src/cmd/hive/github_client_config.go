@@ -280,6 +280,9 @@ func (b *boot) applyGitHubClientAgentHooks(client *github.Client) {
 	// is the loop-safety authority that decides when to STOP nudging.
 	client.SetMergeReEngageHook(mergeReEngageHook(b.cfg, agentKicker{mgr: b.agentMgr},
 		agentAvailability(b.cfg, b.agentMgr), b.logger))
+	// Merge-request CIWaits/attempts, poll backoff and "exhausted on this
+	// SHA" records live on the PVC so a restart cannot reset them (#11894).
+	client.SetMergeRequestStatePath(github.MergeRequestStatePath)
 }
 
 // applyGitHubClientDashboardHooks installs the sinks that report into the
