@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.166.3)
+
+### Fixed
+
+- The reporter-trust wait comment now links GOVERNANCE.md with the full `owner/repo` path instead of a broken `github.com/<repo>` URL ([#11018](https://github.com/hivecommons/hive/issues/11018)).
+
 ## 2026-10-14 (v5.166.2)
 
 ### Changed
