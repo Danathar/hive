@@ -33,6 +33,7 @@ import (
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/planning"
+	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/tokens"
 	"github.com/hivecommons/hive/pkg/watchdog"
 )
@@ -454,6 +455,9 @@ type StatusPayload struct {
 	OverviewTotals   FrontendOverviewTotals    `json:"overviewTotals"`
 	ActionableNow    FrontendActionableNow     `json:"actionableNow"`
 	OverviewCoverage *FrontendOverviewCoverage `json:"overviewCoverage,omitempty"`
+	// SLA is the fleet-wide Delivery SLA roll-up (spans, 30-day history,
+	// stale in-progress issues, targets); per-repo blocks sit on each repo.
+	SLA *FrontendSLA `json:"sla,omitempty"`
 	// OverviewKPIIncomplete means at least one configured repo did not produce
 	// forge totals for this status snapshot, so Overview KPI history must not
 	// record it as a real point.
@@ -811,6 +815,12 @@ type FrontendAgent struct {
 	BackendAuthStatus    string `json:"backendAuthStatus,omitempty"`
 	BackendAuthSince     string `json:"backendAuthSince,omitempty"`
 	BackendAuthLastError string `json:"backendAuthLastError,omitempty"`
+	// InferenceLastError is the full text of the most recent inference error
+	// hive's proxy returned to this agent (#11761), shown while Claude Code's
+	// own retry line is still clipped to one pane row. Empty when unknown,
+	// stale, or cleared by a later successful call.
+	InferenceLastError   string `json:"inferenceLastError,omitempty"`
+	InferenceLastErrorAt string `json:"inferenceLastErrorAt,omitempty"`
 	// Conditions is the watchdog reconciler's observed-truth condition set
 	// (Ready/Authenticated/Producing — RFC #4665), replacing trust in the
 	// State config echo. Empty until the watchdog's first sweep.
@@ -994,6 +1004,7 @@ type FrontendRepo struct {
 	Mode             string                    `json:"mode,omitempty"`
 	CountsIncomplete bool                      `json:"countsIncomplete,omitempty"`
 	WorkBreakdown    *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
+	SLA              *timeline.SLARepoReport   `json:"sla,omitempty"`
 	// ActionableIssues and OpenPrs are the items the agents may act on: the
 	// enumeration's actionable sets, minus anything held or exempt. Every
 	// automated consumer — the contribute queue, the mergeable counter, the
@@ -2564,11 +2575,7 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 		s.AttachHiveAdvice(status, time.Now().UTC())
 	}
 	version, commit := fleetReportBuildInfo()
-	dryRun := true
-	if s.deps != nil && s.deps.Config != nil {
-		dryRun = s.deps.Config.Governor.FleetReport.DryRun()
-	}
-	s.AttachFleetReport(status, version, commit, dryRun)
+	s.AttachFleetReport(status, version, commit, !s.FleetReportFilesUpstream())
 	s.statusSeq++
 	status.StatusSeq = s.statusSeq
 	status.StatusInstance = strconv.FormatInt(s.startedAt.UnixNano(), 10)
@@ -3448,6 +3455,15 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 			if overall == "ok" {
 				overall = "degraded"
 			}
+		}
+	}
+
+	// Slot-placeholder project.org with a bare repo (#11846).
+	if st, detail, ok := s.projectOrgCheck(); ok {
+		checks[healthCheckProjectOrg] = map[string]any{"status": st, "detail": detail}
+		failCount++
+		if overall == "ok" {
+			overall = "degraded"
 		}
 	}
 
@@ -4647,6 +4663,12 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 		if st == "fail" {
 			fails++
 		}
+	}
+
+	// Slot-placeholder project.org with a bare repo (#11846).
+	if st, detail, ok := s.projectOrgCheck(); ok {
+		checks = append(checks, check{Name: healthCheckProjectOrg, Status: st, Detail: detail})
+		fails++
 	}
 
 	// 8. Queue

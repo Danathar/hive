@@ -200,6 +200,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/stat-sources", s.handleStatSources)
 
 	s.mux.HandleFunc("GET /api/config/governor", s.handleGovernorConfigGet)
+	s.mux.HandleFunc("GET /api/config/dashboard", s.handleDashboardSettingsGet)
+	s.mux.HandleFunc("PUT /api/config/dashboard", s.handleDashboardSettingsPut)
 	s.mux.HandleFunc("PUT /api/config/governor/sensing", s.handleGovernorSensing)
 	s.mux.HandleFunc("PUT /api/config/governor/thresholds", s.handleGovernorThresholds)
 	s.mux.HandleFunc("GET /api/config/governor/cadence-scope", s.handleGovernorCadenceScopeGet)
@@ -244,6 +246,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// fixed-commit telemetry read path (convergence_soak.go).
 	s.mux.HandleFunc("GET /api/config/convergence", s.handleConvergenceConfigGet)
 	s.mux.HandleFunc("PUT /api/config/convergence", s.handleConvergenceConfigPut)
+	s.mux.HandleFunc("GET /api/config/sla", s.handleSLAConfigGet)
+	s.mux.HandleFunc("PUT /api/config/sla", s.handleSLAConfigPut)
 	s.mux.HandleFunc("GET /api/convergence/soak", s.handleConvergenceSoak)
 	s.mux.HandleFunc("GET /api/config/governor/advisory", s.handleGovernorAdvisoryGet)
 	s.mux.HandleFunc("PUT /api/config/governor/advisory", s.handleGovernorAdvisoryPut)
@@ -255,6 +259,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/governor/question-autoclose", s.handleGovernorQuestionAutocloseGet)
 	s.mux.HandleFunc("PUT /api/config/governor/question-autoclose", s.handleGovernorQuestionAutocloseSet)
 	s.mux.HandleFunc("GET /api/config/governor/question-autoclose/schedule", s.handleGovernorQuestionAutocloseSchedule)
+	s.mux.HandleFunc("GET /api/config/governor/fleet-report", s.handleGovernorFleetReportGet)
+	s.mux.HandleFunc("PUT /api/config/governor/fleet-report", s.handleGovernorFleetReportSet)
 	s.mux.HandleFunc("GET /api/config/governor/work-source", s.handleGovernorWorkSourceGet)
 	s.mux.HandleFunc("PUT /api/config/governor/work-source", s.handleGovernorWorkSourcePut)
 	s.mux.HandleFunc("PUT /api/config/governor/security", s.handleGovernorSecurity)
@@ -342,6 +348,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/sidebar", s.handleSidebarGet)
 	s.mux.HandleFunc("PUT /api/config/sidebar", s.handleSidebarSet)
 	s.mux.HandleFunc("GET /api/config/backends", s.handleBackends)
+	s.mux.HandleFunc("PUT /api/config/backends", s.handleBackendsPolicyPut)
+	s.mux.HandleFunc("PUT /api/config/classifier", s.handleClassifierSettingsPut)
 	s.mux.HandleFunc("GET /api/inference/models/{backend}", s.handleInferenceModels)
 
 	s.mux.HandleFunc("GET /api/knowledge", s.handleKnowledgeList)

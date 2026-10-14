@@ -62,6 +62,12 @@ func (s *HubServer) beginUpgrade(i int, target string) {
 	// toward the same target keeps the original start so the timer is honest.
 	if !h.Upgrading || h.UpgradeTarget != target || h.UpgradeStartedAt.IsZero() {
 		h.UpgradeStartedAt = time.Now()
+		// Remember the rollout for the crash-loop rule: the new StartedAt it
+		// produces is an upgrade, not a crash (#11824). Only a genuinely new
+		// upgrade is noted — a same-target retry must not keep excusing the
+		// starts of a pod that is really crash-looping. alertState's lock is
+		// a leaf, safe to take under s.mu.
+		s.alerts.noteUpgrade(h.ID, h.UpgradeStartedAt)
 	}
 	h.Upgrading = true
 	h.UpgradeTarget = target
@@ -1316,6 +1322,19 @@ func (s *HubServer) triggerAutoUpgrades() {
 		if commitAtOrAheadOfTarget(currentSHA, latestSHA, s.logger) {
 			continue
 		}
+		// Per-hive cooldown (#11825): an instant hive that auto-upgraded less
+		// than autoUpgradeCooldown() ago is DEFERRED, not dropped. Nothing is
+		// recorded against the target, so once the cooldown expires the hive
+		// chases whatever latestSHA is THEN — intermediate targets are skipped.
+		if autoUpgradeCooldownApplies(h.AutoUpgradeMode, reach.Channel) {
+			cooldown := autoUpgradeCooldown()
+			if remaining := autoUpgradeCooldownRemaining(h.AutoUpgradeLastAt, cooldown, time.Now()); remaining > 0 {
+				s.logger.Debug("auto-upgrade deferred — hive is inside its upgrade cooldown",
+					"hive_id", h.ID, "target", latestSHA, "current", currentSHA,
+					"remaining", remaining.Round(time.Second), "cooldown", cooldown)
+				continue
+			}
+		}
 		// Merge-driven debounce (#5391). Reached ONLY on the automatic
 		// chase-latest path: everything that starts an upgrade for an operator
 		// — a manual "Upgrade now" (upgradeHiveHandler), a bulk upgrade
@@ -1432,7 +1451,9 @@ func (s *HubServer) triggerAutoUpgrades() {
 		// The hive is deliverable again — drop any suppressed-refusal memory so a
 		// future undeliverable episode is reported afresh rather than swallowed.
 		s.forgetUncollectibleUpgrade(h.ID)
-		s.logger.Info("audit: auto-upgrade triggered", "hive_id", h.ID, "branch", branch, "from", currentSHA, "to", latestSHA, "cluster", hiveCluster.ID, "mode", normalizeAutoUpgradeMode(h.AutoUpgradeMode))
+		s.recordAutoUpgradeFired(&h, time.Now())
+		s.logger.Info("audit: auto-upgrade triggered", "hive_id", h.ID, "branch", branch, "from", currentSHA, "to", latestSHA, "cluster", hiveCluster.ID, "mode", normalizeAutoUpgradeMode(h.AutoUpgradeMode),
+			"schedule", effectiveAutoUpgradeSchedule(h.AutoUpgradeMode, reach.Channel), "reason", decision.Reason)
 		s.recordTimeline(h.ID, TimelineUpgradeStarted,
 			fmt.Sprintf("auto-upgrade triggered on %s: %s → %s", branch, orDash(currentSHA), latestSHA), "auto-upgrade")
 		s.mu.Lock()

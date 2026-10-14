@@ -351,6 +351,7 @@ func (c *Config) ValidateWithOptions(opts ValidateOptions) error {
 			return fmt.Errorf("notifications.msteams.webhook_url is required when msteams.enabled is true")
 		}
 	}
+	c.Governor.ClearInvalidInferenceLaunchCmds(c.Agents)
 	for name, agent := range c.Agents {
 		// One gate, shared with the config write path (dashboard agent-config
 		// save) and agreeing with what the launcher can actually dispatch. A

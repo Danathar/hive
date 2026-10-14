@@ -33,6 +33,8 @@ type WebhookEventResult struct {
 	// DirtyIssues lists the issues an `issues` labeled/unlabeled event marked
 	// for the next un-park sweep (hivecommons/hive#11313).
 	DirtyIssues []int `json:"dirty_issues,omitempty"`
+	// ReopenedIssue is the issue an `issues` reopened event named, if any.
+	ReopenedIssue int `json:"reopened_issue,omitempty"`
 }
 
 // webhookTracker records webhook liveness per repository and the set of PRs a
@@ -356,6 +358,12 @@ func (c *Client) HandleWebhookEvent(event string, payload []byte) (WebhookEventR
 		sharedWebhookTracker.markIssueDirty(aliases, n)
 		res.DirtyIssues = []int{n}
 	}
+	if n, ok := webhookIssueReopenedTarget(event, p); ok {
+		res.ReopenedIssue = n
+		if hook := issueReopenedHook(); hook != nil {
+			hook(configured, n, sharedWebhookTracker.now())
+		}
+	}
 	numbers := webhookInvalidationTargets(event, p, aliases)
 	for _, n := range numbers {
 		c.invalidateWebhookPR(aliases, n)
@@ -399,6 +407,40 @@ func webhookIssueLabelTarget(event string, p webhookEventPayload) (int, bool) {
 		return p.Issue.Number, true
 	}
 	return 0, false
+}
+
+// webhookIssueReopenedTarget returns the issue number of an `issues` event
+// whose action reopened a non-PR issue.
+func webhookIssueReopenedTarget(event string, p webhookEventPayload) (int, bool) {
+	if event != "issues" || p.Issue == nil || p.Issue.PullRequest != nil || p.Issue.Number <= 0 {
+		return 0, false
+	}
+	return p.Issue.Number, p.Action == "reopened"
+}
+
+// IssueReopenedHook is told, with the configured repo name, the issue number
+// and the delivery time, that an `issues` webhook reopened an issue. The
+// duplicate-PR claim ledger registers one so a reopen voids the merged claim
+// on the issue without waiting for the next enumeration pass.
+type IssueReopenedHook func(repo string, number int, at time.Time)
+
+var (
+	issueReopenedHookMu sync.RWMutex
+	issueReopenedHookFn IssueReopenedHook
+)
+
+// SetIssueReopenedHook installs (or, with nil, removes) the process-wide
+// IssueReopenedHook.
+func SetIssueReopenedHook(fn IssueReopenedHook) {
+	issueReopenedHookMu.Lock()
+	issueReopenedHookFn = fn
+	issueReopenedHookMu.Unlock()
+}
+
+func issueReopenedHook() IssueReopenedHook {
+	issueReopenedHookMu.RLock()
+	defer issueReopenedHookMu.RUnlock()
+	return issueReopenedHookFn
 }
 
 func webhookInvalidationTargets(event string, p webhookEventPayload, aliases []string) []int {

@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"time"
 )
+
+var errMissingSessionAlreadyAlive = errors.New("missing-session recovery found an existing tmux session")
 
 // inferencePaneCheck pairs an inference agent name with its captured visible
 // pane for post-kick stall inspection outside the manager read lock.
@@ -128,8 +131,14 @@ func (m *Manager) SetDeadSessionRecoveryOwner(ownedElsewhere bool) {
 // the watchdog's; this loop still observes and logs, and still performs the
 // consent/stall work that is nobody else's.
 func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
+	m.runCopilotCacheJanitor()
+
 	m.mu.RLock()
-	var crashed []string
+	type crashCandidate struct {
+		name           string
+		missingSession bool
+	}
+	var crashed []crashCandidate
 	var consentStuck, consentCleared []string
 	var stallChecks []inferencePaneCheck
 	type sessionRestart struct{ name, message, reason string }
@@ -160,7 +169,7 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 				"recovery_owner", deadSessionRecoveryOwner(m.deadSessionRecoveryOwnedElsewhere),
 			)
 			if !m.deadSessionRecoveryOwnedElsewhere {
-				crashed = append(crashed, name)
+				crashed = append(crashed, crashCandidate{name: name, missingSession: true})
 			}
 			// Either way there is no session to capture a pane from, so the
 			// consent/stall checks below cannot run for this agent.
@@ -201,7 +210,7 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 				"pane_tail", crashPaneTail(pane),
 			)
 			if !m.deadSessionRecoveryOwnedElsewhere {
-				crashed = append(crashed, name)
+				crashed = append(crashed, crashCandidate{name: name})
 				continue
 			}
 			// Recovery is the watchdog's, but a bare pane is still a live
@@ -227,7 +236,11 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 	}
 	m.mu.RUnlock()
 
-	m.noteOOMKillsForCrashes(crashed)
+	crashedNames := make([]string, 0, len(crashed))
+	for _, c := range crashed {
+		crashedNames = append(crashedNames, c.name)
+	}
+	m.noteOOMKillsForCrashes(crashedNames)
 
 	for _, name := range consentCleared {
 		m.clearConsentTracking(name)
@@ -251,7 +264,7 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 		if h.message != "" {
 			err = m.RestartThenSendKick(ctx, h.name, h.message)
 		} else {
-			err = m.Restart(ctx, h.name)
+			_, err = m.restartWithStormBreaker(ctx, h.name, "stalled session recovery", "stalled: "+h.reason)
 		}
 		if err != nil {
 			m.logger.Error("failed to restart stalled session", "name", h.name, "error", err)
@@ -259,14 +272,27 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 	}
 
 	var restarted []string
-	for _, name := range crashed {
+	for _, crash := range crashed {
+		name := crash.name
 		m.logger.Info("restarting crashed agent", "name", name)
-		if err := m.Restart(ctx, name); err != nil {
+		var didRestart bool
+		var err error
+		if crash.missingSession {
+			didRestart, err = m.recoverMissingSessionWithStormBreaker(ctx, name, "crashed agent recovery", "tmux session disappeared")
+		} else {
+			didRestart, err = m.restartWithStormBreaker(ctx, name, "crashed agent recovery", "agent CLI crashed or tmux session disappeared")
+		}
+		if err != nil {
 			m.logger.Error("failed to restart crashed agent", "name", name, "error", err)
+		} else if !didRestart {
+			continue
 		} else {
 			m.mu.RLock()
 			agent := m.agents[name]
 			m.mu.RUnlock()
+			if agent == nil || agent.Paused {
+				continue
+			}
 			m.logger.Info("agent recovered from crash",
 				"name", name,
 				"restart_count", agent.RestartCount,
@@ -759,6 +785,62 @@ func (m *Manager) RestartWithReason(ctx context.Context, name, reason string) er
 	return m.restartWithReason(ctx, name, reason, false)
 }
 
+func (m *Manager) RestartMissingSessionWithReason(ctx context.Context, name, reason string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	agent, ok := m.agents[name]
+	if !ok {
+		return false, fmt.Errorf("agent %s not found", name)
+	}
+	m.clearStartFailureLocked(agent)
+	if err := m.applyAgentSpec(agent); err != nil {
+		return false, err
+	}
+	if agent.cancel != nil {
+		agent.cancel()
+	}
+	agent.forceRelaunch = true
+	if err := m.ensureTmuxSession(agent); err != nil {
+		if isTmuxDuplicateSessionError(err) {
+			m.logger.Warn("missing-session recovery found an existing tmux session; treating agent as alive without incrementing restart_count",
+				"name", name,
+				"session", agent.tmuxSession,
+				"error", err)
+			m.restoreExistingSessionMonitorLocked(ctx, agent)
+			return false, nil
+		}
+		return false, err
+	}
+
+	m.recordRestartLocked(agent, reason)
+	m.logger.Info("audit: agent restarting", "name", name, "reason", sanitizeRestartReason(reason), "restart_count", agent.RestartCount)
+	if agent.Paused {
+		agent.State = StatePaused
+		m.logger.Info("agent restart preserving paused state", "name", name)
+		return true, nil
+	}
+
+	genBeforeMint := agent.launchGen
+	m.mu.Unlock()
+	m.mintAgentTokenUnlocked(ctx, agent)
+	m.bobPreflightUnlocked(agent)
+	m.mu.Lock()
+	if cur, ok := m.agents[name]; !ok || cur != agent {
+		return false, fmt.Errorf("agent %s removed during missing-session recovery", name)
+	}
+	if agent.launchGen != genBeforeMint {
+		return false, nil
+	}
+
+	return true, m.launchInTmux(ctx, agent)
+}
+
 // restartForKick is the restart a kick delivery performs on its OWN behalf
 // when it finds the CLI crashed or wedged on a consent screen (SendKick /
 // deliverKickAsync). It still invalidates every OTHER pending kick for the
@@ -847,10 +929,17 @@ func (m *Manager) restartWithReason(ctx context.Context, name, reason string, ki
 		m.logger.Info("reaped agent CLI on restart", "name", name, "reaped_cli", reaped)
 	}
 
-	_ = m.tmuxCmd(agent, "kill-session", "-t", agent.tmuxSession).Run()
+	agent.forceRelaunch = true
+	if output, err := m.tmuxCmd(agent, "kill-session", "-t", agent.tmuxSession).CombinedOutput(); err != nil {
+		m.logger.Warn("tmux kill-session before restart failed",
+			"name", name,
+			"session", agent.tmuxSession,
+			"reason", sanitizeRestartReason(reason),
+			"error", err,
+			"stderr", strings.TrimSpace(string(output)))
+	}
 
 	m.recordRestartLocked(agent, reason)
-	agent.forceRelaunch = true
 	m.logger.Info("audit: agent restarting", "name", name, "reason", sanitizeRestartReason(reason), "restart_count", agent.RestartCount)
 
 	if err := m.ensureTmuxSession(agent); err != nil {
@@ -900,6 +989,31 @@ func (m *Manager) restartWithReason(ctx context.Context, name, reason string, ki
 	return m.launchInTmux(ctx, agent)
 }
 
+func isTmuxDuplicateSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate session")
+}
+
+func (m *Manager) restoreExistingSessionMonitorLocked(ctx context.Context, agent *AgentProcess) {
+	if agent.cancel != nil {
+		agent.cancel()
+	}
+	agent.forceRelaunch = false
+	agent.State = StateRunning
+	if agent.StartedAt == nil {
+		now := time.Now()
+		agent.StartedAt = &now
+	}
+	agentCtx, cancel := context.WithCancel(ctx)
+	agent.cancel = cancel
+	go m.pollTmuxOutputForAgent(agent, agentCtx)
+	if backendHasBlockingPrompts(agent.effectiveBackend()) {
+		go m.watchForTrustPromptForAgent(agent, agentCtx)
+	}
+}
+
 func (m *Manager) ResetRestartCount(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -912,6 +1026,9 @@ func (m *Manager) ResetRestartCount(name string) error {
 	agent.RestartCount = 0
 	agent.RestartEvents = nil
 	agent.LastRestartReason = "operator"
+	agent.restartStormBackoffUntil = time.Time{}
+	agent.tokenRestartAttempts = 0
+	agent.tokenRestartGaveUp = false
 	// Resetting the counter is the operator saying "I have looked at this";
 	// lift the restart/kick breaker with it (#7363) so a deliberate kick
 	// need not wait out the hold.

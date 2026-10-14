@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -134,6 +133,10 @@ var (
 
 	inferenceAuthMu sync.RWMutex
 	inferenceAuthFn func() (errMsg string, since time.Time)
+	// inferenceLastError* carry the proxy's per-agent most recent inference
+	// error text (#11761) — the full message, not the clipped pane line.
+	inferenceLastErrorMu sync.RWMutex
+	inferenceLastErrorFn func(agent string) (msg string, status int, at time.Time, ok bool)
 	// inferenceBudget* carry the PROVIDER spending-limit signal (#4294) —
 	// distinct from the auth signal above and from the hive's own token budget.
 	inferenceBudgetMu sync.RWMutex
@@ -182,6 +185,76 @@ func getInferenceAuthFn() func() (errMsg string, since time.Time) {
 	inferenceAuthMu.RLock()
 	defer inferenceAuthMu.RUnlock()
 	return inferenceAuthFn
+}
+
+// SetInferenceLastErrorProvider registers a function reporting the most recent
+// inference error the proxy returned to one agent (#11761). Claude Code clips
+// its retry status line to one pane row beside the "Retrying in Ns" countdown,
+// so the pane-derived ProviderErrorLine is truncated until every retry is
+// exhausted; the proxy generated that message and holds it in full. Wired to
+// the proxy's LastInferenceError; nil in tests and on spokes with no proxy,
+// which agentInferenceLastError tolerates (the card then keeps the pane line).
+func SetInferenceLastErrorProvider(fn func(agent string) (msg string, status int, at time.Time, ok bool)) {
+	inferenceLastErrorMu.Lock()
+	defer inferenceLastErrorMu.Unlock()
+	inferenceLastErrorFn = fn
+}
+
+func getInferenceLastErrorFn() func(agent string) (msg string, status int, at time.Time, ok bool) {
+	inferenceLastErrorMu.RLock()
+	defer inferenceLastErrorMu.RUnlock()
+	return inferenceLastErrorFn
+}
+
+// inferenceLastErrorMaxAge bounds how old a proxy-recorded inference error may
+// be and still be shown on an agent card. Claude Code's whole retry ladder
+// (10 attempts, backoff capped near 40s) finishes well inside it, so a live
+// outage stays visible, while an error from an agent that has since gone quiet
+// without a successful call (which would clear it) ages out.
+const inferenceLastErrorMaxAge = 15 * time.Minute
+
+// agentInferenceLastError returns the proxy's full last-inference-error text
+// for proc, or ok=false when it should not be shown. Conservative gating: the
+// entry must be recent (inferenceLastErrorMaxAge) AND relevant to the agent's
+// current state — either hive already classified a provider/backend-auth
+// error from the pane, or the error happened during the current turn (newer
+// than the last kick), which is exactly the mid-retry window #11761 is about.
+// A successful inference call clears the proxy entry, so a recovered agent
+// never shows it.
+func agentInferenceLastError(proc *agent.AgentProcess, now time.Time) (msg string, at time.Time, ok bool) {
+	fn := getInferenceLastErrorFn()
+	if fn == nil || proc == nil {
+		return "", time.Time{}, false
+	}
+	m, _, when, found := fn(proc.Name)
+	m = strings.TrimSpace(m)
+	if !found || m == "" || when.IsZero() || now.Sub(when) > inferenceLastErrorMaxAge {
+		return "", time.Time{}, false
+	}
+	providerErr := proc.ProviderErrorClass != "" && now.Before(proc.ProviderErrorBackoffUntil)
+	backendAuthErr := proc.BackendAuth.Status != "" && proc.BackendAuth.Status != agent.BackendAuthOK
+	duringTurn := proc.LastKick != nil && when.After(*proc.LastKick)
+	if !providerErr && !backendAuthErr && !duringTurn {
+		return "", time.Time{}, false
+	}
+	return m, when, true
+}
+
+// preferFullInferenceError returns the proxy's full message in place of a
+// clipped pane-derived line. A pane summary such as "Inference backend
+// rejected credentials (401): <clipped>" keeps its classification prefix —
+// the dashboard keys its backend-auth banner title on it — and only the
+// clipped detail after it is replaced.
+func preferFullInferenceError(paneLine, full string) string {
+	if full == "" {
+		return paneLine
+	}
+	if strings.HasPrefix(paneLine, "Inference backend ") {
+		if i := strings.Index(paneLine, "): "); i >= 0 {
+			return paneLine[:i+len("): ")] + full
+		}
+	}
+	return full
 }
 
 // SetInferenceBudgetProvider registers a function reporting the proxy's current
@@ -908,10 +981,10 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 		// per-mode cadence and the same IsPaused semantics. offByCadence is the
 		// stricter "has a pause/off ENTRY" form (an ABSENT cadence is not off),
 		// which is why it checks the resolved cadence directly rather than
-		// negating ExpectedActive.
+		// negating ExpectedActive. config.OffByCadence is also the watchdog's
+		// not-producing gate (#11910), so the card and the banner agree.
 		modeCadence := cfg.CadenceValueForMode(name, currentMode)
-		offByCadence := modeCadence != "" && modeCadence.IsPaused() &&
-			!proc.Config.OnDemand && !onDemandSet[name]
+		offByCadence := cfg.OffByCadence(name, currentMode, proc.Config.OnDemand || onDemandSet[name])
 
 		// noCadence: NO governor mode names this agent in its cadence map and it
 		// has never been kicked, so nothing will ever schedule it — the silent
@@ -991,7 +1064,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			AwaitingCI:      awaitingCI,
 			Paused:          proc.Paused,
 			PausedAt:        formatOptionalTime(proc.PausedAt),
-			PausedReason:    proc.PausedReason,
+			PausedReason:    redactTokens(proc.PausedReason),
 			PausedTrigger:   proc.PausedTrigger,
 			PausedBy:        proc.PausedBy,
 			OffByCadence:    offByCadence,
@@ -1029,7 +1102,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			DetailSummary:          detailSummary,
 			SubAgentModels:         proc.SubAgentModels,
 			StatsConfig:            resolveStatsSources(loadStatsConfig(name), cfg),
-			LastError:              proc.LastError,
+			LastError:              redactTokens(proc.LastError),
 			LoginURL:               proc.LoginURL,
 			StallNudges:            proc.StallNudges,
 			ActionNudges:           proc.ActionNudges,
@@ -1060,15 +1133,29 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 				}
 			}
 		}
+		// #11761: the proxy's full inference error beats the pane line Claude
+		// Code clips beside its retry countdown.
+		inferenceLastErr, inferenceLastErrAt, hasInferenceLastErr := agentInferenceLastError(proc, time.Now())
+		if hasInferenceLastErr {
+			a.InferenceLastError = inferenceLastErr
+			a.InferenceLastErrorAt = formatOptionalTime(inferenceLastErrAt)
+		}
 		if status := proc.BackendAuth.Status; status != "" && status != agent.BackendAuthOK {
 			a.BackendAuthStatus = status
 			a.BackendAuthSince = formatOptionalTime(proc.BackendAuth.Since)
 			a.BackendAuthLastError = proc.BackendAuth.LastError
+			if hasInferenceLastErr {
+				a.BackendAuthLastError = preferFullInferenceError(a.BackendAuthLastError, inferenceLastErr)
+			}
 		}
 		if proc.ProviderErrorClass != "" && time.Now().Before(proc.ProviderErrorBackoffUntil) {
 			a.StructuredStatus = "BLOCKED"
 			a.StatusEvidence = "blocked: inference (" + proc.ProviderErrorClass + ")"
-			if line := strings.TrimSpace(proc.ProviderErrorLine); line != "" {
+			line := strings.TrimSpace(proc.ProviderErrorLine)
+			if hasInferenceLastErr {
+				line = preferFullInferenceError(line, inferenceLastErr)
+			}
+			if line != "" {
 				a.StatusEvidence += ": " + line
 			}
 			if continuousNow && !continuousState.BackoffUntil.IsZero() && time.Now().Before(continuousState.BackoffUntil) {
@@ -3089,50 +3176,11 @@ func roundTo(f float64, decimals int) float64 {
 	return math.Round(f*shift) / shift
 }
 
-var statusTokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`)
-var statusJWTRedactor = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
-var statusBearerRedactor = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b`)
-var deviceCodeRedactor = regexp.MustCompile(`(?i)(one-time code:\s*)[A-Z0-9]{4}-[A-Z0-9]{4}`)
-
-var deviceCodeLineRedactor = regexp.MustCompile(`(?m)^.*(?:login/device|Waiting for authorization|one-time code:|Press any key to copy).*$`)
-
-// apiKeyRedactor matches sk-prefixed API keys: real Anthropic keys (sk-ant-…),
-// the per-agent LiteLLM virtual keys hive itself mints (sk-hive-<agent>, see
-// Manager.agentEnv), and the generic OpenAI-style sk-… form.
-//
-// This surface previously redacted only GitHub tokens, so an agent command line
-// carrying ANTHROPIC_API_KEY='sk-hive-…' reached the pane/full-log endpoints in
-// clear text (observed in the #3852 report). That was survivable only by
-// accident: an 80-column pane frequently clipped the key off the end of the
-// line before it was ever captured. Widening the pane for #3878 removes that
-// accidental cover and makes the exposure reliable, so the redaction has to
-// become real. Truncation is not a security control.
-//
-// The {6,} floor keeps the pattern off ordinary prose ("sk-" alone) while still
-// catching short virtual keys such as sk-hive-qa.
-//
-// The leading (^|[^A-Za-z0-9._-]) guard anchors the match to a real token
-// start. Without it the pattern fires INSIDE ordinary identifiers — a module
-// named "task-sk-flow" was rewritten to "task-[redacted]", which would corrupt
-// the very tool-call text this change exists to make readable. A redactor that
-// eats legitimate output is its own bug, so the boundary is asserted by
-// TestRedactTokensPreservesNonSecretText.
-var apiKeyRedactor = regexp.MustCompile(`(^|[^A-Za-z0-9._-])(sk-[A-Za-z0-9._\-]{6,})`)
-
+// redactTokens delegates to agent.RedactPaneTokens (itself a thin seam over
+// pkg/logscrub) so the agent package, which dashboard already imports, applies
+// the identical pane redaction.
 func redactTokens(s string) string {
-	s = statusJWTRedactor.ReplaceAllString(s, "[REDACTED]")
-	s = statusBearerRedactor.ReplaceAllString(s, "[REDACTED]")
-	s = statusTokenRedactor.ReplaceAllStringFunc(s, func(m string) string {
-		if len(m) > 7 {
-			return m[:7] + "***"
-		}
-		return "***"
-	})
-	// ${1} preserves the boundary character the pattern had to consume.
-	s = apiKeyRedactor.ReplaceAllString(s, "${1}sk-***REDACTED***")
-	s = deviceCodeRedactor.ReplaceAllString(s, "${1}****-****")
-	s = deviceCodeLineRedactor.ReplaceAllString(s, "[auth flow redacted]")
-	return s
+	return agent.RedactPaneTokens(s)
 }
 
 // SetReleaseLineLagProvider registers a function reporting how far the edge

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/claude"
+	"github.com/hivecommons/hive/pkg/logscrub"
 )
 
 // sharedCopilotConfigPath and sharedClaudeCredentialPath are vars (not consts)
@@ -173,14 +174,20 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			// diagnostic is not a start failure — relaunch, like the other two
 			// branches do, and only fall back to StateFailed if the relaunch
 			// itself fails.
-			m.logger.Warn("diagnostic: timed out waiting for copilot error output, relaunching agent", "agent", agent.Name)
+			output := m.captureTmuxPaneForAgent(agent)
+			diagnosticTail := compactPaneTail(output, 8)
 			agent.LastError = "copilot hung with no output (diagnostic timed out)"
+			if diagnosticTail != "" {
+				agent.LastError += ": " + diagnosticTail
+			}
+			m.logger.Warn("diagnostic: timed out waiting for copilot error output, relaunching agent",
+				"agent", agent.Name, "output_tail", truncateStr(diagnosticTail, 500))
 			if agent.UID > 0 {
 				killAgentProcesses(agent.UID, m.logger)
 			}
 			_ = m.tmuxCmd(agent, "kill-session", "-t", agent.tmuxSession).Run()
 			agent.forceRelaunch = true
-			if err := m.RestartWithReason(ctx, agent.Name, "copilot hang diagnostic timed out"); err != nil {
+			if _, err := m.restartWithStormBreaker(ctx, agent.Name, "copilot hang diagnostic timed out", agent.LastError); err != nil {
 				m.logger.Warn("diagnostic: restart after timeout failed", "agent", agent.Name, "error", err)
 				agent.State = StateFailed
 				m.audit(AuditAgentStartFailed, agent.Name, auditFields(
@@ -234,12 +241,43 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			}
 			_ = m.tmuxCmd(agent, "kill-session", "-t", agent.tmuxSession).Run()
 			agent.forceRelaunch = true
-			if err := m.Restart(ctx, agent.Name); err != nil {
+			if _, err := m.restartWithStormBreaker(ctx, agent.Name, "copilot diagnostic recovered", agent.LastError); err != nil {
 				m.logger.Warn("diagnostic: restart failed", "agent", agent.Name, "error", err)
 			}
 			return
 		}
 	}
+}
+
+// RedactPaneTokens masks GitHub tokens, sk- API keys and device-login lines in
+// text derived from an agent pane. It is the seam pkg/dashboard uses so both
+// packages apply the identical pane redaction without dashboard importing
+// pkg/logscrub directly (see internal/testutil/dashboard_import_allowlist.txt).
+func RedactPaneTokens(s string) string {
+	return logscrub.RedactPaneTokens(s)
+}
+
+func compactPaneTail(output string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		// Redact per line: the device-code line redactor is line-anchored and
+		// would swallow the whole tail once the lines are joined.
+		line = strings.TrimSpace(logscrub.RedactPaneTokens(logscrub.ScrubString(line)))
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 // fixSharedConfigPerms ensures /data/home/.copilot/config.json is group-readable

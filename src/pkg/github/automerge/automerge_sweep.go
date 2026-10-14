@@ -123,6 +123,13 @@ type Engine struct {
 	evaluatedHeads                    map[string]string
 	requiredChecksFallbackWarnedMu    sync.Mutex
 	requiredChecksFallbackWarned      map[string]bool
+	// heldRunApprovals remembers PR heads whose held workflow runs the sweep
+	// already tried to approve, so each head costs one approve pass.
+	heldRunApprovalsMu sync.Mutex
+	heldRunApprovals   map[string]bool
+	// terminalHoldsLogged remembers PR head+reason pairs already reported as a
+	// terminal held/never-started hold so later ticks only count them.
+	terminalHoldsLogged map[string]bool
 }
 
 // New returns an automerge sweep engine over a GitHub transport client.
@@ -840,7 +847,13 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				result.UpdatedBranches++
 			}
 			if reason != "" {
-				c.info("automerge skip", "repo", repo, "pr", number, "reason", reason)
+				if isTerminalRequiredCheckHold(reason) {
+					if c.markTerminalHoldLogged(owner, repoName, number, pr.GetHead().GetSHA(), reason) {
+						c.info("automerge hold", "repo", repo, "pr", number, "sha", pr.GetHead().GetSHA(), "reason", reason)
+					}
+				} else {
+					c.info("automerge skip", "repo", repo, "pr", number, "reason", reason)
+				}
 				result.Skipped++
 				repoSkipped++
 				repoSkipReasons[reason]++
@@ -1246,7 +1259,10 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, reason, err
 	}
 	if !green {
-		return reject(reason)
+		// A missing required check on a trusted-lane head may be a workflow
+		// run GitHub is holding for approval; release it rather than polling
+		// forever (automerge_held_runs.go).
+		return AutoMergeSweepEvent{}, c.resolveMissingRequiredCheck(ctx, displayRepo, owner, repo, pr, number, evaluatedHeadSHA, reason, headPushedAt), nil
 	}
 
 	// Intent tier gate (#6258). The human merge lane never lets a PR reach

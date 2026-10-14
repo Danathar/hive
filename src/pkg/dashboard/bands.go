@@ -175,6 +175,9 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 		}
 		signals = append(signals, Signal{Glyph: "✓", Label: label})
 	}
+	if cc := issue.ClaimContext; cc != nil && cc.Decision == github.ClaimDecisionReopenedAfterMerge {
+		signals = append(signals, Signal{Glyph: "↺", Label: fmt.Sprintf("reopened after PR #%d merged; re-queued for work", cc.PRNumber)})
+	}
 	if role != "" {
 		ack := ", not yet acknowledged"
 		if acknowledged {
@@ -488,7 +491,7 @@ func issueAgentRole(labels []string) string {
 func issueClaimed(labels []string) bool {
 	for _, label := range labels {
 		lower := strings.ToLower(label)
-		if lower == "claimed" || strings.HasPrefix(lower, "hive/claimed-by-") {
+		if lower == "claimed" || lower == "hive/in-progress" || strings.HasPrefix(lower, "hive/claimed-by-") {
 			return true
 		}
 	}

@@ -322,6 +322,11 @@ type AgentProcess struct {
 	// tokenRestartGaveUp latches once the cap is hit so the diagnosis is logged
 	// a single time rather than every poll (~3s). Cleared alongside the counter.
 	tokenRestartGaveUp bool
+	// restartStormBackoffUntil is the shared circuit breaker for automatic
+	// relaunch paths (crashed-session recovery, token-refresh recovery and
+	// Copilot hang diagnostics). Operator restarts bypass it; automatic loops
+	// must not relaunch forever with no backoff.
+	restartStormBackoffUntil time.Time
 	// lastRateLimitRestart paces the relaunch of an agent whose CLI start-up
 	// banner reports GitHub rate-limited the credential validation. Distinct
 	// from lastTokenRestart on purpose: this lane has no attempt cap because
@@ -764,6 +769,14 @@ type Manager struct {
 	kickLogDir       string
 	kickLogRetention int
 	kickLogMaxBytes  int64
+	// kickLogSource is the boot-time HIVE_KICK_LOG_SOURCE (kick_transcript.go);
+	// "" behaves as kickLogSourceScrollback. kickLogSourceResolver, when
+	// injected (SetKickLogSourceResolver), replaces it with the live
+	// governor.logging.kick_log_source so a dashboard change applies to the
+	// next kick without a restart. Same atomic.Pointer discipline as
+	// explainModeDefaultResolver: read on paths that already hold m.mu.
+	kickLogSource         string
+	kickLogSourceResolver atomic.Pointer[func() string]
 	// buildInfo supplies hive_version/hive_commit for kick log headers.
 	buildInfo func() (version, commit string)
 }
@@ -893,6 +906,7 @@ func NewManagerWithOptions(agents map[string]config.AgentConfig, logger *slog.Lo
 		kickLogDir:                    kickLogDir,
 		kickLogRetention:              kickLogRetention,
 		kickLogMaxBytes:               kickLogMaxBytes,
+		kickLogSource:                 kickLogSourceFromEnv(),
 	}
 
 	for name, cfg := range agents {
@@ -1111,6 +1125,15 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 			m.mu.Unlock()
 			m.logger.Info("agent starting paused", "name", agent.Name, "backend", backend, "trigger", agent.PausedTrigger, "persisted", agent.Config.Paused)
 			return nil
+		}
+	}
+	if backend == "copilot" {
+		m.runCopilotCacheJanitor()
+		if reason, full := copilotDiskFullCondition(); full {
+			if err := m.Pause(name, DiskFullTrigger, reason); err != nil {
+				return err
+			}
+			return fmt.Errorf("%s", reason)
 		}
 	}
 

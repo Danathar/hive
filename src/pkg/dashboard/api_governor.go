@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/classify"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/hooks"
@@ -189,14 +190,9 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			"ttlSeconds":         cfg.Governor.Sensing.TTLSeconds,
 			"pullbackSeconds":    cfg.Governor.Sensing.PullbackSeconds,
 		},
-		"logging": map[string]interface{}{
-			"dir":        cfg.Governor.Logging.Dir,
-			"maxSizeMB":  cfg.Governor.Logging.MaxSizeMB,
-			"maxAgeDays": cfg.Governor.Logging.MaxAgeDays,
-			"maxBackups": cfg.Governor.Logging.MaxBackups,
-			"compress":   cfg.Governor.Logging.Compress,
-			"level":      cfg.Governor.Logging.Level,
-		},
+		"logging":               loggingSectionResponse(cfg),
+		"dashboard":             dashboardSettingsResponse(cfg),
+		"backends":              backendsPolicyResponse(cfg),
 		"litellm":               litellmSectionResponse(&cfg.Governor.LiteLLM),
 		"trajectory":            trajectorySectionResponse(&cfg.Governor),
 		"classifier":            classifierSectionResponse(cfg),
@@ -205,10 +201,12 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"review_bots":           reviewBotsSectionResponse(cfg),
 		"auto_merge":            s.autoMergeSectionResponseWithBots(cfg),
 		"convergence":           s.convergenceSectionResponse(cfg),
+		"sla":                   slaSectionResponse(cfg),
 		"advisory":              advisorySectionResponse(cfg),
 		"project_observability": s.projectObservabilityResponse(cfg),
 		"replan":                replanSectionResponse(cfg),
 		"question_autoclose":    questionAutocloseSectionResponse(cfg),
+		"fleet_report":          s.fleetReportSectionResponse(cfg),
 		"work_source":           s.workSourceSectionResponse(cfg),
 		"security":              securitySectionResponse(cfg),
 		"attribution": map[string]interface{}{
@@ -960,6 +958,7 @@ func (s *Server) governorNotificationsPayload() map[string]any {
 		out["slackWebhook"] = maskSecret(cfg.Notifications.Slack.Webhook)
 		out["hasSlack"] = cfg.Notifications.Slack.Webhook != ""
 	}
+	notificationsExtraPayload(cfg, out)
 	return out
 }
 
@@ -974,6 +973,7 @@ func (s *Server) handleGovernorNotifications(w http.ResponseWriter, r *http.Requ
 		DiscordWebhook string   `json:"discordWebhook"`
 		SlackWebhook   string   `json:"slackWebhook"`
 		Events         []string `json:"events"`
+		notificationsExtraBody
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -988,6 +988,10 @@ func (s *Server) handleGovernorNotifications(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := validateNotificationURL(body.SlackWebhook, "slackWebhook"); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := applyNotificationsExtra(s.deps.Config, body.notificationsExtraBody); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1111,6 +1115,27 @@ func (s *Server) handleGovernorHealth(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, map[string]string{"status": "updated"})
 }
 
+// loggingSectionResponse builds the Logging tab payload. kickLogSource is the
+// saved governor.logging.kick_log_source ("" when unset); kickLogSourceEffective
+// is what the next kick log will actually use, with HIVE_KICK_LOG_SOURCE
+// applied, and kickLogSourceEnvLocked says when that env var is the reason the
+// two differ so the dialog can lock the select and say why (#11762, #9579).
+func loggingSectionResponse(cfg *config.Config) map[string]interface{} {
+	l := cfg.Governor.Logging
+	return map[string]interface{}{
+		"dir":                    l.Dir,
+		"maxSizeMB":              l.MaxSizeMB,
+		"maxAgeDays":             l.MaxAgeDays,
+		"maxBackups":             l.MaxBackups,
+		"compress":               l.Compress,
+		"level":                  l.Level,
+		"kickLogSource":          l.KickLogSource,
+		"kickLogSourceEffective": l.ResolveKickLogSource(),
+		"kickLogSourceEnvLocked": l.KickLogSourceOrigin() == config.KickLogSourceOriginEnv,
+		"kickLogSources":         config.KickLogSources(),
+	}
+}
+
 func (s *Server) handleGovernorLogging(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
 		return
@@ -1122,6 +1147,9 @@ func (s *Server) handleGovernorLogging(w http.ResponseWriter, r *http.Request) {
 		MaxBackups int    `json:"maxBackups"`
 		Compress   *bool  `json:"compress"`
 		Level      string `json:"level"`
+		// KickLogSource is a pointer so an absent key leaves the setting
+		// untouched; "" resets it to the default (scrollback).
+		KickLogSource *string `json:"kickLogSource"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -1129,6 +1157,10 @@ func (s *Server) handleGovernorLogging(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateGovernorLogging(s.deps.Config.Governor.Logging.Dir, body.MaxSizeMB, body.MaxAgeDays); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.KickLogSource != nil && strings.TrimSpace(*body.KickLogSource) != "" && !config.ValidKickLogSource(*body.KickLogSource) {
+		jsonError(w, fmt.Sprintf("kickLogSource must be one of %s", strings.Join(config.KickLogSources(), ", ")), http.StatusBadRequest)
 		return
 	}
 
@@ -1152,6 +1184,15 @@ func (s *Server) handleGovernorLogging(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "level must be one of: debug, info, warn, error", http.StatusBadRequest)
 			return
 		}
+	}
+	if body.KickLogSource != nil {
+		// Applied to the next kick by the resolver main.go injects into the
+		// agent manager; nothing to push here.
+		v := strings.TrimSpace(*body.KickLogSource)
+		if v != "" {
+			v = config.NormalizeKickLogSource(v)
+		}
+		s.deps.Config.Governor.Logging.KickLogSource = v
 	}
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config after logging update", "error", err)
@@ -1634,11 +1675,59 @@ func litellmModelsHTTPError(req *http.Request, resp *http.Response, apiKey strin
 			return fmt.Errorf("gateway requires an API key and none is configured (HTTP %d for GET %s; final URL %s): %s",
 				resp.StatusCode, req.URL.String(), finalURL, gatewayMsg)
 		}
-		return fmt.Errorf("gateway rejected the configured key (HTTP %d for GET %s; final URL %s): %s",
-			resp.StatusCode, req.URL.String(), finalURL, gatewayMsg)
+		// A JSON body means the gateway API ITSELF evaluated the key and said
+		// no — the opposite classification from the proxy/WAF branch above.
+		// Spell out exactly what was sent (method, path, which header carried
+		// the key, its fingerprint, the User-Agent) and what answered (Server,
+		// content-type) so the operator can line it up against a curl that
+		// works from their laptop without guessing which part differs.
+		return fmt.Errorf("gateway rejected the configured key (HTTP %d for GET %s; final URL %s) — this is the gateway API's own JSON auth error (server %q, content-type %q), not a proxy/WAF refusal, so the key below is what it evaluated; request sent: %s: %s",
+			resp.StatusCode, req.URL.String(), finalURL, resp.Header.Get("Server"), contentType, probeRequestShape(req, apiKey), gatewayMsg)
 	default:
-		return fmt.Errorf("gateway returned HTTP %d for GET %s (final URL %s): %s", resp.StatusCode, req.URL.String(), finalURL, gatewayMsg)
+		return fmt.Errorf("gateway returned HTTP %d for GET %s (final URL %s; server %q, content-type %q; request sent: %s): %s",
+			resp.StatusCode, req.URL.String(), finalURL, resp.Header.Get("Server"), contentType, probeRequestShape(req, apiKey), gatewayMsg)
 	}
+}
+
+// probeUserAgent is what the probe (and the inference translator, which also
+// uses Go's default client) presents as User-Agent. Go only stamps the header
+// at transport time, so req.UserAgent() is empty while the diagnostic is being
+// built; naming the default here keeps the report truthful.
+const probeUserAgent = "Go-http-client/1.1 (Go default; identical to the hive's inference translator)"
+
+// probeRequestShape describes the outbound probe request in the terms an
+// operator compares against their own curl: method and path, which header
+// carried the key (always Authorization: Bearer — never x-api-key), the key's
+// SHA-256 prefix (a fingerprint, never the value), the User-Agent, and the
+// egress proxy that applied. One sentence fragment, safe to log.
+func probeRequestShape(req *http.Request, apiKey string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s", req.Method, req.URL.String())
+	if apiKey == "" {
+		b.WriteString(" with no Authorization header")
+	} else {
+		b.WriteString(" with Authorization: Bearer <key>")
+		if hash := config.APIKeySHA256(apiKey); hash != "" {
+			fmt.Fprintf(&b, " (SHA256 %s)", shortKeyHash(hash))
+		}
+	}
+	if req.Header.Get("Content-Type") != "" {
+		fmt.Fprintf(&b, ", Content-Type %s", req.Header.Get("Content-Type"))
+	}
+	fmt.Fprintf(&b, ", User-Agent %s%s", probeUserAgent, describeEgressProxy(req))
+	return b.String()
+}
+
+// shortKeyHashLen is how many leading hex characters of a key's SHA-256 the
+// dashboard shows: enough to match against `shasum -a 256` output by eye,
+// far too few to be a usable fingerprint of the secret.
+const shortKeyHashLen = 12
+
+func shortKeyHash(hash string) string {
+	if len(hash) > shortKeyHashLen {
+		return hash[:shortKeyHashLen]
+	}
+	return hash
 }
 
 // probeEdgeRejectedError marks a /v1/models probe failure that an ingress,
@@ -1692,7 +1781,12 @@ func probeLiteLLMInference(endpoint, apiKey, model string) error {
 			" (server %q), so inference from the hive is blocked too, not just model listing%s: %s",
 			chatURL, model, resp.StatusCode, resp.Header.Get("Server"), describeEgressProxy(req), gatewayMsg)
 	}
-	return fmt.Errorf("POST %s (model %q) returned HTTP %d: %s", chatURL, model, resp.StatusCode, gatewayMsg)
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("POST %s (model %q) was rejected by the gateway API itself with HTTP %d (JSON auth error; server %q, content-type %q) — request sent: %s: %s",
+			chatURL, model, resp.StatusCode, resp.Header.Get("Server"), contentType, probeRequestShape(req, apiKey), gatewayMsg)
+	}
+	return fmt.Errorf("POST %s (model %q) returned HTTP %d (server %q, content-type %q): %s",
+		chatURL, model, resp.StatusCode, resp.Header.Get("Server"), contentType, gatewayMsg)
 }
 
 // redactSecret removes any occurrence of a secret value from a message so
@@ -1761,6 +1855,26 @@ func litellmSectionResponse(lc *config.LiteLLMConfig) map[string]interface{} {
 	}
 }
 
+// classifierSectionResponse surfaces the effective tier-classification keyword
+// lists (Phase 4 Part C) to the dashboard governor-config view. It returns the
+// keywords actually in force — config-driven when a `classifier:` block is set,
+// else the built-in defaults — so operators can see and (via hive.yaml) edit
+// which title keywords map issues to the Simple/Complex tiers. classify.SetLanes
+// already surfaces per-agent lane_keywords per-agent; these are the analogous
+// global tier lists.
+func classifierSectionResponse(cfgs ...*config.Config) map[string]interface{} {
+	simple, complex := classify.TierKeywords()
+	out := map[string]interface{}{
+		"simpleKeywords": simple,
+		"complexSignals": complex,
+	}
+	if len(cfgs) > 0 && cfgs[0] != nil {
+		out["simple_keywords"] = append([]string{}, cfgs[0].Classifier.SimpleKeywords...)
+		out["complex_signals"] = append([]string{}, cfgs[0].Classifier.ComplexSignals...)
+	}
+	return out
+}
+
 // liteLLMProbeResult runs the live probe against the effective endpoint
 // using the SAME key resolution the inference translator uses
 // (ResolveAPIKey: api_key_file → Secret mount → PVC file → env), unless
@@ -1794,20 +1908,20 @@ func (s *Server) liteLLMProbeResult(lc *config.LiteLLMConfig, overrideKey string
 			} else {
 				infErr := probeLiteLLMInference(ep, probeKey, lc.DefaultModel)
 				if infErr == nil {
-					return map[string]interface{}{
+					return s.withLiteLLMRouteDiagnostic(map[string]interface{}{
 						"ok":                true,
 						"models":            0,
 						"modelsListBlocked": true,
 						"inferenceModel":    lc.DefaultModel,
 						"warning":           redactSecret(err.Error(), probeKey),
-					}
+					}, ep, probeKey)
 				}
 				err = fmt.Errorf("%w; fallback inference check with default model also failed: %v", err, infErr)
 			}
 		}
-		return map[string]interface{}{"ok": false, "error": redactSecret(err.Error(), probeKey)}
+		return s.withLiteLLMRouteDiagnostic(map[string]interface{}{"ok": false, "error": redactSecret(err.Error(), probeKey)}, ep, probeKey)
 	}
-	result := map[string]interface{}{"ok": true, "models": n}
+	result := s.withLiteLLMRouteDiagnostic(map[string]interface{}{"ok": true, "models": n}, ep, probeKey)
 	// If the proxy has learned this key's entitled subset (some gateways
 	// advertise the full catalog on /v1/models but scope the key to fewer),
 	// surface how many of the ADVERTISED models are actually usable so Test
@@ -1824,6 +1938,23 @@ func (s *Server) liteLLMProbeResult(lc *config.LiteLLMConfig, overrideKey string
 		}
 	}
 	return result
+}
+
+// withLiteLLMRouteDiagnostic attaches the "route" line (where agents on the
+// litellm backend will really POST, with which key) to a LiteLLM tab probe
+// result. The tab probes the LEGACY block's endpoint; when an explicit gateway
+// named "litellm" exists the route resolver prefers that gateway instead, and
+// the line says so, so the operator is never told "OK" about an endpoint no
+// agent will use (hivecommons/hive#9945). Nil-safe for the test seams that
+// build a Server without deps.
+func (s *Server) withLiteLLMRouteDiagnostic(probe map[string]interface{}, testedEndpoint, testedKey string) map[string]interface{} {
+	if s == nil || s.deps == nil || s.deps.Config == nil {
+		return probe
+	}
+	if line := inferenceRouteDiagnostic(s.deps.Config, config.GatewayKindLiteLLM, testedEndpoint, testedKey); line != "" {
+		probe["route"] = line
+	}
+	return probe
 }
 
 // handleGovernorLiteLLMTest is the Test Connection endpoint: a live

@@ -213,12 +213,30 @@ func shouldAutoUpgradeNowForChannel(mode, lastFiredDate, channel string, now tim
 	return shouldAutoUpgradeNow(mode, lastFiredDate, now)
 }
 
+// autoUpgradeScheduleCandidateBypass names the effective schedule of a
+// candidate-channel hive whose stored daily/weekly mode is not being honored.
+const autoUpgradeScheduleCandidateBypass = "candidate-bypass"
+
+// effectiveAutoUpgradeSchedule reports the schedule actually in force for a
+// hive. It returns the normalized configured mode unless the candidate bypass
+// applies, in which case it returns autoUpgradeScheduleCandidateBypass. The
+// dashboard and the audit log read this instead of re-deriving the env logic.
+func effectiveAutoUpgradeSchedule(mode, channel string) string {
+	if channel == ReleaseChannelCandidate && !candidateAutoUpgradeScheduleOverride() {
+		return autoUpgradeScheduleCandidateBypass
+	}
+	return normalizeAutoUpgradeMode(mode)
+}
+
 func candidateAutoUpgradeScheduleOverride() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(candidateRespectAutoUpgradeScheduleEnv))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		// The dashboard renders a candidate hive's stored daily/weekly mode as
+		// the operator-visible cadence. Respect that cadence unless a deployment
+		// explicitly opts back into candidate-continuous tracking.
+		return true
 	}
 }
 
