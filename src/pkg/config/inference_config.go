@@ -64,6 +64,9 @@ type LoggingConfig struct {
 	MaxBackups int    `yaml:"max_backups"`
 	Compress   bool   `yaml:"compress"`
 	Level      string `yaml:"level"`
+	// KickLogSource selects what per-kick agent logs are built from:
+	// scrollback, transcript or auto. Empty or unknown means scrollback.
+	KickLogSource string `yaml:"kick_log_source,omitempty" json:"kick_log_source,omitempty"`
 }
 
 // LiteLLM key/endpoint resolution defaults. hive.yaml stores only the env
