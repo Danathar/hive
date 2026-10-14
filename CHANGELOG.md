@@ -11,6 +11,50 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.166.1)
+
+### Fixed
+
+- fix: name the upstream URL in inference-backend error responses (#11758)
+- fix: make TestEvalIntervalForConfigWithoutWebhooksMatchesBudget deterministic (#11759)
+
+## 2026-10-14 (v5.166.0)
+
+### Added
+
+- A Kubernetes or Podman hive that was expected to run per-agent UID isolation but booted on the shared dev UID (UID map missing or unreadable) now raises a failing `uid_isolation` health check ([#11713](https://github.com/hivecommons/hive/issues/11713)). Previously the manager only logged "no UID map found, agents will share dev UID" and agents silently ran with no per-agent scoped GitHub tokens — 21 hives sat in that state for up to two weeks (#11707). The check appears in the dashboard health summary and `/api/health/deep`, and the hub raises its `health-check-failing` fleet alert; its detail names the remedy (restart on an image that includes #11706, or delete the empty `/data/.hive/uid-map.json` and restart) and links [troubleshooting.md](src/docs/troubleshooting.md#hive_agent_token_cache-unset-no-read-credential-available).
+
+## 2026-10-13 (v5.165.3)
+
+### Security
+
+- The built-in `project.label_driven_trusted_bots` default no longer includes `github-actions[bot]`, which is the shared identity of every workflow in a repo (including ones triggered by untrusted events), so a workflow-applied `triage/accepted` label could clear the label-driven approval and self-authorization gates without a person. Only `kubestellar-prow[bot]` stays trusted by default; operators whose Prow emulation runs as `github-actions[bot]` must add it explicitly per deployment via `label_driven_trusted_bots` (hivecommons/hive#11737).
+
+## 2026-10-13 (v5.165.2)
+
+### Fixed
+
+- Hub-managed upgrades now patch a spoke Deployment directly after the heartbeat fallback stays armed too long, so a crash-looping spoke that never reaches its self-upgrade minimum uptime can still receive the target image.
+
+## 2026-10-13 (v5.165.1)
+
+### Fixed
+
+- The arm64 agent image now ships an arm64 Go toolchain; it previously copied the amd64 build-platform toolchain, so `go` failed in-pod with `Exec format error`. The toolchain now comes from a target-platform `agent-go` stage, and a `go-real version` build step fails the image build on any arch mismatch. ([#11726](https://github.com/hivecommons/hive/issues/11726))
+- Clicking an agent's terminal action opens the terminal directly again. #11262 had replaced the new-tab open with an unconditional "Terminal URL for <agent>" modal that made every terminal session a two-click affair; the tab is now reserved synchronously in the click handler (so browsers do not popup-block it after the handoff await) and the URL modal remains only as the fallback when the popup is genuinely blocked (#11738)
+- Fixed the image build broken by the arm64 Go toolchain fix (#11726): the new `agent-go` stage was declared between `builder`'s `FROM` and its build steps, so `/hive`, `/bd` and `/hivectl` were never built and `COPY --from=builder` failed. The stage is now declared before `builder`.
+- Keep the Governor NEXT RUN tile aligned with the effective eval interval and label active-loop lag as delayed instead of stale overdue.
+
+### Security
+
+- The sentinel sweep now reads its per-head state (which head was alerted on and whether a maintainer cleared `sentinel-alert`) only from comments one of the hive's own accounts wrote. Previously any comment containing the `<!-- hive-sentinel --> <head>` marker counted, so a PR author could post one carrying the alert heading and the sweep would treat the unlabelled head as already cleared and never apply the label; the sweep also edited that comment in place instead of posting its own. A hive that cannot name its own accounts keeps the previous any-author rule, matching the label-approval marker check.
+
+## 2026-10-13 (v5.165.0)
+
+### Added
+
+- **Label-driven approval via `triage/accepted` on Prow-style repos** ([#11313](https://github.com/hivecommons/hive/issues/11313)). Strictly opt-in per repository (`project.repo_policies[].label_driven: true`, now also editable from Settings → Repos): a trusted addition of an approval label (default `triage/accepted`, `project.label_driven_approval_labels` / per-repo override) releases a parked issue exactly like `/hive approve` — Hive-added `needs-human`/`needs-decision`/`needs-direction` removed, `approved-direction` added, one reply — and counts as human sign-off for `pr_self_authorization`, with no `/hive` comment required. Only the latest `labeled` event's actor is checked: an allowlisted bot (`project.label_driven_trusted_bots`), a collaborator whose `role_name` is triage/write/maintain/admin, or a public org member when `project.label_driven_trust_org_members` is on (default, Prow's rule); anything else or an unreadable timeline fails closed. On label-driven repos `/hive approve|decision` also accept the GitHub **triage** role and remove Hive-added park labels only; person-added park labels and `hold`/`do-not-merge` still park. Globally, an `issues` `labeled`/`unlabeled` webhook now lets the un-park sweep run within ~30 s instead of the 5-minute poll, and once-only reply markers are honoured only when the hive's own identity wrote them. Repos without `label_driven` are otherwise unchanged.
+
 ## 2026-10-13 (v5.164.0)
 
 ### Added

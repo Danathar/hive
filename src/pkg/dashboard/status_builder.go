@@ -315,7 +315,7 @@ func BuildFrontendStatus(
 		Agents:                agents,
 		HiddenAgents:          hiddenAgents,
 		ConfiguredAgents:      buildConfiguredAgents(cfg),
-		Governor:              buildGovernorWithLaneDepths(govState, cfg, buildLaneQueueDepths(cfg, actionable)),
+		Governor:              buildGovernorWithLaneDepths(govState, cfg, buildLaneQueueDepths(cfg, actionable), apiBudgetFromRateLimits(ghRateLimits)),
 		Tokens:                buildTokens(tokenCollector),
 		Repos:                 repos,
 		OverviewKPIIncomplete: overviewKPIIncomplete(cfg, actionable),
@@ -1842,11 +1842,11 @@ func cadenceDisplay(c config.Cadence) string {
 	return c.ShortLabel(time.Now())
 }
 
-func buildGovernor(state governor.State, cfg *config.Config) FrontendGovernor {
-	return buildGovernorWithLaneDepths(state, cfg, nil)
+func buildGovernor(state governor.State, cfg *config.Config, apiBudget ...map[string]any) FrontendGovernor {
+	return buildGovernorWithLaneDepths(state, cfg, nil, apiBudget...)
 }
 
-func buildGovernorWithLaneDepths(state governor.State, cfg *config.Config, laneDepths map[string]int) FrontendGovernor {
+func buildGovernorWithLaneDepths(state governor.State, cfg *config.Config, laneDepths map[string]int, apiBudget ...map[string]any) FrontendGovernor {
 	// The gauge must show the thresholds the governor ACTUALLY laddered on, or
 	// it explains the current mode with numbers that did not produce it. This
 	// used to be a private copy of the defaults plus its own explicit-wins
@@ -1863,12 +1863,12 @@ func buildGovernorWithLaneDepths(state governor.State, cfg *config.Config, laneD
 	nextKick := ""
 	nextKickAt := ""
 	nextKickIn := ""
-	if cfg.Governor.EvalIntervalS > 0 {
+	if interval := governorStatusEvalInterval(cfg, apiBudget...); interval > 0 {
 		base := time.Now()
 		if !state.LastEval.IsZero() {
 			base = state.LastEval
 		}
-		next := base.Add(time.Duration(cfg.Governor.EvalIntervalS) * time.Second)
+		next := base.Add(interval)
 		nextKick = formatHumanTime(next)
 		nextKickAt = next.UTC().Format(time.RFC3339)
 		nextKickIn = formatETA(time.Until(next))
@@ -1940,6 +1940,44 @@ func cloneStringStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func governorStatusEvalInterval(cfg *config.Config, apiBudget ...map[string]any) time.Duration {
+	if cfg == nil || cfg.Governor.EvalIntervalS <= 0 {
+		return 0
+	}
+	base := cfg.Governor.EvalIntervalS
+	effective := base
+	switch governorAPIBudgetMode(apiBudget...) {
+	case "critical":
+		effective = base * 4
+	case "conserve":
+		multiplier := cfg.Governor.ConserveIntervalMultiplier
+		if multiplier < 1 {
+			multiplier = 2
+		}
+		effective = base * multiplier
+	}
+	if cfg.Governor.EvalIntervalMaxS > 0 && effective > cfg.Governor.EvalIntervalMaxS {
+		effective = cfg.Governor.EvalIntervalMaxS
+	}
+	if cfg.Governor.EvalIntervalWebhookS > effective && github.WebhookHealthSnapshot().Healthy {
+		effective = cfg.Governor.EvalIntervalWebhookS
+		if cfg.Governor.EvalIntervalMaxS > 0 && effective > cfg.Governor.EvalIntervalMaxS {
+			effective = cfg.Governor.EvalIntervalMaxS
+		}
+	}
+	return time.Duration(effective) * time.Second
+}
+
+func governorAPIBudgetMode(apiBudget ...map[string]any) string {
+	if len(apiBudget) == 0 || apiBudget[0] == nil {
+		return ""
+	}
+	if mode, _ := apiBudget[0]["mode"].(string); mode != "" {
+		return strings.ToLower(mode)
+	}
+	return ""
 }
 
 func buildTokens(collector *tokens.Collector) FrontendTokens {
