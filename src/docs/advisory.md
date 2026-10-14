@@ -304,6 +304,36 @@ time and any error; on the spoke, `posted advisory digest` is logged at INFO on
 every successful update, and `advisory digest not posted` at WARN when there is
 nothing to post to.
 
+## When the write is refused
+
+GitHub answers `403 Resource not accessible by integration` when an
+installation token may not act on the resource. For the digest that happens
+in three shapes, none of them transient: the existing digest comment was
+authored by another identity, the repository was removed from the App
+installation, or — the most confusing — the repository was **transferred to
+another owner**. GitHub follows the rename redirect on every read, so the hive
+still finds the advisory issue and its digest comment under the old
+`owner/repo`, but the installation token is bound to the old owner and every
+write is refused.
+
+What the hive does:
+
+- A refused (403) or vanished (404) **edit** of the existing digest comment
+  falls back to **creating a fresh comment** under the hive App's own identity;
+  later cycles find and edit that one. Transient failures (5xx, rate limit)
+  do not fall back and are retried next cycle as before.
+- If the **create** is refused too, the hive probes the repository's canonical
+  name. When it has moved, the recorded error — shown on the hub health row and
+  the dashboard App banner — names the move and the remedy: install the hive
+  App on the new owner if it is not already, then update the hive's configured
+  repo to the new `owner/repo`. Otherwise the existing write-forbidden
+  diagnosis (repo not in the installation's selected repositories) applies.
+- Post attempts then **pause** for `governor.advisory.post_retry_backoff_s`
+  (default `3600`; `HIVE_ADVISORY_POST_RETRY_BACKOFF_S` overrides the default;
+  negative disables the pause) instead of re-sending the same refused write
+  every eval cycle. The recorded error stays visible for the whole window; a
+  successful post — e.g. after the operator repoints the hive — clears it.
+
 ## How often the digest updates
 
 `governor.advisory.update_interval_s` — default `0`, meaning the digest is
@@ -318,7 +348,9 @@ Details worth knowing:
 - The throttle paces only the GitHub comment write. The digest itself, the
   dashboard view, and the status broadcast still refresh every cycle.
 - The window advances only on a **successful** post, so a failed write is
-  retried on the very next cycle rather than waiting out the interval.
+  retried on the very next cycle rather than waiting out the interval — except
+  a `403 Resource not accessible by integration`, which pauses attempts for
+  `post_retry_backoff_s` (see below).
 - A brand-new finding on a quiet hive posts immediately; only subsequent
   refreshes wait for the interval.
 - Byte-identical digests are skipped regardless of this setting, with a

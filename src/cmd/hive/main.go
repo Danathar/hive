@@ -6354,6 +6354,10 @@ func recordAdvisoryPostSuccess(repo string, now time.Time) {
 	advisoryPostGate.RecordSuccess(repo, now)
 }
 
+func recordAdvisoryPostForbidden(repo string, now time.Time, backoff time.Duration) {
+	advisoryPostGate.RecordWriteForbidden(repo, now, backoff)
+}
+
 // advisoryIssueMissingError is the error recorded (and reported to the hub) when
 // a hive has findings to publish but no advisory issue to publish them to. It is
 // deliberately an ERROR rather than a silent skip: the hub's staleness gate
@@ -7228,6 +7232,26 @@ func runEvalCycle(
 					logger.Warn("GitHub App write failed — cannot write issue comments",
 						"repo", primaryRepo, "state", state.String(),
 						"operator_actionable", state.OperatorActionable(), "detail", msg)
+				},
+				onRepoMoved: func(ctx context.Context, moved *github.RepoMovedError) {
+					// #11791: the write was refused because the repository
+					// now lives under another owner. The installation is
+					// healthy, so the generic write-forbidden remedy would
+					// misdirect the operator; name the move instead.
+					dashSrv.SetGitHubAppRequired(true)
+					dashSrv.SetGitHubAppPermIssue(moved.Error())
+					dashSrv.SetGitHubAppState(github.AppStateRepoMoved.String())
+					logger.Warn("GitHub App write failed — repository transferred to another owner",
+						"configured", moved.Configured, "current", moved.Current)
+				},
+				recordWriteForbidden: func(repo string) {
+					backoff := advCfg.PostRetryBackoff()
+					recordAdvisoryPostForbidden(repo, time.Now(), backoff)
+					if backoff > 0 {
+						logger.Warn("advisory digest write forbidden — pausing post attempts",
+							"repo", repo, "retry_after", backoff.String(),
+							"knob", "governor.advisory.post_retry_backoff_s")
+					}
 				},
 				onAuthFailure: func(ctx context.Context) {
 					// Same verdict function as boot and Re-check, so a healthy

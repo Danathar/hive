@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/advisory"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/github"
 )
 
 // digestSnapshotDeps are the GitHub reads pinDigestSnapshot needs to pin a
@@ -125,6 +127,14 @@ type advisoryPublishDeps struct {
 	onWriteForbidden func(ctx context.Context)
 	onAuthFailure    func(ctx context.Context)
 	onWriteProven    func(ctx context.Context)
+	// onRepoMoved runs INSTEAD of onWriteForbidden when the refused write was
+	// traced to a repository transferred to another owner (#11791): the
+	// write-forbidden banner's "tick the repo in this installation" remedy is
+	// wrong for that case, so the moved verdict gets its own hook.
+	onRepoMoved func(ctx context.Context, moved *github.RepoMovedError)
+	// recordWriteForbidden pauses further post attempts for repo after a
+	// non-transient 403, so the same refusal is not re-sent every eval cycle.
+	recordWriteForbidden func(repo string)
 }
 
 // advisoryPublishOutcome names how a cycle's digest publish ended, so the
@@ -237,7 +247,13 @@ func publishAdvisoryDigest(
 	logger.Warn("failed to post advisory digest via app", "repo", route.primaryRepo, "issue", route.issueNum, "error", err)
 	switch classifyAdvisoryPostError(err) {
 	case advisoryPostWriteForbidden:
-		if deps.onWriteForbidden != nil {
+		if deps.recordWriteForbidden != nil {
+			deps.recordWriteForbidden(route.primaryRepo)
+		}
+		var moved *github.RepoMovedError
+		if errors.As(err, &moved) && deps.onRepoMoved != nil {
+			deps.onRepoMoved(ctx, moved)
+		} else if deps.onWriteForbidden != nil {
 			deps.onWriteForbidden(ctx)
 		}
 	case advisoryPostRateLimited:
