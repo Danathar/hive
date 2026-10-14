@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.166.1)
+
+### Fixed
+
+- fix: name the upstream URL in inference-backend error responses (#11758)
+- fix: make TestEvalIntervalForConfigWithoutWebhooksMatchesBudget deterministic (#11759)
+
 ## 2026-10-14 (v5.166.0)
 
 ### Added
