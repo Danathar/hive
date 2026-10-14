@@ -240,7 +240,6 @@ governor.eval_interval_max_s # TODO #11854
 governor.eval_interval_s # TODO #11854
 governor.eval_interval_webhook_s # TODO #11854
 governor.explain_mode # TODO #11854
-governor.fleet_report.file_upstream # TODO #11854
 governor.gateways[].api_key_env # TODO #11854
 governor.gateways[].api_key_file # TODO #11854
 governor.gateways[].ca_bundle # TODO #11854
