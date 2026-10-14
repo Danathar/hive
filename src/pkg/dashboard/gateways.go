@@ -533,6 +533,7 @@ func (s *Server) handleGovernorGatewaysDiscover(w http.ResponseWriter, r *http.R
 		msg := redactSecret(err.Error(), key)
 		probe := map[string]interface{}{"ok": false, "error": msg}
 		probe["diagnostic"] = gatewayProbeDiagnosticText(probeGW, probe, key)
+		s.appendInferenceRouteForForm(probeGW, probe)
 		jsonResponse(w, map[string]interface{}{"ok": false, "error": msg, "diagnostic": probe["diagnostic"], "probe": probe})
 		return
 	}
@@ -549,6 +550,7 @@ func (s *Server) handleGovernorGatewaysDiscover(w http.ResponseWriter, r *http.R
 		msg := redactSecret(redactSecret(err.Error(), key), bearer)
 		probe := map[string]interface{}{"ok": false, "error": msg}
 		probe["diagnostic"] = gatewayProbeDiagnosticText(probeGW, probe, key)
+		s.appendInferenceRouteForForm(probeGW, probe)
 		jsonResponse(w, map[string]interface{}{"ok": false, "error": msg, "diagnostic": probe["diagnostic"], "probe": probe})
 		return
 	}
@@ -597,6 +599,7 @@ func (s *Server) gatewayProbeResult(gw config.GatewayConfig, overrideKey string)
 		}
 		probe := map[string]interface{}{"ok": false, "error": msg}
 		probe["diagnostic"] = gatewayProbeDiagnosticText(gw, probe, probeKey)
+		s.appendInferenceRouteDiagnostic(gw, probe, probeKey)
 		return probe
 	}
 	n, err := probeModelsWithHeaders(ep, bearer, headers)
@@ -609,6 +612,7 @@ func (s *Server) gatewayProbeResult(gw config.GatewayConfig, overrideKey string)
 		}
 		probe := map[string]interface{}{"ok": false, "error": msg}
 		probe["diagnostic"] = gatewayProbeDiagnosticText(gw, probe, probeKey)
+		s.appendInferenceRouteDiagnostic(gw, probe, probeKey)
 		return probe
 	}
 	if store := s.gatewayHealthStore(); store != nil {
@@ -616,6 +620,7 @@ func (s *Server) gatewayProbeResult(gw config.GatewayConfig, overrideKey string)
 	}
 	probe := map[string]interface{}{"ok": true, "model_count": n}
 	probe["diagnostic"] = gatewayProbeDiagnosticText(gw, probe, probeKey)
+	s.appendInferenceRouteDiagnostic(gw, probe, probeKey)
 	return probe
 }
 
@@ -640,11 +645,7 @@ func gatewayProbeDiagnosticText(gw config.GatewayConfig, probe map[string]interf
 		b.WriteString(keyName)
 		if hash := config.APIKeySHA256(key); hash != "" {
 			b.WriteString(" · SHA256: ")
-			if len(hash) > 12 {
-				b.WriteString(hash[:12])
-			} else {
-				b.WriteString(hash)
-			}
+			b.WriteString(shortKeyHash(hash))
 		}
 	}
 	if ok, _ := probe["ok"].(bool); ok {
