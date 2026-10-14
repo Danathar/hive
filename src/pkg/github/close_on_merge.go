@@ -73,6 +73,10 @@ type CloseOnMergeSweep struct {
 	SkippedSettled int
 	// SkippedNotFresh counts claims older than Options.MergedAfter.
 	SkippedNotFresh int
+	// SkippedReopened counts merged claims whose issue a person reopened
+	// after the merge (IssueClaim.ReopenedAfterMerge); they are never
+	// re-closed for that PR and cost no API call.
+	SkippedReopened int
 	// Marked counts claims whose settled marker this pass set or refreshed.
 	Marked int
 }
@@ -168,6 +172,13 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 			continue
 		}
 		if claim.Reference {
+			continue
+		}
+		// A person reopened the issue after this PR merged: never close it
+		// for this PR again, and spend no API call finding that out.
+		if claim.ReopenedAfterMerge() {
+			sweep.SkippedReopened++
+			sweep.Results = append(sweep.Results, CloseOnMergeResult{Repo: claim.Repo, Issue: claim.Issue, PR: claim.PRNumber, Action: CloseOnMergeSkipped, Reason: "reopened_after_merge"})
 			continue
 		}
 		if closeOnMergeClaimSettled(claim, now, recheck) {

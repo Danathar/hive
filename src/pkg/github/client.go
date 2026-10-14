@@ -540,11 +540,16 @@ type Issue struct {
 	// relay split out of a human-filed or human-acknowledged parent
 	// (hivecommons/hive#9840). Empty when HumanAcknowledged was earned on the
 	// issue (label, assignee) or is false.
-	AckSource string    `json:"ack_source,omitempty"`
-	Labels    []string  `json:"labels"`
-	Assignees []string  `json:"assignees"`
-	Priority  string    `json:"priority,omitempty"`
-	State     string    `json:"state,omitempty"`
+	AckSource string   `json:"ack_source,omitempty"`
+	Labels    []string `json:"labels"`
+	Assignees []string `json:"assignees"`
+	Priority  string   `json:"priority,omitempty"`
+	State     string   `json:"state,omitempty"`
+	// Reopened is GitHub's state_reason == "reopened": the issue was closed
+	// at least once and a person opened it again. The duplicate-PR guard uses
+	// it to decide which merged claims to re-examine (ClaimLedger.
+	// ReconcileReopenedIssues) without a timeline read per issue per pass.
+	Reopened  bool      `json:"reopened,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is GitHub's last-activity timestamp for the issue (new commits
 	// referencing it, comments, label/assignee changes, …). It is the
@@ -624,7 +629,10 @@ type IssueClaimContext struct {
 	Reference      bool      `json:"reference,omitempty"`
 	MergedPR       bool      `json:"merged_pr,omitempty"`
 	MergedAt       time.Time `json:"merged_at,omitempty"`
-	Decision       string    `json:"decision"`
+	// ReopenedAt is set with Decision ClaimDecisionReopenedAfterMerge: when a
+	// person reopened the issue after the PR named here merged.
+	ReopenedAt time.Time `json:"reopened_at,omitempty"`
+	Decision   string    `json:"decision"`
 }
 
 type PullRequest struct {
@@ -1428,6 +1436,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			AckSource:         ackSource,
 			Labels:            labels,
 			Assignees:         extractAssignees(issue.Assignees),
+			Reopened:          strings.EqualFold(issue.GetStateReason(), issueStateReasonReopened),
 			CreatedAt:         issue.GetCreatedAt().Time,
 			UpdatedAt:         issue.GetUpdatedAt().Time,
 			AgeMinutes:        ageMinutes,

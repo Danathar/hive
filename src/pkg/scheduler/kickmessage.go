@@ -138,6 +138,14 @@ func (s *Scheduler) formatIssueListWithPolicy(issues []github.Issue) (string, bo
 		if diff := s.upstreamPortDiffURL(issue); diff != "" {
 			b.WriteString(fmt.Sprintf("    ↳ upstream patch: %s — read it first, then port the change to this fork by hand; do not cherry-pick across repos\n", diff))
 		}
+		if issue.ClaimContext != nil && issue.ClaimContext.Decision == github.ClaimDecisionReopenedAfterMerge {
+			prRef := fmt.Sprintf("%s#%d", issue.ClaimContext.PRRepo, issue.ClaimContext.PRNumber)
+			b.WriteString(fmt.Sprintf("    ↳ reopened after %s merged", prRef))
+			if issue.ClaimContext.PRURL != "" {
+				b.WriteString(fmt.Sprintf(" (%s)", issue.ClaimContext.PRURL))
+			}
+			b.WriteString(": that fix did not resolve it — read the reporter's reopen comment, then implement what is still missing; do NOT re-verify, re-label likely-done, or close it\n")
+		}
 		if issue.ClaimContext != nil && issue.ClaimContext.MergedPR {
 			reason := "weakly claimed"
 			if issue.ClaimContext.Reference {

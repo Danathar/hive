@@ -8917,8 +8917,32 @@ func getClaimLedger(logger *slog.Logger) *github.ClaimLedger {
 				"path", claimLedgerPath, "error", err)
 		}
 		claimLedger = ledger
+		// A person reopening an issue after its closing PR merged voids the
+		// merged claim right away (hivecommons/hive#9945 sat likely-done for
+		// hours after a /reopen); the enumeration pass is the fallback when
+		// webhooks are not delivered.
+		github.SetIssueReopenedHook(issueReopenedHookFor(ledger, logger))
 	})
 	return claimLedger
+}
+
+// issueReopenedHookFor builds the webhook hook that voids a merged claim on a
+// reopened issue and persists the ledger, logging `reopened issue re-queued`.
+func issueReopenedHookFor(ledger *github.ClaimLedger, logger *slog.Logger) github.IssueReopenedHook {
+	return func(repo string, number int, at time.Time) {
+		if ledger == nil || !ledger.MarkIssueReopened(repo, number, at) {
+			return
+		}
+		claim, _ := ledger.LookupAny(repo, number)
+		if logger != nil {
+			logger.Info("reopened issue re-queued: merged PR claim voided",
+				"repo", repo, "issue", number, "claimed_by_pr", claim.PRNumber, "pr_repo", claim.PRRepo,
+				"pr_url", claim.PRURL, "merged_at", claim.MergedAt, "reopened_at", at, "source", "webhook")
+		}
+		if err := ledger.Save(); err != nil && logger != nil {
+			logger.Warn("reopened issue: failed to persist claim ledger", "repo", repo, "issue", number, "error", err)
+		}
+	}
 }
 
 // claimingPRRedStale builds the Fix #3 release predicate: given a claiming PR
