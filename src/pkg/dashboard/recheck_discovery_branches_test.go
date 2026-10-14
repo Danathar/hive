@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,14 +64,18 @@ func TestCollectRecheckDiscoveryRunsConfiguredSources(t *testing.T) {
 	}))
 	defer ghSrv.Close()
 
+	feedURL, err := url.Parse(feed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
+	cfg.Variables.Security.HTTPAllowlist = []string{feedURL.Hostname(), "api.github.com"}
 	disc := &cfg.Runs.Spektacular.Recheck.Discovery
 	disc.Enabled = true
 	disc.Timeout = 5 * time.Second
 	disc.Sources = []config.SpektacularRecheckDiscoverySource{
 		{Kind: "standards_feed", Name: "feed", URLOrRepo: feed.URL},
 		{Kind: "upstream_release", Name: "up", URLOrRepo: "owner/repo"},
-		{Kind: "unknown_kind", Name: "weird", URLOrRepo: "x"},
 	}
 	s := &Server{deps: &Dependencies{
 		Config:   cfg,
@@ -78,13 +83,23 @@ func TestCollectRecheckDiscoveryRunsConfiguredSources(t *testing.T) {
 	}}
 	items, failures := s.collectRecheckDiscovery(context.Background(), Campaign{}, time.Time{})
 	if len(items) != 2 {
-		t.Fatalf("items = %#v, want feed item and release", items)
+		t.Fatalf("items = %#v / failures = %#v, want feed item and release", items, failures)
 	}
 	if items[0].Kind != "standards_feed" || items[1].Kind != "upstream_release" {
 		t.Fatalf("kinds = %q/%q, want source order preserved", items[0].Kind, items[1].Kind)
 	}
-	if len(failures) != 1 || failures[0].Name != "weird" || failures[0].Reason != "bad_kind" {
-		t.Fatalf("failures = %#v, want bad_kind for unknown source", failures)
+	if len(failures) != 0 {
+		t.Fatalf("failures = %#v, want none", failures)
+	}
+
+	// Validation at use rejects an unknown kind before any source runs.
+	disc.Sources = append(disc.Sources, config.SpektacularRecheckDiscoverySource{Kind: "unknown_kind", Name: "weird", URLOrRepo: "x"})
+	items, failures = s.collectRecheckDiscovery(context.Background(), Campaign{}, time.Time{})
+	if items != nil {
+		t.Fatalf("items = %#v, want nil when config validation fails", items)
+	}
+	if len(failures) != 1 || failures[0].Name != "config" {
+		t.Fatalf("failures = %#v, want a single config failure for unknown source", failures)
 	}
 }
 
