@@ -1646,6 +1646,8 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 		logger.Error("failed to load journey nudge state", "error", err)
 	}
 	s.loadAlertAcks()
+	// After the acks, so an ack's FirstSeen wins over the bookkeeping file (#11826).
+	s.loadAlertState()
 	// F10: restore the session revocation set BEFORE the mux starts serving, so
 	// a hub that has just rolled never honours a session revoked before it.
 	s.loadRevokedSessions()
@@ -1765,6 +1767,8 @@ func (s *HubServer) Shutdown(timeout time.Duration) error {
 	// Before the listener check: a server shut down before Start still owes
 	// its history a flush, and SaveNow is nil-safe and dirty-gated.
 	s.reachHistory.SaveNow()
+	// Flush fleet-alert bookkeeping so a hub roll does not forget it (#11826).
+	s.saveAlertState()
 	s.httpMu.Lock()
 	srv := s.httpServer
 	s.httpMu.Unlock()

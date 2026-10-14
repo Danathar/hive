@@ -301,6 +301,10 @@ type alertState struct {
 	firstSeen map[string]time.Time
 	// acks holds acknowledgements. Key: alertAckKey(hiveID, type).
 	acks map[string]alertAck
+	// hubStartedAt is when this hub process began serving (set by the
+	// production lifecycle via markHubStart, zero in tests). Restart-sensitive
+	// rules are suppressed for alertHubRestartGrace after it (#11826).
+	hubStartedAt time.Time
 }
 
 // alertStartObservation is one observed spoke process start time.
@@ -958,7 +962,8 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 			state.noteUpgrade(h.ID, h.UpgradeStartedAt)
 		}
 		restarts := state.observeStart(h.ID, h.StartedAt, now)
-		if restarts >= alertCrashLoopMinRestarts && recentlyStarted(h.StartedAt, now) {
+		if restarts >= alertCrashLoopMinRestarts && recentlyStarted(h.StartedAt, now) &&
+			!state.suppressedByHubRestart(h.ID, AlertTypeCrashLoop, now) {
 			add(h.ID, h.Name, AlertTypeCrashLoop, AlertSeverityCritical,
 				"Restarted "+itoa(restarts)+" times in the last "+
 					alertCrashLoopWindow.String()+" and has been up under "+
@@ -973,7 +978,7 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 		// LastHeartbeat left; for an assigned hive the persisted went-offline
 		// time (OfflineSince) stands in, so the alert outlives the prune
 		// instead of vanishing after 24h (#11644). ---
-		if !h.Online {
+		if !h.Online && !state.suppressedByHubRestart(h.ID, AlertTypeOffline, now) {
 			if age, ok := heartbeatAge(h.LastHeartbeat, now); ok && age > alertOfflineThreshold {
 				add(h.ID, h.Name, AlertTypeOffline, AlertSeverityCritical,
 					"No heartbeat for "+roundedDuration(age))
