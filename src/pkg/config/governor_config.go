@@ -171,17 +171,57 @@ type GovernorConfig struct {
 
 // FleetReportConfig controls upstream fleet self-reporting.
 type FleetReportConfig struct {
-	// FileUpstream is the explicit opt-in to create/comment on hivecommons/hive.
-	// The zero value is dry-run, which still surfaces the would-file reports on
-	// the dashboard for operator review.
+	// FileUpstream is the legacy explicit opt-in to create/comment on the
+	// report repo. Kept for existing hive.yaml files; Enabled supersedes it.
 	FileUpstream bool `yaml:"file_upstream,omitempty" json:"file_upstream,omitempty"`
+	// Enabled is the tri-state switch. nil = default: ON for hub-managed
+	// spokes and OFF for self-hosted hives. An explicit false wins over
+	// file_upstream.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Repo is the owner/name the reports are filed on. Empty = hivecommons/hive.
+	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	// MaxPerDay caps new issues this hive may open per 24h. 0 = default 5.
+	MaxPerDay int `yaml:"max_per_day,omitempty" json:"max_per_day,omitempty"`
 }
 
 type FleetConfig struct {
 	RunWaitAmberSeconds int64 `yaml:"run_wait_amber_seconds,omitempty" json:"run_wait_amber_seconds,omitempty"`
 }
 
-func (f FleetReportConfig) DryRun() bool { return !f.FileUpstream }
+// DefaultFleetReportRepo is where self-reports land unless overridden.
+const DefaultFleetReportRepo = "hivecommons/hive"
+
+const defaultFleetReportMaxPerDay = 5
+
+// DryRun is the legacy accessor: dry-run unless file_upstream is set. It
+// ignores the hosted default; callers that know whether the hive is
+// hub-managed should use FilesUpstream.
+func (f FleetReportConfig) DryRun() bool { return !f.FilesUpstream(false) }
+
+// FilesUpstream resolves the tri-state: explicit enabled wins, then the legacy
+// file_upstream opt-in, then the hosted default.
+func (f FleetReportConfig) FilesUpstream(hubManaged bool) bool {
+	if f.Enabled != nil {
+		return *f.Enabled
+	}
+	return f.FileUpstream || hubManaged
+}
+
+// EffectiveRepo returns the report repo, applying the default.
+func (f FleetReportConfig) EffectiveRepo() string {
+	if r := strings.TrimSpace(f.Repo); r != "" {
+		return r
+	}
+	return DefaultFleetReportRepo
+}
+
+// EffectiveMaxPerDay returns the new-issue daily cap, applying the default.
+func (f FleetReportConfig) EffectiveMaxPerDay() int {
+	if f.MaxPerDay > 0 {
+		return f.MaxPerDay
+	}
+	return defaultFleetReportMaxPerDay
+}
 
 type LabelsConfig struct {
 	Exempt []string `yaml:"exempt"`

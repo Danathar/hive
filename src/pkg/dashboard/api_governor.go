@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/classify"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/hooks"
@@ -1853,26 +1852,6 @@ func litellmSectionResponse(lc *config.LiteLLMConfig) map[string]interface{} {
 		// NAME appearing in the source string.
 		"keySource": redactSecret(lc.ResolveAPIKeySource(), key),
 	}
-}
-
-// classifierSectionResponse surfaces the effective tier-classification keyword
-// lists (Phase 4 Part C) to the dashboard governor-config view. It returns the
-// keywords actually in force — config-driven when a `classifier:` block is set,
-// else the built-in defaults — so operators can see and (via hive.yaml) edit
-// which title keywords map issues to the Simple/Complex tiers. classify.SetLanes
-// already surfaces per-agent lane_keywords per-agent; these are the analogous
-// global tier lists.
-func classifierSectionResponse(cfgs ...*config.Config) map[string]interface{} {
-	simple, complex := classify.TierKeywords()
-	out := map[string]interface{}{
-		"simpleKeywords": simple,
-		"complexSignals": complex,
-	}
-	if len(cfgs) > 0 && cfgs[0] != nil {
-		out["simple_keywords"] = append([]string{}, cfgs[0].Classifier.SimpleKeywords...)
-		out["complex_signals"] = append([]string{}, cfgs[0].Classifier.ComplexSignals...)
-	}
-	return out
 }
 
 // liteLLMProbeResult runs the live probe against the effective endpoint
