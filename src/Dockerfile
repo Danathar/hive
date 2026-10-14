@@ -10,6 +10,13 @@
 #     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
 #     https://registry-1.docker.io/v2/library/golang/manifests/1.27-alpine | grep -i docker-content-digest
 # and update both the tag and the @sha256 digest together.
+# No --platform: resolves to the target platform so the agent Go toolchain
+# copied into the runtime image matches its arch (#11726). This stage must be
+# declared BEFORE builder: every instruction after a FROM belongs to that
+# stage, so placing it after builder's FROM hijacked the builder steps and
+# left /hive, /bd, /hivectl unbuilt (v5 docker build broke on 470c2002).
+FROM public.ecr.aws/docker/library/golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS agent-go
+
 FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 RUN apk add --no-cache git
 WORKDIR /src
@@ -487,8 +494,9 @@ ARG GIT_HASH=unknown
 
 # Go toolchain for agents. The wrapper below blocks in-pod test/vet
 # execution by agents while preserving build/fmt/mod/etc.
-COPY --from=builder /usr/local/go /usr/local/go
+COPY --from=agent-go /usr/local/go /usr/local/go
 RUN mv /usr/local/go/bin/go /usr/local/go/bin/go-real
+RUN /usr/local/go/bin/go-real version
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 COPY --from=builder /hive /usr/local/bin/hive
