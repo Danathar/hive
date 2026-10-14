@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.168.0)
+
+### Added
+
+- dashboard settings: expose every `notifications.*` key — Discord bot token (write-only), channel id, allowed users, factory and hosted-request webhooks (write-only), and the hub GitHub activity feed (`notifications.github_activity.*`), with YAML-key hints and restart notes (#11854)
+- dedupe: the hive now closes an advisory-only dedupe checklist (`triage/advisory`, marker `<!-- hive:dedupe-checklist repo=… -->`) with a one-line comment once every `#N` it references is closed or merged, or 7 days after it was filed. When the dedupe agent rewrites one to `Decision required: yes`, the hive swaps `triage/advisory` for `needs-decision` and posts the "What to reply" notice. Both run in the close-on-merge backfill (#11871)
+
+### Fixed
+
+- Hub-instructed self-upgrades now drain first: while any agent's kicked turn is still running the spoke defers the restart and withholds new kicks, then upgrades once those turns end or `hub.upgrade_drain_timeout_s` (default 45 min; negative disables) elapses, logging any kicks it had to cut (#11876).
+- agent: diffNewLines emits only changed lines on full-frame redraw (#11913)
+- watchdog: don't flag agents the governor deliberately does not kick (#11914)
+
 ## 2026-10-14 (v5.167.0)
 
 ### Added
