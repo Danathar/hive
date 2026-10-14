@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-14 (v5.166.2)
+
+### Changed
+
+- Kick log headers now record `hive_version:`, `hive_commit:`, `backend:`, `model:` and `tmux_session:` alongside the existing keys, sourced from the same build info the dashboard version endpoint reports ([#11764](https://github.com/hivecommons/hive/issues/11764)). The dashboard's live "log (current run)" view and download now lead with the identical header (`captured:` instead of `archived:`, `reason: live`), so an operator can diff a live capture against the archived kick log byte for byte apart from those two fields ([#11763](https://github.com/hivecommons/hive/issues/11763)).
+
 ## 2026-10-14 (v5.166.1)
 
 ### Fixed
