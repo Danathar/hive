@@ -227,18 +227,18 @@ func TestCommenterMayUnparkEdgeCases(t *testing.T) {
 	server := newUnparkFailServer(t, s)
 	c := newTestClient(t, server, "org", []string{"repo"})
 
-	ok, err := c.commenterMayUnpark(context.Background(), "org", "repo", "  ")
+	ok, err := c.commenterMayUnpark(context.Background(), "org", "repo", "  ", false)
 	if err != nil || ok {
 		t.Fatalf("blank login: ok=%v err=%v, want false/nil", ok, err)
 	}
-	ok, err = c.commenterMayUnpark(context.Background(), "org", "repo", "someone")
+	ok, err = c.commenterMayUnpark(context.Background(), "org", "repo", "someone", false)
 	if err != nil || ok {
 		t.Fatalf("triage: ok=%v err=%v, want false/nil", ok, err)
 	}
 
 	s.failPath = "collaborators/"
 	s.failStatus = http.StatusInternalServerError
-	ok, err = c.commenterMayUnpark(context.Background(), "org", "repo", "someone")
+	ok, err = c.commenterMayUnpark(context.Background(), "org", "repo", "someone", false)
 	if err == nil || ok {
 		t.Fatalf("lookup failure must be an error, not permission: ok=%v err=%v", ok, err)
 	}
