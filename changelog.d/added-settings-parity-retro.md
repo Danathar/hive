@@ -1,1 +1,0 @@
-- Expose retro lane settings (scan interval, fix-attempt, kick and long-stall thresholds, recent-closed window) in the dashboard Settings dialog.
