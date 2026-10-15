@@ -12654,6 +12654,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           })()}${kickOutcomeBadgeHtml(a)}${agentSpendChip(a.name)}</div>
           ${agentNowHtml(a)}
           ${agentBlockerLineHtml(a)}
+          ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence, a.inferenceLastError)}
           ${(() => {
             // Last upstream/launch error stays on its own line below the state
             // badge, never behind the working-indicator dot — previously the

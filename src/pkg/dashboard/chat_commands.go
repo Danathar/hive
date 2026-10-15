@@ -82,6 +82,13 @@ func (s *Server) chatCommandHintAnswer(query string) (string, bool) {
 }
 
 func (s *Server) chatStatusRuns() []Run {
+	if s.SpektacularStatus() != nil {
+		runs, err := s.activeRuns(true)
+		if err != nil {
+			return nil
+		}
+		return runs
+	}
 	if status := s.chatStatusSnapshot(); status != nil {
 		return append([]Run(nil), status.Runs...)
 	}

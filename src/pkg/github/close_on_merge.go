@@ -179,29 +179,9 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 	// in the ledger for settledClaimRetention, so reading every one of them on
 	// every pass exhausts the App quota after a restart empties the caches.
 	openIssues := map[string]map[int]*gh.Issue{}
+	openIssueListFailed := map[string]bool{}
 	for _, claim := range claims {
 		if !candidate(claim) {
-			continue
-		}
-		key := c.closeOnMergeRepoKey(claim.Repo)
-		if _, seen := openIssues[key]; seen {
-			continue
-		}
-		open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
-		if err != nil {
-			if opts.Logger != nil {
-				opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
-			}
-			open = map[int]*gh.Issue{}
-		}
-		openIssues[key] = open
-	}
-	for _, claim := range claims {
-		if !candidate(claim) {
-			continue
-		}
-		issue, ok := openIssues[c.closeOnMergeRepoKey(claim.Repo)][claim.Issue]
-		if !ok {
 			continue
 		}
 		// A person reopened the issue after this PR merged: never close it
@@ -218,6 +198,29 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 		if !opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter) {
 			sweep.SkippedNotFresh++
 			continue
+		}
+		var issue *gh.Issue
+		key := c.closeOnMergeRepoKey(claim.Repo)
+		if _, seen := openIssues[key]; !seen && !openIssueListFailed[key] {
+			open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
+			if err != nil {
+				if opts.Logger != nil {
+					opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
+				}
+				openIssueListFailed[key] = true
+			} else {
+				openIssues[key] = open
+			}
+		}
+		if open, ok := openIssues[key]; ok {
+			if issue = open[claim.Issue]; issue == nil {
+				res := CloseOnMergeResult{Repo: claim.Repo, Issue: claim.Issue, PR: claim.PRNumber, Action: CloseOnMergeAlreadyDone, Reason: "issue_not_open"}
+				sweep.Results = append(sweep.Results, res)
+				if ledger.MarkCloseOnMergeSettled(claim.Repo, claim.Issue, claim.PRNumber, now) {
+					sweep.Marked++
+				}
+				continue
+			}
 		}
 		pr, err := c.getPullRequestForCloseOnMerge(ctx, claim.PRRepo, claim.PRNumber)
 		if err != nil {
