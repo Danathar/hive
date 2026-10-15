@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	CloseOnMergeMarker          = "<!-- hive-close-on-merge -->"
-	closeOnMergeAwaitingMarker  = "<!-- hive-close-on-merge: awaiting-confirmation -->"
-	closeOnMergeCommentPageSize = 100
+	CloseOnMergeMarker                  = "<!-- hive-close-on-merge -->"
+	closeOnMergeAwaitingMarker          = "<!-- hive-close-on-merge: awaiting-confirmation -->"
+	closeOnMergeCommentPageSize         = 100
+	closeOnMergeOpenIssueBatchThreshold = 20
 	// reopenedAfterMergeMarkerFormat marks an issue a person reopened after
 	// the given PR merged. It is PR-specific and must not contain
 	// CloseOnMergeMarker, which is matched issue-wide and would also block a
@@ -180,6 +181,13 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 	// every pass exhausts the App quota after a restart empties the caches.
 	openIssues := map[string]map[int]*gh.Issue{}
 	openIssueListFailed := map[string]bool{}
+	eligibleByRepo := map[string]int{}
+	for _, claim := range claims {
+		if !candidate(claim) || claim.ReopenedAfterMerge() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
+			continue
+		}
+		eligibleByRepo[c.closeOnMergeRepoKey(claim.Repo)]++
+	}
 	for _, claim := range claims {
 		if !candidate(claim) {
 			continue
@@ -201,15 +209,17 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 		}
 		var issue *gh.Issue
 		key := c.closeOnMergeRepoKey(claim.Repo)
-		if _, seen := openIssues[key]; !seen && !openIssueListFailed[key] {
-			open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
-			if err != nil {
-				if opts.Logger != nil {
-					opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
+		if eligibleByRepo[key] >= closeOnMergeOpenIssueBatchThreshold {
+			if _, seen := openIssues[key]; !seen && !openIssueListFailed[key] {
+				open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
+				if err != nil {
+					if opts.Logger != nil {
+						opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
+					}
+					openIssueListFailed[key] = true
+				} else {
+					openIssues[key] = open
 				}
-				openIssueListFailed[key] = true
-			} else {
-				openIssues[key] = open
 			}
 		}
 		if open, ok := openIssues[key]; ok {
