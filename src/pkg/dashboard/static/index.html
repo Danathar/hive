@@ -8,6 +8,9 @@
   <meta property="og:description" content="Real-time dashboard for a Hive AI agent swarm. Monitor agents, governor mode, issues, PRs, and contributor activity across open source projects.">
   <meta property="og:type" content="website">
   <title>Hive Dashboard</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Hive">
   <link rel="stylesheet" href="/tokens.css">
   <link rel="stylesheet" href="/components.css">
   <style>
@@ -2617,6 +2620,10 @@
     .iphone-widget-fallback .hv-btn { margin: var(--sp-2) 0 0; }
     .iphone-widget-token-link { margin-left: var(--sp-3); font-size: var(--fs-sm); }
     .iphone-widget-note { color: var(--muted); font-size: var(--fs-sm); margin: 0 0 var(--sp-4); }
+    .iphone-widget-qr { margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2, var(--panel)); }
+    .iphone-widget-qr img { display:block; width: 200px; height: 200px; margin: var(--sp-2) 0; background: var(--infra-logo-chip-bg); padding: var(--sp-2); border-radius: var(--radius); image-rendering: pixelated; }
+    .iphone-widget-qr code { word-break: break-all; font-size: var(--fs-sm); }
+    .iphone-widget-qr .hv-btn { margin: var(--sp-2) var(--sp-2) 0 0; }
     .feedback-body { flex:1 1 auto; min-height:0; overflow:hidden; display:flex; flex-direction:column; padding:var(--sp-8); }
     .feedback-footer { flex:0 0 auto; position: sticky; bottom:0; z-index:2; display:flex; justify-content:flex-end; gap:var(--sp-4); padding:var(--sp-6) var(--sp-8); border-top:1px solid var(--border); background:var(--panel); }
     .feedback-tabs, .feedback-segmented { display:inline-flex; gap:var(--sp-1); padding:var(--sp-1); border:1px solid var(--border); border-radius:var(--r-pill); background:var(--bg-soft); }
@@ -6527,10 +6534,16 @@
           <ol class="iphone-widget-steps">
             <li><strong>Add the widget script to Scriptable.</strong><br>
               <button type="button" class="hv-btn btn-primary btn-sm" data-action="iphoneWidgetAddScript">Add script to Scriptable</button>
+              <button type="button" class="hv-btn btn-secondary btn-sm" data-action="iphoneWidgetCopyScriptURL">Copy script URL</button>
               <span class="iphone-widget-status" id="iphone-widget-add-status"></span>
               <div class="iphone-widget-fallback" id="iphone-widget-not-installed" hidden>Scriptable did not open — it is probably not installed. <a class="hv-btn btn-secondary btn-sm" href="${IPHONE_WIDGET_APP_STORE_URL}" target="_blank" rel="noopener noreferrer">Get Scriptable (free) ↗</a> then come back and tap the button again.</div>
             </li>
-            <li><strong>Set it up for this hive.</strong> Scriptable asks only for a GitHub token (fine-grained, no repository permissions — it just proves who you are; stored in the iOS Keychain).<br>
+            <li><strong>Set it up for this hive.</strong> Owners: create a <strong>read-only widget token</strong> — it can only read this widget's numbers, never change anything — and scan the QR code with the iPhone camera (or tap <em>Open in Scriptable</em> on the phone). Scriptable stores the hive URL and token in the iOS Keychain.<br>
+              <button type="button" class="hv-btn btn-primary btn-sm" data-action="iphoneWidgetMintToken">Create widget token &amp; QR</button>
+              <button type="button" class="hv-btn btn-secondary btn-sm" data-action="iphoneWidgetRevokeToken">Revoke widget token</button>
+              <span class="iphone-widget-status" id="iphone-widget-token-status"></span>
+              <div class="iphone-widget-qr" id="iphone-widget-qr" hidden></div>
+              <span class="iphone-widget-status">Not the owner? Use a GitHub token instead (fine-grained, no repository permissions — it just proves who you are):</span>
               <button type="button" class="hv-btn btn-secondary btn-sm" data-action="iphoneWidgetRunSetup">Set up this hive in Scriptable</button>
               <a class="iphone-widget-token-link" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">Create token ↗</a>
             </li>
@@ -6541,6 +6554,7 @@
       </div>`;
       overlay.addEventListener('click', (e) => { if (e.target === overlay) closeIPhoneWidgetModal(); });
       document.body.appendChild(overlay);
+      iphoneWidgetRefreshTokenStatus();
     }
     function closeIPhoneWidgetModal() { const el = document.getElementById('iphone-widget-overlay'); if (el) el.remove(); }
     // Navigate to a custom-scheme URL and report whether the page went to the
@@ -6584,6 +6598,78 @@
         if (notInstalled) notInstalled.hidden = false;
         showToast('Scriptable did not open. Install it (step 1) and make sure the script is named “' + IPHONE_WIDGET_SCRIPT_NAME + '”.', 'error');
       }
+    }
+    // Read-only widget token (owner only): the server returns the plaintext
+    // once, plus a QR of the scriptable:///run deep link carrying it. The token
+    // is shown here and never stored by the browser.
+    async function iphoneWidgetRefreshTokenStatus() {
+      const status = document.getElementById('iphone-widget-token-status');
+      if (!status) return;
+      try {
+        const resp = await fetch('/api/widget/token', { credentials: 'same-origin', cache: 'no-cache' });
+        if (!resp.ok) { status.textContent = ''; return; }
+        const d = await resp.json();
+        status.textContent = d.configured ? ('A widget token exists (created ' + (d.createdAt || 'earlier') + '; last used ' + (d.lastUsedAt || 'never') + '). Creating a new one replaces it.') : 'No widget token yet.';
+      } catch { status.textContent = ''; }
+    }
+    async function iphoneWidgetMintToken() {
+      const box = document.getElementById('iphone-widget-qr');
+      const status = document.getElementById('iphone-widget-token-status');
+      if (status) status.textContent = 'Creating widget token…';
+      let d = null;
+      try {
+        const resp = await fetch('/api/widget/token', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hiveUrl: iphoneWidgetHiveURL() }) });
+        d = await resp.json().catch(() => null);
+        if (!resp.ok || !d || !d.token) throw new Error((d && d.error) || ('HTTP ' + resp.status));
+      } catch (err) {
+        if (status) status.textContent = '';
+        showToast('Could not create a widget token: ' + (err && err.message ? err.message : err), 'error');
+        return;
+      }
+      if (status) status.textContent = 'Widget token created. It is shown only once — any earlier widget token no longer works.';
+      if (!box) return;
+      box.textContent = '';
+      if (d.qrDataUrl) {
+        const img = document.createElement('img');
+        img.src = d.qrDataUrl;
+        img.alt = 'QR code: open this hive in Scriptable with the widget token';
+        box.appendChild(img);
+      }
+      const open = document.createElement('a');
+      open.className = 'hv-btn btn-secondary btn-sm';
+      open.href = d.setupUrl;
+      open.textContent = 'Open in Scriptable';
+      box.appendChild(open);
+      const p = document.createElement('div');
+      p.className = 'iphone-widget-status';
+      p.append('Token (for manual setup): ');
+      const code = document.createElement('code');
+      code.textContent = d.token;
+      p.appendChild(code);
+      box.appendChild(p);
+      box.hidden = false;
+    }
+    async function iphoneWidgetCopyScriptURL() {
+      const url = iphoneWidgetHiveURL() + IPHONE_WIDGET_SCRIPT_PATH;
+      try {
+        await navigator.clipboard.writeText(url);
+        showToast('Script URL copied: ' + url, 'success');
+      } catch {
+        showToast('Copy failed — the script is at ' + url, 'info', true);
+      }
+    }
+    async function iphoneWidgetRevokeToken() {
+      const box = document.getElementById('iphone-widget-qr');
+      try {
+        const resp = await fetch('/api/widget/token', { method: 'DELETE', credentials: 'same-origin' });
+        const d = await resp.json().catch(() => null);
+        if (!resp.ok) throw new Error((d && d.error) || ('HTTP ' + resp.status));
+        if (box) { box.textContent = ''; box.hidden = true; }
+        showToast(d && d.revoked ? 'Widget token revoked — widgets using it stop updating.' : 'There was no widget token to revoke.', 'success');
+      } catch (err) {
+        showToast('Could not revoke the widget token: ' + (err && err.message ? err.message : err), 'error');
+      }
+      iphoneWidgetRefreshTokenStatus();
     }
     async function feedbackAddFiles(files) {
       if (!files) return;

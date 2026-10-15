@@ -14,7 +14,13 @@ func TestIOSWidgetScriptEmbeddedAndWired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("widget script not embedded: %v", err)
 	}
-	for _, want := range []string{"queryParameters", "Keychain.set(KEYCHAIN_URL_KEY", "config.runsInWidget"} {
+	for _, want := range []string{
+		"queryParameters", "Keychain.set(KEYCHAIN_URL_KEY", "config.runsInWidget",
+		// Read-only widget token (#12147): the QR deep link hands it over as
+		// widgetToken=, and it is only ever sent in its dedicated header to the
+		// one endpoint it can read.
+		"q.widgetToken", `"` + widgetTokenHeader + `"`, `"` + widgetSummaryPath + `"`, `"` + widgetTokenPrefix + `"`,
+	} {
 		if !strings.Contains(string(script), want) {
 			t.Errorf("widget script missing %q (dashboard deep link relies on it)", want)
 		}
@@ -30,6 +36,9 @@ func TestIOSWidgetScriptEmbeddedAndWired(t *testing.T) {
 		`scriptable:///add?scriptName=`,
 		`scriptable:///run/`,
 		`apps.apple.com/app/scriptable/id1405459188`,
+		`data-action="iphoneWidgetMintToken"`,
+		`data-action="iphoneWidgetRevokeToken"`,
+		`fetch('/api/widget/token'`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("index.html missing %q", want)

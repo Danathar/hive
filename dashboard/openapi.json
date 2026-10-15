@@ -26746,6 +26746,162 @@
         }
       }
     },
+    "/api/widget/summary": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Get the read-only phone widget summary",
+        "description": "Everything the iPhone widget renders in one call: eval history for the sparklines and each agent's name and state. Besides the normal dashboard credentials, accepts the hive's read-only widget token in the X-Hive-Widget-Token header; that token authenticates this operation only.",
+        "responses": {
+          "200": {
+            "description": "Widget summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hiveId": {
+                      "type": "string"
+                    },
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "agents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked credentials"
+          }
+        }
+      }
+    },
+    "/api/widget/token": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Get read-only widget token state",
+        "description": "Owner only. Reports whether a read-only widget token exists and when it was created. Never returns the token.",
+        "responses": {
+          "200": {
+            "description": "Widget token state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "configured": {
+                      "type": "boolean"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a verified owner"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Mint the read-only widget token",
+        "description": "Owner only. Creates a new read-only widget token, replacing any previous one, and returns it once together with a scriptable:// setup link and a QR code (PNG data URL) of that link. Only the token's SHA-256 is stored.",
+        "responses": {
+          "200": {
+            "description": "Minted token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "hiveUrl": {
+                      "type": "string"
+                    },
+                    "setupUrl": {
+                      "type": "string"
+                    },
+                    "qrDataUrl": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a verified owner"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Revoke the read-only widget token",
+        "description": "Owner only. Deletes the widget token; widgets using it stop updating. Idempotent.",
+        "responses": {
+          "200": {
+            "description": "Revocation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "revoked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a verified owner"
+          }
+        }
+      }
+    },
     "/api/presence": {
       "get": {
         "tags": [

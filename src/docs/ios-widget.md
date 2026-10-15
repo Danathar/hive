@@ -1,7 +1,8 @@
 # Hive on your iPhone Home Screen (widget)
 
 You can already save a hive's URL to the Home Screen and get the mobile
-dashboard. This adds a real **Home Screen widget** — the kind that sits in the
+dashboard (Safari → Share → **Add to Home Screen**; the bookmark is named
+"Hive" and uses the bee icon from the dashboard's web app manifest). This adds a real **Home Screen widget** — the kind that sits in the
 grid next to Weather and Calendar — showing the hive's open issues, open PRs,
 and the "your turn" counts for each, every one with a sparkline. Tap it and the
 hive dashboard opens.
@@ -44,9 +45,15 @@ widget**. The dialog walks through three steps:
    Scriptable shows the script and asks you to confirm **Add**. If Scriptable
    is not installed the page stays in the foreground, and the dialog reveals
    an App Store link instead.
-2. **Set up this hive in Scriptable** — opens
+2. **Set up this hive.** If you are the hive's owner, tap **Create widget
+   token & QR**. The dashboard mints a [read-only widget
+   token](#read-only-widget-token) and shows a QR code; scan it with the
+   iPhone camera (or tap **Open in Scriptable** when you are already on the
+   phone). That opens `scriptable:///run/Hive?url=<this hive>&widgetToken=…`
+   and the script stores both in the iOS Keychain — nothing to type.
+   Not the owner? **Set up this hive in Scriptable** opens
    `scriptable:///run/Hive?url=<this hive>&setup=1`; the script stores the
-   hive URL and asks only for the GitHub token (see below).
+   hive URL and asks only for a GitHub token (see below).
 3. Add the Scriptable widget to the Home Screen and point it at `Hive`.
 
 ## Install by hand (about two minutes)
@@ -74,6 +81,34 @@ widget**. The dialog walks through three steps:
 That is it. The widget refreshes itself roughly every 15 minutes (iOS decides
 the exact cadence) and opens the hive when tapped.
 
+## Read-only widget token
+
+The owner of a hive can mint a widget token from the dashboard (avatar →
+**📱 iPhone widget** → **Create widget token & QR**). It is the preferred
+credential for the widget:
+
+- It can do exactly one thing: `GET /api/widget/summary`, which returns the
+  eval history for the sparklines and each agent's name and state. Every other
+  endpoint — including every mutation and the token endpoints themselves —
+  answers 401 to it. It is not a session and is never accepted in
+  `Authorization`.
+- The widget sends it in the `X-Hive-Widget-Token` header. On hosted hives the
+  hub lets that one path through to the spoke, which checks the token; the hub
+  never sees it as a GitHub token.
+- One token per hive. Creating a new one replaces the old one immediately;
+  **Revoke widget token** deletes it and widgets using it stop updating.
+- Only the token's SHA-256 is stored on the hive (`/data/widget-token.json`,
+  mode 0600). The plaintext is shown once, when it is created, and lives only
+  in the iOS Keychain afterwards (per hive, so several hives can each have
+  their own).
+- The dialog shows when the token was created and when a widget last used
+  it, so a stale token is obvious.
+- Only owners can create, revoke, or see the status of the token
+  (`GET`/`POST`/`DELETE /api/widget/token`).
+
+To set it up by hand instead of scanning the QR code, paste the `hwt_…` token
+into the token field of the script's setup form.
+
 ## Several hives
 
 Add one widget per hive. In **Edit Widget**, set the **Parameter** field to
@@ -99,6 +134,7 @@ in a new script.
 |---|---|
 | "Open Scriptable and run this script once…" | No URL/token saved yet — do step 4. |
 | "Can't reach hive HTTP 302" / "not JSON (login page?)" | The token was not accepted: wrong token, expired, or your GitHub user is not allowed on that hive. |
+| "Can't reach hive HTTP 401 /api/widget/summary" | The widget token was replaced or revoked. Create a new one in the dashboard and scan its QR code again. |
 | "Can't reach hive HTTP 404" | The URL is not a hive dashboard (check for a path or typo). |
 | Numbers with a red "stale · Nh ago" footer | Phone is offline or the hive is down; the last good numbers are shown. |
 
@@ -106,13 +142,14 @@ in a new script.
 
 - The token is stored only in the iOS Keychain, never in the widget parameter
   (which iOS stores in plain text) and never written to the history file.
-- The widget only calls `GET /api/history` and `GET /api/status/summary`.
-- Use a token with no repository permissions: it is an identity proof, not an
-  access grant.
+- With a widget token the widget only calls `GET /api/widget/summary`; with a
+  GitHub token it calls `GET /api/history` and `GET /api/status/summary`.
+- The QR code encodes a `scriptable://` link, so the token goes straight from
+  the camera to Scriptable and is never sent to any web server.
+- If you use a GitHub token, use one with no repository permissions: it is an
+  identity proof, not an access grant.
 
 ## Not yet
 
-- A dedicated read-only "widget token" minted from the hive's dashboard (so a
-  GitHub token is not needed) and an "Add to iPhone" page with a QR code.
 - Hub-level fleet widget (all your hives in one glance) — owner only.
 - A native app with WidgetKit widgets and push notifications.

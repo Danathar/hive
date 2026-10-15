@@ -1879,6 +1879,14 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			}
 		}
 
+		// Read-only widget token (#12147): admits ONLY a GET of the widget
+		// summary path, as a read-role identity. It is never consulted for any
+		// other path, so it cannot reach a mutation or stand in for a session.
+		if !trusted && widgetTokenAuthenticates(r) {
+			trusted = true
+			widgetTokenIdentity(r)
+		}
+
 		if !trusted && r.URL.Path == "/api/knowledge/export" {
 			if profile := s.contributorProfileFromAuthorization(r); profile != nil && profile.TrustTier != "revoked" {
 				trusted = true

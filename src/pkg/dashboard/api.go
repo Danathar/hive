@@ -104,6 +104,10 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/campaigns/{id}/jam/project-sync", s.handleCampaignJamProjectSyncPost)
 	s.mux.HandleFunc("GET /api/campaigns/{id}/jam/ws", s.handleCampaignJamWebSocket)
 	s.mux.HandleFunc("GET /api/widget", s.handleWidget)
+	s.mux.HandleFunc("GET /api/widget/summary", s.handleWidgetSummary)
+	s.mux.HandleFunc("GET /api/widget/token", s.handleWidgetTokenStatus)
+	s.mux.HandleFunc("POST /api/widget/token", s.handleWidgetTokenMint)
+	s.mux.HandleFunc("DELETE /api/widget/token", s.handleWidgetTokenRevoke)
 	s.mux.HandleFunc("GET /api/pane/{agent}", s.handlePane)
 	// Full retained scrollback of an agent's latest run, as plain text (#3693).
 	// Backs the Terminal's "view / download full log" controls.
@@ -822,6 +826,13 @@ func (s *Server) sentinelLabel() string {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, s.historyPayload())
+}
+
+// historyPayload is the /api/history body: the live eval history, prefixed by
+// the seeded sparkline history when one exists. Shared with the read-only
+// widget summary so both report the same series.
+func (s *Server) historyPayload() any {
 	history := s.deps.Governor.EvalHistory()
 
 	seedData, err := os.ReadFile("/data/sparkline-history.json")
@@ -830,21 +841,17 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(seedData, &seed) == nil && len(seed) > 0 {
 			liveData, err := json.Marshal(history)
 			if err != nil {
-				jsonResponse(w, history)
-				return
+				return history
 			}
 			var liveEntries []json.RawMessage
 			if json.Unmarshal(liveData, &liveEntries) != nil {
-				jsonResponse(w, history)
-				return
+				return history
 			}
-			combined := append(seed, liveEntries...)
-			jsonResponse(w, combined)
-			return
+			return append(seed, liveEntries...)
 		}
 	}
 
-	jsonResponse(w, history)
+	return history
 }
 
 func (s *Server) handleTrends(w http.ResponseWriter, r *http.Request) {
