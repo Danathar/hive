@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-15 (v5.171.0)
+
+### Added
+
+- **Knowledge:** Context7 is now a connector card in Knowledge → Integrations with an API-key reference (set/unset, never the value), enabled toggle, default library IDs, a live Validate against the Context7 search API, and status; `knowledge.context7.auto_import` is editable from the same card (#11948).
+- Expose governor stall replan settings in the dashboard Settings dialog.
+
 ## 2026-10-15 (v5.170.0)
 
 ### Added
