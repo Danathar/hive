@@ -152,7 +152,7 @@ func TestSourcesAndUnknownSource(t *testing.T) {
 	dir := t.TempDir()
 	writePlain(t, dir, HiveLogFilename, recs(0, 2))
 	list := Sources(Options{LogDir: dir})
-	if list.Default != SourceHive || len(list.Sources) != 1 || !list.Sources[0].Available || !list.Sources[0].Default || list.Untrusted != UntrustedMarker {
+	if list.Default != SourceHive || len(list.Sources) != len(sourceSpecs) || !list.Sources[0].Available || !list.Sources[0].Default || list.Untrusted != UntrustedMarker {
 		t.Fatalf("sources = %+v", list)
 	}
 	for _, tc := range []struct {
@@ -782,7 +782,8 @@ func TestScanFallsBackToCompressedTwin(t *testing.T) {
 	dir := t.TempDir()
 	writeGz(t, dir, backupName(0)+".gz", recs(0, 3))
 	res := &Result{Source: SourceHive, LinesApplied: 10}
-	s := newScan(Request{}, Options{LogDir: dir}, res)
+	spec, _ := lookupSource(SourceHive)
+	s := newScan(Request{}, Options{LogDir: dir}, res, spec)
 	f := &logFile{path: filepath.Join(dir, backupName(0)), name: backupName(0)}
 	if err := s.scanFile(f, -1); err != nil || len(s.collected) != 3 || !f.gz {
 		t.Fatalf("err=%v collected=%d gz=%v", err, len(s.collected), f.gz)
