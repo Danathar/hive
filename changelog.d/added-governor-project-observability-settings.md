@@ -1,1 +1,0 @@
-- Expose governor project observability target settings in the dashboard Settings dialog.
