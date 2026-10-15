@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-15 (v5.174.0)
+
+### Added
+
+- Expose ioscan and OpenTelemetry settings in the dashboard Settings dialog.
+
 ## 2026-10-15 (v5.173.1)
 
 ### Fixed
