@@ -74,7 +74,7 @@ func TestAutoUpgradeLatchedWhileClaimInFlight(t *testing.T) {
 
 	const id = "hosted-inflight-95"
 	saveSaaSHive(&SaaSHive{
-		ID: id, Owner: "acme", AutoUpgrade: true, ClusterID: "remote",
+		ID: id, Owner: "acme", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant, ClusterID: "remote",
 		Status: statusAssigned, ClaimDelivered: false,
 		AssignedAt: time.Now().UTC().Format(time.RFC3339),
 	})

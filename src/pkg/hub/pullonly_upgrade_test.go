@@ -101,7 +101,7 @@ func TestAutoUpgradeNotArmedForNeverHeartbeatedHive(t *testing.T) {
 	s := pullOnlyTestServer(t)
 	s.forgetUncollectibleUpgrade("ph-1")
 	saveSaaSHive(&SaaSHive{
-		ID: "ph-1", Owner: "alice", AutoUpgrade: true,
+		ID: "ph-1", Owner: "alice", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant,
 		Status: "running", ClusterID: "vllm-d",
 	})
 	// The live wedged shape: no LastHeartbeat at all.
@@ -130,7 +130,7 @@ func TestAutoUpgradeNotArmedForLongDeadHive(t *testing.T) {
 	s := pullOnlyTestServer(t)
 	s.forgetUncollectibleUpgrade("dead-1")
 	saveSaaSHive(&SaaSHive{
-		ID: "dead-1", Owner: "alice", AutoUpgrade: true,
+		ID: "dead-1", Owner: "alice", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant,
 		Status: "running", ClusterID: "hive-oke",
 	})
 	s.registry.Hives = []RegistryEntry{{
@@ -186,7 +186,7 @@ func TestStaleUpgradeNotReArmedForUncollectibleHive(t *testing.T) {
 	s := pullOnlyTestServer(t)
 	s.forgetUncollectibleUpgrade("ph-2")
 	saveSaaSHive(&SaaSHive{
-		ID: "ph-2", Owner: "alice", AutoUpgrade: true,
+		ID: "ph-2", Owner: "alice", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant,
 		Status: "running", ClusterID: "vllm-d",
 	})
 	s.registry.Hives = []RegistryEntry{{
@@ -221,7 +221,7 @@ func TestStaleUpgradeStillRecoveredForLiveHive(t *testing.T) {
 	s := pullOnlyTestServer(t)
 	s.forgetUncollectibleUpgrade("ok-2")
 	saveSaaSHive(&SaaSHive{
-		ID: "ok-2", Owner: "alice", AutoUpgrade: true,
+		ID: "ok-2", Owner: "alice", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant,
 		Status: "running", ClusterID: "vllm-d",
 	})
 	s.registry.Hives = []RegistryEntry{{
@@ -252,7 +252,7 @@ func TestUncollectibleUpgradeCannotAccumulateStaleness(t *testing.T) {
 	s := pullOnlyTestServer(t)
 	s.forgetUncollectibleUpgrade("ph-3")
 	saveSaaSHive(&SaaSHive{
-		ID: "ph-3", Owner: "alice", AutoUpgrade: true,
+		ID: "ph-3", Owner: "alice", AutoUpgrade: true, AutoUpgradeMode: AutoUpgradeModeInstant,
 		Status: "running", ClusterID: "vllm-d",
 	})
 	s.registry.Hives = []RegistryEntry{{ID: "ph-3", GitBranch: "v4", GitHash: "old1234"}}
