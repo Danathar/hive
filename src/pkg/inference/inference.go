@@ -12,7 +12,6 @@ package inference
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os/exec"
 	"strconv"
@@ -33,18 +32,12 @@ import (
 // returned model is that request when non-empty, otherwise the default
 // inherited from whichever source supplied the endpoint.
 //
-// Resolution order — each step matches the behavior shipped in 231ca4b:
-//
-//  1. local_proxy: the Go translator forwards to the bundled litellm proxy on
-//     loopback, overriding any configured remote endpoint.
-//  2. the legacy governor.litellm block (HIVE_LITELLM_ENDPOINT or yaml), whose
-//     default_model supplies the model.
-//  3. the EXPLICIT gateway named by this backend. A hive configured only
-//     through the Model Gateways tab leaves the legacy block empty; the key
-//     and CA bundle already resolve from that gateway, so the endpoint must
-//     too, or NO route is installed and every agent call dies "502 no
-//     inference route" while the Gateways tab Test button happily passes
-//     (ains-validation/pocketmini, 2026-08-31 — #5393).
+// local_proxy wins outright: the Go translator forwards to the bundled litellm
+// proxy on loopback, overriding any configured remote endpoint. Otherwise the
+// decision is config.GovernorConfig.ResolveLiteLLMRemoteRoute — explicit
+// gateway named by the backend first, legacy governor.litellm block second —
+// which lives in pkg/config so the dashboard's Test Connection can print the
+// very same route without importing this package (hivecommons/hive#9945).
 //
 // ok is false when no source yields an endpoint: the caller must warn and
 // install NO route. It never invents an endpoint, and never returns a route
@@ -52,26 +45,33 @@ import (
 // path exists to prevent.
 func ResolveLiteLLMRoute(cfg *config.Config, backend, requestedModel string) (endpoint, model string, ok bool) {
 	lc := cfg.Governor.LiteLLM
-	model = requestedModel
-	endpoint = lc.ResolveEndpoint()
 	if lc.LocalProxy {
-		endpoint = LocalLiteLLMProxyURL()
-	}
-	if endpoint == "" {
-		if gw := cfg.Governor.ResolveGateway(backend); gw != nil && gw.Endpoint != "" {
-			endpoint = gw.Endpoint
-			if model == "" {
-				model = gw.DefaultModel
-			}
+		model = requestedModel
+		if model == "" {
+			model = lc.DefaultModel
 		}
+		return LocalLiteLLMProxyURL(), model, true
 	}
-	if endpoint == "" {
+	endpoint, model, source := cfg.Governor.ResolveLiteLLMRemoteRoute(backend, requestedModel)
+	if source == config.LiteLLMRouteNone || endpoint == "" {
 		return "", requestedModel, false
 	}
-	if model == "" {
-		model = lc.DefaultModel
-	}
 	return endpoint, model, true
+}
+
+// ExplicitLiteLLMGateway is config.GovernorConfig.ExplicitLiteLLMGateway for
+// a whole Config (nil-safe).
+func ExplicitLiteLLMGateway(cfg *config.Config, backend string) *config.GatewayConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Governor.ExplicitLiteLLMGateway(backend)
+}
+
+// ChatCompletionsURL is config.LiteLLMChatCompletionsURL: the exact URL the
+// translator POSTs to for an endpoint.
+func ChatCompletionsURL(endpoint string) string {
+	return config.LiteLLMChatCompletionsURL(endpoint)
 }
 
 // ResolveWatsonxGateway finds the gateway backing the built-in "watsonx" agent
@@ -134,8 +134,9 @@ const (
 	// LocalLiteLLMProxyPort is the loopback port the bundled litellm proxy
 	// listens on when governor.litellm.local_proxy is enabled. Distinct from
 	// proxy.InferenceTranslatePort (18444): agents always talk to the Go
-	// translator, which forwards to this local litellm instance.
-	LocalLiteLLMProxyPort = 18445
+	// translator, which forwards to this local litellm instance. The value
+	// lives in pkg/config so the dashboard can print the same URL.
+	LocalLiteLLMProxyPort = config.LocalLiteLLMProxyPort
 	// localLiteLLMConfigPath is the user-provided litellm proxy config
 	// (model list, upstream keys) on the /data volume.
 	localLiteLLMConfigPath = "/data/litellm/config.yaml"
@@ -147,7 +148,7 @@ const (
 // LocalLiteLLMProxyURL is the endpoint the Go inference translator forwards
 // to when the local litellm proxy fallback is enabled.
 func LocalLiteLLMProxyURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", LocalLiteLLMProxyPort)
+	return config.LocalLiteLLMProxyURL()
 }
 
 // SuperviseLocalLiteLLM runs the bundled litellm binary as a local

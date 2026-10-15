@@ -43,7 +43,10 @@ type MyHiveEntry struct {
 	// AutoUpgradeMode is always sent NORMALIZED (never empty when autoUpgrade is
 	// on) so the dashboard can render the effective mode without re-deriving the
 	// legacy empty-means-instant rule in JavaScript.
-	AutoUpgradeMode     string                 `json:"autoUpgradeMode,omitempty"`
+	AutoUpgradeMode string `json:"autoUpgradeMode,omitempty"`
+	// AutoUpgradeSchedule is the EFFECTIVE schedule: the configured mode, or
+	// "candidate-bypass" when a candidate-channel hive ignores the window.
+	AutoUpgradeSchedule string                 `json:"autoUpgradeSchedule,omitempty"`
 	NextUpdateAt        string                 `json:"nextUpdateAt,omitempty"`
 	NextUpdateStatus    string                 `json:"nextUpdateStatus,omitempty"`
 	UpgradeWhyNotNow    string                 `json:"upgradeWhyNotNow,omitempty"`
@@ -68,6 +71,11 @@ type MyHiveEntry struct {
 	// its reconcile under.
 	Assigning   bool   `json:"assigning,omitempty"`
 	AssigningTo string `json:"assigningTo,omitempty"`
+
+	// PlaceholderOrg flags a hive whose claim was delivered with a real org but
+	// whose spoke still reports a slot-placeholder org while a primary repo is
+	// set (#11800): it runs without GitHub credentials, so surface it in Fleet.
+	PlaceholderOrg bool `json:"placeholderOrg,omitempty"`
 
 	// AssignedUnclaimed marks a placeholder wedged at Status=statusAssigned &&
 	// !ClaimDelivered: a claim was stamped but the spoke never reported the
@@ -674,6 +682,7 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		//   - only show it when the spoke is genuinely reporting a DIFFERENT,
 		//     non-empty project (an empty reported org means the spoke just
 		//     restarted / hasn't beaten yet — not a fresh assignment).
+		entry.PlaceholderOrg = assignedPlaceholderOrgStuck(sh, entry.Org, entry.PrimaryRepo)
 		spokeReportsDifferentProject := entry.Org != "" && !strings.EqualFold(entry.Org, sh.Org)
 		if !entry.Upgrading && spokeReportsDifferentProject &&
 			// Empty curAPIURL deliberately: a GHE API-URL-only push is a config
@@ -959,6 +968,9 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		// the same resolution the auto-upgrade engine uses — not the branch
 		// tip. A :stable spoke at the channel's commit is 0 behind here even
 		// when CommitsBehindStableV4 says 128.
+		if result[i].AutoUpgrade {
+			result[i].AutoUpgradeSchedule = effectiveAutoUpgradeSchedule(result[i].AutoUpgradeMode, result[i].TrackedChannel)
+		}
 		if result[i].TrackedChannel == ReleaseChannelStable && result[i].AutoUpgrade {
 			result[i].NextUpdateAt = stableNextUpdateAt
 			result[i].NextUpdateStatus = stableNextUpdateStatus
@@ -1048,6 +1060,9 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		// count. (isPlaceholderEntry is the same authoritative test computeFleet‐
 		// Stats and the alert layer use.)
 		if len(result[i].Agents) > 0 && !isPlaceholderEntry(result[i]) {
+			if sh := loadSaaSHive(result[i].ID); sh != nil {
+				applyAgentRestartResetBaselines(result[i].Agents, sh.AgentRestartResets, journeyNow)
+			}
 			blockers := hiveBlockers{
 				GitHubAppRequired:       result[i].GitHubAppRequired,
 				GitHubAppPermIssue:      result[i].GitHubAppPermIssue,
@@ -1124,6 +1139,41 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 	// quadrant percentiles) has run over the caller's full visible set — the
 	// page is a wire-level view, not a different fleet. No query params →
 	// full set, exactly as before.
+	// Alert state is shared hub-wide, so fleet-relative alert facts (token-burn
+	// median, repo overlaps) must be computed over the same WHOLE fleet for
+	// every caller — otherwise a scoped poll evaluates a hive the admin sees
+	// firing as clear and evicts its FirstSeen/ack (#11819). An admin's result
+	// already is that fleet (registry hives plus meta-only hives); for anyone
+	// else it is rebuilt the same way, used only inside fleetAlerts.
+	var alertFleet []MyHiveEntry
+	if !isAdmin {
+		alertFleet = make([]MyHiveEntry, 0, len(allHives)+len(saasByID))
+		inRegistry := make(map[string]bool, len(allHives))
+		for _, h := range allHives {
+			inRegistry[h.ID] = true
+			entry := MyHiveEntry{RegistryEntry: h}
+			enrichFromSaaSMeta(&entry)
+			resolveGitHubHost(&entry)
+			alertFleet = append(alertFleet, entry)
+		}
+		for id, sh := range saasByID {
+			if inRegistry[id] {
+				continue
+			}
+			entry := MyHiveEntry{RegistryEntry: RegistryEntry{
+				ID:          sh.ID,
+				Name:        sh.Org + "/" + sh.PrimaryRepo,
+				Org:         sh.Org,
+				Repos:       sh.Repos,
+				PrimaryRepo: sh.PrimaryRepo,
+				HiveType:    "hosted",
+			}}
+			enrichFromSaaSMeta(&entry)
+			resolveGitHubHost(&entry)
+			alertFleet = append(alertFleet, entry)
+		}
+	}
+
 	hivesView := result
 	query := parseMyHivesQuery(queryValues)
 	matched := len(result)
@@ -1162,11 +1212,12 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		// own "channel -> image" block above the per-branch rows, and offers
 		// them as branch-switch targets. The association is resolved from
 		// registry digests (cached), never hardcoded to a branch name.
-		"release_channels":  ReleaseChannels(),
-		"channel_targets":   channelTargets,
-		"stable_promotion":  stablePromotion,
-		"hub_auto_upgrade":  isHubAutoUpgrade(),
-		"hub_upgrade_state": s.hubUpgradeState(),
+		"release_channels":            ReleaseChannels(),
+		"candidate_bypasses_schedule": !candidateAutoUpgradeScheduleOverride(),
+		"channel_targets":             channelTargets,
+		"stable_promotion":            stablePromotion,
+		"hub_auto_upgrade":            isHubAutoUpgrade(),
+		"hub_upgrade_state":           s.hubUpgradeState(),
 		// Kill-switch state rides the top-level payload (NOT the hive-row
 		// shape, so no HIVES_CACHE_VERSION bump): the dashboard shows a
 		// prominent banner while anything is paused, and admins get toggles.
@@ -1177,7 +1228,7 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		// round-trip would make the panel pop in after the list and shift it.
 		// Scoped to the hives this caller can already see, so it never leaks
 		// the existence of a hive they have no access to.
-		"alerts": s.fleetAlerts(result),
+		"alerts": s.fleetAlerts(result, alertFleet),
 	}
 
 	myReq := loadProvisionRequest(username)

@@ -25,6 +25,12 @@ type WatchdogFleet struct {
 	// watchdog.MaxQueuedRefs are used), so a not-producing alert can link
 	// them. Nil means the items cannot be named; the alert keeps the count.
 	QueuedRefs func() []watchdog.QueuedRef
+	// KickSuppressed reports why the governor is deliberately not kicking
+	// the named agent right now (cadence paused in the current mode, reviewer
+	// lane with nothing to adjudicate), or "" when it would kick it. Nil means
+	// no suppression. Injected for the same reason as Queued: the governor and
+	// scheduler that know the answer are not imported by pkg/agent.
+	KickSuppressed func(name string) string
 }
 
 // AgentNames lists agents the watchdog should reconcile: agents the manager
@@ -176,6 +182,16 @@ func (f WatchdogFleet) QueuedWorkRefs(string) ([]watchdog.QueuedRef, bool) {
 		return nil, true
 	}
 	return f.QueuedRefs(), true
+}
+
+// KickSuppressedReason implements watchdog.KickSuppressionReporter: an agent
+// the governor is deliberately not kicking is idle by design, so the hive-wide
+// backlog must not be counted against it (#11910).
+func (f WatchdogFleet) KickSuppressedReason(name string) string {
+	if f.KickSuppressed == nil {
+		return ""
+	}
+	return f.KickSuppressed(name)
 }
 
 // agentIsAdvisoryOnly reports whether an agent is barred from opening issues

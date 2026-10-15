@@ -43,6 +43,13 @@
       --fs-md: .92rem; --fs-lg: 1.05rem; --fs-xl: 1.25rem;
       /* Touch floor: iOS Safari zooms the page when a focused control is under 16px. */
       --fs-touch: 16px;
+      /* Mobile icon-only buttons (section ?/⚙/grip, topbar chips): a fixed
+         square tap target with a glyph sized to fill it. Width AND height are
+         pinned so a touch-target min-size can never inflate a round button
+         into a circle several times its glyph. */
+      --tap-target: 40px;
+      --tap-glyph: 16px;
+      --tap-ring: 28px;
       /* Terminal surface — terminals always read as terminals: near-black
          in dark mode, deep neutral (never white) in light mode. The
          fg/muted/cyan companions are mode-independent because the
@@ -950,7 +957,13 @@
     .terminal-copy-hint.backend-auth-error {
       border-color: color-mix(in srgb, var(--red) 55%, transparent);
       background: color-mix(in srgb, var(--red) 10%, var(--panel));
-      color: var(--text); font-weight: 600;
+      color: var(--text); font-weight: 600; flex-wrap: wrap;
+    }
+    /* #11761: the full proxy-side inference error must wrap, never clip —
+       clipping is exactly what Claude Code's own retry line does. */
+    .terminal-copy-hint-detail {
+      min-width: 0; flex: 1 1 100%; white-space: pre-wrap; overflow-wrap: anywhere;
+      font-family: var(--font-mono); font-weight: 400;
     }
     .terminal-copy-hint-dismiss {
       margin-left: auto; padding: var(--sp-0) var(--sp-1); border: 0; background: transparent;
@@ -1398,7 +1411,9 @@
       .gov-pr-models-summary { white-space: normal; }
       .gov-pr-models-head { align-items: flex-start; flex-direction: column; }
       .gov-pr-models-toggle { flex-wrap: wrap; }
-      .gov-pr-models-toggle button { min-height: 36px; }
+      /* Range pills (24h / 7d …): keep the touch height but widen the padding
+         so a two-character pill reads as a pill, not a circle. */
+      .gov-pr-models-toggle button { min-height: 36px; padding: var(--sp-2) var(--sp-5); font-size: var(--fs-sm); }
       .governor-subsection .section-body,
       .gov-pr-models,
       .gov-pr-models-subheader,
@@ -1545,6 +1560,38 @@
     @media (max-width: 800px) { .prt-attribution { grid-template-columns:1fr; } }
     @media (max-width: 900px) { .lc-fleet.prt-headline { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 640px) { .lc-fleet.prt-headline { grid-template-columns: 1fr; } .window-pills-toolbar { justify-self: start; justify-content: flex-start; } }
+    /* Delivery SLA (#11879; moved here from the Overview in #11899): three
+       span tiles in the Throughput metric rhythm with 30-day sparklines
+       coloured against sla.targets, a stale in-progress badge and a per-repo
+       table. Colour is a scoped custom property; no new :root tokens. */
+    .prt-sla { margin: var(--sp-3) 0; min-width: 0; }
+    .prt-sla-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); font-size: var(--fs-xs); }
+    .prt-sla-head strong { display: inline-flex; align-items: center; gap: var(--sp-1); }
+    .prt-sla-head-spacer { flex: 1 1 auto; }
+    .prt-sla-window { color: var(--muted); font-size: var(--fs-2xs); }
+    .prt-sla-stale { display: inline-flex; align-items: center; gap: var(--sp-1); padding: var(--sp-0) var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--muted); text-decoration: none; white-space: nowrap; cursor: pointer; background: var(--bg); font: inherit; font-size: var(--fs-2xs); font-weight: 700; line-height: 1.4; }
+    .prt-sla-stale[data-sla-state="breach"] { border-color: var(--red); color: var(--red); }
+    .prt-sla-stale:hover { border-color: var(--accent); }
+    .prt-sla-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--sp-2); }
+    .prt-sla .prt-metric { --prt-sla-color: var(--text); min-width: 0; }
+    .prt-sla .prt-metric[data-sla-state="ok"] { --prt-sla-color: var(--green); }
+    .prt-sla .prt-metric[data-sla-state="warn"] { --prt-sla-color: var(--yellow); }
+    .prt-sla .prt-metric[data-sla-state="breach"] { --prt-sla-color: var(--red); }
+    .prt-sla .prt-metric .mval { color: var(--prt-sla-color); }
+    .prt-sla .prt-metric .mlbl { display: flex; align-items: center; gap: var(--sp-1); text-transform: none; letter-spacing: 0; }
+    .prt-sla .prt-metric-spark { margin-top: var(--sp-1); }
+    .prt-sla .prt-metric-spark .sparkline { display: block; margin: 0; max-width: 100%; }
+    .prt-sla .prt-metric-spark svg { max-width: 100%; height: auto; }
+    .prt-sla-detail { overflow: auto; min-width: 0; margin-top: var(--sp-2); -webkit-overflow-scrolling: touch; }
+    .prt-sla-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+    .prt-sla-table th, .prt-sla-table td { padding: var(--sp-1) var(--sp-2); text-align: right; border-top: 1px solid var(--border); white-space: nowrap; }
+    .prt-sla-table th { color: var(--muted); font-size: var(--fs-2xs); font-weight: 600; border-top: none; }
+    .prt-sla-table th:first-child, .prt-sla-table td:first-child { text-align: left; }
+    .prt-sla-table td[data-sla-state="ok"] { color: var(--green); }
+    .prt-sla-table td[data-sla-state="warn"] { color: var(--yellow); }
+    .prt-sla-table td[data-sla-state="breach"] { color: var(--red); }
+    .prt-sla-stale-list { display: flex; flex-wrap: wrap; gap: var(--sp-2); font-size: var(--fs-xs); margin-bottom: var(--sp-2); }
+    .prt-sla-stale-list a { color: var(--red); font-weight: 600; }
     .lc-journeys { list-style: none; margin: var(--sp-0); padding: var(--sp-0); display: flex; flex-direction: column; gap: var(--sp-2);
       max-height: 420px; overflow-y: auto; }
     .lc-journey { font-size: 0.78rem; border-radius: var(--r); background: var(--bg); border: 1px solid var(--border); overflow: hidden; flex-shrink: 0; }
@@ -2774,6 +2821,31 @@
       background: var(--bg-soft); cursor: pointer;
     }
     .config-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+
+    .settings-search-panel { display: none; flex: 0 0 auto; padding: var(--sp-4) var(--sp-7); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 92%, transparent); gap: var(--sp-3); align-items: center; }
+    .settings-search-panel.active { display: flex; }
+    .settings-search-panel[hidden] { display: none !important; }
+    .settings-search-input-wrap { position: relative; flex: 1 1 360px; min-width: 220px; }
+    .settings-search-input { width: 100%; box-sizing: border-box; padding: var(--sp-4) calc(var(--sp-8) + var(--sp-4)) var(--sp-4) calc(var(--sp-8) + var(--sp-3)); border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--surface); color: var(--text); font: inherit; }
+    .settings-search-input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent); border-color: var(--accent); }
+    .settings-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+    .settings-search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: var(--r-pill); padding: var(--sp-1) var(--sp-3); }
+    .settings-search-clear:hover { color: var(--text); background: var(--border); }
+    .settings-search-count { flex: 0 0 auto; min-width: 105px; color: var(--muted); font-size: var(--fs-sm); }
+    .settings-search-results { display: grid; gap: var(--sp-4); }
+    .settings-search-group { border: 1px solid var(--border); border-radius: var(--r); background: color-mix(in srgb, var(--surface) 84%, transparent); overflow: hidden; }
+    .settings-search-group-title { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border); font-weight: 700; color: var(--text); }
+    .settings-search-group-title button { flex: 0 0 auto; }
+    .settings-search-hit { padding: var(--sp-4); border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+    .settings-search-hit:first-child { border-top: 0; }
+    .settings-search-hit-label { font-weight: 700; color: var(--text); margin-bottom: var(--sp-1); }
+    .settings-search-hit-meta { color: var(--muted); font-size: var(--fs-xs); line-height: 1.45; }
+    .settings-search-key { display: inline-block; margin-top: var(--sp-2); font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); border-radius: var(--r-sm); padding: var(--sp-0) var(--sp-2); }
+    .settings-yaml-hint { margin-left: var(--sp-2); color: var(--muted); font-size: var(--fs-xs); font-weight: 500; letter-spacing: 0; text-transform: none; }
+    .settings-yaml-hint code { font-family: var(--font-mono); }
+    .settings-search-mark { background: color-mix(in srgb, var(--amber) 35%, transparent); color: var(--text); border-radius: var(--r-sm); padding: var(--sp-0) var(--sp-1); }
+    .settings-search-empty { text-align: center; color: var(--muted); padding: var(--sp-9); border: 1px dashed var(--border); border-radius: var(--r); background: color-mix(in srgb, var(--surface) 72%, transparent); }
+
     .config-body {
       flex: 1 1 auto; overflow: auto; padding: var(--sp-7);
       /* min-height:0 lets this flex child actually shrink, so it stays the
@@ -2817,12 +2889,16 @@
     /* Scrollable surfaces inside the OTHER modals (#4805) — the #2766 rules
        above only covered the config modal family. These are the remaining
        overlay scrollers; without containment their boundary hands the wheel
-       to the dashboard whenever the body lock is absent or stuck. */
+       to the dashboard whenever the body lock is absent or stuck.
+       Form textareas and <pre> blocks are deliberately NOT in this list:
+       Chrome honours overscroll-behavior:contain on a scroll container even
+       when it has nothing to scroll, so a contained (empty) textarea under
+       the pointer swallowed the wheel and the modal body behind it could
+       never be scrolled to its bottom. Their chain lands on .nous-config-body
+       or the overlay, both contained, so the dashboard still never moves. */
     .gh-setup-modal,
     .acmm-dialog,
     .nous-config-dialog > .nous-config-body,
-    .nous-config-overlay textarea,
-    .nous-config-overlay pre,
     .nous-config-body [style*="overflow-y:auto"],
     .nous-config-body [style*="overflow-y: auto"],
     .welcome-body,
@@ -3099,6 +3175,8 @@
       pointer-events: none;
     }
     .config-tooltip-portal { display: block; position: fixed; }
+    /* The author `display: block` above outranks the UA `[hidden] { display: none }`
+       rule, so without this the portal stayed on screen after `portal.hidden = true`. */
     .config-tooltip-portal[hidden] { display: none; }
     .config-info:hover .config-tooltip, .config-info:focus-within .config-tooltip { display: none; }
     .section-help-mark { text-decoration: none; }
@@ -3550,6 +3628,9 @@
     .kb-integrations-sidebar { min-height:0; border-right: var(--line-width) solid var(--border); padding-right: var(--sp-5); overflow: auto; }
     .kb-integrations-list { margin-top: var(--sp-4); }
     .kb-integrations-note { margin-top: var(--sp-5); }
+    /* Vendor/project glyphs for the Knowledge Integrations list and detail header; currentColor so they follow theme and active state. */
+    .kb-integration-icon { width: 16px; height: 16px; display: inline-block; flex: 0 0 auto; vertical-align: -0.15em; color: currentColor; }
+    .kb-integration-title { display: flex; align-items: center; gap: var(--sp-2); }
     .kb-integrations-main { min-height:0; overflow: auto; padding-right: var(--sp-3); }
     .kb-integration-row-main { min-width: 0; flex: 1; }
     .kb-integration-connector-title { font-weight: 700; color: var(--fg); }
@@ -4081,18 +4162,28 @@
         justify-content: flex-end;
         flex-wrap: nowrap;
       }
+      /* Topbar chips: resize through the nav-chip tokens so icon chips stay a
+         square --tap-target and text chips keep their natural width. */
+      .oc-topbar {
+        --nav-chip-h: var(--tap-target);
+        --nav-chip-icon: var(--tap-glyph);
+      }
       .oc-topbar .nav-chip {
-        min-width: 44px !important;
-        min-height: 44px !important;
-        height: 44px !important;
+        flex: 0 0 auto;
+        min-width: var(--tap-target);
+      }
+      .oc-topbar .nav-chip--icon {
+        font-size: var(--tap-glyph);
+      }
+      .oc-topbar .nav-chip:not(.nav-chip--icon) {
         padding-left: var(--sp-3) !important;
         padding-right: var(--sp-3) !important;
       }
       #acmm-badge {
-        max-width: 58px;
-        overflow: hidden;
-        text-overflow: clip;
         white-space: nowrap;
+      }
+      #acmm-badge .acmm-badge-name {
+        display: none;
       }
       .oc-health-badge .nav-chip__label,
       #oc-settings-btn .nav-chip__label,
@@ -4305,17 +4396,378 @@
         min-height: 36px !important;
         height: auto !important;
       }
+      /* Icon-only controls: a fixed --tap-target square, never stretched by a
+         flex row or a min-size rule, with the glyph scaled up to match. */
       .dashboard-grip,
+      .dash-card-header .dashboard-grip,
       .config-info,
       .section-settings-gear {
-        min-width: 44px;
-        min-height: 44px;
+        width: var(--tap-target);
+        height: var(--tap-target);
+        min-width: var(--tap-target);
+        min-height: var(--tap-target);
+        flex: 0 0 auto;
+        font-size: var(--tap-glyph);
+      }
+      .section-settings-gear-icon {
+        width: var(--tap-glyph);
+        height: var(--tap-glyph);
+      }
+      /* The round ?/⚙ marks keep the whole 40px box as the hit area but draw
+         their ring on a ::before sized to --tap-ring, so the visible circle
+         stays proportional to the header text. isolation + z-index:-1 keeps
+         the ring under the glyph without touching sibling stacking. */
+      .config-info,
+      .section-settings-gear,
+      .config-info:hover,
+      .section-settings-gear:hover,
+      .section-settings-gear:focus-visible {
+        background: transparent;
+        border-color: transparent;
+        isolation: isolate;
+      }
+      .config-info::before {
+        content: "";
+        position: absolute;
+        inset: calc((var(--tap-target) - var(--tap-ring)) / 2);
+        border-radius: var(--r-pill);
+        background: color-mix(in srgb, var(--blue) 18%, var(--panel));
+        border: 1px solid color-mix(in srgb, var(--blue) 60%, transparent);
+        z-index: -1;
+      }
+      .config-info:hover::before,
+      .section-settings-gear:focus-visible::before {
+        background: var(--blue);
+        border-color: var(--blue);
       }
       .hive-chat-fab {
         width: 48px;
         height: 48px;
         right: max(12px, env(safe-area-inset-right));
         bottom: max(12px, env(safe-area-inset-bottom));
+      }
+      /* Collapsed-section summaries reflow on narrow screens instead of
+         hanging off the right edge of the card (#11807). Short summaries stay
+         on the title row; strips and tile rows take a full row of their own. */
+      .dash-card.collapsed .dash-card-summary {
+        flex: 1 1 auto;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        text-align: left;
+        row-gap: var(--sp-2);
+        min-width: 0;
+        max-width: 100%;
+        white-space: normal;
+      }
+      .mini-summary-strip,
+      .audit-collapsed-summary,
+      .review-queue-collapsed,
+      .agents-collapsed-tiles,
+      .repos-collapsed-tiles,
+      .advisory-collapsed-advice,
+      .debug-quota-strip {
+        flex: 1 1 100%;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        height: auto;
+      }
+      .mini-summary-strip,
+      .audit-collapsed-summary,
+      .review-queue-collapsed,
+      .debug-quota-strip {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        overflow: visible;
+      }
+      .review-queue-collapsed-main {
+        flex-wrap: wrap;
+      }
+      .audit-last-entry {
+        max-width: 100%;
+      }
+      /* Tile rows scroll sideways with a visible thin scrollbar; tiles keep
+         their two-line layout instead of being cut at 26px. */
+      .agents-collapsed-tiles,
+      .repos-collapsed-tiles,
+      .advisory-collapsed-advice {
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: var(--sp-1);
+        scrollbar-width: thin;
+        -webkit-overflow-scrolling: touch;
+      }
+      .acmm-collapsed-pill {
+        white-space: normal;
+        max-width: 100%;
+      }
+      /* Diagnostics headline: API text, budget pill and quota meters stack. */
+      .debug-headline {
+        flex-wrap: wrap;
+      }
+      .debug-headline-main {
+        flex: 1 1 100%;
+        flex-wrap: wrap;
+        row-gap: var(--sp-2);
+        overflow: visible;
+      }
+      .debug-headline-api,
+      .debug-headline-tokens {
+        flex: 1 1 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      .debug-headline-mini {
+        flex: 1 1 100%;
+        min-width: 0;
+        margin-left: var(--sp-0);
+      }
+      .debug-quota-chip {
+        flex: 1 1 100%;
+        max-width: 100%;
+        height: auto;
+        min-height: var(--nav-chip-h);
+        padding-top: var(--sp-1);
+        padding-bottom: var(--sp-1);
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      .debug-quota-label {
+        flex: 1 1 auto;
+        max-width: none;
+      }
+      .debug-quota-frac {
+        margin-left: auto;
+      }
+      /* Headline tiles (cost, throughput) shrink below --metric-tile-min
+         rather than overflowing the card. */
+      .cost-grid.sec-headline {
+        grid-template-columns: repeat(auto-fit, minmax(min(var(--metric-tile-min), 100%), 1fr));
+      }
+      .cost-stat,
+      .token-stat {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .cost-stat > *,
+      .token-stat > * {
+        min-width: 0;
+      }
+      .cost-stat svg,
+      .token-stat svg,
+      .prt-tile-spark svg {
+        max-width: 100%;
+        height: auto;
+      }
+      .spark-row {
+        flex-wrap: wrap;
+      }
+      .token-model-chip {
+        max-width: 100%;
+        min-width: 0;
+        flex-wrap: wrap;
+        white-space: normal;
+      }
+      /* Long unbroken tokens (test names, URLs) wrap inside facts/advice. */
+      .kb-fact-snippet,
+      .advisory-agent-body,
+      #kb-subs-content,
+      .config-body {
+        overflow-wrap: anywhere;
+      }
+      .gov-matrix td.continuous,
+      .gov-matrix td.name-col {
+        overflow-wrap: anywhere;
+        white-space: normal;
+      }
+    }
+    /* ── Landscape phones (#11860) ──
+       A phone turned sideways is 667-932px wide, so it falls out of the
+       width-only ≤768px phone block above, yet it still has touch, notch
+       safe-areas on the long edges and only ~360-430px of height. This tier
+       keys on height + orientation + coarse pointer so desktop windows and
+       tablets are untouched: it hands the topbar the full width with the
+       notch insets, keeps the topbar to one 48px row so the height budget
+       stays with the content, and makes every modal and the chat panel
+       fill the viewport with internal scroll (the desktop 92vh/bottom:80px
+       recipes do not fit in 390px). Sizing goes through the tap-target
+       tokens from #11804; no new :root tokens. */
+    @media (max-width: 1024px) and (max-height: 500px) and (orientation: landscape) and (pointer: coarse) {
+      body {
+        padding-left: max(var(--sp-5), env(safe-area-inset-left));
+        padding-right: max(var(--sp-5), env(safe-area-inset-right));
+        padding-top: calc(var(--navbar-sticky-height) + var(--sp-4) + env(safe-area-inset-top));
+        padding-bottom: calc(var(--tap-target) + var(--sp-6) + env(safe-area-inset-bottom));
+      }
+      .oc-topbar {
+        --topbar-grid-columns: auto minmax(0, 1fr) auto;
+        --nav-chip-h: var(--tap-target);
+        --nav-chip-icon: var(--tap-glyph);
+        height: auto;
+        min-height: var(--navbar-sticky-height);
+        padding: env(safe-area-inset-top) max(var(--sp-5), env(safe-area-inset-right)) var(--sp-0) max(var(--sp-5), env(safe-area-inset-left));
+        column-gap: var(--sp-3);
+        row-gap: var(--sp-0);
+      }
+      .oc-topbar-left,
+      .oc-topbar-right {
+        gap: var(--sp-2);
+        flex-wrap: nowrap;
+        overflow: hidden;
+      }
+      .oc-topbar-center {
+        gap: var(--sp-2);
+      }
+      .oc-topbar .nav-chip {
+        flex: 0 0 auto;
+        min-width: var(--tap-target);
+      }
+      .oc-topbar .nav-chip--icon {
+        font-size: var(--tap-glyph);
+      }
+      .oc-topbar .nav-chip:not(.nav-chip--icon) {
+        padding-left: var(--sp-3) !important;
+        padding-right: var(--sp-3) !important;
+      }
+      /* One row: the labels that wrap the bar to two rows at 932px go. */
+      #acmm-badge .acmm-badge-name,
+      .oc-health-badge .nav-chip__label,
+      #oc-settings-btn .nav-chip__label,
+      #welcome-topbar-btn .nav-chip__label,
+      .oc-topbar .layout-toggle.nav-chip,
+      .agent-navbar-upnext {
+        display: none !important;
+      }
+      #acmm-badge {
+        white-space: nowrap;
+      }
+      /* Drawer: never wider than the landscape viewport leaves for a tap on
+         the backdrop, and inset from the notch. */
+      .oc-sidebar {
+        width: min(var(--sidebar-w), 60vw);
+        padding-left: env(safe-area-inset-left);
+      }
+      /* Modals: fill the viewport, header/tabs/footer shrink so the body
+         keeps most of the ~390px, tab strip scrolls sideways on one row. */
+      .gh-auth-overlay,
+      .cred-dialog-overlay,
+      .config-overlay,
+      .hive-dialog-overlay,
+      .nous-config-overlay,
+      .acmm-dialog-overlay {
+        align-items: stretch;
+        justify-content: stretch;
+        padding: var(--sp-0);
+      }
+      .config-modal,
+      .feedback-modal,
+      .nous-config-dialog,
+      .hive-dialog,
+      .acmm-dialog,
+      .welcome-modal {
+        width: 100vw !important;
+        width: 100dvw !important;
+        max-width: 100vw !important;
+        max-width: 100dvw !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        max-height: 100vh !important;
+        max-height: 100dvh !important;
+        border-radius: var(--sp-0) !important;
+        border-left: 0;
+        border-right: 0;
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+      }
+      .hive-dialog,
+      .acmm-dialog {
+        overflow-y: auto;
+        padding: var(--sp-5) max(var(--sp-5), env(safe-area-inset-right)) max(var(--sp-5), env(safe-area-inset-bottom)) max(var(--sp-5), env(safe-area-inset-left));
+      }
+      .config-header,
+      .feedback-header,
+      .nous-config-dialog > h2 {
+        padding: max(var(--sp-3), env(safe-area-inset-top)) var(--sp-5) var(--sp-3);
+        align-items: center;
+      }
+      .feedback-header .feedback-intro {
+        display: none;
+      }
+      .config-tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding: var(--sp-0) var(--sp-4);
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+      .config-tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .config-tab {
+        flex: 0 0 auto;
+        min-height: var(--tap-target);
+        display: inline-flex;
+        align-items: center;
+        padding-top: var(--sp-2);
+        padding-bottom: var(--sp-2);
+      }
+      .config-body,
+      .feedback-body,
+      .nous-config-body {
+        padding: var(--sp-4) var(--sp-5);
+      }
+      .config-footer,
+      .feedback-footer {
+        flex-wrap: wrap;
+        align-items: center;
+        padding: var(--sp-3) var(--sp-5) max(var(--sp-3), env(safe-area-inset-bottom));
+      }
+      .feedback-footer > *,
+      .config-footer > * {
+        min-width: 0;
+      }
+      /* Chat: the floating 560px panel at bottom:80px/max-height:92vh pokes
+         above the viewport and under the topbar; go full-screen instead. */
+      .hive-chat-panel:not(.maximized):not(.docked) {
+        inset: 0;
+        width: auto !important;
+        height: auto !important;
+        min-width: 0;
+        min-height: 0;
+        max-width: none;
+        max-height: none;
+        border-radius: var(--sp-0);
+      }
+      .hive-chat-panel.docked {
+        height: 100dvh !important;
+      }
+      /* The panel sits below the fixed topbar in the stack (9001 vs 9400), so
+         once it covers the viewport its own header and close button would be
+         painted over; lift it above the bar while it is full-screen. */
+      .hive-chat-panel.open {
+        z-index: calc(var(--navbar-sticky-z) + 1);
+        padding-top: env(safe-area-inset-top);
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+      }
+      .hive-chat-cheatsheet,
+      .hive-chat-resize,
+      .hive-chat-resize-width {
+        display: none;
+      }
+      .hive-chat-fab {
+        width: var(--tap-target);
+        height: var(--tap-target);
+        right: max(var(--sp-5), env(safe-area-inset-right));
+        bottom: max(var(--sp-5), env(safe-area-inset-bottom));
+        font-size: var(--tap-glyph);
+      }
+      /* iOS Safari zooms the page when a focused control is under 16px. */
+      input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+      select,
+      textarea {
+        font-size: var(--fs-touch) !important;
       }
     }
     @media (max-width: 480px) {
@@ -5082,6 +5534,14 @@
       <button class="config-close" data-action="closeConfigDialog">&times;</button>
     </div>
     <nav class="config-tabs" id="config-tabs"></nav>
+    <div class="settings-search-panel" id="settings-search-panel" role="search" aria-label="Search global settings" hidden>
+      <div class="settings-search-input-wrap">
+        <span class="settings-search-icon" aria-hidden="true">⌕</span>
+        <input id="settings-search-input" class="settings-search-input" type="search" placeholder="Search settings…" aria-label="Search settings" autocomplete="off">
+        <button type="button" class="settings-search-clear" id="settings-search-clear" aria-label="Clear settings search" hidden>&times;</button>
+      </div>
+      <div id="settings-search-count" class="settings-search-count" aria-live="polite">Search settings</div>
+    </div>
     <div class="config-body" id="config-body"></div>
     <div class="config-footer">
       <button class="hv-btn btn-secondary btn config-cancel" data-action="closeConfigDialog">Cancel</button>
@@ -5705,7 +6165,7 @@
         <h3 style="font-size:1rem;margin:18px 0 8px">Issue claims and GitHub footprint</h3>
 
         <h4 style="font-size:0.95rem;margin:var(--sp-0) var(--sp-0) var(--sp-3)">Why did an agent comment or label my issue as claimed?</h4>
-        <p style="margin:var(--sp-0) var(--sp-0) var(--sp-4)">Hive agents do not claim issues by assigning themselves as users. They use the App-bot path: <code>hive-open-issue claim</code> asks the issue-request watcher to apply a visible <code>hive/claimed-by-&lt;agent&gt;</code> label and audit <code>agent_issue_claimed</code>. The watcher re-derives the requesting agent from file ownership, so an agent cannot forge another agent's claim. See <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/hive-open-issue.md" target="_blank" rel="noopener noreferrer">hive-open-issue</a>.</p>
+        <p style="margin:var(--sp-0) var(--sp-0) var(--sp-4)">Hive agents do not claim issues by assigning themselves as users. They use the App-bot path: <code>hive-open-issue claim</code> asks the issue-request watcher to apply visible <code>hive/claimed-by-&lt;agent&gt;</code> and <code>hive/in-progress</code> labels (with a timestamped <code>hive:claim</code> start marker) and audit <code>agent_issue_claimed</code>. The watcher re-derives the requesting agent from file ownership, so an agent cannot forge another agent's claim. See <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/hive-open-issue.md" target="_blank" rel="noopener noreferrer">hive-open-issue</a>.</p>
         <p style="margin:var(--sp-0) var(--sp-0) var(--sp-6)">Claims are issue writes, so they require the same ACMM issue-writing permission as comments and issue creation. The optional claim-expiry feature is default-off under <code>governor.claims.enabled</code>; when off, ordinary work assignment still relies on the existing queue/lease rules.</p>
 
         <h4 style="font-size:0.95rem;margin:var(--sp-0) var(--sp-0) var(--sp-3)">How much GitHub footprint should I expect?</h4>
@@ -9013,7 +9473,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         </div>
         ${agentNowHtml(a)}
         <div class="oc-detail-blockers">${agentBlockerLineHtml(a)}${neverScheduledChipHtml(a, a.name)}</div>
-        ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence)}
+        ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence, a.inferenceLastError)}
         ${ocDetailFieldsHtml(a, isPaused, isOff, isOnDemand)}
         ${subAgentModelsHtml(a)}
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
@@ -11543,12 +12003,22 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
        sentence — that one reports whether a login URL was actually seen, so it
        earns the space and always wins over the persisted dismissal. */
     const TERMINAL_KEYBOARD_COPY_HINT = 'Selecting text in the terminal: hold ⇧ (Shift) while dragging — tmux mouse mode owns an ordinary drag. Then ⌘C (macOS) or Ctrl+Shift+C copies, and ⌘V or Ctrl+Shift+V pastes.';
-    function terminalCopyHintHtml(needsLogin, sessionUnavailable, agentName, loginURL, backendAuthStatus, backendAuthLastError, statusEvidence) {
+    function terminalCopyHintHtml(needsLogin, sessionUnavailable, agentName, loginURL, backendAuthStatus, backendAuthLastError, statusEvidence, inferenceLastError) {
       if (sessionUnavailable) return '';
+      /* #11761: inferenceLastError is the FULL error hive's inference proxy
+         returned to this agent. Claude Code clips the same text to one pane
+         row beside its "Retrying in Ns" countdown, and the pane-derived
+         backendAuthLastError/statusEvidence inherit that clipping — so the
+         proxy's copy wins whenever the server supplies it. */
+      const fullError = (inferenceLastError || '').trim();
       const backendDetail = backendAuthLastError || ((statusEvidence || '').includes('backend_auth_error') ? statusEvidence : '');
       if (backendDetail && /Inference backend (?:outage|rejected credentials) \(401\)/.test(backendDetail)) {
         const backendTitle = backendDetail.includes('Inference backend outage (401)') ? 'Inference backend outage (401).' : 'Inference backend rejected credentials (401).';
-        return `<div class="terminal-copy-hint backend-auth-error" role="note"><strong>${backendTitle}</strong> ${esc(backendDetail)} <span class="terminal-copy-hint-help">Check the inference proxy / API key; this is not an interactive login.</span></div>`;
+        const shown = fullError ? `<span class="terminal-copy-hint-detail">${esc(fullError)}</span>` : esc(backendDetail);
+        return `<div class="terminal-copy-hint backend-auth-error" role="note"><strong>${backendTitle}</strong> ${shown} <span class="terminal-copy-hint-help">Check the inference proxy / API key; this is not an interactive login.</span></div>`;
+      }
+      if (fullError && !needsLogin) {
+        return `<div class="terminal-copy-hint backend-auth-error" role="note"><strong>Inference backend error.</strong> <span class="terminal-copy-hint-detail">${esc(fullError)}</span> <span class="terminal-copy-hint-help">Full message from hive's inference proxy; the CLI may still be retrying.</span></div>`;
       }
       /* #5327: the copy control is for a LOGIN link. It is rendered only
          where one is expected — see terminalCopyUrlButtonHtml — rather than
@@ -12174,7 +12644,6 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           ${agentSpanHandle}
           <span class="working-indicator"></span>
           <div class="agent-name">${agentOrderHandle}<span class="dot ${dotState}" data-status="${statusAttr(dotState)}"${isOff ? ` title="${esc(agentOffTitle(a))}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' ' + statusBadgeHTML('ready', 'sandboxed', 'Sandboxed runner active', 'done') : ''}${disabledBadge}${continuousBadge}${replicaBadge} ${agentPowerSwitchHtml(a)} ${isDisabled ? disabledEnableBtn : ''}${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionActions} <button class="hv-btn btn-secondary btn-sm" data-action="showAdvisorRecords" data-arg0="${esc(a.name)}" data-stop="1" title="Advisor reviews of this agent's finished turns — severity and text, newest first">🗣 advisor</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
-          ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence)}
           <div class="agent-state ${isPoweredOff ? 'disabled' : isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${agentStateText(a)}${pauseInfoIcon(a)}${(() => {
             if (a.structuredStatus === 'BLOCKED') return statusBadgeHTML('blocked', 'blocked', a.statusEvidence, 'blocked');
             if (a.structuredStatus === 'NEEDS_CONTEXT') return statusBadgeHTML('needs_context', 'needs context', a.statusEvidence, 'needs-context');
@@ -12185,6 +12654,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           })()}${kickOutcomeBadgeHtml(a)}${agentSpendChip(a.name)}</div>
           ${agentNowHtml(a)}
           ${agentBlockerLineHtml(a)}
+          ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence, a.inferenceLastError)}
           ${(() => {
             // Last upstream/launch error stays on its own line below the state
             // badge, never behind the working-indicator dot — previously the
@@ -14543,7 +15013,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (labels.has('blocked')) kinds.push('issue:blocked');
       if (labels.has('needs-decision') || labels.has('2-discussing')) kinds.push('issue:needs-decision');
       if (labels.has('epic')) kinds.push('issue:epic');
-      if (issueLabels.some(l => l === 'claimed' || l.startsWith('hive/claimed-by-')) || ((issue && issue.assignees) || []).length) kinds.push('issue:claimed');
+      if (issueLabels.some(l => l === 'claimed' || l === 'hive/in-progress' || l.startsWith('hive/claimed-by-')) || ((issue && issue.assignees) || []).length) kinds.push('issue:claimed');
       if (info && info.role) kinds.push('issue:role');
       if (issueIsStale(issue)) kinds.push('issue:stale');
       if (Array.isArray(issue && issue.linked_prs) && issue.linked_prs.length) kinds.push('issue:linked-pr');
@@ -18725,6 +19195,17 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // tooltip on every model dropdown already on screen for that backend —
     // the agent cards are rendered independently of this fetch, so a notice
     // that arrives after they paint still has to reach them.
+    // formatStaleCatalogAge renders how long ago a replayed CLI catalog was
+    // discovered ("40s ago", "12m ago", "3h ago") from the server's RFC3339
+    // stale_at; '' when unparsable.
+    function formatStaleCatalogAge(iso) {
+      const t = Date.parse(iso);
+      if (!Number.isFinite(t)) return '';
+      const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      if (sec < 60) return `${sec}s ago`;
+      if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+      return `${Math.floor(sec / 3600)}h ago`;
+    }
     function setBackendModelNotice(backend, notice) {
       if (notice) BACKEND_MODEL_NOTICES[backend] = notice;
       else delete BACKEND_MODEL_NOTICES[backend];
@@ -18768,8 +19249,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           // from a real one for two days while auto-heal downgraded every
           // agent off it (#7384). An entitlement notice (#6500) still wins
           // the label — it is the more specific diagnosis.
+          // b.stale: the server is replaying the last CLI catalog it
+          // discovered because the current probe failed transiently (#11865).
+          // That IS the CLI's list, so it is not "degraded"; the label says
+          // it is cached and the tooltip says why the refresh failed.
           const discoveryFailed = !!(b.discovery && b.discovery.ok === false);
+          const staleAge = b.stale && b.stale_at ? formatStaleCatalogAge(b.stale_at) : '';
           const labelSuffix = (b.notice && b.notice.label) ? ` (${b.notice.label})`
+            : (discoveryFailed && b.stale) ? ` (cached CLI catalog${staleAge ? ', ' + staleAge : ''} — refresh failing)`
             : discoveryFailed ? (b.degraded
                 ? ' (⚠ model discovery degraded — not the CLI catalog)'
                 : ' (⚠ model discovery failed — showing fallback list)')
@@ -18777,17 +19264,22 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           if (b.notice && b.notice.detail) {
             console.warn(`[models] ${b.id}: ${b.notice.detail}`);
           } else if (discoveryFailed) {
-            console.warn(`[models] ${b.id}: model discovery failed — ${b.discovery.error}`);
+            console.warn(`[models] ${b.id}: model discovery ${b.stale ? 'serving cached catalog' : 'failed'} — ${b.discovery.error}`);
           }
           // The tooltip carries the diagnostic text itself — the exact
           // string ("Could not find a @github/copilot platform package…" vs
-          // "Not authenticated") an operator previously had to read off a
-          // server log to tell the failures apart.
-          setBackendModelNotice(b.id, b.notice || (discoveryFailed ? {
+          // "Not authenticated" vs "sdk helper timed out after 20s") an
+          // operator previously had to read off a server log to tell the
+          // failures apart.
+          setBackendModelNotice(b.id, b.notice || (discoveryFailed ? (b.stale ? {
+            class: 'discovery',
+            label: 'cached CLI catalog — refresh failing',
+            detail: `ℹ this is the CLI catalog discovered ${staleAge || 'earlier'}; the latest refresh failed and the server is holding the last good list. ${b.discovery.error}`,
+          } : {
             class: 'discovery',
             label: b.degraded ? 'model discovery degraded' : 'model discovery failed',
             detail: `⚠ model discovery ${b.degraded ? 'degraded' : 'failed'} — ${b.degraded ? 'this list is live but is not the catalog the CLI uses' : 'showing the static fallback list'}. ${b.discovery.error}`,
-          } : null));
+          }) : null));
           if (b.reasoning_efforts) MODEL_REASONING_EFFORTS[b.id] = b.reasoning_efforts;
           const models = (b.models || []).map(m => ({ value: m, label: (b.id === 'omp' ? m : m.split('/').pop()) + labelSuffix }));
           if (!models.length) return; // keep prior (possibly fallback) list rather than blanking the dropdown
@@ -18795,7 +19287,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           // A degraded list is not authority either: absence from it proves
           // nothing about what the CLI can run, so auto-heal sits it out
           // exactly as it sits out a static fallback (#7384).
-          reconcileModelsAfterDiscovery(b.id, models, !!b.fallback || !!b.degraded);
+          // A stale replay is the CLI's catalog but not freshly confirmed;
+          // auto-heal waits for a live probe too (#11865).
+          reconcileModelsAfterDiscovery(b.id, models, !!b.fallback || !!b.degraded || !!b.stale);
         });
       } catch (e) {
         // Leave BACKEND_MODELS / fallbacks untouched — retried on next refresh hook.
@@ -20170,6 +20664,7 @@ function burnAreaChart() {
     function v4KindClass(kind) {
       switch (kind) {
         case 'kicked':
+        case 'started':
         case 'pr_opened': return 'blue';
         case 'merged': return 'green';
         case 'blocked': return 'red';
@@ -20293,8 +20788,9 @@ function burnAreaChart() {
       dto = dto || {};
       const reports = Array.isArray(dto.reports) ? dto.reports : [];
       const recoveries = Array.isArray(dto.recoveries) ? dto.recoveries : [];
-      setSectionSummary('fleet-report-section', `${reports.length} reports · ${recoveries.length} recovered`);
-      if (reports.length === 0 && recoveries.length === 0) { section.style.display = 'none'; return; }
+      const selfReports = fleetReportSelfReportRow(dto);
+      setSectionSummary('fleet-report-section', `${reports.length} reports · ${recoveries.length} recovered${selfReports.count ? ` · ${selfReports.count} filed` : ''}`);
+      if (reports.length === 0 && recoveries.length === 0 && selfReports.count === 0) { section.style.display = 'none'; return; }
       const dryRun = dto.dry_run !== false;
       const mk = (r, i, recovered) => {
         r = r || {};
@@ -20333,8 +20829,26 @@ function burnAreaChart() {
       const reportHtml = reports.map((r, i) => mk(r, i, false)).join('');
       const recoveryHtml = recoveries.map((r, i) => mk(r, i, true)).join('');
       section.style.display = '';
-      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge ${dryRun ? 'stay' : 'raise'}">${dryRun ? 'dry-run preview' : 'filing enabled'}</span><span class="reco-rationale" style="margin-top:var(--sp-0)">Persistent ACMM shortfalls and hive-code defect symptoms. Reports contain shape-only scrubbed evidence.</span></div><ul class="reco-checklist">${reportHtml}${recoveryHtml}</ul>`;
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge ${dryRun ? 'stay' : 'raise'}">${dryRun ? 'dry-run preview' : 'filing enabled'}</span><span class="reco-rationale">Persistent ACMM shortfalls, hive-code defect symptoms and unusual runtime errors. Reports contain shape-only scrubbed evidence.</span></div>${selfReports.html}<ul class="reco-checklist">${reportHtml}${recoveryHtml}</ul>`;
       applySectionCollapse('fleet-report-section');
+    }
+
+    // fleetReportSelfReportRow summarises the hivecommons/hive issues this
+    // hive has filed or joined (hivecommons/hive#11868): "Self-reports: N
+    // open (last: <class> → #NNN)". Every value comes from GitHub or the
+    // local state file and is escaped; links open the issue in a new tab.
+    function fleetReportSelfReportRow(dto) {
+      const open = (dto && dto.state && dto.state.open) || {};
+      const entries = Object.keys(open).map(fp => Object.assign({ fingerprint: fp }, open[fp] || {}))
+        .filter(e => Number(e.number) > 0 && !e.recovered && !e.closed_at);
+      if (entries.length === 0) return { count: 0, html: '' };
+      entries.sort((x, y) => String(y.posted_at || '').localeCompare(String(x.posted_at || '')));
+      const last = entries[0];
+      const lastLabel = `${escapeHtml(last.class || last.criterion || last.trigger || 'report')} → ${last.url ? `<a href="${escapeHtml(last.url)}" target="_blank" rel="noopener">#${escapeHtml(String(last.number))}</a>` : `#${escapeHtml(String(last.number))}`}${last.joined ? ' (joined)' : ''}`;
+      const links = entries.slice(0, 8).map(e => e.url
+        ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener" title="${escapeHtml(e.class || e.trigger || '')}">#${escapeHtml(String(e.number))}</a>`
+        : `#${escapeHtml(String(e.number))}`).join(', ');
+      return { count: entries.length, html: `<div class="crit-detail" data-fleet-selfreports>Self-reports: <strong>${entries.length} open</strong> (last: ${lastLabel})${entries.length > 1 ? ` · ${links}` : ''}</div>` };
     }
 
     async function fetchHiveAdvice() {
@@ -20470,9 +20984,9 @@ function burnAreaChart() {
 
     // Short chip labels for the journey stage axis; keys are the closed Kind
     // set served by /api/lifecycle-timeline.
-    const LC_STAGE_AXIS = ['enumerated', 'classified', 'kicked', 'pr_opened', 'merged', 'blocked'];
+    const LC_STAGE_AXIS = ['enumerated', 'classified', 'kicked', 'started', 'pr_opened', 'merged', 'blocked'];
     const LC_STAGE_LABEL = {
-      enumerated: 'enum', classified: 'class', kicked: 'kick',
+      enumerated: 'enum', classified: 'class', kicked: 'kick', started: 'start',
       pr_opened: 'pr', merged: 'merged', blocked: 'blocked'
     };
 
@@ -20518,7 +21032,7 @@ function burnAreaChart() {
 
     function lcStageLabel(kind) {
       const labels = {
-        enumerated: 'Enumerated', classified: 'Classified', kicked: 'Kicked', pr_opened: 'PR opened',
+        enumerated: 'Enumerated', classified: 'Classified', kicked: 'Kicked', started: 'Started', pr_opened: 'PR opened',
         merged: 'Merged', blocked: 'Blocked', stage_completed: 'Stage completed', stage_receipt: 'Stage receipt',
         stage_approval: 'Stage approval'
       };
@@ -21158,7 +21672,8 @@ function burnAreaChart() {
       const mergedActorTotal = mergedActors.hive + mergedActors.human + mergedActors.other;
       const hiveMergedPct = mergedActorTotal ? Math.round((mergedActors.hive / mergedActorTotal) * 100) : 0;
       const windowName = PRT_WINDOWS.find(([h]) => h === prtHours);
-      const summary = `${merged} merged · ${opened} opened (${windowName ? windowName[1] : 'window'})`;
+      const slaReport = prtSLAReport();
+      const summary = `${merged} merged · ${opened} opened (${windowName ? windowName[1] : 'window'})${prtSLASummary(slaReport)}`;
       setSectionSummary('pr-throughput-section', summary, `Merged and opened PRs in the selected window; ${hiveMergedPct}% hive-attributed merged share`);
       const pathLabels = { sweep: 'auto-merge sweep', queue: 'auto-merge sweep', relay: 'merge relay', hive: 'hive identity', human: 'human', other_automation: 'other automation', unknown: 'unrecorded path' };
       const pathParts = Object.keys(byPath).filter((k) => Number(byPath[k]) > 0).sort()
@@ -21185,8 +21700,178 @@ function burnAreaChart() {
           <div class="lc-fleet-stat" title="Pull/merge requests observed merged in the selected range"><div class="val merged">${merged}</div><div class="lbl">Merged</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'merged', 'var(--green)')}</span></div>
           <div class="lc-fleet-stat" title="Pull/merge requests observed closed without merging in the selected range"><div class="val closed">${closed}</div><div class="lbl">Closed without merging</div><span class="prt-tile-spark">${prtSeriesSpark(dto, 'closed', 'var(--red)')}</span></div>
           ${prtHiveHumanTile(dto)}
-        </div>${metricsHtml}<div class="prt-attribution">${prtActorMatrix(dto)}${prtActorTrend(dto)}</div>${pathsHtml}${breakdowns ? `<div class="prt-breakdowns">${breakdowns}</div>` : ''}`;
+        </div>${metricsHtml}${renderThroughputSLA()}<div class="prt-attribution">${prtActorMatrix(dto)}${prtActorTrend(dto)}</div>${pathsHtml}${breakdowns ? `<div class="prt-breakdowns">${breakdowns}</div>` : ''}`;
       applySectionCollapse('pr-throughput-section');
+    }
+
+    // ── Delivery SLA (Throughput) ─────────────────────────────────────────────
+    // Reads /api/status .sla (fleet) and repos[].sla, derived server-side from
+    // the lifecycle timeline — no extra fetch. Spans are hours; p50 is coloured
+    // against the sla.targets budgets (Settings → Thresholds).
+    const PRT_SLA_SPANS = [
+      { key: 'start_to_pr', hist: 'start_to_pr_p50', target: 'start_to_pr_h', label: 'Start → PR', color: 'var(--accent)', tip: 'Hours from the hive/in-progress start mark (an agent claimed, commented or opened a PR on the issue) to the PR that fixes it being opened.' },
+      { key: 'pr_to_merge', hist: 'pr_to_merge_p50', target: 'pr_to_merge_h', label: 'PR → merge', color: 'var(--green)', tip: 'Hours from the fixing PR opening to its merge (hive-driven or observed).' },
+      { key: 'open_to_merge', hist: 'open_to_merge_p50', target: 'open_to_merge_h', label: 'Open → merge', color: 'var(--orange)', tip: 'Hours from the issue being opened on GitHub to the fixing PR merging — the end-to-end delivery time.' },
+    ];
+    const PRT_SLA_WARN_RATIO = 1.5;
+    let _prtSLAExpanded = false;
+    // The SLA window follows the Throughput period pills: 7d percentiles for
+    // every pill except `all`, which switches to the 30d window.
+    function prtSLAWindow() { return prtHours > 0 && prtHours <= 168 ? '7d' : '30d'; }
+
+    function prtSLAState(p50, n, target) {
+      if (!Number.isFinite(n) || n <= 0 || !Number.isFinite(p50)) return 'none';
+      if (!Number.isFinite(target) || target <= 0) return 'none';
+      if (p50 <= target) return 'ok';
+      if (p50 <= target * PRT_SLA_WARN_RATIO) return 'warn';
+      return 'breach';
+    }
+
+    function fmtSLAHours(h) {
+      if (!Number.isFinite(h)) return '—';
+      if (h < 1) return `${Math.round(h * 60)}m`;
+      if (h < 48) return `${h >= 10 ? Math.round(h) : h.toFixed(1)}h`;
+      return `${(h / 24).toFixed(1)}d`;
+    }
+
+    // prtSLASeries turns the 30 daily buckets into a dense sparkline
+    // series: days with no closed span carry the previous day's p50 forward so
+    // a quiet weekend does not read as "zero hours".
+    function prtSLASeries(history, field) {
+      const out = [];
+      let last = 0;
+      (history || []).forEach(d => {
+        const v = Number(d && d[field]);
+        if (Number.isFinite(v) && v > 0) last = v;
+        out.push(last);
+      });
+      return out;
+    }
+
+    function prtSLASpark(span, report, state, width) {
+      const series = prtSLASeries(report && report.history, span.hist);
+      if (!series.some(v => v > 0)) return '';
+      const title = `30-day daily p50 · ${overviewKPISparkTitle(series.filter(v => v > 0), fmtSLAHours)}`;
+      return `<span class="prt-metric-spark">${renderSparkline(null, series, {
+        width: width || 240, height: 28, min: 0, color: state === 'none' ? span.color : 'var(--prt-sla-color)', title,
+        ariaLabel: `${span.label}: ${title}`, label: `sla ${span.label}`, id: `prt-sla:${span.key}`,
+        wrapperClass: 'sparkline--flush', wrapperTitle: title, strokeWidth: 1.5,
+      })}</span>`;
+    }
+
+    function prtSLAInfoHTML(id, label, tip) {
+      return `<span class="config-info overview-term-info" tabindex="0" data-action="gh3" data-stop="1" aria-describedby="${esc(id)}" aria-label="${esc(label)} details">ⓘ<span id="${esc(id)}" class="config-tooltip" role="tooltip">${esc(tip)}</span></span>`;
+    }
+
+    // prtSLAReport follows the Throughput repo filter: the fleet block for
+    // "All repos", otherwise that repo's own windows/history/stale list.
+    function prtSLAReport() {
+      const status = window._lastStatus || {};
+      const fleet = status.sla || null;
+      if (!fleet) return null;
+      if (!prtRepo) return Object.assign({}, fleet, { stale_count: (fleet.stale_in_progress || []).length });
+      const match = (status.repos || []).find(r => r && overviewRepoName(r).toLowerCase() === String(prtRepo).toLowerCase());
+      if (!match || !match.sla) return Object.assign({}, fleet, { windows: {}, history: [], stale_in_progress: [], stale_count: 0, merged_7d: 0, missing: true });
+      return Object.assign({}, match.sla, { targets: fleet.targets, claim_ttl_s: fleet.claim_ttl_s, stale_count: (match.sla.stale_in_progress || []).length });
+    }
+
+    function prtSLAIssueURL(repoShort, number) {
+      const repos = (window._lastStatus || {}).repos || [];
+      const match = repos.find(r => r && (r.name === repoShort || (r.full || '').split('/').pop() === repoShort));
+      const full = (match && (match.full || match.name)) || repoShort;
+      return `https://github.com/${full.split('/').map(encodeURIComponent).join('/')}/issues/${encodeURIComponent(String(number))}`;
+    }
+
+    function prtSLAStaleBadge(report) {
+      const stale = (report && report.stale_in_progress) || [];
+      const n = stale.length;
+      const ttl = Number(report && report.claim_ttl_s);
+      const ttlText = Number.isFinite(ttl) && ttl > 0 ? fmtSLAHours(ttl / 3600) : 'the claim TTL';
+      const tip = n
+        ? `${n} issue${n === 1 ? '' : 's'} marked hive/in-progress for longer than ${ttlText} with no PR yet. Click to list them.`
+        : `No issue has carried hive/in-progress past ${ttlText} without a PR.`;
+      if (n === 1) {
+        const s0 = stale[0];
+        return `<a class="prt-sla-stale" data-sla-state="breach" href="${esc(prtSLAIssueURL(s0.repo, s0.number))}" target="_blank" rel="noopener" title="${esc(tip)}" aria-label="${esc(tip)}">⚠ 1 stale in-progress · ${esc(s0.repo)}#${esc(String(s0.number))}</a>`;
+      }
+      return `<button type="button" class="prt-sla-stale" data-sla-state="${n ? 'breach' : 'none'}" data-action="togglePRThroughputSLADetail" data-stop="1" title="${esc(tip)}" aria-label="${esc(tip)}" aria-expanded="${_prtSLAExpanded ? 'true' : 'false'}">${n ? '⚠ ' : '✓ '}${n} stale in-progress</button>`;
+    }
+
+    function prtSLATile(span, report, targets) {
+      const winKey = prtSLAWindow();
+      const win = ((report && report.windows) || {})[winKey] || {};
+      const stat = win[span.key] || {};
+      const p50 = Number(stat.p50_h), p95 = Number(stat.p95_h), n = Number(stat.n) || 0;
+      const target = Number(targets && targets[span.target]);
+      const state = prtSLAState(p50, n, target);
+      const tip = `${span.tip} Target ${fmtSLAHours(target)}; green within target, amber up to ${PRT_SLA_WARN_RATIO}× target, red beyond. p50 ${fmtSLAHours(n ? p50 : NaN)} · p95 ${fmtSLAHours(n ? p95 : NaN)} · n=${n} over ${winKey}.`;
+      const value = n ? fmtSLAHours(p50) : '—';
+      return `<div class="prt-metric" data-sla-state="${state}" data-sla-span="${esc(span.key)}" title="${esc(tip)}"><div class="mval" data-prt-sla-p50="${Number.isFinite(p50) ? p50 : ''}">${esc(value)}</div><div class="mlbl">${esc(span.label)} p50${prtSLAInfoHTML(`prt-sla-tip-${span.key}`, span.label, tip)}</div><div class="prt-caption">n=${n} · p95 ${esc(n ? fmtSLAHours(p95) : '—')} · <span class="prt-sla-target">target ${esc(fmtSLAHours(target))}</span></div>${prtSLASpark(span, report, state)}</div>`;
+    }
+
+    function prtSLARepoRows(repos, targets) {
+      const rows = (repos || []).filter(r => r && r.sla).map(r => {
+        const rep = r.sla;
+        const win = (rep.windows || {})[prtSLAWindow()] || {};
+        const cell = span => {
+          const st = win[span.key] || {};
+          const n = Number(st.n) || 0;
+          const state = prtSLAState(Number(st.p50_h), n, Number(targets && targets[span.target]));
+          return `<td data-sla-state="${state}" title="n=${n}">${n ? `${esc(fmtSLAHours(Number(st.p50_h)))} / ${esc(fmtSLAHours(Number(st.p95_h)))}` : '—'}</td>`;
+        };
+        const stale = (rep.stale_in_progress || []).length;
+        const spark = prtSLASpark(PRT_SLA_SPANS[2], rep, 'none', 72) || '<span class="overview-kpi-subline">—</span>';
+        return `<tr><td>${esc(overviewRepoName(r))}${stale ? ` <span class="prt-sla-stale" data-sla-state="breach" title="${stale} stale in-progress">⚠ ${stale}</span>` : ''}</td>${cell(PRT_SLA_SPANS[0])}${cell(PRT_SLA_SPANS[1])}<td>${Number(rep.merged_7d) || 0}</td><td>${spark}</td></tr>`;
+      });
+      if (!rows.length) return '<div class="overview-empty">No per-repo SLA data yet — spans appear as issues move start → PR → merge.</div>';
+      return `<table class="prt-sla-table" aria-label="Delivery SLA per repo"><thead><tr><th>Repo</th><th title="p50 / p95 over ${esc(prtSLAWindow())}">Start → PR</th><th title="p50 / p95 over ${esc(prtSLAWindow())}">PR → merge</th><th>Merged 7d</th><th>Open → merge 30d</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+    }
+
+    function prtSLAStaleList(report) {
+      const stale = (report && report.stale_in_progress) || [];
+      if (!stale.length) return '';
+      return `<div class="prt-sla-stale-list" aria-label="Stale in-progress issues"><span class="overview-kpi-subline">Stale in-progress:</span>${stale.map(s => `<a href="${esc(prtSLAIssueURL(s.repo, s.number))}" target="_blank" rel="noopener" title="started ${esc(s.started_at || '')}${s.agent ? ` by ${esc(s.agent)}` : ''}">${esc(s.repo)}#${esc(String(s.number))}</a>`).join('')}</div>`;
+    }
+
+    function renderThroughputSLA() {
+      const report = prtSLAReport();
+      if (!report) return '';
+      const targets = report.targets || {};
+      const winKey = prtSLAWindow();
+      const tiles = PRT_SLA_SPANS.map(span => prtSLATile(span, report, targets)).join('');
+      const repos = prtRepo ? ((window._lastStatus || {}).repos || []).filter(r => r && overviewRepoName(r).toLowerCase() === String(prtRepo).toLowerCase()) : ((window._lastStatus || {}).repos || []);
+      const detail = _prtSLAExpanded
+        ? `<div class="prt-sla-detail" id="prt-sla-detail">${prtSLAStaleList(report)}${prtSLARepoRows(repos, targets)}</div>`
+        : '';
+      const headTip = 'Delivery SLA: how long issues take to move from start to PR, PR to merge, and open to merge. Derived from the lifecycle timeline the hive already records — no extra GitHub calls. Percentiles use the 7d window, or 30d when the Throughput period is set to all; targets live in Settings → Governor → Thresholds.';
+      return `<div class="prt-sla" data-prt-sla data-sla-window="${esc(winKey)}"><div class="prt-sla-head"><strong>Delivery SLA${prtSLAInfoHTML('prt-sla-tip-head', 'Delivery SLA', headTip)}</strong><span class="prt-sla-window">${esc(winKey)} percentiles · 30-day sparklines</span><span class="prt-sla-head-spacer"></span>${prtSLAStaleBadge(report)}<button type="button" class="hv-btn btn-secondary btn-sm" data-action="togglePRThroughputSLADetail" data-stop="1" aria-expanded="${_prtSLAExpanded ? 'true' : 'false'}" aria-controls="prt-sla-detail" title="${_prtSLAExpanded ? 'Hide' : 'Show'} the per-repo breakdown">${_prtSLAExpanded ? 'Repos ▴' : 'Repos ▾'}</button></div><div class="prt-sla-tiles">${tiles}</div>${detail}</div>`;
+    }
+
+    // prtSLASummary is the fragment appended to the collapsed Throughput line.
+    function prtSLASummary(report) {
+      const stat = (((report || {}).windows || {})[prtSLAWindow()] || {}).open_to_merge || {};
+      const n = Number(stat.n) || 0;
+      const stale = Number((report || {}).stale_count) || 0;
+      const parts = [];
+      if (n) parts.push(`open→merge p50 ${fmtSLAHours(Number(stat.p50_h))}`);
+      if (stale) parts.push(`${stale} stale in-progress`);
+      return parts.length ? ' · ' + parts.join(' · ') : '';
+    }
+
+    // refreshThroughputSLA re-renders only the SLA block when a status poll
+    // lands between Throughput fetches, so the tiles track /api/status.
+    function refreshThroughputSLA() {
+      if (!prtLast) return;
+      const card = document.getElementById('pr-throughput-card');
+      const el = card && card.querySelector('[data-prt-sla]');
+      const html = renderThroughputSLA();
+      if (!el) { if (html) renderPRThroughput(prtLast); return; }
+      if (html) el.outerHTML = html; else el.remove();
+    }
+
+    function togglePRThroughputSLADetail() {
+      _prtSLAExpanded = !_prtSLAExpanded;
+      if (prtLast) renderPRThroughput(prtLast);
     }
 
     async function fetchPRThroughput() {
@@ -23686,7 +24371,6 @@ function burnAreaChart() {
 
     function kbShowModal(title, bodyHtml, opts) {
       const dialogWidth = (opts && opts.width) || '600px';
-      const dialogMaxHeight = (opts && opts.maxHeight) || '';
       let overlay = document.getElementById('kb-modal-overlay');
       if (!overlay) {
         overlay = document.createElement('div');
@@ -24033,7 +24717,10 @@ function burnAreaChart() {
     }
 
     function kbOpenSubscriptions() {
-      kbShowModal('🔗 Knowledge Sources', '<div id="kb-subs-content" style="height:70vh;overflow-y:auto"><div style="text-align:center;padding:var(--sp-7);color:var(--muted)">Loading...</div></div>', { width: 'min(960px, 92vw)', maxHeight: '85vh' });
+      // The dialog body (.nous-config-body) is the one scroll container —
+      // a nested fixed-height scroller here left two competing scrollers and
+      // the bottom of the form unreachable (#11786).
+      kbShowModal('🔗 Knowledge Sources', '<div id="kb-subs-content"><div class="kb-integrations-loading">Loading...</div></div>', { width: 'min(960px, 92vw)', maxHeight: '85vh' });
       kbLoadSubscriptions();
     }
 
@@ -24441,7 +25128,7 @@ function burnAreaChart() {
 
     function kbOpenHowItWorks() {
       const body = `
-        <div style="max-height:70vh;overflow-y:auto;font-size:var(--fs-base);line-height:1.6;color:var(--fg);padding-right:var(--sp-6)">
+        <div style="font-size:var(--fs-base);line-height:1.6;color:var(--fg)">
           <div style="margin-bottom:18px">
             <h3 class="modal-h">How Knowledge Works</h3>
             <p style="margin:var(--sp-0) var(--sp-0) var(--sp-3) var(--sp-0)">Hive organizes knowledge into <strong>4 layers</strong>, listed from highest to lowest priority:</p>
@@ -24554,7 +25241,7 @@ function burnAreaChart() {
         const count = t === 'obsidian' ? '' : String((_kcState.connectors || []).filter(c => c.type === t).length || 0);
         const attr = t === 'obsidian' ? 'data-integration-type="obsidian"' : 'data-connector-type="' + escapeHtml(t) + '"';
         html += '<button class="hv-btn btn-secondary btn-sm kb-layer-btn' + active + '" data-action="kbSelectIntegration" data-arg0="' + escapeHtml(t) + '" ' + attr + '>';
-        html += '<span class="kb-layer-label">' + (t === 'obsidian' ? '🔮 ' : '🔌 ') + escapeHtml(kbIntegrationLabel(t)) + '</span>';
+        html += '<span class="kb-layer-label">' + kbIntegrationIcon(t) + escapeHtml(kbIntegrationLabel(t)) + '</span>';
         if (count) html += '<span class="kb-layer-count">' + count + '</span>';
         html += '</button>';
       });
@@ -24566,7 +25253,7 @@ function burnAreaChart() {
     function kbRenderObsidianIntegration() {
       const hiveHost = window.location.host;
       const modalOpts = { noBack: true, noForm: true, noDone: true };
-      let body = '<div class="card-inset mb-5"><div class="title-sm">Obsidian</div><p class="muted-note m-0">Connect an Obsidian vault by mounting a Git-synced vault folder, or post individual notes through the webhook endpoint. This preserves the previous Obsidian setup guide inside the generic Integrations modal.</p></div>';
+      let body = '<div class="card-inset mb-5"><div class="title-sm kb-integration-title">' + kbIntegrationIcon('obsidian') + 'Obsidian</div><p class="muted-note m-0">Connect an Obsidian vault by mounting a Git-synced vault folder, or post individual notes through the webhook endpoint. This preserves the previous Obsidian setup guide inside the generic Integrations modal.</p></div>';
       body += renderGitSetupInstructions(hiveHost, modalOpts);
       body += '<div style="border-top:1px solid var(--border);margin:var(--sp-7) var(--sp-0)"></div>';
       body += renderWebhookSetupInstructions(hiveHost, modalOpts);
@@ -24601,7 +25288,7 @@ function burnAreaChart() {
       const connectors = (_kcState.connectors || []).filter(c => c.type === type);
       if (!_kbIntegrationEditName || !connectors.some(c => c.name === _kbIntegrationEditName)) _kbIntegrationEditName = connectors[0]?.name || '';
       const edited = connectors.find(c => c.name === _kbIntegrationEditName) || { name: '', type, enabled: true, layer: 'project', interval: '', scope: {}, auth: {} };
-      let html = '<div class="card-inset mb-5"><div class="row-between"><div><div class="title-sm">' + escapeHtml(info.label) + '</div><p class="muted-note m-0">' + escapeHtml(info.description) + '</p></div><a href="/docs/knowledge-connectors.md" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm">Docs ↗</a></div></div>';
+      let html = '<div class="card-inset mb-5"><div class="row-between"><div><div class="title-sm kb-integration-title">' + kbIntegrationIcon(type) + escapeHtml(info.label) + '</div><p class="muted-note m-0">' + escapeHtml(info.description) + '</p></div><a href="/docs/knowledge-connectors.md" target="_blank" rel="noopener" class="hv-btn btn-secondary btn-sm">Docs ↗</a></div></div>';
       html += '<div class="row-between mb-4"><div class="section-label m-0">Configured entries</div>' + (owner ? '<button type="button" class="hv-btn btn-primary btn-sm" data-action="kbIntegrationNew" data-arg0="' + escapeHtml(type) + '">Add ' + escapeHtml(info.label) + '</button>' : '') + '</div>';
       html += connectors.length ? connectors.map(c => kbConnectorRow(type, c, owner)).join('') : '<div class="empty-dashed mb-4">No ' + escapeHtml(info.label) + ' connector configured yet.</div>';
       html += owner ? kbConnectorFormHTML(type, edited, !!edited.name) : '<p class="muted-note">Only the hive owner can edit connector configuration.</p>';
@@ -26383,6 +27070,7 @@ function burnAreaChart() {
       window._lastRuns = dashboardRunsFromStatus(data);
       window._lastStatus = data;
       applyDashboardFeatureVisibility();
+      if (typeof refreshThroughputSLA === 'function') refreshThroughputSLA();
       if (window._acmmOverride) {
         if (data.acmmLevel === window._acmmOverride.level) {
           window._acmmOverride = null;
@@ -28303,38 +28991,85 @@ function burnAreaChart() {
         .replace(/\r/g, '');
     }
 
+    // ── Shared help-tooltip helper ──
+    // Every `.config-info` trigger (card "?" marks, settings help marks, Overview
+    // ⓘ terms) renders its `.config-tooltip` into one body-level fixed portal.
+    // Contract: hover opens after a short delay, focus opens immediately, moving
+    // into the portal keeps it open (some tooltips carry buttons/links), leaving
+    // both trigger and portal hides after a short grace, and Escape / outside
+    // click / scroll / resize / any modal opening hide it. Only one is open at a
+    // time. Hide decisions never depend on trigger identity, because the strip
+    // that owns a trigger may re-render (detaching it) while it is hovered.
     const CONFIG_TOOLTIP_EDGE_PAD_PX = 8;
     const CONFIG_TOOLTIP_GAP_PX = 6;
     const CONFIG_TOOLTIP_DEFAULT_WIDTH_PX = 240;
+    const CONFIG_TOOLTIP_OPEN_DELAY_MS = 120;
+    const CONFIG_TOOLTIP_CLOSE_GRACE_MS = 150;
+    const CONFIG_TOOLTIP_PORTAL_ID = 'config-tooltip-portal';
     let _configTooltipTrigger = null;
     let _configTooltipOriginalDescribedBy = '';
+    let _configTooltipOpenTimer = 0;
+    let _configTooltipCloseTimer = 0;
 
     function configTooltipPortal() {
-      let portal = document.getElementById('config-tooltip-portal');
+      let portal = document.getElementById(CONFIG_TOOLTIP_PORTAL_ID);
       if (!portal) {
         portal = document.createElement('div');
         portal.id = 'config-tooltip-portal';
         portal.className = 'config-tooltip config-tooltip-portal';
         portal.setAttribute('role', 'tooltip');
+        portal.hidden = true;
         document.body.appendChild(portal);
       }
       return portal;
     }
 
+    function configTooltipIsOpen() {
+      const portal = document.getElementById(CONFIG_TOOLTIP_PORTAL_ID);
+      return !!(_configTooltipTrigger && portal && !portal.hidden);
+    }
+
+    function configTooltipOwns(node) {
+      if (!node || typeof node.nodeType !== 'number') return false;
+      if (_configTooltipTrigger && _configTooltipTrigger.contains(node)) return true;
+      const portal = document.getElementById(CONFIG_TOOLTIP_PORTAL_ID);
+      return !!(portal && !portal.hidden && portal.contains(node));
+    }
+
+    function configTooltipHovered() {
+      const portal = document.getElementById(CONFIG_TOOLTIP_PORTAL_ID);
+      try {
+        return !!((_configTooltipTrigger && _configTooltipTrigger.isConnected && _configTooltipTrigger.matches(':hover'))
+          || (portal && !portal.hidden && portal.matches(':hover')));
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function cancelConfigTooltipOpen() {
+      if (_configTooltipOpenTimer) { clearTimeout(_configTooltipOpenTimer); _configTooltipOpenTimer = 0; }
+    }
+
+    function cancelConfigTooltipClose() {
+      if (_configTooltipCloseTimer) { clearTimeout(_configTooltipCloseTimer); _configTooltipCloseTimer = 0; }
+    }
+
     function positionConfigTooltip(info) {
-      if (!info) return;
+      if (!info || !info.isConnected) return;
       const sourceTip = info.querySelector('.config-tooltip');
       if (!sourceTip) return;
+      cancelConfigTooltipOpen();
+      cancelConfigTooltipClose();
       const portal = configTooltipPortal();
+      if (_configTooltipTrigger !== info) {
+        if (_configTooltipTrigger) hideConfigTooltip();
+        _configTooltipTrigger = info;
+        _configTooltipOriginalDescribedBy = info.getAttribute('aria-describedby') || '';
+      }
       const extraClasses = Array.from(sourceTip.classList).filter(c => c !== 'config-tooltip').join(' ');
       portal.className = ('config-tooltip config-tooltip-portal ' + extraClasses).trim();
       portal.innerHTML = sourceTip.innerHTML;
       portal.hidden = false;
-      if (_configTooltipTrigger !== info) {
-        if (_configTooltipTrigger) hideConfigTooltip(_configTooltipTrigger);
-        _configTooltipTrigger = info;
-        _configTooltipOriginalDescribedBy = info.getAttribute('aria-describedby') || '';
-      }
       info.setAttribute('aria-describedby', portal.id);
       const rect = info.getBoundingClientRect();
       const tipW = portal.offsetWidth || CONFIG_TOOLTIP_DEFAULT_WIDTH_PX;
@@ -28351,26 +29086,79 @@ function burnAreaChart() {
       portal.style.top = top + 'px';
     }
 
-    function hideConfigTooltip(info) {
-      if (!info || info !== _configTooltipTrigger) return;
-      const portal = document.getElementById('config-tooltip-portal');
-      if (portal) portal.hidden = true;
-      if (_configTooltipOriginalDescribedBy) info.setAttribute('aria-describedby', _configTooltipOriginalDescribedBy);
-      else info.removeAttribute('aria-describedby');
-      _configTooltipTrigger = null;
-      _configTooltipOriginalDescribedBy = '';
+    function scheduleConfigTooltipOpen(info) {
+      if (!info) return;
+      cancelConfigTooltipOpen();
+      if (info === _configTooltipTrigger && configTooltipIsOpen()) { cancelConfigTooltipClose(); return; }
+      _configTooltipOpenTimer = setTimeout(() => {
+        _configTooltipOpenTimer = 0;
+        positionConfigTooltip(info);
+      }, CONFIG_TOOLTIP_OPEN_DELAY_MS);
     }
 
-    document.addEventListener('mouseover', (e) => positionConfigTooltip(e.target.closest('.config-info')));
-    document.addEventListener('focusin', (e) => positionConfigTooltip(e.target.closest('.config-info')));
-    document.addEventListener('mouseout', (e) => {
-      const info = e.target.closest('.config-info');
-      if (!info || (e.relatedTarget && info.contains(e.relatedTarget))) return;
-      hideConfigTooltip(info);
-    });
-    document.addEventListener('focusout', (e) => hideConfigTooltip(e.target.closest('.config-info')));
-    window.addEventListener('scroll', () => { if (_configTooltipTrigger) positionConfigTooltip(_configTooltipTrigger); }, true);
-    window.addEventListener('resize', () => { if (_configTooltipTrigger) positionConfigTooltip(_configTooltipTrigger); });
+    // Hides whatever is open. Returns true when a tooltip was actually open.
+    function hideConfigTooltip() {
+      cancelConfigTooltipOpen();
+      cancelConfigTooltipClose();
+      const wasOpen = configTooltipIsOpen();
+      const portal = document.getElementById(CONFIG_TOOLTIP_PORTAL_ID);
+      if (portal) portal.hidden = true;
+      const info = _configTooltipTrigger;
+      if (info) {
+        if (_configTooltipOriginalDescribedBy) info.setAttribute('aria-describedby', _configTooltipOriginalDescribedBy);
+        else info.removeAttribute('aria-describedby');
+      }
+      _configTooltipTrigger = null;
+      _configTooltipOriginalDescribedBy = '';
+      return wasOpen;
+    }
+
+    function scheduleConfigTooltipHide() {
+      cancelConfigTooltipOpen();
+      if (!configTooltipIsOpen()) return;
+      cancelConfigTooltipClose();
+      _configTooltipCloseTimer = setTimeout(() => {
+        _configTooltipCloseTimer = 0;
+        if (configTooltipHovered()) return;
+        hideConfigTooltip();
+      }, CONFIG_TOOLTIP_CLOSE_GRACE_MS);
+    }
+
+    function configTooltipPointerOver(target) {
+      const info = target && target.closest ? target.closest('.config-info') : null;
+      if (info) { scheduleConfigTooltipOpen(info); return; }
+      if (configTooltipOwns(target)) { cancelConfigTooltipClose(); return; }
+      // Pointer is over something else: a sibling, a modal overlay that now
+      // covers the trigger, or the strip that replaced a detached trigger.
+      scheduleConfigTooltipHide();
+    }
+
+    function configTooltipPointerOut(target, relatedTarget) {
+      if (configTooltipOwns(relatedTarget)) return;
+      if (relatedTarget && relatedTarget.closest && relatedTarget.closest('.config-info')) return;
+      const info = target && target.closest ? target.closest('.config-info') : null;
+      if (info || configTooltipOwns(target)) scheduleConfigTooltipHide();
+    }
+
+    function configTooltipFocusIn(target) {
+      const info = target && target.closest ? target.closest('.config-info') : null;
+      if (info) { positionConfigTooltip(info); return; }
+      if (configTooltipOwns(target)) { cancelConfigTooltipClose(); return; }
+      if (configTooltipIsOpen()) hideConfigTooltip();
+    }
+
+    function configTooltipFocusOut(target, relatedTarget) {
+      if (configTooltipOwns(relatedTarget)) return;
+      if (configTooltipOwns(target)) scheduleConfigTooltipHide();
+    }
+
+    document.addEventListener('mouseover', (e) => configTooltipPointerOver(e.target));
+    document.addEventListener('mouseout', (e) => configTooltipPointerOut(e.target, e.relatedTarget));
+    document.addEventListener('focusin', (e) => configTooltipFocusIn(e.target));
+    document.addEventListener('focusout', (e) => configTooltipFocusOut(e.target, e.relatedTarget));
+    document.addEventListener('click', (e) => { if (configTooltipIsOpen() && !configTooltipOwns(e.target)) hideConfigTooltip(); });
+    window.addEventListener('scroll', () => { if (configTooltipIsOpen()) hideConfigTooltip(); }, true);
+    window.addEventListener('resize', () => { if (configTooltipIsOpen()) hideConfigTooltip(); });
 
     // ── Event delegation for actions with user-controlled data ──
     // Eliminates XSS via inline data-action="func" data-arg0="${unsafeValue}" injection.
@@ -32461,7 +33249,7 @@ function burnAreaChart() {
     // which is read-only hub-synced user/role data. It sits next to Model
     // Gateways because both are backend configuration.
     const GOVERNOR_BOB_TAB = 'Bob';
-    const GOVERNOR_CONFIG_TABS = ['General', 'Appearance', 'Agents', 'Thresholds', 'Labels', 'Repos', 'Budget', 'Notifications', 'Health', 'Sensing', 'Logging', 'Features', 'Extensions', 'Knowledge', 'Project Observability', 'Advisory', 'Smart classifier', 'Work Source', 'Hub', 'Forge App', 'Model Gateways', GOVERNOR_BOB_TAB, 'Variables', 'Security', 'Compliance'];
+    const GOVERNOR_CONFIG_TABS = ['General', 'Appearance', 'Dashboard', 'Agents', 'Thresholds', 'Labels', 'Repos', 'Budget', 'Notifications', 'Health', 'Sensing', 'Logging', 'Features', 'Extensions', 'Knowledge', 'Project Observability', 'Advisory', 'Smart classifier', 'Work Source', 'Hub', 'Forge App', 'Model Gateways', GOVERNOR_BOB_TAB, 'Variables', 'Security', 'Compliance'];
     const PIPELINE_STAGES = ['resolve-beads', 'track-prs', 'stale-check', 'repo-scan', 'coverage-gate', 'prompt-compose', 'budget-check', 'api-collect', 'final-compose'];
     const PIPELINE_STAGE_TIPS = {
       'resolve-beads': 'Fetch and inject knowledge beads (facts, patterns, gotchas) relevant to the agent\'s current task context.',
@@ -32504,6 +33292,215 @@ function burnAreaChart() {
     ];
     const MAX_AGENT_REPLICAS = 5;
 
+    const SETTINGS_SEARCH_STATIC_HITS = [
+      { tab: 'General', section: 'Governor', label: 'Maturity Level', key: '', text: 'ACMM maturity level agent packs advisory fully autonomous' },
+      { tab: 'Features', section: 'Dashboard', label: 'Experiment Lab', key: 'dashboard.experiment_lab', text: 'experiment_lab Experiment Lab dashboard feature experimental planner' },
+      { tab: 'Logging', section: 'Logging', label: 'Kick log source', key: 'logging.kick_log_source', text: 'kick log source live file audit' },
+      { tab: 'Health', section: 'Watchdog', label: 'Watchdog', key: 'governor.watchdog', text: 'watchdog activity stale agent detection health restart alerts' },
+      { tab: 'Thresholds', section: 'Thresholds', label: 'Restart thresholds', key: 'governor.thresholds', text: 'restart thresholds quiet busy surge pressure backoff' },
+      { tab: 'Thresholds', section: 'Thresholds', label: 'Delivery SLA targets', key: 'sla.targets', text: 'delivery sla targets sla.targets.start_to_pr_h sla.targets.pr_to_merge_h sla.targets.open_to_merge_h hours sparkline overview stale in-progress' },
+      { tab: 'Hub', section: 'Release', label: 'Release channel', key: '', text: 'channel stable candidate edge release update stream' },
+      { tab: 'Knowledge', section: 'Knowledge channels', label: 'Knowledge channel', key: '', text: 'channel channels import knowledge vault project org community personal' },
+    ];
+    let _settingsSearch = { active: false, query: '', previousTab: '', index: null, bound: false };
+
+    function settingsSearchControls() {
+      return {
+        panel: document.getElementById('settings-search-panel'),
+        input: document.getElementById('settings-search-input'),
+        clear: document.getElementById('settings-search-clear'),
+        count: document.getElementById('settings-search-count'),
+      };
+    }
+
+    function setupSettingsSearchControls(type) {
+      const c = settingsSearchControls();
+      if (!c.panel || !c.input) return;
+      const on = type === 'governor';
+      c.panel.hidden = !on;
+      c.panel.classList.toggle('active', on);
+      if (!on) {
+        _settingsSearch = { active: false, query: '', previousTab: '', index: null, bound: _settingsSearch.bound };
+        c.input.value = '';
+        if (c.clear) c.clear.hidden = true;
+        if (c.count) c.count.textContent = 'Search settings';
+        return;
+      }
+      if (!_settingsSearch.bound) {
+        c.input.addEventListener('input', () => applySettingsSearch(c.input.value));
+        c.input.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') { e.preventDefault(); clearSettingsSearch(); }
+        });
+        if (c.clear) c.clear.addEventListener('click', clearSettingsSearch);
+        const overlay = document.getElementById('config-overlay');
+        if (overlay) overlay.addEventListener('keydown', settingsSearchShortcutHandler);
+        _settingsSearch.bound = true;
+      }
+      if (c.input.value) applySettingsSearch(c.input.value);
+    }
+
+    function settingsSearchShortcutHandler(e) {
+      if (!_configModalOpen || _configState.type !== 'governor') return;
+      const c = settingsSearchControls();
+      if (!c.input) return;
+      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+      const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target && e.target.isContentEditable);
+      if ((e.key === '/' && !typing) || ((e.ctrlKey || e.metaKey) && e.key && e.key.toLowerCase() === 'k')) {
+        e.preventDefault();
+        c.input.focus();
+        c.input.select();
+      } else if (e.key === 'Escape' && _settingsSearch.active) {
+        clearSettingsSearch();
+      }
+    }
+
+    function clearSettingsSearch() {
+      const c = settingsSearchControls();
+      if (c.input) c.input.value = '';
+      if (c.clear) c.clear.hidden = true;
+      if (c.count) c.count.textContent = 'Search settings';
+      const previous = _settingsSearch.previousTab;
+      _settingsSearch.active = false;
+      _settingsSearch.query = '';
+      if (_configState.type === 'governor') switchConfigTab(previous || _configState.tab || GOVERNOR_CONFIG_TABS[0]);
+    }
+
+    function settingsSearchText(node) {
+      return (node && (node.textContent || node.innerText) || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function settingsSearchSectionName(node, fallback) {
+      let cur = node;
+      while (cur) {
+        if (cur.matches && (cur.matches('.config-section') || cur.matches('details'))) {
+          const h = cur.querySelector('h3, summary, .var-heading, .overview-settings-card-title');
+          if (h) return settingsSearchText(h);
+        }
+        cur = cur.parentElement;
+      }
+      return fallback || '';
+    }
+
+    function settingsSearchKeyFromField(field) {
+      const ctrl = field.querySelector('[data-arg0][data-arg1], [data-section][data-key], [data-setting], [data-setting-key]');
+      if (!ctrl) return '';
+      const explicit = ctrl.getAttribute('data-setting-key') || ctrl.getAttribute('data-setting');
+      if (explicit) return explicit;
+      const section = ctrl.getAttribute('data-section') || ctrl.getAttribute('data-arg0') || '';
+      const key = ctrl.getAttribute('data-key') || ctrl.getAttribute('data-arg1') || '';
+      if (!section || !key || /^(s|v|N|c|t|w)$/.test(section)) return '';
+      const snake = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/-/g, '_').toLowerCase();
+      return section.replace(/-/g, '_') + '.' + snake;
+    }
+
+    function settingsSearchLabel(field) {
+      const label = field.querySelector('label, .config-toggle-label, .var-heading, th, td:first-child, summary');
+      if (label) return settingsSearchText(label).replace(/\?\s*$/, '').trim();
+      const txt = settingsSearchText(field);
+      return txt.length > 100 ? txt.slice(0, 100) + '…' : txt;
+    }
+
+    function settingsSearchBuildIndex() {
+      if (_settingsSearch.index) return _settingsSearch.index;
+      const out = SETTINGS_SEARCH_STATIC_HITS.slice();
+      const previousTab = _configState.tab;
+      GOVERNOR_CONFIG_TABS.forEach(tab => {
+        let html = '';
+        try { html = renderGovernorTab(tab) || ''; } catch (e) { html = ''; }
+        const wrap = document.createElement('div');
+        wrap.innerHTML = html;
+        const fields = wrap.querySelectorAll('.config-field, .config-toggle, .config-list-item, .var-section, details, tr');
+        fields.forEach(field => {
+          const label = settingsSearchLabel(field);
+          const text = settingsSearchText(field);
+          if (!label || !text) return;
+          const key = settingsSearchKeyFromField(field);
+          const section = settingsSearchSectionName(field, tab);
+          out.push({ tab, section, label, key, text });
+        });
+      });
+      _configState.tab = previousTab;
+      const seen = {};
+      _settingsSearch.index = out.filter(item => {
+        const id = [item.tab, item.section, item.label, item.key].join('\n').toLowerCase();
+        if (seen[id]) return false;
+        seen[id] = true;
+        return true;
+      });
+      return _settingsSearch.index;
+    }
+
+    function settingsSearchMatches(item, query) {
+      const hay = [item.tab, item.section, item.label, item.key, item.text].join(' ').toLowerCase();
+      return hay.indexOf(query.toLowerCase()) >= 0;
+    }
+
+    function settingsSearchHighlight(text, query) {
+      const safe = esc(text || '');
+      if (!query) return safe;
+      const idx = String(text || '').toLowerCase().indexOf(query.toLowerCase());
+      if (idx < 0) return safe;
+      return esc(text.slice(0, idx)) + '<span class="settings-search-mark">' + esc(text.slice(idx, idx + query.length)) + '</span>' + esc(text.slice(idx + query.length));
+    }
+
+    function settingsSearchSnippet(item, query) {
+      const text = [item.section, item.text].filter(Boolean).join(' · ').replace(/\s+/g, ' ').trim();
+      const low = text.toLowerCase();
+      const q = query.toLowerCase();
+      let start = low.indexOf(q);
+      if (start < 0) start = 0;
+      start = Math.max(0, start - 55);
+      let snip = text.slice(start, start + 170);
+      if (start > 0) snip = '…' + snip;
+      if (start + 170 < text.length) snip += '…';
+      return settingsSearchHighlight(snip, query);
+    }
+
+    function renderSettingsSearchResults(query) {
+      const body = document.getElementById('config-body');
+      const c = settingsSearchControls();
+      if (!body) return;
+      const q = (query || '').trim();
+      const matches = q ? settingsSearchBuildIndex().filter(item => settingsSearchMatches(item, q)) : [];
+      if (c.count) c.count.textContent = q ? (matches.length + ' setting' + (matches.length === 1 ? '' : 's') + ' match') : 'Search settings';
+      if (c.clear) c.clear.hidden = !q;
+      if (!q) return;
+      if (!matches.length) {
+        body.innerHTML = '<div class="settings-search-empty">No settings match <strong>' + esc(q) + '</strong></div>';
+        return;
+      }
+      const byTab = {};
+      matches.forEach(item => { if (!byTab[item.tab]) byTab[item.tab] = []; byTab[item.tab].push(item); });
+      body.innerHTML = '<div class="settings-search-results">' + Object.keys(byTab).map(tab => {
+        const hits = byTab[tab];
+        return '<section class="settings-search-group" data-settings-search-tab="' + esc(tab) + '">' +
+          '<div class="settings-search-group-title"><span>' + settingsSearchHighlight(tab, q) + ' <span class="text-muted">(' + hits.length + ')</span></span><button type="button" class="hv-btn btn-secondary btn-sm" data-action="settingsSearchOpenTab" data-arg0="' + esc(tab) + '">Open tab</button></div>' +
+          hits.map(item => '<div class="settings-search-hit">' +
+            '<div class="settings-search-hit-label">' + settingsSearchHighlight(item.label, q) + '</div>' +
+            '<div class="settings-search-hit-meta">' + settingsSearchSnippet(item, q) + '</div>' +
+            (item.key ? '<code class="settings-search-key">' + settingsSearchHighlight(item.key, q) + '</code>' : '') +
+          '</div>').join('') + '</section>';
+      }).join('') + '</div>';
+    }
+
+    function applySettingsSearch(value) {
+      const q = (value || '').trim();
+      if (!_configModalOpen || _configState.type !== 'governor') return;
+      if (!_settingsSearch.active && q) _settingsSearch.previousTab = _configState.tab;
+      _settingsSearch.active = !!q;
+      _settingsSearch.query = q;
+      if (!q) { clearSettingsSearch(); return; }
+      renderSettingsSearchResults(q);
+    }
+
+    function settingsSearchOpenTab(tab) {
+      const c = settingsSearchControls();
+      if (c.input) c.input.value = '';
+      _settingsSearch.active = false;
+      _settingsSearch.query = '';
+      switchConfigTab(tab);
+    }
+
     function openConfigDialog(type, agentName, initialTabOverride) {
       const isCreate = type === 'agent' && !agentName;
       _configModalOpen = true;
@@ -32515,6 +33512,7 @@ function burnAreaChart() {
       hiveRememberModalOpen(document.getElementById('config-overlay'));
       const title = type === 'governor' ? 'Settings' : isCreate ? 'Create Agent' : `${agentName || 'Agent'} Configuration`;
       document.querySelector('.config-title').textContent = title;
+      setupSettingsSearchControls(type);
       const tabs = type === 'governor' ? GOVERNOR_CONFIG_TABS : (isCreate ? AGENT_CREATE_TABS : AGENT_CONFIG_TABS);
       const tabsEl = document.getElementById('config-tabs');
       tabsEl.innerHTML = tabs.map((t, i) =>
@@ -32561,6 +33559,7 @@ function burnAreaChart() {
       _configLoadSeq++;
       if (_configLoadAbort) { _configLoadAbort.abort(); _configLoadAbort = null; }
       _configState = { type: null, agent: null, tab: null, data: {}, dirty: {}, promptTemplateDirty: false, promptTemplateValue: '' };
+      setupSettingsSearchControls(null);
       document.getElementById('config-overlay').classList.add('hidden');
       if (location.hash.startsWith('#config/')) history.replaceState(null, '', window.hiveURLWithHash ? window.hiveURLWithHash('') : location.pathname);
     }
@@ -32608,6 +33607,8 @@ function burnAreaChart() {
     let _hiveModalSequence = 0;
     function hiveRememberModalOpen(el) {
       if (!el) return el;
+      // A modal covers every help-tooltip trigger; never leave a tooltip floating over it.
+      if (typeof hideConfigTooltip === 'function') hideConfigTooltip();
       _hiveModalSequence++;
       if (!el.dataset) el.dataset = {};
       el.dataset.hiveModalSequence = String(_hiveModalSequence);
@@ -32626,6 +33627,9 @@ function burnAreaChart() {
       function add(el, close, fallbackRank) {
         if (!hiveOverlayIsOpen(el)) return;
         candidates.push({ el: el, close: close, rank: hiveOverlayRank(el, fallbackRank), order: hiveModalOrder(el, candidates.length) });
+      }
+      if (typeof configTooltipIsOpen === 'function' && configTooltipIsOpen()) {
+        candidates.push({ el: document.getElementById(CONFIG_TOOLTIP_PORTAL_ID), close: hideConfigTooltip, rank: 40000, order: candidates.length });
       }
       const installHintBtn = document.getElementById('gh-app-install-id-hint-btn');
       if (installHintBtn && installHintBtn.getAttribute('aria-expanded') === 'true') {
@@ -32913,7 +33917,8 @@ function burnAreaChart() {
       };
       const topbarBadge = document.getElementById('acmm-badge');
       if (topbarBadge) {
-        topbarBadge.innerHTML = escapeHtml(acmmLevelLabel(level).replace(' ', ' · '));
+        const [levelCode, ...levelName] = acmmLevelLabel(level).split(' ');
+        topbarBadge.innerHTML = escapeHtml(levelCode) + (levelName.length ? `<span class="acmm-badge-name"> · ${escapeHtml(levelName.join(' '))}</span>` : '');
         topbarBadge.title = 'ACMM ' + acmmLevelLabel(level) + ' — click to change maturity level';
         tint(topbarBadge);
       }
@@ -33060,6 +34065,7 @@ function burnAreaChart() {
         const data = await res.json();
         if (seq !== _configLoadSeq) return false;
         _configState.data = data;
+        _settingsSearch.index = null;
       } catch (err) {
         if (seq !== _configLoadSeq) return false;
         if (timedOut) {
@@ -33105,6 +34111,7 @@ function burnAreaChart() {
     }
 
     function renderConfigTab(tabId) {
+      if (_configState.type === 'governor' && _settingsSearch.active) { renderSettingsSearchResults(_settingsSearch.query); return; }
       const body = document.getElementById('config-body');
       // A tab click after a failed load must not render the placeholder data
       // as if it were the agent's config (#7405).
@@ -33314,8 +34321,9 @@ function burnAreaChart() {
       switch (tab) {
         case 'General': return renderGovGeneral();
         case 'Appearance': return renderGovAppearance();
+        case 'Dashboard': return renderGovDashboard(d.dashboard || {});
         case 'Agents': return renderGovAgents(d.agents || []);
-        case 'Thresholds': return renderGovThresholds(d);
+        case 'Thresholds': return renderGovThresholds(d) + renderGovSLATargets(d);
         case 'Labels': return renderGovLabels(d.labels || [], d.holdLabels || [], d.requireLabels || []);
         case 'Repos': return renderGovRepos(d.repos || []);
         case 'Budget': return renderGovBudget(d.budget || {}, d.health || {});
@@ -33363,6 +34371,24 @@ function burnAreaChart() {
       'repo-wiki': { label: 'Repo wiki', description: 'Sync .hive/wiki (or another directory) from one or more GitHub repositories.' },
       'sharepoint': { label: 'SharePoint / OneDrive', description: 'Sync markdown, text, and HTML files from SharePoint document libraries or OneDrive drives.' }
     };
+    const KC_TYPE_ICONS = {
+      // Vendor marks: simple-icons (CC0 1.0) paths, 24x24 viewBox, rendered with currentColor.
+      'obsidian': 'M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z',
+      'confluence': 'M.87 18.257c-.248.382-.53.875-.763 1.245a.764.764 0 0 0 .255 1.04l4.965 3.054a.764.764 0 0 0 1.058-.26c.199-.332.454-.763.733-1.221 1.967-3.247 3.945-2.853 7.508-1.146l4.957 2.337a.764.764 0 0 0 1.028-.382l2.364-5.346a.764.764 0 0 0-.382-1 599.851 599.851 0 0 1-4.965-2.361C10.911 10.97 5.224 11.185.87 18.257zM23.131 5.743c.249-.405.531-.875.764-1.25a.764.764 0 0 0-.256-1.034L18.675.404a.764.764 0 0 0-1.058.26c-.195.335-.451.763-.734 1.225-1.966 3.246-3.945 2.85-7.508 1.146L4.437.694a.764.764 0 0 0-1.027.382L1.046 6.422a.764.764 0 0 0 .382 1c1.039.49 3.105 1.467 4.965 2.361 6.698 3.246 12.392 3.029 16.738-4.04z',
+      'git': 'M13.09 23.549a1.54 1.54 0 0 1-2.18 0L.451 13.089a1.54 1.54 0 0 1 0-2.179l7.191-7.19 2.733 2.733a1.85 1.85 0 0 0 .964 2.326v6.66a1.849 1.849 0 1 0 1.54 0V8.957l2.508 2.508a1.85 1.85 0 1 0 1.09-1.09l-2.634-2.634a1.85 1.85 0 0 0-2.378-2.377L8.73 2.63 10.91.451a1.54 1.54 0 0 1 2.179 0l10.459 10.46a1.54 1.54 0 0 1 0 2.179z',
+      'github-wiki': 'M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12',
+      'google-drive': 'M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z',
+      'notion': 'M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z',
+      'sharepoint': 'M24 13.5q0 1.242-.475 2.332-.474 1.09-1.289 1.904-.814.815-1.904 1.29-1.09.474-2.332.474-.762 0-1.523-.2-.106.997-.557 1.858-.451.862-1.154 1.494-.704.633-1.606.99-.902.358-1.91.358-1.09 0-2.045-.416-.955-.416-1.664-1.125-.709-.709-1.125-1.664Q6 19.84 6 18.75q0-.188.018-.375.017-.188.04-.375H.997q-.41 0-.703-.293T0 17.004V6.996q0-.41.293-.703T.996 6h3.54q.14-1.277.726-2.373.586-1.096 1.488-1.904Q7.652.914 8.807.457 9.96 0 11.25 0q1.395 0 2.625.533T16.02 1.98q.914.915 1.447 2.145T18 6.75q0 .188-.012.375-.011.188-.035.375 1.242 0 2.344.469 1.101.468 1.928 1.277.826.809 1.3 1.904Q24 12.246 24 13.5zm-12.75-12q-.973 0-1.857.34-.885.34-1.577.943-.691.604-1.154 1.43Q6.2 5.039 6.06 6h4.945q.41 0 .703.293t.293.703v4.945l.21-.035q.212-.75.61-1.424.399-.673.944-1.218.545-.545 1.213-.944.668-.398 1.43-.61.093-.503.093-.96 0-1.09-.416-2.045-.416-.955-1.125-1.664-.709-.709-1.664-1.125Q12.34 1.5 11.25 1.5zM6.117 15.902q.54 0 1.06-.111.522-.111.932-.37.41-.257.662-.679.252-.422.252-1.055 0-.632-.263-1.054-.264-.422-.662-.703-.399-.282-.856-.463l-.855-.34q-.399-.158-.662-.334-.264-.176-.264-.445 0-.2.14-.323.141-.123.335-.193.193-.07.404-.094.21-.023.351-.023.598 0 1.055.152.457.153.95.457V8.543q-.282-.082-.522-.14-.24-.06-.475-.1-.234-.041-.486-.059-.252-.017-.557-.017-.515 0-1.054.117-.54.117-.979.375-.44.258-.715.68-.275.421-.275 1.03 0 .598.263.997.264.398.663.68.398.28.855.474l.856.363q.398.17.662.358.263.187.263.457 0 .222-.123.351-.123.13-.31.2-.188.07-.393.087-.205.018-.369.018-.703 0-1.248-.234-.545-.235-1.107-.621v1.875q1.195.468 2.472.468zM11.25 22.5q.773 0 1.453-.293t1.19-.803q.51-.51.808-1.195.299-.686.299-1.459 0-.668-.223-1.277-.222-.61-.62-1.096-.4-.486-.95-.826-.55-.34-1.207-.48v1.933q0 .41-.293.703t-.703.293H7.57q-.07.375-.07.75 0 .773.293 1.459t.803 1.195q.51.51 1.195.803.686.293 1.459.293zM18 18q.926 0 1.746-.352.82-.351 1.436-.966.615-.616.966-1.43.352-.815.352-1.752 0-.926-.352-1.746-.351-.82-.966-1.436-.616-.615-1.436-.966Q18.926 9 18 9t-1.74.357q-.815.358-1.43.973t-.973 1.43q-.357.814-.357 1.74 0 .129.006.258t.017.258q.551.27 1.02.65t.838.855q.369.475.627 1.026.258.55.387 1.148Q17.18 18 18 18Z',
+      // Generic glyphs (no vendor): document sheet and open book, drawn in-house.
+      'document': 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zm4 18H6V4h7v5h5zM8 12h8v1.6H8zm0 3.2h8v1.6H8zm0 3.2h5V20H8z',
+      'repo-wiki': 'M4 3h7.2c1.1 0 2 .55 2.8 1.3.8-.75 1.7-1.3 2.8-1.3H20v16h-3.2c-1 0-1.95.4-2.8 1.1V22h-4v-1.9c-.85-.7-1.8-1.1-2.8-1.1H4zm2 2v12h1.2c1.3 0 2.5.4 3.6 1.1V6.2C10.4 5.55 9.6 5 8.8 5zm12 0h-1.2c-.8 0-1.6.55-2 1.2v12.1c1.1-.7 2.3-1.1 3.6-1.1H18z'
+    };
+    function kbIntegrationIcon(type) {
+      const d = KC_TYPE_ICONS[type];
+      if (!d) return '<span class="kb-integration-icon" aria-hidden="true">🔌</span>';
+      return '<svg class="kb-integration-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-kb-icon="' + escapeHtml(type) + '"><path fill="currentColor" d="' + d + '"/></svg>';
+    }
     const KC_SCOPE_FIELDS = {
       'confluence': [['base_url', 'Base URL', 'https://acme.atlassian.net/wiki'], ['deployment', 'Deployment', 'cloud or datacenter'], ['email', 'Cloud account email', 'hive-bot@acme.com'], ['spaces', 'Spaces', 'ENG, OPS'], ['root_page_ids', 'Root page IDs', '12345, 67890'], ['include_labels', 'Include labels', 'runbook,decision'], ['exclude_labels', 'Exclude labels', 'draft'], ['include_attachments', 'Include attachments', 'false'], ['max_pages', 'Max pages', '2000'], ['full_sync_every', 'Full sync every', '10']],
       'document': [['url', 'Document URL', 'https://example.org/guide.html'], ['file_path', 'File path', '/data/knowledge/guide.pdf'], ['context7_id', 'Context7 ID', '/org/project']],
@@ -33606,6 +34632,88 @@ function burnAreaChart() {
     var _themeState = { loaded:false, theme:'hive', theme_overrides:{}, catalog:[], effective:null };
     const HONEYCOMB_WATERMARK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='97' viewBox='0 0 56 97'%3E%3Cpath d='M28 1l27 15.5v31L28 63 1 47.5v-31zM28 34l27 15.5v31L28 96 1 80.5v-31z' fill='none' stroke='%23e0a33a' stroke-opacity='.09'/%3E%3C/svg%3E";
 
+    function yamlHint(path) {
+      return '<span class="settings-yaml-hint">YAML <code>' + esc(path) + '</code></span>';
+    }
+
+    function splitConfigLines(value) {
+      return String(value || '').split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+    }
+
+    function parseSettingsMap(value) {
+      const out = {};
+      String(value || '').split(/\r?\n/).forEach(line => {
+        line = line.trim();
+        if (!line) return;
+        const idx = line.indexOf('=');
+        const key = (idx >= 0 ? line.slice(0, idx) : line).trim();
+        const val = (idx >= 0 ? line.slice(idx + 1) : '').trim();
+        if (key && val) out[key] = val;
+      });
+      return out;
+    }
+
+    function settingsMapText(map) {
+      return Object.keys(map || {}).sort().map(k => k + '=' + (map || {})[k]).join('\n');
+    }
+
+    function markDashboardList(key, value) {
+      _configState.data.dashboard = _configState.data.dashboard || {};
+      _configState.data.dashboard[key] = splitConfigLines(value);
+      markDirty('dashboard', key, _configState.data.dashboard[key]);
+    }
+
+    function markDashboardNames(value) {
+      const names = parseSettingsMap(value);
+      _configState.data.dashboard = _configState.data.dashboard || {};
+      _configState.data.dashboard.authorized_user_names = names;
+      markDirty('dashboard', 'authorized_user_names', names);
+    }
+
+    function markDashboardIssueBands(key, value) {
+      const d = _configState.data.dashboard = _configState.data.dashboard || {};
+      const bands = d.issue_bands = Object.assign({}, d.issue_bands || {});
+      bands[key] = key === 'stale_days' ? Math.max(0, parseInt(value || '0', 10) || 0) : splitConfigLines(value);
+      markDirty('dashboard', 'issue_bands', bands);
+    }
+
+    function markBackendsPolicy(key, value) {
+      _configState.data.backends = _configState.data.backends || {};
+      _configState.data.backends[key] = splitConfigLines(value);
+      markDirty('backends', key, _configState.data.backends[key]);
+    }
+
+    function markClassifierList(key, value) {
+      _configState.data.classifier = _configState.data.classifier || {};
+      _configState.data.classifier[key] = splitConfigLines(value);
+      markDirty('classifier', key, _configState.data.classifier[key]);
+    }
+
+    function renderGovDashboard(dash) {
+      const bands = dash.issue_bands || {};
+      const authTokenText = dash.auth_token_configured ? 'Configured — enter a new token to rotate, or save an empty value to clear.' : 'Not configured.';
+      return '<div class="config-section">' +
+        '<h3>Dashboard runtime</h3>' +
+        '<p class="text-muted fs-base">Settings from <code>dashboard.*</code>. Port, proxy, and token changes may require restart or re-authentication.</p>' +
+        '<div class="config-field-row">' +
+          '<div class="config-field"><label>Port ' + yamlHint('dashboard.port') + '</label><input type="number" min="1" max="65535" value="' + esc(String(dash.port || 3001)) + '" data-change-action="markDirty" data-arg0="dashboard" data-arg1="port" data-arg-types="s,s,N"><div class="config-help">Requires restart.</div></div>' +
+          '<div class="config-field"><label>Agent poll interval (seconds) ' + yamlHint('dashboard.agent_poll_interval_s') + '</label><input type="number" min="1" value="' + esc(String(dash.agent_poll_interval_s || 0)) + '" data-change-action="markDirty" data-arg0="dashboard" data-arg1="agent_poll_interval_s" data-arg-types="s,s,N"></div>' +
+        '</div>' +
+        '<div class="config-toggle"><div class="config-toggle-switch ' + (dash.experiment_lab ? 'on' : '') + '" data-action="toggleConfigSwitch" data-section="dashboard" data-key="experiment_lab"></div><span class="config-toggle-label">Experiment Lab ' + yamlHint('dashboard.experiment_lab') + '</span></div>' +
+        '<div class="config-toggle"><div class="config-toggle-switch ' + (dash.hub_proxied ? 'on' : '') + '" data-action="toggleConfigSwitch" data-section="dashboard" data-key="hub_proxied"></div><span class="config-toggle-label">Hub-proxied auth ' + yamlHint('dashboard.hub_proxied') + ' <span class="text-muted">Managed by hub on hosted hives.</span></span></div>' +
+        '<div class="config-field"><label>Dashboard auth token ' + yamlHint('dashboard.auth_token') + '</label><input type="password" autocomplete="new-password" placeholder="' + esc(authTokenText) + '" data-change-action="markDirty" data-arg0="dashboard" data-arg1="auth_token" data-arg-types="s,s,v"><div class="config-help">Write-only; the current token is never echoed.</div></div>' +
+        '<h3>Access allowlist</h3>' +
+        '<div class="config-field"><label>Authorized users ' + yamlHint('dashboard.authorized_users[]') + '</label><textarea rows="5" data-change-action="markDashboardList" data-arg0="authorized_users" data-arg-types="s,v">' + esc((dash.authorized_users || []).join('\n')) + '</textarea><div class="config-help">One user per line; append <code>:read</code>, <code>:read-write</code>, or <code>:owner</code> for explicit roles.</div></div>' +
+        '<div class="config-field"><label>Authorized user display names ' + yamlHint('dashboard.authorized_user_names.<key>') + '</label><textarea rows="4" placeholder="ibmid:123=Jane Doe" data-change-action="markDashboardNames" data-arg-types="v">' + esc(settingsMapText(dash.authorized_user_names || {})) + '</textarea></div>' +
+        '<h3>Issue bands</h3>' +
+        '<div class="config-field-row">' +
+          '<div class="config-field"><label>Waiting labels ' + yamlHint('dashboard.issue_bands.waiting_labels[]') + '</label><textarea rows="4" data-change-action="markDashboardIssueBands" data-arg0="waiting_labels" data-arg-types="s,v">' + esc((bands.waiting_labels || []).join('\n')) + '</textarea></div>' +
+          '<div class="config-field"><label>Done labels ' + yamlHint('dashboard.issue_bands.done_labels[]') + '</label><textarea rows="4" data-change-action="markDashboardIssueBands" data-arg0="done_labels" data-arg-types="s,v">' + esc((bands.done_labels || []).join('\n')) + '</textarea></div>' +
+        '</div>' +
+        '<div class="config-field"><label>Stale after days ' + yamlHint('dashboard.issue_bands.stale_days') + '</label><input type="number" min="0" value="' + esc(String(bands.stale_days || 0)) + '" data-change-action="markDashboardIssueBands" data-arg0="stale_days" data-arg-types="s,N"></div>' +
+      '</div>';
+    }
+
     function renderDashboardTimezoneSettings() {
       const pref = dashboardTimeZonePreference();
       const serverTz = validDashboardTimeZone(_dashboardServerTimeZone) || '';
@@ -33652,6 +34760,8 @@ function burnAreaChart() {
       const current = _themeState.theme || 'hive';
       const overrides = _themeState.theme_overrides || {};
       const bg = overrides.background || {};
+      const fonts = overrides.fonts || {};
+      const tokens = overrides.tokens || {};
       const customCSS = overrides.custom_css || '';
       const honeyOn = bg.image === HONEYCOMB_WATERMARK;
       const bgScope = bg.scope || 'page';
@@ -33674,11 +34784,17 @@ function burnAreaChart() {
         + '<p style="font-size:.8rem;color:var(--muted);margin-bottom:var(--sp-5)">Choose a hive-wide dashboard theme. Owners can layer safe CSS tokens, a background image, and capped custom CSS on top of any preset.</p>'
         + '<div class="theme-actions"><button class="hv-btn btn-secondary btn" data-action="resetThemeToPreset">Reset to preset</button><button class="hv-btn btn-secondary btn" data-action="saveThemeOverrides">Apply background/CSS</button><span style="color:var(--muted);font-size:.76rem">Current: <code>' + esc(current) + '</code></span></div>'
         + cards
-        + '<div class="config-field-row"><div class="config-field"><label>Background image URL</label><input id="theme-bg-url" type="text" value="' + esc(bg.image || '') + '" placeholder="https://example.org/background.svg"></div>'
-        + '<div class="config-field"><label>Background opacity: <span id="theme-bg-opacity-value">' + esc(String(bg.opacity || 0.08)) + '</span></label><input id="theme-bg-opacity" type="range" min="0" max="1" step="0.01" value="' + esc(String(bg.opacity || 0.08)) + '" data-input-action="updateThemeOpacityLabel"></div></div>'
-        + '<div class="config-field"><label for="theme-bg-scope">Watermark on</label><select id="theme-bg-scope"><option value="page"' + (bgScope === 'page' ? ' selected' : '') + '>Page</option><option value="cards"' + (bgScope === 'cards' ? ' selected' : '') + '>Cards</option><option value="both"' + (bgScope === 'both' ? ' selected' : '') + '>Both</option></select></div>'
+        + '<div class="config-field-row"><div class="config-field"><label>Background image URL ' + yamlHint('dashboard.theme_overrides.background.image') + '</label><input id="theme-bg-url" type="text" value="' + esc(bg.image || '') + '" placeholder="https://example.org/background.svg"></div>'
+        + '<div class="config-field"><label>Background opacity: <span id="theme-bg-opacity-value">' + esc(String(bg.opacity || 0.08)) + '</span> ' + yamlHint('dashboard.theme_overrides.background.opacity') + '</label><input id="theme-bg-opacity" type="range" min="0" max="1" step="0.01" value="' + esc(String(bg.opacity || 0.08)) + '" data-input-action="updateThemeOpacityLabel"></div></div>'
+        + '<div class="config-field-row4"><div class="config-field"><label for="theme-bg-scope">Watermark on ' + yamlHint('dashboard.theme_overrides.background.scope') + '</label><select id="theme-bg-scope"><option value="page"' + (bgScope === 'page' ? ' selected' : '') + '>Page</option><option value="cards"' + (bgScope === 'cards' ? ' selected' : '') + '>Cards</option><option value="both"' + (bgScope === 'both' ? ' selected' : '') + '>Both</option></select></div>'
+        + '<div class="config-field"><label>Position ' + yamlHint('dashboard.theme_overrides.background.position') + '</label><input id="theme-bg-position" type="text" value="' + esc(bg.position || '') + '" placeholder="center center"></div>'
+        + '<div class="config-field"><label>Size ' + yamlHint('dashboard.theme_overrides.background.size') + '</label><input id="theme-bg-size" type="text" value="' + esc(bg.size || '') + '" placeholder="cover"></div>'
+        + '<div class="config-field"><label>Attachment ' + yamlHint('dashboard.theme_overrides.background.attachment') + '</label><select id="theme-bg-attachment"><option value=""' + (!bg.attachment ? ' selected' : '') + '>(default)</option><option value="fixed"' + (bg.attachment === 'fixed' ? ' selected' : '') + '>fixed</option><option value="scroll"' + (bg.attachment === 'scroll' ? ' selected' : '') + '>scroll</option></select></div></div>'
         + '<label class="config-toggle" style="margin:4px 0 14px"><span class="config-toggle-switch' + (honeyOn ? ' on' : '') + '" data-action="toggleHoneycombWatermark"></span><span class="config-toggle-label">Use honeycomb watermark</span></label>'
-        + '<div class="config-field"><label>Custom CSS</label><textarea id="theme-custom-css" rows="10" data-input-action="updateThemeByteCount" placeholder=".panel { border-radius: 2px; }">' + esc(customCSS) + '</textarea><div class="theme-byte-count"><span id="theme-css-bytes">' + utf8Bytes(customCSS) + '</span> / 32768 bytes</div></div>'
+        + '<div class="config-field-row"><div class="config-field"><label>UI font ' + yamlHint('dashboard.theme_overrides.fonts.ui') + '</label><input id="theme-font-ui" type="text" value="' + esc(fonts.ui || '') + '" placeholder="Inter, system-ui, sans-serif"></div>'
+        + '<div class="config-field"><label>Mono font ' + yamlHint('dashboard.theme_overrides.fonts.mono') + '</label><input id="theme-font-mono" type="text" value="' + esc(fonts.mono || '') + '" placeholder="JetBrains Mono, monospace"></div></div>'
+        + '<div class="config-field"><label>CSS token overrides ' + yamlHint('dashboard.theme_overrides.tokens.<key>') + '</label><textarea id="theme-token-overrides" rows="5" placeholder="--accent=#e0a33a">' + esc(settingsMapText(tokens)) + '</textarea><div class="config-help">One allowlisted CSS token per line as <code>--token=value</code>.</div></div>'
+        + '<div class="config-field"><label>Custom CSS ' + yamlHint('dashboard.theme_overrides.custom_css') + '</label><textarea id="theme-custom-css" rows="10" data-input-action="updateThemeByteCount" placeholder=".panel { border-radius: 2px; }">' + esc(customCSS) + '</textarea><div class="theme-byte-count"><span id="theme-css-bytes">' + utf8Bytes(customCSS) + '</span> / 32768 bytes</div></div>'
         + '<div id="theme-save-status" style="font-size:.76rem;color:var(--muted)"></div></div>';
     }
 
@@ -33703,9 +34819,17 @@ function burnAreaChart() {
       const bgURL = (document.getElementById('theme-bg-url') || {}).value || '';
       const opacity = parseFloat((document.getElementById('theme-bg-opacity') || {}).value || '0.08');
       const scope = (document.getElementById('theme-bg-scope') || {}).value || 'page';
+      const position = ((document.getElementById('theme-bg-position') || {}).value || '').trim();
+      const size = ((document.getElementById('theme-bg-size') || {}).value || '').trim();
+      const attachment = ((document.getElementById('theme-bg-attachment') || {}).value || '').trim();
+      const fontUI = ((document.getElementById('theme-font-ui') || {}).value || '').trim();
+      const fontMono = ((document.getElementById('theme-font-mono') || {}).value || '').trim();
+      const tokens = parseSettingsMap((document.getElementById('theme-token-overrides') || {}).value || '');
       const css = (document.getElementById('theme-custom-css') || {}).value || '';
       const overrides = { custom_css: css };
-      if (bgURL.trim()) overrides.background = { image: bgURL.trim(), scope: scope, opacity: Number.isFinite(opacity) ? opacity : 0.08, attachment: 'fixed' };
+      if (Object.keys(tokens).length) overrides.tokens = tokens;
+      if (fontUI || fontMono) overrides.fonts = { ui: fontUI, mono: fontMono };
+      if (bgURL.trim()) overrides.background = { image: bgURL.trim(), scope: scope, opacity: Number.isFinite(opacity) ? opacity : 0.08, position: position, size: size, attachment: attachment || 'fixed' };
       return overrides;
     }
     async function putTheme(theme, overrides) {
@@ -33770,10 +34894,15 @@ function burnAreaChart() {
     // {ok:false, error}) from the save/test endpoints. Live results only —
     // the server never counts static fallback aliases here.
     function litellmProbeMessage(probe) {
+      // probe.route (#9945): the request agents on the litellm backend will
+      // really make (POST URL, key fingerprint, config source) and a warning
+      // when it is not what this Test just exercised. Appended to every
+      // outcome so "OK" is never shown without saying what it proves.
+      const route = probe.route ? '\n' + probe.route : '';
       if (probe.ok && probe.modelsListBlocked) {
         // /v1/models was refused by a proxy in front of the gateway, but a
         // 1-token inference call with the default model succeeded (#9945).
-        return { ok: true, msg: `LiteLLM OK — inference with ${probe.inferenceModel} works, but model listing is blocked: ${probe.warning}` };
+        return { ok: true, msg: `LiteLLM OK — inference with ${probe.inferenceModel} works, but model listing is blocked: ${probe.warning}` + route };
       }
       if (probe.ok) {
         const base = `LiteLLM OK — ${probe.models} model${probe.models === 1 ? '' : 's'} available`;
@@ -33782,9 +34911,9 @@ function burnAreaChart() {
         // so the smaller usable number is not a surprise later.
         const usable = (typeof probe.usable === 'number' && probe.usable < probe.models)
           ? ` (${probe.usable} usable with your key)` : '';
-        return { ok: true, msg: base + usable };
+        return { ok: true, msg: base + usable + route };
       }
-      return { ok: false, msg: `LiteLLM connection failed: ${probe.error}` };
+      return { ok: false, msg: `LiteLLM connection failed: ${probe.error}` + route };
     }
 
     // showLiteLLMTestResult writes a probe result to the tab's inline
@@ -35714,7 +36843,7 @@ function burnAreaChart() {
           <input type="text" id="hub-snapshot-url" value="${esc(snapUrl)}" data-change-action="markDirty" data-arg0="hub" data-arg1="snapshot_url" data-arg-types="s,s,v" ${hub.auto_snapshot ? 'disabled style="opacity:0.5"' : ''} placeholder="${hub.auto_snapshot ? '' : 'https://your-site.com/dashboard-preview'}">
         </div>
         <div class="config-field">
-          <label>Snapshot frame allowlist ${settingHelpMark('snapshots', '', 'Snapshot frame allowlist', `Exact HTTPS origins allowed to embed the public read-only /snapshot page. Empty keeps frame-ancestors 'none' and X-Frame-Options: DENY. X-Frame-Options is omitted for /snapshot only when this allowlist is non-empty because XFO cannot express allowlists.`)}</label>
+          <label>Snapshot frame allowlist ${yamlHint('dashboard.snapshot_frame_ancestors[]')} ${settingHelpMark('snapshots', '', 'Snapshot frame allowlist', `Exact HTTPS origins allowed to embed the public read-only /snapshot page. Empty keeps frame-ancestors 'none' and X-Frame-Options: DENY. X-Frame-Options is omitted for /snapshot only when this allowlist is non-empty because XFO cannot express allowlists.`)}</label>
           <div style="display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-bottom:var(--sp-3)">${frameAncestors.map(function(o) { return '<span style="display:inline-flex;align-items:center;gap:var(--sp-2);padding:var(--sp-1) var(--sp-4);border-radius:var(--r-pill);font-size:0.72rem;background:rgba(96,165,250,0.15);color:var(--blue);border:1px solid rgba(96,165,250,0.3)">' + esc(o) + ' <span data-action="removeHubFilter" data-arg0="snapshot_frame_ancestors" data-arg1="' + esc(o) + '" style="cursor:pointer;opacity:0.7">✕</span></span>';}).join('') || '<span style="font-size:0.72rem;color:var(--muted)">No origins allowed — /snapshot cannot be framed.</span>'}</div>
           <textarea rows="3" style="width:100%;font-family:var(--font-mono);font-size:0.72rem;resize:vertical" placeholder="https://docs.projectbluefin.io" data-change-action="setSnapshotFrameAncestorsFromText" data-arg-types="v">${esc(frameAncestors.join('\n'))}</textarea>
           <span style="font-size:0.65rem;color:var(--muted);margin-top:var(--sp-2);display:block">One exact origin per line: <code>https://host</code> or <code>https://host:port</code>. Paths, http://, credentials, and wildcards are rejected.</span>
@@ -35763,7 +36892,7 @@ function burnAreaChart() {
         <div class="config-field">
           <label>Help &amp; community links ${settingHelpMark('contributor-relay', '', 'Help & community links', `Shown on /contribute Onboarding, Operations, and in relay terminals at connect. One "Label | URL" per line, max 5. Discord channel URLs only work for existing server members; prefer https://hivecommons.dev/discord for new contributors.`)}</label>
           <textarea rows="4" style="width:100%;font-family:var(--font-mono);font-size:0.72rem;resize:vertical" placeholder="Chat with other contributors | https://hivecommons.dev/discord" data-change-action="setContributeHelpLinksFromText" data-arg-types="v">${esc(helpLinksText)}</textarea>
-          <span style="font-size:0.65rem;color:var(--muted);margin-top:var(--sp-2);display:block">Stored as <code>contribute.help_links</code>. Empty restores Hive's default contributor docs and issue links.</span>
+          <span style="font-size:0.65rem;color:var(--muted);margin-top:var(--sp-2);display:block">Stored as <code>contribute.help_links[].label</code> and <code>contribute.help_links[].url</code>. Empty restores Hive's default contributor docs and issue links.</span>
         </div>
 
         ${renderFilterWithMode({
@@ -37748,6 +38877,7 @@ function burnAreaChart() {
 
     function renderGovAgents(agents) {
       const sec = (_configState.data || {}).security || {};
+      const backendPolicy = (_configState.data || {}).backends || {};
       const live = window._lastAgents || [];
       const liveMap = {};
       live.forEach(a => { liveMap[a.name] = a; });
@@ -37771,6 +38901,15 @@ function burnAreaChart() {
             ${agents.map(a => { const name = typeof a === 'string' ? a : (a && a.name) || ''; return '<option value="' + esc(name) + '">copy ' + esc(name) + '</option>'; }).join('')}
           </select>
           <button class="hv-btn btn-primary" data-action="addAgent" title="Create the new agent with the specified name and optional copied config">+ Add Agent</button>
+        </div>
+        <div class="config-section mt-6">
+          <h3>Backend placement policy</h3>
+          <p class="text-muted fs-base">Restrict which CLI or inference backends agents may use. Deny wins over allow; an empty allow list permits every supported backend.</p>
+          <div class="config-field-row">
+            <div class="config-field"><label>Allowed backends ${yamlHint('backends.allow[]')}</label><textarea rows="4" placeholder="copilot&#10;claude" data-change-action="markBackendsPolicy" data-arg0="allow" data-arg-types="s,v">${esc((backendPolicy.allow || []).join('\n'))}</textarea></div>
+            <div class="config-field"><label>Denied backends ${yamlHint('backends.deny[]')}</label><textarea rows="4" placeholder="codex" data-change-action="markBackendsPolicy" data-arg0="deny" data-arg-types="s,v">${esc((backendPolicy.deny || []).join('\n'))}</textarea></div>
+          </div>
+          <div class="config-help">Use backend IDs such as <code>copilot</code>, <code>claude</code>, <code>gemini</code>, <code>goose</code>, <code>codex</code>, <code>bob</code>, <code>vllm</code>, <code>llm-d</code>, or a configured gateway name.</div>
         </div>`;
     }
 
@@ -37901,6 +39040,27 @@ function burnAreaChart() {
       if (pinned) return `${effectiveValue} (pinned, scaling off)`;
       if (scaling === 'sqrt') return `${baseValue} × ceil(sqrt(${repos} repos)) = ${effectiveValue} in force`;
       return `${baseValue} × ${repos} repos = ${effectiveValue} in force`;
+    }
+
+    // renderGovSLATargets: the Delivery SLA budgets (hours) the Throughput panel
+    // colours against. Saved through PUT /api/config/sla (top-level block).
+    function renderGovSLATargets(d) {
+      const sla = (d && d.sla) || {};
+      const eff = sla.effective_targets || {};
+      const defaults = sla.defaults || { start_to_pr_h: 4, pr_to_merge_h: 24, open_to_merge_h: 72 };
+      const dirty = _configState.dirty.sla || {};
+      const fields = [
+        ['start_to_pr_h', 'Start → PR', 'Hours from the hive/in-progress start mark to the fixing PR opening.'],
+        ['pr_to_merge_h', 'PR → merge', 'Hours from the fixing PR opening to its merge.'],
+        ['open_to_merge_h', 'Open → merge', 'Hours from the issue opening on GitHub to the fixing PR merging.'],
+      ];
+      return `<div class="config-field mb-7">
+          <label>Delivery SLA targets (hours) ${settingHelpMark('operator-reference', 'delivery-sla', 'Delivery SLA targets', `Per-span budgets the Throughput section's Delivery SLA tiles and sparklines are coloured against: green within target, amber up to ${PRT_SLA_WARN_RATIO}× target, red beyond. 0 restores the default (${defaults.start_to_pr_h} / ${defaults.pr_to_merge_h} / ${defaults.open_to_merge_h} h).`)}</label>
+          <div class="config-field-row">${fields.map(([key, label, tip]) => {
+            const v = dirty[key] !== undefined ? dirty[key] : (eff[key] !== undefined ? eff[key] : defaults[key]);
+            return `<div class="config-field"><label for="cfg-sla-${esc(key)}" title="${esc(tip)}">${esc(label)}</label><input type="number" min="0" max="8760" step="0.5" id="cfg-sla-${esc(key)}" value="${esc(String(v))}" data-input-action="markDirty" data-arg0="sla" data-arg1="${esc(key)}" data-arg-types="s,s,N" data-setting-path="sla.targets.${esc(key)}" aria-label="${esc(label)} target in hours"></div>`;
+          }).join('')}</div>
+        </div>`;
     }
 
     function renderGovThresholds(d) {
@@ -38834,25 +39994,125 @@ function burnAreaChart() {
         </label>`).join('');
       return `
         <div class="config-field">
-          <label>Ntfy Server ${ntfyHint} ${settingHelpMark('notifications', 'configuration', 'Ntfy Server', `URL of the ntfy.sh server for push notifications. The governor sends alerts for mode changes, budget warnings, agent crashes, and rate limits. Leave empty to disable ntfy notifications. Default: https://ntfy.sh`)}</label>
+          <label>Ntfy Server ${ntfyHint} ${yamlHint('notifications.ntfy.server')} ${settingHelpMark('notifications', 'configuration', 'Ntfy Server', `URL of the ntfy.sh server for push notifications. The governor sends alerts for mode changes, budget warnings, agent crashes, and rate limits. Leave empty to disable ntfy notifications. Default: https://ntfy.sh`)}</label>
           <input type="text" value="${esc(n.ntfyServer || '')}" data-change-action="markDirty" data-arg0="notifications" data-arg1="ntfyServer" data-arg-types="s,s,v" placeholder="https://ntfy.sh">
         </div>
         <div class="config-field">
-          <label>Ntfy Topic ${settingHelpMark('notifications', 'configuration', 'Ntfy Topic', `Topic name on the ntfy server. Subscribe to this topic in the ntfy app or web UI to receive governor notifications on your phone or desktop.`)}</label>
+          <label>Ntfy Topic ${yamlHint('notifications.ntfy.topic')} ${settingHelpMark('notifications', 'configuration', 'Ntfy Topic', `Topic name on the ntfy server. Subscribe to this topic in the ntfy app or web UI to receive governor notifications on your phone or desktop.`)}</label>
           <input type="text" value="${esc(n.ntfyTopic || '')}" data-change-action="markDirty" data-arg0="notifications" data-arg1="ntfyTopic" data-arg-types="s,s,v" placeholder="my-topic">
         </div>
         <div class="config-field">
-          <label>Discord Webhook ${discordHint} ${settingHelpMark('notifications', 'configuration', 'Discord Webhook', `Discord webhook URL for posting selected hive notifications to a channel. Create a webhook in your Discord server settings under Integrations.`)}</label>
+          <label>Discord Webhook ${discordHint} ${yamlHint('notifications.discord.webhook')} ${settingHelpMark('notifications', 'configuration', 'Discord Webhook', `Discord webhook URL for posting selected hive notifications to a channel. Create a webhook in your Discord server settings under Integrations.`)}</label>
           <input type="text" value="${n.hasDiscord ? '••••••••' : ''}" data-change-action="markDirty" data-arg0="notifications" data-arg1="discordWebhook" data-arg-types="s,s,v" placeholder="https://discord.com/api/webhooks/...">
         </div>
         <div class="config-field">
-          <label>Slack Webhook ${slackHint} ${settingHelpMark('notifications', 'configuration', 'Slack Webhook', `Slack incoming webhook URL. It uses the same notify hook fanout as Discord and ntfy.`)}</label>
+          <label>Slack Webhook ${slackHint} ${yamlHint('notifications.slack.webhook')} ${settingHelpMark('notifications', 'configuration', 'Slack Webhook', `Slack incoming webhook URL. It uses the same notify hook fanout as Discord and ntfy.`)}</label>
           <input type="text" value="${n.hasSlack ? '••••••••' : ''}" data-change-action="markDirty" data-arg0="notifications" data-arg1="slackWebhook" data-arg-types="s,s,v" placeholder="https://hooks.slack.com/services/...">
         </div>
         <div class="config-field">
-          <label>Hive notification events ${settingHelpMark('notifications', 'configuration', 'Hive notification events', `Select which hive transitions are fanned out through the notify hooks to Discord, Slack, and ntfy.`)}</label>
+          <label>Hive notification events ${yamlHint('notifications.events[]')} ${settingHelpMark('notifications', 'configuration', 'Hive notification events', `Select which hive transitions are fanned out through the notify hooks to Discord, Slack, and ntfy.`)}</label>
           <div class="config-grid notification-event-checkboxes">${eventBoxes}</div>
+        </div>
+        ${renderGovNotificationsDiscordBot(n)}
+        ${renderGovNotificationsGithubActivity(n)}`;
+    }
+
+    function markNotificationsList(key, value) {
+      markDirty('notifications', key, splitConfigLines(value));
+    }
+
+    function githubActivityState() {
+      const n = ((_configState.data || {}).notifications) || {};
+      n.githubActivity = n.githubActivity || {};
+      return n.githubActivity;
+    }
+
+    function markGithubActivity(key, value) {
+      githubActivityState()[key] = value;
+      const prev = (_configState.dirty.notifications || {}).githubActivity || {};
+      markDirty('notifications', 'githubActivity', Object.assign({}, prev, { [key]: value }));
+    }
+
+    function markGithubActivityList(key, value) {
+      markGithubActivity(key, splitConfigLines(value));
+    }
+
+    function toggleGithubActivityFlag(el, key) {
+      if (!el || el.classList.contains('disabled')) return;
+      const isOn = el.classList.toggle('on');
+      el.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      markGithubActivity(key, isOn);
+    }
+
+    function renderGovNotificationsDiscordBot(n) {
+      const tokenText = n.hasDiscordBotToken ? 'Configured — enter a new token to rotate, or save an empty value to clear.' : 'Not configured.';
+      const factoryText = n.hasDiscordFactoryWebhook ? 'Configured — enter a new URL to change, or save an empty value to clear.' : 'https://discord.com/api/webhooks/...';
+      const requestsText = n.hasDiscordRequestsWebhook ? 'Configured — enter a new URL to change, or save an empty value to clear.' : 'https://discord.com/api/webhooks/...';
+      return `
+        <div class="config-subgroup">Discord bot ${settingHelpMark('notifications', 'configuration', 'Discord bot', `Optional Discord bot integration; separate from webhook notifications. The bot posts status to one channel and accepts commands only from allowed users.`)}</div>
+        <div class="config-field">
+          <label>Bot token ${yamlHint('notifications.discord.bot_token')} ${settingHelpMark('notifications', 'configuration', 'Discord bot token', `Discord bot token. The bot starts only when both the token and the channel id are set.`)}</label>
+          <input type="password" autocomplete="new-password" placeholder="${esc(tokenText)}" data-change-action="markDirty" data-arg0="notifications" data-arg1="discordBotToken" data-arg-types="s,s,v">
+          <div class="config-help">Write-only; the current token is never echoed. Requires restart.</div>
+        </div>
+        <div class="config-field">
+          <label>Channel id ${yamlHint('notifications.discord.channel_id')} ${settingHelpMark('notifications', 'configuration', 'Discord channel id', `Discord channel the bot posts to and listens on, for example 1234567890.`)}</label>
+          <input type="text" value="${esc(n.discordChannelId || '')}" placeholder="1234567890" data-change-action="markDirty" data-arg0="notifications" data-arg1="discordChannelId" data-arg-types="s,s,w">
+          <div class="config-help">Requires restart.</div>
+        </div>
+        <div class="config-field">
+          <label>Allowed users ${yamlHint('notifications.discord.allowed_users[]')} ${settingHelpMark('notifications', 'configuration', 'Discord allowed users', `Discord user IDs permitted to issue bot commands (!kick, !pause, agent actions). When empty, command handling is disabled (fail closed): the bot still posts status but accepts no commands.`)}</label>
+          <textarea rows="3" placeholder="One Discord user id per line" data-change-action="markNotificationsList" data-arg0="discordAllowedUsers" data-arg-types="s,v">${esc((n.discordAllowedUsers || []).join('\n'))}</textarea>
+          <div class="config-help">Empty disables bot commands. Requires restart.</div>
+        </div>
+        <div class="config-field">
+          <label>Factory webhook ${yamlHint('notifications.discord.factory_webhook')} ${settingHelpMark('notifications', 'configuration', 'Discord factory webhook', `Discord webhook the hub posts the org-wide GitHub activity feed to. Required when the GitHub activity feed is enabled.`)}</label>
+          <input type="password" autocomplete="new-password" placeholder="${esc(factoryText)}" data-change-action="markDirty" data-arg0="notifications" data-arg1="discordFactoryWebhook" data-arg-types="s,s,v">
+          <div class="config-help">Write-only; the current URL is never echoed. Used by the hub process.</div>
+        </div>
+        <div class="config-field">
+          <label>Hosted-hive requests webhook ${yamlHint('notifications.discord.requests_webhook_url')} ${settingHelpMark('notifications', 'configuration', 'Discord requests webhook', `Discord webhook the hub posts new hosted-hive provision requests to (the community request channel). A hub-level requests webhook takes precedence when set.`)}</label>
+          <input type="password" autocomplete="new-password" placeholder="${esc(requestsText)}" data-change-action="markDirty" data-arg0="notifications" data-arg1="discordRequestsWebhookUrl" data-arg-types="s,s,v">
+          <div class="config-help">Write-only; the current URL is never echoed. Used by the hub process; may require restart.</div>
         </div>`;
+    }
+
+    function renderGovNotificationsGithubActivity(n) {
+      const ga = n.githubActivity || {};
+      const toggle = (key, on, label, yamlKey, tip) => `<div class="config-toggle mt-3">
+          <div class="config-toggle-switch ${on ? 'on' : ''}" data-action="toggleGithubActivityFlag" data-arg0="${key}" data-arg-types="t,s" role="switch" aria-checked="${on ? 'true' : 'false'}"></div>
+          <span class="config-toggle-label">${label} ${yamlHint(yamlKey)} ${settingHelpMark('notifications', 'configuration', label, tip)}</span>
+        </div>`;
+      const list = (key, label, yamlKey, placeholder, tip) => `<div class="config-field">
+          <label>${label} ${yamlHint(yamlKey)} ${settingHelpMark('notifications', 'configuration', label, tip)}</label>
+          <textarea rows="3" placeholder="${esc(placeholder)}" data-change-action="markGithubActivityList" data-arg0="${key}" data-arg-types="s,v">${esc((ga[key] || []).join('\n'))}</textarea>
+        </div>`;
+      return `
+        <div class="config-subgroup">GitHub activity feed ${settingHelpMark('notifications', 'configuration', 'GitHub activity feed', `Default off. When enabled, the hub polls org repos, diffs issue and PR state, and posts concise lines to the Discord factory webhook. Runs in the hub process; changes apply after a hub restart.`)}</div>
+        ${toggle('enabled', !!ga.enabled, 'Enable GitHub activity feed', 'notifications.github_activity.enabled', 'Requires a Discord factory webhook and an org (or project.org). Requires restart.')}
+        <div class="config-field-row">
+          <div class="config-field">
+            <label>Org ${yamlHint('notifications.github_activity.org')} ${settingHelpMark('notifications', 'configuration', 'GitHub activity org', `GitHub org to watch. Empty falls back to project.org.`)}</label>
+            <input type="text" value="${esc(ga.org || '')}" placeholder="${esc(ga.effectiveOrg || 'project.org')}" data-change-action="markGithubActivity" data-arg0="org" data-arg-types="s,w">
+          </div>
+          <div class="config-field">
+            <label>Poll interval (seconds) ${yamlHint('notifications.github_activity.poll_interval_s')} ${settingHelpMark('notifications', 'configuration', 'GitHub activity poll interval', `Seconds between polls. 0 uses the built-in default.`)}</label>
+            <input type="number" min="0" value="${esc(String(ga.pollIntervalS || 0))}" data-change-action="markGithubActivity" data-arg0="pollIntervalS" data-arg-types="s,N">
+          </div>
+        </div>
+        <div class="config-field">
+          <label>API URL ${yamlHint('notifications.github_activity.api_url')} ${settingHelpMark('notifications', 'configuration', 'GitHub activity API URL', `GitHub API base URL for GitHub Enterprise. Empty uses https://api.github.com.`)}</label>
+          <input type="text" value="${esc(ga.apiUrl || '')}" placeholder="https://api.github.com" data-change-action="markGithubActivity" data-arg0="apiUrl" data-arg-types="s,w">
+          <div class="config-help">Requires restart.</div>
+        </div>
+        ${list('repos', 'Repos', 'notifications.github_activity.repos[]', 'One repo per line; empty watches every org repo', 'Limit the feed to these repos. Empty watches every repo in the org.')}
+        ${list('events', 'Events', 'notifications.github_activity.events[]', 'issue_opened', 'Activity events to post, for example issue_opened, issue_closed, issue_reopened. Empty posts every event.')}
+        <div class="config-field-row">
+          ${list('allowAuthors', 'Allow authors', 'notifications.github_activity.allow_authors[]', 'One login per line', 'When set, only activity by these authors is posted.')}
+          ${list('denyAuthors', 'Deny authors', 'notifications.github_activity.deny_authors[]', 'One login per line', 'Activity by these authors is never posted.')}
+        </div>
+        ${toggle('filterBots', ga.filterBots !== false, 'Filter bot authors', 'notifications.github_activity.filter_bots', 'Default on: skip activity authored by bot accounts.')}
+        ${toggle('filterDependabot', ga.filterDependabot !== false, 'Filter Dependabot', 'notifications.github_activity.filter_dependabot', 'Default on: skip Dependabot activity.')}`;
     }
 
     // ── Stats tab for per-agent stat config ──
@@ -39442,6 +40702,35 @@ function burnAreaChart() {
         </div>`;
     }
 
+    // Kick log source (#11762, #9579): what per-kick agent logs are built from.
+    // Mirrors config.KickLogSources(); the labels explain the choice because
+    // the values alone ("auto") do not.
+    const KICK_LOG_SOURCES = [
+      { value: 'scrollback', label: 'Scrollback (tmux capture — default)' },
+      { value: 'transcript', label: 'CLI transcript' },
+      { value: 'auto', label: 'Auto (transcript when the backend has a reader, else scrollback)' },
+    ];
+
+    function renderGovKickLogSource(l) {
+      const envLocked = !!l.kickLogSourceEnvLocked;
+      const saved = l.kickLogSource || 'scrollback';
+      const effective = l.kickLogSourceEffective || saved;
+      const shown = envLocked ? effective : saved;
+      const label = v => ((KICK_LOG_SOURCES.find(o => o.value === v) || {}).label || v);
+      const options = KICK_LOG_SOURCES.map(o => '<option value="' + o.value + '"' + (shown === o.value ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
+      const lockNote = envLocked
+        ? `<p class="fs-sm text-muted mt-3 mb-0">Set by <code>HIVE_KICK_LOG_SOURCE</code> on the deployment: kick logs currently use <b>${esc(label(effective))}</b>. The saved setting (<b>${esc(label(saved))}</b>) applies once that variable is unset.</p>`
+        : '';
+      return `
+        <hr class="config-section-rule">
+        <div class="config-subgroup">Kick logs</div>
+        <div class="config-field">
+          <label>Kick log source ${settingHelpMark('agent-logging', 'per-kick-log-history', 'Kick log source', `What each per-kick agent log — the archives on an agent&apos;s 🕘 kick history page and the live full log — is built from. <b>Scrollback</b> (default) is the tmux capture of what the CLI painted; tool output the CLI collapsed (&quot;(N lines hidden)&quot;) is not in it. <b>CLI transcript</b> renders the backend&apos;s own session transcript as plain text instead: every turn and every tool call with its full arguments (the shell command) and full output, timestamped, for this kick only. Transcript readers exist today for Copilot CLI and Claude Code; a backend without one, or a missing or unparseable transcript, falls back to the scrollback with one warning in the hive log. <b>Auto</b> uses the transcript when the backend has a reader and the transcript is usable, else the scrollback, silently. Applies to the next kick without a restart. Every log&apos;s header carries a <code>source:</code> line (also the source column on the kick history page) so you can verify which was used. <code>HIVE_KICK_LOG_SOURCE</code> on the deployment overrides this setting.`)}</label>
+          <select data-change-action="markDirty" data-arg0="logging" data-arg1="kickLogSource" data-arg-types="s,s,v"${envLocked ? ' disabled' : ''}>${options}</select>
+          ${lockNote}
+        </div>`;
+    }
+
     function renderGovLogging(l) {
       const levels = ['debug', 'info', 'warn', 'error'];
       return `
@@ -39464,7 +40753,8 @@ function burnAreaChart() {
         <div class="config-toggle">
           <div class="config-toggle-switch ${l.compress !== false ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="logging" data-key="compress"></div>
           <span class="config-toggle-label">Compress Rotated Files ${settingHelpMark('settings', 'logging', 'Compress Rotated Files', `Gzip-compress rotated log files to save disk space. Typically reduces log file size by ~90%. Enabled by default.`)}</span>
-        </div>`;
+        </div>
+        ${renderGovKickLogSource(l)}`;
     }
 
     function securityPostureStripHtml() {
@@ -40475,6 +41765,7 @@ function burnAreaChart() {
       const checkpointImplementMinACMMLevel = f.checkpointImplementMinACMMLevel || 5;
       const publicationAvailable = f.publicationAvailable === true;
       const publicationMinACMMLevel = f.publicationMinACMMLevel || 3;
+      const cls = (_configState.data || {}).classifier || {};
       const amSelfOn = am.self_authored !== false; // nil/undefined = enabled
       const amChecks = Array.isArray(am.required_checks) ? am.required_checks : [];
       const amBots = Array.isArray(am.bot_authors) ? am.bot_authors : [];
@@ -40600,6 +41891,15 @@ function burnAreaChart() {
           <div class="config-field" style="margin-top:10px">
             <label>Private disclosure channel ${settingHelpMark('audit-campaign', 'publication', 'Private disclosure channel', `Where security-sensitive findings go instead of a public issue: repo:owner/name files them in that private repository, notify sends only the title and finding hash to the operator notifier. A sensitive finding with no channel is refused and audited, never filed publicly.`)}</label>
             <input type="text" value="${esc(f.publicationPrivateChannel || '')}" placeholder="repo:owner/security-intake or notify" data-change-action="markDirty" data-arg0="features" data-arg1="publicationPrivateChannel" data-arg-types="s,s,w">
+          </div>
+        </div>
+
+        <div class="overview-settings-section">
+          <h3>Tier classifier</h3>
+          <p class="text-muted fs-base">Override the issue-title keywords that map work to Simple or Complex tiers. Empty lists keep the built-in defaults.</p>
+          <div class="config-field-row">
+            <div class="config-field"><label>Simple keywords ${yamlHint('classifier.simple_keywords[]')} ${settingHelpMark('settings', 'features', 'Simple keywords', `Title substrings that classify an issue as Tier Simple. Leave empty to keep the built-in default set.`)}</label><textarea rows="4" data-change-action="markClassifierList" data-arg0="simple_keywords" data-arg-types="s,v">${esc((cls.simple_keywords || []).join('\n'))}</textarea><div class="config-help">Effective defaults: ${esc((cls.simpleKeywords || []).join(', ') || 'none')}</div></div>
+            <div class="config-field"><label>Complex signals ${yamlHint('classifier.complex_signals[]')} ${settingHelpMark('settings', 'features', 'Complex signals', `Title substrings that classify an issue as Tier Complex. Leave empty to keep the built-in default set.`)}</label><textarea rows="4" data-change-action="markClassifierList" data-arg0="complex_signals" data-arg-types="s,v">${esc((cls.complex_signals || []).join('\n'))}</textarea><div class="config-help">Effective defaults: ${esc((cls.complexSignals || []).join(', ') || 'none')}</div></div>
           </div>
         </div>
 
@@ -40974,7 +42274,38 @@ function burnAreaChart() {
           <div class="advisor-set-actions"><button class="hv-btn btn-secondary btn" data-action="loadAdvisorSettings">Refresh</button></div>
         </div>
         ${renderGovReplanSection((_configState.data || {}).replan || {})}
-        ${renderGovQuestionAutocloseSection((_configState.data || {}).question_autoclose || {})}`;
+        ${renderGovQuestionAutocloseSection((_configState.data || {}).question_autoclose || {})}
+        ${renderGovFleetReportSection((_configState.data || {}).fleet_report || {})}`;
+    }
+
+    // renderGovFleetReportSection renders the self-report settings
+    // (hivecommons/hive#11868): whether this hive files or joins issues on
+    // the report repo when it notices unusual errors in itself. Values are
+    // marked dirty under the 'fleet-report' section, which the generic Save
+    // dispatcher PUTs to /api/config/governor/fleet-report. Keys:
+    // governor.fleet_report.enabled, governor.fleet_report.repo,
+    // governor.fleet_report.max_per_day.
+    function renderGovFleetReportSection(fr) {
+      fr = fr || {};
+      const on = fr.enabled === true;
+      const sourceNote = fr.explicit ? 'set in hive.yaml' : (fr.hub_managed ? 'default for hub-managed hives: on' : 'default for self-hosted hives: off (dry-run preview only)');
+      const openReports = Array.isArray(fr.open_reports) ? fr.open_reports : [];
+      const openHtml = openReports.length === 0
+        ? '<span class="qa-note">No self-reports filed or joined yet.</span>'
+        : `<span class="qa-note">Self-reports: ${openReports.length} open — ${openReports.slice(0, 6).map(e => e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">#${esc(String(e.number))}</a> ${esc(e.class || e.trigger || '')}${e.joined ? ' (joined)' : ''}` : `#${esc(String(e.number))}`).join(', ')}</span>`;
+      return `
+        <div class="qa-section">
+          <div class="qa-section-title">Self-Reported Issues</div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${on ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="fleet-report" data-key="enabled"></div>
+            <span class="config-toggle-label">File issues upstream when this hive hits unusual errors ${settingHelpMark('settings', 'features', 'File issues upstream when this hive hits unusual errors', `When on, persistent problems Hive notices in itself (restart storms, repeated kick failures, recovered panics, degraded model discovery, inference auth failures, advisory post failures, ACMM shortfalls) are filed as issues on the report repo — or, when a matching issue is already open, this hive adds itself to it instead. Evidence is shape-only and scrubbed; never tokens or prompts. Rate-limited to the per-day cap below, one new filing per hour, and never re-filed within 7 days of being closed. ${esc(sourceNote)}.`)}</span>
+          </div>
+          <div class="config-field-row qa-hours">
+            <div class="config-field"><label>Report repo ${settingHelpMark('settings', 'features', 'Report repo', `owner/repo that receives self-reports. Default hivecommons/hive. Hub-managed hives without write access relay through the hub, which files under the App identity.`)}</label><input type="text" value="${esc(fr.repo || '')}" placeholder="hivecommons/hive" data-change-action="markDirty" data-arg0="fleet-report" data-arg1="repo" data-arg-types="s,s,v"></div>
+            <div class="config-field"><label>Max new issues per day ${settingHelpMark('settings', 'features', 'Max new issues per day', `Cap on NEW issues this hive may open per 24h. Joining an existing issue never counts. 0 means the default (5).`)}</label><input type="number" min="0" step="1" value="${fr.max_per_day || 0}" placeholder="5" data-change-action="markDirty" data-arg0="fleet-report" data-arg1="max_per_day" data-arg-types="s,s,N"></div>
+          </div>
+          <div class="qa-schedule">${fr.hive_slug ? `<span class="qa-note">Identified upstream as <code>hive/${esc(fr.hive_slug)}</code>. </span>` : ''}${openHtml}</div>
+        </div>`;
     }
 
     // renderGovReplanSection renders the stall-replan lane settings: the
@@ -43618,6 +44949,17 @@ function burnAreaChart() {
               body: JSON.stringify(values)
             });
             if (!amRes.ok) throw new Error(await saveErrorMessage(amRes));
+          } else if (_configState.type === 'governor' && section === 'sla') {
+            // sla is a TOP-LEVEL config block (Delivery SLA targets); it
+            // saves through its own owner-only /api/config/sla endpoint.
+            const current = ((_configState.data || {}).sla || {}).targets || {};
+            const slaRes = await fetch('/api/config/sla', {
+              method: 'PUT',
+              headers: _inceptionAuthHeaders(),
+              body: JSON.stringify({ targets: Object.assign({}, current, values) })
+            });
+            if (!slaRes.ok) throw new Error(await saveErrorMessage(slaRes));
+            _configState.data.sla = await slaRes.json().catch(() => _configState.data.sla);
           } else if (_configState.type === 'governor' && section === 'convergence') {
             // convergence is a TOP-LEVEL config block, not under governor —
             // it saves through its own owner-only /api/config/convergence
@@ -43638,6 +44980,30 @@ function burnAreaChart() {
               body: JSON.stringify(values)
             });
             if (!rvRes.ok) throw new Error(await saveErrorMessage(rvRes));
+          } else if (_configState.type === 'governor' && section === 'dashboard') {
+            const dashRes = await fetch('/api/config/dashboard', {
+              method: 'PUT',
+              headers: _inceptionAuthHeaders(),
+              body: JSON.stringify(values)
+            });
+            if (!dashRes.ok) throw new Error(await saveErrorMessage(dashRes));
+            _configState.data.dashboard = await dashRes.json().catch(() => _configState.data.dashboard);
+          } else if (_configState.type === 'governor' && section === 'backends') {
+            const backendsRes = await fetch('/api/config/backends', {
+              method: 'PUT',
+              headers: _inceptionAuthHeaders(),
+              body: JSON.stringify(values)
+            });
+            if (!backendsRes.ok) throw new Error(await saveErrorMessage(backendsRes));
+            _configState.data.backends = await backendsRes.json().catch(() => _configState.data.backends);
+          } else if (_configState.type === 'governor' && section === 'classifier') {
+            const clsRes = await fetch('/api/config/classifier', {
+              method: 'PUT',
+              headers: _inceptionAuthHeaders(),
+              body: JSON.stringify(values)
+            });
+            if (!clsRes.ok) throw new Error(await saveErrorMessage(clsRes));
+            _configState.data.classifier = await clsRes.json().catch(() => _configState.data.classifier);
           } else {
             const res = await fetch(`${base}/${section}`, {
               method: 'PUT',

@@ -3347,6 +3347,49 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Update backend placement allow/deny policy",
+        "description": "Owner-only Settings write for the top-level `backends` policy in hive.yaml. `allow` is the optional allow-list for agent backend placement; `deny` is the deny-list and takes precedence.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "allow": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "deny": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated backend placement policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/nous/status": {
@@ -7143,6 +7186,30 @@
         }
       }
     },
+    "/api/config/sla": {
+      "get": {
+        "tags": ["Governor"],
+        "summary": "Get Delivery SLA targets",
+        "description": "Returns the configured `sla.targets` (0 = default), the effective targets with defaults filled in, and the defaults. Hours per span; the Throughput Delivery SLA panel colours its p50s and sparklines against these. Requires owner role.",
+        "responses": {
+          "200": { "description": "SLA targets", "content": { "application/json": { "schema": { "type": "object", "properties": { "targets": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } }, "effective_targets": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } }, "defaults": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } } } } } } },
+          "403": { "description": "Requires owner role" },
+          "503": { "description": "Config unavailable" }
+        }
+      },
+      "put": {
+        "tags": ["Governor"],
+        "summary": "Update Delivery SLA targets",
+        "description": "Replaces `sla.targets` with the given per-span hour budgets and persists hive.yaml. Each value must be between 0 (default) and 8760; invalid budgets are rejected before anything is mutated. Requires owner role.",
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "targets": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } } } } } } },
+        "responses": {
+          "200": { "description": "Updated SLA targets", "content": { "application/json": { "schema": { "type": "object", "properties": { "targets": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } }, "effective_targets": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } }, "defaults": { "type": "object", "properties": { "start_to_pr_h": { "type": "number", "description": "Hours from the hive/in-progress start mark to the fixing PR opening (default 4)" }, "pr_to_merge_h": { "type": "number", "description": "Hours from the fixing PR opening to its merge (default 24)" }, "open_to_merge_h": { "type": "number", "description": "Hours from the issue opening to the fixing PR merging (default 72)" } } } } } } } },
+          "400": { "description": "Invalid body or budget" },
+          "403": { "description": "Requires owner role" },
+          "503": { "description": "Config unavailable" }
+        }
+      }
+    },
     "/api/config/governor/coverage-target": {
       "put": {
         "tags": [
@@ -9240,6 +9307,192 @@
           },
           "403": {
             "description": "Requires owner role"
+          }
+        }
+      }
+    },
+    "/api/config/governor/fleet-report": {
+      "get": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Self-report (fleet report) settings",
+        "description": "Returns governor.fleet_report resolved for this hive plus the hivecommons/hive issues it has filed or joined (hivecommons/hive#11868). Requires owner role.",
+        "responses": {
+          "200": {
+            "description": "Self-report config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Resolved: explicit governor.fleet_report.enabled, else file_upstream, else on for hub-managed hives and off for self-hosted"
+                    },
+                    "explicit": {
+                      "type": "boolean",
+                      "description": "True when hive.yaml sets enabled or file_upstream"
+                    },
+                    "hub_managed": {
+                      "type": "boolean"
+                    },
+                    "repo": {
+                      "type": "string",
+                      "description": "owner/repo receiving self-reports (default hivecommons/hive)"
+                    },
+                    "max_per_day": {
+                      "type": "integer",
+                      "description": "Cap on NEW issues per 24h (default 5)"
+                    },
+                    "hive_slug": {
+                      "type": "string",
+                      "description": "hive/<slug> label this hive uses upstream; empty for anonymous self-hosted hives"
+                    },
+                    "open_reports": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "fingerprint": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "trigger": {
+                            "type": "string"
+                          },
+                          "number": {
+                            "type": "integer"
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "joined": {
+                            "type": "boolean"
+                          },
+                          "posted_at": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires owner role"
+          },
+          "503": {
+            "description": "Config unavailable"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Update self-report settings",
+        "description": "Updates governor.fleet_report. Fields are pointer-typed; absent fields are unchanged. Requires owner role.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "repo": {
+                    "type": "string",
+                    "description": "owner/repo; empty resets to the default"
+                  },
+                  "max_per_day": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "0 resets to the default (5)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated (same shape as GET)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Resolved: explicit governor.fleet_report.enabled, else file_upstream, else on for hub-managed hives and off for self-hosted"
+                    },
+                    "explicit": {
+                      "type": "boolean",
+                      "description": "True when hive.yaml sets enabled or file_upstream"
+                    },
+                    "hub_managed": {
+                      "type": "boolean"
+                    },
+                    "repo": {
+                      "type": "string",
+                      "description": "owner/repo receiving self-reports (default hivecommons/hive)"
+                    },
+                    "max_per_day": {
+                      "type": "integer",
+                      "description": "Cap on NEW issues per 24h (default 5)"
+                    },
+                    "hive_slug": {
+                      "type": "string",
+                      "description": "hive/<slug> label this hive uses upstream; empty for anonymous self-hosted hives"
+                    },
+                    "open_reports": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "fingerprint": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "trigger": {
+                            "type": "string"
+                          },
+                          "number": {
+                            "type": "integer"
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "joined": {
+                            "type": "boolean"
+                          },
+                          "posted_at": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, repo not owner/repo, or negative max_per_day"
+          },
+          "403": {
+            "description": "Requires owner role"
+          },
+          "503": {
+            "description": "Config unavailable"
           }
         }
       }
@@ -24812,6 +25065,51 @@
         }
       }
     },
+    "/api/config/classifier": {
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Update tier classifier keyword overrides",
+        "description": "Owner-only Settings write for the top-level `classifier` keyword lists in hive.yaml. Empty lists keep the built-in defaults.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "simple_keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "complex_signals": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated tier classifier keyword overrides",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/inference/models/{backend}": {
       "get": {
         "tags": [
@@ -28699,6 +28997,83 @@
           },
           "304": {
             "description": "Theme CSS not modified"
+          }
+        }
+      }
+    },
+    "/api/config/dashboard": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Dashboard settings",
+        "description": "Owner-only read of dashboard runtime, access, and issue-band settings. Secret values such as dashboard.auth_token are masked and reported only as configured/not configured.",
+        "responses": {
+          "200": {
+            "description": "Dashboard settings"
+          },
+          "403": {
+            "description": "Owner access required"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Update dashboard settings",
+        "description": "Owner-only update for dashboard.port, dashboard.agent_poll_interval_s, dashboard.strategy_lab, dashboard.auth_token, dashboard.authorized_users, dashboard.authorized_user_names, dashboard.hub_proxied, and dashboard.issue_bands.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "port": {
+                    "type": "integer"
+                  },
+                  "agent_poll_interval_s": {
+                    "type": "integer"
+                  },
+                  "strategy_lab": {
+                    "type": "boolean"
+                  },
+                  "auth_token": {
+                    "type": "string"
+                  },
+                  "authorized_users": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "authorized_user_names": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "hub_proxied": {
+                    "type": "boolean"
+                  },
+                  "issue_bands": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated dashboard settings"
+          },
+          "400": {
+            "description": "Invalid dashboard settings"
+          },
+          "403": {
+            "description": "Owner access required"
           }
         }
       }

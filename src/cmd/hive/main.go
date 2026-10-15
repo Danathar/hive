@@ -144,44 +144,16 @@ func reportedVersion() string {
 	return normalizeVersion(version)
 }
 
+// publishFleetReports is the legacy entry point kept for the one call site's
+// signature; the policy lives in selfreport_publish.go (#11868).
 func publishFleetReports(ctx context.Context, logger *slog.Logger, ghClient *github.Client, dashSrv *dashboard.Server, res *fleetreport.Result, dryRun bool) {
-	if res == nil || dryRun || ghClient == nil || dashSrv == nil {
-		return
-	}
-	for _, report := range res.Reports {
-		write, err := ghClient.EnsureFleetReport(ctx, report)
-		if err != nil {
-			logger.Warn("fleet report: upstream write failed", "fingerprint", report.Fingerprint, "error", err)
-			continue
-		}
-		dashSrv.MarkFleetReportPosted(report.Fingerprint, write.Number, write.URL, write.Created, report.Body)
-		logger.Info("fleet report: upstream report recorded", "fingerprint", report.Fingerprint, "issue", write.Number, "created", write.Created, "commented", write.Commented, "reaction", write.ReactionSent)
-	}
-	for _, report := range res.Recoveries {
-		open, ok := dashSrv.FleetReportOpenIssue(report.Fingerprint)
-		if !ok {
-			continue
-		}
-		if open.Number <= 0 {
-			issue, found, err := ghClient.FleetReportIssue(ctx, report.Fingerprint)
-			if err != nil {
-				logger.Warn("fleet report: recovery lookup failed", "fingerprint", report.Fingerprint, "error", err)
-				continue
-			}
-			if !found {
-				dashSrv.ClearFleetReportOpen(report.Fingerprint)
-				continue
-			}
-			open.Number = issue.Number
-			open.URL = issue.URL
-		}
-		if err := ghClient.PostFleetReportRecovery(ctx, open.Number, report, open.OpenedByHive); err != nil {
-			logger.Warn("fleet report: recovery write failed", "fingerprint", report.Fingerprint, "issue", open.Number, "error", err)
-			continue
-		}
-		dashSrv.MarkFleetReportRecovered(report.Fingerprint)
-		logger.Info("fleet report: recovery recorded", "fingerprint", report.Fingerprint, "issue", open.Number, "closed", open.OpenedByHive)
-	}
+	publishFleetReportsWith(ctx, logger, dashSrv, res, selfReportPublishDeps{
+		dryRun:  dryRun,
+		gh:      ghClient,
+		limits:  fleetreport.DefaultFilingLimits,
+		now:     time.Now,
+		tracker: fleetreport.DefaultTracker(),
+	})
 }
 
 var (
@@ -2218,6 +2190,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	if b.cfg.GitHub.IsGHE() {
 		b.projectCtx.GHHost = b.cfg.GitHub.HostLabel()
 	}
+	for _, name := range b.cfg.Governor.ClearInvalidInferenceLaunchCmds(b.cfg.Agents) {
+		b.logger.Warn("cleared invalid inference launch_cmd; inference and gateway backends launch through claude", "agent", name)
+	}
 	b.agentMgr = agent.NewManager(b.cfg.EnabledAgents(), b.logger, b.projectCtx)
 	// SIGTERM (pod roll, hive upgrade) destroys every tmux server and with it
 	// the in-flight kick's scrollback; archive it to /data first (#4296).
@@ -2294,6 +2269,13 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	})
 	b.agentMgr.SetRepoAutoMergeEnabledResolver(func(repo string) bool {
 		return b.cfg.RepoAutoMergeEnabled(repo)
+	})
+	// Kick log source (#11762, #9579): governor.logging.kick_log_source from
+	// Settings → Logging, with HIVE_KICK_LOG_SOURCE still winning. A closure
+	// for the same reason as explain mode above — the next archive or live
+	// full-log read must honour a change made from the dashboard.
+	b.agentMgr.SetKickLogSourceResolver(func() string {
+		return b.cfg.Governor.Logging.ResolveKickLogSource()
 	})
 	// The launch path also needs to know WHICH FILE the key came from, so it can
 	// check that file is readable by the agent UID rather than only by the hive
@@ -2797,6 +2779,14 @@ func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 	// the panel's only memory of merged/blocked outcomes, so a pod roll must
 	// not zero the fleet counters. Enabled before any producer records.
 	deps.enableLifecyclePersistence(b.dashSrv, lifecycleTimelinePath)
+	deps.enableSLAHistoryPersistence(b.dashSrv, slaHistoryPath)
+	// Writes are throttled to one a minute; flush the last dirty buckets on
+	// shutdown so a pod roll never drops the current day's SLA samples.
+	b.preShutdownHooks.add("flush-sla-history", func() {
+		if err := b.dashSrv.SLATracker().History.Flush(); err != nil {
+			b.logger.Warn("sla history flush on shutdown failed", "error", err)
+		}
+	})
 
 	// The scheduler's classifier pass records KindClassified journeys the
 	// moment lane routing decides an issue's lane — same store, no extra work.
@@ -3511,6 +3501,17 @@ func (b *boot) bootSupervision() {
 			QueuedRefs: func() []watchdog.QueuedRef {
 				return watchdogQueuedRefs(b.lastActionable.Load(), b.cfg.Project.Org, watchdog.MaxQueuedRefs)
 			},
+			// Agents the governor deliberately does not kick are idle by
+			// design, not "alive but not producing" (#11910).
+			KickSuppressed: func(name string) string {
+				mode := strings.ToLower(string(b.gov.GetState().Mode))
+				ac, ok := b.cfg.Agents[name]
+				onDemand := (ok && ac.OnDemand) || b.onDemandFromPack[name]
+				if b.cfg.OffByCadence(name, mode, onDemand) {
+					return fmt.Sprintf("cadence paused in %s mode", mode)
+				}
+				return b.sched.ReviewerLaneIdleReason(name)
+			},
 		}
 		b.wd = watchdog.New(wdSettings, wdFleet, b.dashSrv, b.logger,
 			watchdog.WithAuthProbes(watchdogAuthProbes(b.cfg)))
@@ -3670,6 +3671,14 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 					b.dashSrv.AuditLog("system", "github_app_check", "result=no GitHub client: "+b.appAuthFailure, "")
 					return false
 				}
+				// #11791: heal a wrong-account installation BEFORE asking the
+				// installation about coverage. After an org transfer the
+				// configured org no longer matches the installation's account,
+				// and the coverage check below — asked of the OLD installation
+				// — answers "repo not covered" and returns, so Re-check could
+				// never adopt the new org's installation without a restart.
+				// Rediscovery is TTL-cached, so this costs nothing on repeat.
+				healGitHubAppInstallation(b.ctx, b.ghClient.AppAuth(), b.cfg, b.logger)
 				// #4360: ask about repo COVERAGE before attempting a read.
 				// A repo the installation does not cover answers 404, which is
 				// indistinguishable from "no such repo" and used to be reported
@@ -3697,10 +3706,6 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 				// wrong installation). Verify write capability before letting
 				// the handler clear the banner, so Re-check can't produce a
 				// clears-then-returns flip-flop.
-				// Before reporting a wrong-account installation, try to fix it:
-				// this is the exact case rediscovery exists for. Cached by TTL,
-				// so a repeated re-check does not re-hit the API.
-				healGitHubAppInstallation(b.ctx, b.ghClient.AppAuth(), b.cfg, b.logger)
 				// Shared verdict with the boot and advisory-digest paths. Re-check
 				// previously branched on `diag != ""` while boot branched on the
 				// error string, which is how the two came to disagree about the
@@ -4223,6 +4228,9 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 		// and the heartbeat builder reports it to the hub (both as an immediate
 		// advisory-staleness cause and as a dedicated inference-auth alert).
 		dashboard.SetInferenceAuthProvider(b.githubProxy.InferenceAuthError)
+		// #11761: the full per-agent inference error the proxy returned, so the
+		// agent card is not limited to Claude Code's clipped retry line.
+		dashboard.SetInferenceLastErrorProvider(b.githubProxy.LastInferenceError)
 		// #4294: the provider spending-limit signal, read by the eval cycle to
 		// raise an advisory and stop kicking agents at a gateway that is
 		// refusing on a money limit.
@@ -5233,6 +5241,44 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 						b.logger.Warn("failed to clear upgrade marker for unpublished target", "path", upgradeMarkerPath, "error", err)
 					}
 					return
+				}
+
+				// Drain in-flight kicks before exiting (#11876): on a fast release
+				// channel the restart cadence is shorter than a long-lane turn, so
+				// exiting immediately cut most of those turns. While any kicked
+				// turn is still running, defer (the hub re-sends UpgradeTo every
+				// heartbeat) and withhold new kicks; proceed once the turns end or
+				// hub.upgrade_drain_timeout_s elapses.
+				if b.agentMgr != nil {
+					inFlight := agentKicksInFlight(b.agentMgr.AllStatuses(), b.startTime)
+					drainTimeout := b.cfg.Hub.EffectiveUpgradeDrainTimeout()
+					dec := selfUpgradeDrain.decide(targetSHA, inFlight, drainTimeout, selfUpgradeDrainNow())
+					switch {
+					case !dec.Proceed:
+						b.logger.Info("self-upgrade deferred: draining in-flight agent kicks",
+							"target", targetSHA,
+							"current", gitShort,
+							"in_flight", dec.InFlight,
+							"waited", dec.Waited.Round(time.Second),
+							"max_wait_remaining", dec.Remaining.Round(time.Second),
+							"drain_timeout", drainTimeout,
+						)
+						return
+					case dec.TimedOut:
+						b.logger.Warn("self-upgrade drain timed out: proceeding and cutting in-flight kicks",
+							"target", targetSHA,
+							"current", gitShort,
+							"cut_kicks", dec.InFlight,
+							"waited", dec.Waited.Round(time.Second),
+							"drain_timeout", drainTimeout,
+						)
+					case dec.Waited > 0:
+						b.logger.Info("self-upgrade drain complete: no agent kicks in flight",
+							"target", targetSHA,
+							"current", gitShort,
+							"waited", dec.Waited.Round(time.Second),
+						)
+					}
 				}
 
 				// Record the attempt BEFORE acting: if the process dies mid-upgrade the
@@ -6638,6 +6684,11 @@ func recordEnumeratedIssues(ctx context.Context, rec lifecycleRecorder, actionab
 			IssueRef: issueRef(issue.Repo, issue.Number),
 			Kind:     timeline.KindEnumerated,
 		}
+		// The GitHub created_at is the open→triage / open→merge SLA origin;
+		// retained here so the SLA never re-fetches the issue.
+		if !issue.CreatedAt.IsZero() {
+			event.Attrs = map[string]string{timeline.AttrIssueCreatedAt: issue.CreatedAt.UTC().Format(time.RFC3339)}
+		}
 		_, span := tracing.StartTimelineSpan(ctx, event)
 		store.Record(event)
 		span.End()
@@ -6776,6 +6827,10 @@ func advisoryPostDue(advCfg config.AdvisoryConfig, repo string, now time.Time, l
 
 func recordAdvisoryPostSuccess(repo string, now time.Time) {
 	advisoryPostGate.RecordSuccess(repo, now)
+}
+
+func recordAdvisoryPostForbidden(repo string, now time.Time, backoff time.Duration) {
+	advisoryPostGate.RecordWriteForbidden(repo, now, backoff)
 }
 
 // advisoryIssueMissingError is the error recorded (and reported to the hub) when
@@ -7334,6 +7389,14 @@ func runEvalCycle(
 			"last_rebuff", providerBudgetLastRebuff, "probe_interval", providerBudgetProbeInterval)
 	}
 	messages = kickGate.Kept
+	// Self-upgrade drain (#11876): a hub-instructed upgrade is waiting for
+	// in-flight kicks to end, so starting new turns would only feed the
+	// restart. Withheld kicks stay due and go out from the new process.
+	if target, draining := selfUpgradeDrain.Active(selfUpgradeDrainNow()); draining && len(messages) > 0 {
+		logger.Info("self-upgrade drain: withholding new agent kicks",
+			"target", target, "withheld", pendingKickAgentsFromMessages(messages))
+		messages = nil
+	}
 	govState.PendingKicks = pendingKickAgentsFromMessages(messages)
 	gov.SetPendingKicks(govState.PendingKicks)
 	if notifyProviderBudget {
@@ -7593,6 +7656,26 @@ func runEvalCycle(
 						"repo", primaryRepo, "state", state.String(),
 						"operator_actionable", state.OperatorActionable(), "detail", msg)
 				},
+				onRepoMoved: func(ctx context.Context, moved *github.RepoMovedError) {
+					// #11791: the write was refused because the repository
+					// now lives under another owner. The installation is
+					// healthy, so the generic write-forbidden remedy would
+					// misdirect the operator; name the move instead.
+					dashSrv.SetGitHubAppRequired(true)
+					dashSrv.SetGitHubAppPermIssue(moved.Error())
+					dashSrv.SetGitHubAppState(github.AppStateRepoMoved.String())
+					logger.Warn("GitHub App write failed — repository transferred to another owner",
+						"configured", moved.Configured, "current", moved.Current)
+				},
+				recordWriteForbidden: func(repo string) {
+					backoff := advCfg.PostRetryBackoff()
+					recordAdvisoryPostForbidden(repo, time.Now(), backoff)
+					if backoff > 0 {
+						logger.Warn("advisory digest write forbidden — pausing post attempts",
+							"repo", repo, "retry_after", backoff.String(),
+							"knob", "governor.advisory.post_retry_backoff_s")
+					}
+				},
 				onAuthFailure: func(ctx context.Context) {
 					// Same verdict function as boot and Re-check, so a healthy
 					// or unclassifiable probe cannot raise the banner here.
@@ -7738,7 +7821,7 @@ func runEvalCycle(
 	}
 	persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 
-	publishFleetReports(ctx, logger, ghClient, dashSrv, statusPayload.FleetReport, cfg.Governor.FleetReport.DryRun())
+	publishFleetReportsWith(ctx, logger, dashSrv, statusPayload.FleetReport, newSelfReportPublishDeps(cfg, ghClient, dashSrv))
 
 	if agentStats := dashboard.CollectAgentStats(statusPayload); len(agentStats) > 0 {
 		gov.AttachAgentStats(agentStats)
@@ -9325,8 +9408,6 @@ var (
 	claimLedger       *github.ClaimLedger
 	claimLedgerPath   = github.ClaimLedgerPath
 	claimLedgerLoader = github.LoadClaimLedger
-	closeOnMergeMu    sync.Mutex
-	closeOnMergeLast  time.Time
 )
 
 // hiveIdentity determines which PR authors count as "this hive", so only our
@@ -9366,36 +9447,32 @@ func applyDuplicatePRGuard(
 		return
 	}
 	github.ApplyDuplicatePRGuard(ctx, ghClient, ledger, hiveIdentity(cfg), actionable, claimingPRRedStale(cfg, actionable), logger)
+	// hive/in-progress runs after the PR-claim guard so an issue whose PR just
+	// opened sheds the start mark here, and a lapsed mark frees the issue
+	// before kicks are built. Independent of governor.claims: the label is
+	// read from the issue, the marker from the comment, on every hive.
+	if withheld := github.SweepInProgressIssues(ctx, ghClient, actionable, time.Now(), logger); withheld > 0 {
+		logger.Info("in-progress guard applied", "withheld", withheld)
+	}
 	runCloseOnMergeSweep(ctx, cfg, ghClient, ledger, logger)
 }
 
-func runCloseOnMergeSweep(ctx context.Context, cfg *config.Config, ghClient *github.Client, ledger *github.ClaimLedger, logger *slog.Logger) {
-	if cfg == nil || ghClient == nil || ledger == nil || !cfg.Issues.CloseOnMergeEnabled() {
-		return
+// inProgressSetting resolves the hive/in-progress label setting from config.
+// The label follows the claims label mirror: an operator who set
+// governor.claims.label: false asked for no hive-managed claim labels, and
+// gets none here either; otherwise the start signal is always labelled. The
+// mark lasts the agent claim TTL, so both the ledger and the label agree on
+// when an agent's hold lapses.
+func inProgressSetting(cfg *config.Config) github.InProgressSetting {
+	if cfg == nil {
+		return github.InProgressSetting{}
 	}
-	opts := github.CloseOnMergeOptions{
-		Identity: hiveIdentity(cfg),
-		Logger:   logger,
-		TrustedAuthor: func(repo, login string) bool {
-			decision := trustedAuthorFunc(cfg)(login, cfg.AutoMerge.TrustedAuthors.EffectiveRequireRole())
-			return decision.Allowed
-		},
+	_, agentTTL, _, _ := cfg.Governor.Claims.EffectiveTTLs()
+	return github.InProgressSetting{
+		Enabled: !(cfg.Governor.Claims.IsEnabled() && !cfg.Governor.Claims.LabelEnabled()),
+		HiveID:  cfg.HiveID,
+		TTL:     agentTTL,
 	}
-	results := ghClient.CloseOnMergeForLedger(ctx, ledger, opts)
-	logCloseOnMergeResults(logger, "close-on-merge ledger sweep", results)
-
-	interval := cfg.Issues.EffectiveCloseOnMergeBackfillInterval()
-	closeOnMergeMu.Lock()
-	due := closeOnMergeLast.IsZero() || time.Since(closeOnMergeLast) >= interval
-	if due {
-		closeOnMergeLast = time.Now()
-	}
-	closeOnMergeMu.Unlock()
-	if !due {
-		return
-	}
-	backfill := ghClient.CloseOnMergeBackfill(ctx, opts)
-	logCloseOnMergeResults(logger, "close-on-merge backfill sweep", backfill)
 }
 
 func logCloseOnMergeResults(logger *slog.Logger, msg string, results []github.CloseOnMergeResult) {
@@ -9436,8 +9513,32 @@ func getClaimLedger(logger *slog.Logger) *github.ClaimLedger {
 				"path", claimLedgerPath, "error", err)
 		}
 		claimLedger = ledger
+		// A person reopening an issue after its closing PR merged voids the
+		// merged claim right away (hivecommons/hive#9945 sat likely-done for
+		// hours after a /reopen); the enumeration pass is the fallback when
+		// webhooks are not delivered.
+		github.SetIssueReopenedHook(issueReopenedHookFor(ledger, logger))
 	})
 	return claimLedger
+}
+
+// issueReopenedHookFor builds the webhook hook that voids a merged claim on a
+// reopened issue and persists the ledger, logging `reopened issue re-queued`.
+func issueReopenedHookFor(ledger *github.ClaimLedger, logger *slog.Logger) github.IssueReopenedHook {
+	return func(repo string, number int, at time.Time) {
+		if ledger == nil || !ledger.MarkIssueReopened(repo, number, at) {
+			return
+		}
+		claim, _ := ledger.LookupAny(repo, number)
+		if logger != nil {
+			logger.Info("reopened issue re-queued: merged PR claim voided",
+				"repo", repo, "issue", number, "claimed_by_pr", claim.PRNumber, "pr_repo", claim.PRRepo,
+				"pr_url", claim.PRURL, "merged_at", claim.MergedAt, "reopened_at", at, "source", "webhook")
+		}
+		if err := ledger.Save(); err != nil && logger != nil {
+			logger.Warn("reopened issue: failed to persist claim ledger", "repo", repo, "issue", number, "error", err)
+		}
+	}
 }
 
 // claimingPRRedStale builds the Fix #3 release predicate: given a claiming PR
@@ -9538,6 +9639,7 @@ func installReviewRelaySettings(client *github.Client, cfg *config.Config, logge
 	client.SetIssueClaims(func() (bool, time.Duration) {
 		return cfg.Governor.Claims.Enabled, cfg.Governor.Claims.EffectiveTTL()
 	})
+	client.SetInProgress(func() github.InProgressSetting { return inProgressSetting(cfg) })
 	client.SetReviewCadenceLimits(
 		func() bool { return cfg.Review.CombinedPerspectives },
 		func() int { return cfg.Review.MaxReviewsPerHead },

@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +66,110 @@ func (c *Client) ProbeIssuesDisabled(ctx context.Context, owner, repo string) (*
 		return &IssuesDisabledError{Repo: owner + "/" + repo, Fork: ghRepo.GetFork()}, nil
 	}
 	return nil, nil
+}
+
+// writeForbiddenMessage is GitHub's 403 body when an installation token may
+// not act on the resource: the comment was authored by another identity, or
+// the repository is outside this installation's scope. Mirrors
+// githubWriteForbiddenText in cmd/hive, which classifies the same text.
+const writeForbiddenMessage = "Resource not accessible by integration"
+
+// RepoMovedError reports that a repository the hive is configured for has been
+// transferred to a different owner (#11791). GitHub follows the rename
+// redirect for every READ, so the hive keeps finding the advisory issue and
+// its digest comment — but an installation token is bound to the ORIGINAL
+// owner's installation, and GitHub refuses every write under the new owner
+// with 403 "Resource not accessible by integration". No change to the old
+// installation can fix it; the remedy is to install the App on the new owner
+// (if it is not already) and repoint the hive.
+type RepoMovedError struct {
+	// Configured is the owner/name the hive is pointed at.
+	Configured string
+	// Current is the owner/name GitHub now reports for the same repository.
+	Current string
+}
+
+func (e *RepoMovedError) Error() string {
+	newOwner := e.Current
+	if i := strings.Index(newOwner, "/"); i > 0 {
+		newOwner = newOwner[:i]
+	}
+	return fmt.Sprintf("%s has been transferred to %s — the hive App's installation on the old owner can read it "+
+		"(GitHub follows the redirect) but every write returns 403 (%s). Install the hive App on '%s' if it is not "+
+		"already, then update this hive's configured repo to %s; nothing under the old owner can be changed to fix this",
+		e.Configured, e.Current, writeForbiddenMessage, newOwner, e.Current)
+}
+
+// ProbeRepoMoved reads owner/repo's metadata and reports whether GitHub now
+// serves it under a different full name — the deterministic signature of an
+// org transfer or rename. It returns a non-nil *RepoMovedError when the
+// canonical full_name differs (case-insensitively) from owner/repo, (nil, nil)
+// when it matches, and the lookup error when the probe itself failed.
+func (c *Client) ProbeRepoMoved(ctx context.Context, owner, repo string) (*RepoMovedError, error) {
+	if c == nil || c.client == nil {
+		return nil, ErrNoGitHubClient
+	}
+	ghRepo, _, err := c.client.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	configured := owner + "/" + repo
+	current := ghRepo.GetFullName()
+	if current == "" || strings.EqualFold(current, configured) {
+		return nil, nil
+	}
+	return &RepoMovedError{Configured: configured, Current: current}, nil
+}
+
+// isWriteForbiddenError reports whether err is GitHub's 403 "Resource not
+// accessible by integration". The structured status is preferred; the text
+// match covers errors that were wrapped into plain strings upstream.
+func isWriteForbiddenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		return ghErr.Response.StatusCode == http.StatusForbidden &&
+			strings.Contains(ghErr.Message, writeForbiddenMessage)
+	}
+	text := err.Error()
+	return strings.Contains(text, "403") && strings.Contains(text, writeForbiddenMessage)
+}
+
+// isDigestEditUnrecoverable reports whether a failed PATCH of an existing
+// digest comment can never succeed on retry: GitHub refused this identity
+// (403 write-forbidden) or the comment is gone (404). Anything else — rate
+// limit, 5xx, network — is transient and is left to the next cycle's retry.
+func isDigestEditUnrecoverable(err error) bool {
+	if isWriteForbiddenError(err) {
+		return true
+	}
+	var ghErr *gh.ErrorResponse
+	return errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound
+}
+
+// classifyDigestWriteError enriches a failed digest CREATE. A write-forbidden
+// 403 is probed for the one cause the installation cannot see about itself —
+// the repository has moved owners (#11791) — and, when confirmed, wrapped in a
+// *RepoMovedError so the hub health row and dashboard banner name the real
+// remedy instead of "tick the repo in the installation". The probe is a single
+// READ and runs only on the already-failed path, so it costs nothing on a
+// healthy cycle; a failed probe returns the original error unchanged.
+func (c *Client) classifyDigestWriteError(ctx context.Context, owner, repo string, err error) error {
+	if !isWriteForbiddenError(err) {
+		return err
+	}
+	moved, probeErr := c.ProbeRepoMoved(ctx, owner, repo)
+	if probeErr != nil {
+		c.logger.Debug("could not probe repo transfer after write-forbidden digest post",
+			slog.String("repo", owner+"/"+repo), slog.String("error", probeErr.Error()))
+		return err
+	}
+	if moved == nil {
+		return err
+	}
+	return fmt.Errorf("%w: %w", moved, err)
 }
 
 // EnsureAdvisoryIssue finds or creates the pinned advisory issue for a repo.
@@ -352,16 +458,31 @@ func (c *Client) PostAdvisoryDigest(ctx context.Context, repo string, issueNum i
 		edited, _, err := c.client.Issues.EditComment(ctx, owner, repoName, int64(commentID), &gh.IssueComment{
 			Body: gh.Ptr(digest),
 		})
-		if err != nil {
+		switch {
+		case err == nil:
+			author = edited.GetUser().GetLogin()
+		case isDigestEditUnrecoverable(err):
+			// The existing digest cannot be edited by THIS identity (403:
+			// foreign-authored or outside this installation's scope) or no
+			// longer exists (404). Retrying the PATCH every cycle can never
+			// succeed, so fall through to a fresh comment under the hive's
+			// own identity; every later cycle finds and edits THAT one
+			// (#11791). If the CREATE is refused too, the failure is
+			// classified below so the operator is told the real cause.
+			c.logger.Warn("advisory digest comment cannot be edited by this identity — creating a new one",
+				slog.String("repo", owner+"/"+repoName), slog.Int("issue", issueNum),
+				slog.Int("comment_id", commentID), slog.String("error", err.Error()))
+			commentID = 0
+		default:
 			return fmt.Errorf("updating advisory digest comment on %s#%d: %w", repo, issueNum, err)
 		}
-		author = edited.GetUser().GetLogin()
-	} else {
+	}
+	if commentID == 0 {
 		comment, _, err := c.client.Issues.CreateComment(ctx, owner, repoName, issueNum, &gh.IssueComment{
 			Body: gh.Ptr(digest),
 		})
 		if err != nil {
-			return fmt.Errorf("posting advisory digest to %s#%d: %w", repo, issueNum, err)
+			return fmt.Errorf("posting advisory digest to %s#%d: %w", repo, issueNum, c.classifyDigestWriteError(ctx, owner, repoName, err))
 		}
 		author = comment.GetUser().GetLogin()
 	}

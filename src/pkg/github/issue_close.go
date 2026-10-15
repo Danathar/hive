@@ -24,6 +24,10 @@ type IssueCloseOptions struct {
 // because it was resolved.
 const IssueStateReasonCompleted = "completed"
 
+// issueStateReasonReopened is GitHub's state_reason for an open issue that
+// was closed before and opened again.
+const issueStateReasonReopened = "reopened"
+
 func ReporterConfirmationCloseGateReason(issue *gh.Issue) string {
 	return humanFiledBugReason(issue, false)
 }

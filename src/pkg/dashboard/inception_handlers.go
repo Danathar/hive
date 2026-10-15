@@ -18,6 +18,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
@@ -823,6 +824,7 @@ func (s *Server) kickBrainstorm() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error("panic in kickBrainstorm — recovered", "panic", r)
+				fleetreport.Observe(fleetreport.ClassPanicRecovered, "kickBrainstorm", fmt.Sprintf("panic in kickBrainstorm: %v", r), "")
 			}
 		}()
 
@@ -908,6 +910,7 @@ func (s *Server) sendKickBrainstorm() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error("panic in sendKickBrainstorm — recovered", "panic", r)
+				fleetreport.Observe(fleetreport.ClassPanicRecovered, "sendKickBrainstorm", fmt.Sprintf("panic in sendKickBrainstorm: %v", r), "")
 			}
 		}()
 

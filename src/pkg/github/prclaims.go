@@ -229,7 +229,51 @@ type IssueClaim struct {
 	// open. Zero on pre-#11580 ledgers, which fall back to the merge/verdict
 	// instant exactly as before.
 	IssueOpenAt time.Time `json:"issue_open_at,omitempty"`
+	// CloseOnMergeSettledAt is when the close-on-merge ledger sweep last
+	// reached a final verdict for this claim: the issue closed, was already
+	// closed, carries Hive's marker, awaits confirmation, or can never be
+	// closed for this PR (untrusted author, reopened by a person). While it
+	// is within CloseOnMergeOptions.RecheckAfter of now the sweep skips the
+	// claim without any API call; before this field existed every merged
+	// claim cost a PR read and an issue read on every pass, which starved
+	// the core quota on hives with large merge histories. Carried forward by
+	// Reconcile with the claim's other anchors while the SAME PR keeps
+	// claiming the issue; a different PR starts unsettled. Zero on older
+	// ledgers, which the sweep treats as never checked.
+	CloseOnMergeSettledAt time.Time `json:"close_on_merge_settled_at,omitempty"`
+	// ReopenedAt is when a person reopened the claimed issue AFTER the
+	// claiming PR merged. A merged `Fixes #N` closes N; a person reopening it
+	// is the reporter saying the fix did not take, so from this instant the
+	// claim is VOID as evidence of resolution: Lookup hides it, the issue is
+	// plain actionable again (no hive/likely-done, no verify-once gate), the
+	// contribute queue offers it, and the close-on-merge sweep never re-closes
+	// it for this PR. The record itself is kept — and carried forward by
+	// Reconcile with the claim's other anchors while the SAME PR keeps
+	// claiming the issue — so the settle scan re-listing the merged PR cannot
+	// resurrect the claim. A different PR starts a fresh, un-voided claim.
+	// Set by the issues.reopened webhook or by the enumeration reopen check
+	// (an open issue whose state_reason is "reopened" has its timeline read
+	// once after the merge). Zero on older ledgers.
+	ReopenedAt time.Time `json:"reopened_at,omitempty"`
+	// ReopenCheckedAt is when the enumeration reopen check last read the
+	// issue's timeline and found no reopen after the merge. The check is
+	// repeated only once the issue's UpdatedAt moves past it, so a claim
+	// costs at most one timeline read per issue activity, not one per pass.
+	ReopenCheckedAt time.Time `json:"reopen_checked_at,omitempty"`
 }
+
+// ReopenedAfterMerge reports whether a person reopened the claimed issue
+// after the claiming PR merged, which voids the claim as evidence that the
+// issue is resolved.
+func (c IssueClaim) ReopenedAfterMerge() bool {
+	return c.MergedPR && !c.ReopenedAt.IsZero()
+}
+
+// ClaimDecisionReopenedAfterMerge is the IssueClaimContext.Decision an
+// actionable issue carries when its merged closing PR did not stick: a person
+// reopened the issue after the merge, so the kick must say "implement the
+// remainder", never "verify once".
+const ClaimDecisionReopenedAfterMerge = "reopened_after_merge"
 
 // ClaimSourceVerdict is the IssueClaim.Source for claims recovered from a
 // verified no_work_needed verdict reason (hivecommons/hive#7871).
@@ -1106,10 +1150,24 @@ func loadClaimLedgerAt(path string, logger *slog.Logger, clock func() time.Time)
 // observation. Callers must hold l.mu.
 func (l *ClaimLedger) anchorFirstObservedLocked(prev map[string]IssueClaim, c IssueClaim) IssueClaim {
 	if existing, ok := prev[c.Key()]; ok &&
-		existing.PRNumber == c.PRNumber && existing.PRRepo == c.PRRepo &&
-		!existing.FirstObservedAt.IsZero() {
-		c.FirstObservedAt = existing.FirstObservedAt
-		return c
+		existing.PRNumber == c.PRNumber && existing.PRRepo == c.PRRepo {
+		// The close-on-merge verdict belongs to this PR/issue pair, so it
+		// survives the scan re-listing the same merged PR.
+		if c.CloseOnMergeSettledAt.IsZero() {
+			c.CloseOnMergeSettledAt = existing.CloseOnMergeSettledAt
+		}
+		// So does the reopen verdict: a person's reopen after this PR
+		// merged stays true however often the scan re-lists the PR.
+		if c.ReopenedAt.IsZero() {
+			c.ReopenedAt = existing.ReopenedAt
+		}
+		if c.ReopenCheckedAt.IsZero() {
+			c.ReopenCheckedAt = existing.ReopenCheckedAt
+		}
+		if !existing.FirstObservedAt.IsZero() {
+			c.FirstObservedAt = existing.FirstObservedAt
+			return c
+		}
 	}
 	if c.FirstObservedAt.IsZero() {
 		c.FirstObservedAt = c.ObservedAt
@@ -1181,6 +1239,27 @@ func (l *ClaimLedger) Record(c IssueClaim) error {
 	return l.Save()
 }
 
+// MarkCloseOnMergeSettled stamps CloseOnMergeSettledAt = at on the claim for
+// (repo, issue) if it is still the one made by PR pr. It reports whether the
+// ledger changed; callers batch a Save after a sweep rather than per claim.
+// A claim that a different PR has since taken over is left alone: the new
+// PR's verdict has not been reached yet.
+func (l *ClaimLedger) MarkCloseOnMergeSettled(repo string, issue, pr int, at time.Time) bool {
+	if l == nil || issue <= 0 || repo == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := claimKey(repo, issue)
+	c, ok := l.claims[key]
+	if !ok || c.PRNumber != pr {
+		return false
+	}
+	c.CloseOnMergeSettledAt = at
+	l.claims[key] = c
+	return true
+}
+
 // SetTTL overrides the entry lifetime. Intended for tests.
 func (l *ClaimLedger) SetTTL(d time.Duration) {
 	if l == nil || d <= 0 {
@@ -1243,8 +1322,19 @@ func (l *ClaimLedger) Len() int {
 	return len(l.claims)
 }
 
-// Lookup returns the claim covering the given issue, if any.
+// Lookup returns the claim covering the given issue, if any. A merged claim
+// whose issue a person reopened after the merge (ReopenedAfterMerge) is not
+// a claim on the issue any more and reports false; LookupAny returns it.
 func (l *ClaimLedger) Lookup(repo string, issue int) (IssueClaim, bool) {
+	c, ok := l.LookupAny(repo, issue)
+	if !ok || c.ReopenedAfterMerge() {
+		return IssueClaim{}, false
+	}
+	return c, true
+}
+
+// LookupAny returns the ledger record for the given issue, voided or not.
+func (l *ClaimLedger) LookupAny(repo string, issue int) (IssueClaim, bool) {
 	if l == nil {
 		return IssueClaim{}, false
 	}
@@ -1252,6 +1342,114 @@ func (l *ClaimLedger) Lookup(repo string, issue int) (IssueClaim, bool) {
 	defer l.mu.RUnlock()
 	c, ok := l.claims[claimKey(repo, issue)]
 	return c, ok
+}
+
+// MarkIssueReopened voids the merged claim on (repo, issue) because a person
+// reopened the issue at `at`, after the claiming PR merged. It reports whether
+// the ledger changed: false when there is no claim, the claim is not from a
+// merged PR, it is already voided, or the reopen predates the merge (an
+// issue reopened BEFORE the fix landed is exactly what the merged claim is
+// evidence for). Callers persist with Save.
+func (l *ClaimLedger) MarkIssueReopened(repo string, issue int, at time.Time) bool {
+	if l == nil || issue <= 0 || repo == "" || at.IsZero() {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := claimKey(repo, issue)
+	c, ok := l.claims[key]
+	if !ok || !c.MergedPR || !c.ReopenedAt.IsZero() {
+		return false
+	}
+	if !c.MergedAt.IsZero() && !at.After(c.MergedAt) {
+		return false
+	}
+	c.ReopenedAt = at
+	c.ReopenCheckedAt = at
+	l.claims[key] = c
+	return true
+}
+
+// markReopenChecked records that the reopen check read the issue's timeline
+// at `at` and found no reopen after the merge.
+func (l *ClaimLedger) markReopenChecked(repo string, issue int, at time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := claimKey(repo, issue)
+	if c, ok := l.claims[key]; ok {
+		c.ReopenCheckedAt = at
+		l.claims[key] = c
+	}
+}
+
+// reopenedAfterMergeAt returns the instant of the first reopened event in
+// events (already limited to after the PR merged) by anyone but the hive
+// itself — the /reopen workflow's bot included, since it acts for the person
+// who commented.
+func reopenedAfterMergeAt(events []IssueEvent, identity HiveIdentity) (time.Time, bool) {
+	for _, e := range events {
+		if e.Event == "reopened" && !identity.Matches(e.Actor) {
+			return e.At, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ReconcileReopenedIssues is the polling half of the reopen rule (the
+// issues.reopened webhook is the other). For every actionable issue GitHub
+// lists with state_reason "reopened" that a merged PR still claims, it reads
+// the issue timeline since the merge once — again only after the issue has
+// new activity — and voids the claim when a person reopened the issue after
+// the merge, logging `reopened issue re-queued`. A timeline read that fails
+// leaves the claim untouched for the next pass: a stale likely-done for one
+// cycle is cheaper than a wrong release on a GitHub outage. It returns how
+// many claims it voided; the caller saves the ledger.
+func (l *ClaimLedger) ReconcileReopenedIssues(ctx context.Context, client *Client, identity HiveIdentity, result *ActionableResult, logger *slog.Logger) int {
+	if l == nil || client == nil || result == nil {
+		return 0
+	}
+	voided := 0
+	for _, issue := range result.Issues.Items {
+		if !issue.Reopened || issue.Number <= 0 {
+			continue
+		}
+		claim, ok := l.LookupAny(issue.Repo, issue.Number)
+		if !ok || !claim.MergedPR || claim.ReopenedAfterMerge() {
+			continue
+		}
+		if !claim.ReopenCheckedAt.IsZero() && !issue.UpdatedAt.After(claim.ReopenCheckedAt) {
+			continue
+		}
+		since := claim.MergedAt
+		if since.IsZero() {
+			since = claim.SettledAt()
+		}
+		events, err := client.IssueTimelineSince(WithRESTCaller(ctx, "hive:reopen_check"), issue.Repo, issue.Number, since)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("reopen check: could not read issue timeline; keeping the merged claim this pass",
+					"repo", issue.Repo, "issue", issue.Number, "claimed_by_pr", claim.PRNumber, "error", err)
+			}
+			continue
+		}
+		now := l.now()
+		at, reopened := reopenedAfterMergeAt(events, identity)
+		if !reopened {
+			l.markReopenChecked(issue.Repo, issue.Number, now)
+			continue
+		}
+		if !l.MarkIssueReopened(issue.Repo, issue.Number, at) {
+			continue
+		}
+		voided++
+		if logger != nil {
+			logger.Info("reopened issue re-queued: merged PR claim voided",
+				"repo", issue.Repo, "issue", issue.Number, "issue_title", issue.Title,
+				"claimed_by_pr", claim.PRNumber, "pr_repo", claim.PRRepo, "pr_url", claim.PRURL,
+				"merged_at", claim.MergedAt, "reopened_at", at, "source", "poll")
+		}
+	}
+	return voided
 }
 
 // Reconcile merges a freshly-fetched claim set into the ledger.
@@ -1531,6 +1729,34 @@ func annotateIssueWithClaim(issue *Issue, claim IssueClaim) {
 	issue.ClaimContext = claimContext(claim, "covered_by_open_pr")
 }
 
+// annotateIssueReopenedAfterMerge records a voided merged claim on the issue:
+// the PR is linked as merged, the automatic likely-done/covered-by labels
+// come off, and the context decision is ClaimDecisionReopenedAfterMerge with
+// MergedPR deliberately false so neither the kick's "verify once" rendering
+// nor the verify-once gate treats the issue as likely done.
+func annotateIssueReopenedAfterMerge(issue *Issue, claim IssueClaim) {
+	if issue == nil || claim.PRNumber <= 0 {
+		return
+	}
+	link := linkedPRFromClaim(claim)
+	seen := false
+	for _, existing := range issue.LinkedPRs {
+		if existing.Number == link.Number && strings.EqualFold(existing.Repo, link.Repo) {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		issue.LinkedPRs = append(issue.LinkedPRs, link)
+	}
+	issue.Labels = removeIssueLabel(issue.Labels, CoveredByPRLabel)
+	issue.Labels = removeIssueLabel(issue.Labels, LikelyDoneLabel)
+	cc := claimContext(claim, ClaimDecisionReopenedAfterMerge)
+	cc.MergedPR = false
+	cc.ReopenedAt = claim.ReopenedAt
+	issue.ClaimContext = cc
+}
+
 // FilterClaimedIssues applies the duplicate-PR guard to actionable issues.
 //
 // A strong open claim from this hive still suppresses duplicate agent work while
@@ -1556,6 +1782,13 @@ func FilterClaimedIssues(result *ActionableResult, ledger *ClaimLedger, redStale
 	for _, issue := range result.Issues.Items {
 		claim, ok := ledger.Lookup(issue.Repo, issue.Number)
 		if !ok {
+			// A merged claim a person reopened the issue after is no claim
+			// at all, but the agent should still hear that the PR tried and
+			// did not stick, so the kick says "implement the remainder".
+			if voided, found := ledger.LookupAny(issue.Repo, issue.Number); found && voided.ReopenedAfterMerge() {
+				annotateIssueReopenedAfterMerge(&issue, voided)
+				annotated = true
+			}
 			kept = append(kept, issue)
 			continue
 		}
@@ -1752,6 +1985,10 @@ func ApplyDuplicatePRGuard(
 	// not (#7995): a record is an observation that a pull request existed in a
 	// state, which a later failure cannot falsify.
 	ledger.RecordPRHistory(scan.History)
+	// A person reopening an issue after its closing PR merged voids that
+	// claim before labels are mirrored or the filter runs, so the issue
+	// comes out plain actionable this very pass.
+	ledger.ReconcileReopenedIssues(ctx, client, identity, result, logger)
 
 	if saveErr := ledger.Save(); saveErr != nil && logger != nil {
 		logger.Warn("duplicate-PR guard: failed to persist claim ledger", "error", saveErr)

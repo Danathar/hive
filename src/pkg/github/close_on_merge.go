@@ -7,14 +7,17 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/config"
 )
 
 const (
-	CloseOnMergeMarker          = "<!-- hive-close-on-merge -->"
-	closeOnMergeAwaitingMarker  = "<!-- hive-close-on-merge: awaiting-confirmation -->"
-	closeOnMergeCommentPageSize = 100
+	CloseOnMergeMarker                  = "<!-- hive-close-on-merge -->"
+	closeOnMergeAwaitingMarker          = "<!-- hive-close-on-merge: awaiting-confirmation -->"
+	closeOnMergeCommentPageSize         = 100
+	closeOnMergeOpenIssueBatchThreshold = 20
 	// reopenedAfterMergeMarkerFormat marks an issue a person reopened after
 	// the given PR merged. It is PR-specific and must not contain
 	// CloseOnMergeMarker, which is matched issue-wide and would also block a
@@ -26,10 +29,61 @@ var coveredByPRCommentPattern = regexp.MustCompile(`(?i)\bcovered\s+by\s+(?:open
 
 type TrustedPRAuthorFunc func(repo, login string) bool
 
+// DefaultCloseOnMergeRecheck is how long a settled ledger claim
+// (IssueClaim.CloseOnMergeSettledAt) is skipped by the ledger sweep before
+// it is re-verified against the API once more. It mirrors the config
+// default so a zero CloseOnMergeOptions behaves like an unset config.
+const DefaultCloseOnMergeRecheck = config.DefaultCloseOnMergeRecheck
+
 type CloseOnMergeOptions struct {
 	Identity      HiveIdentity
 	TrustedAuthor TrustedPRAuthorFunc
 	Logger        *slog.Logger
+	// RecheckAfter bounds how long a settled claim is skipped without an API
+	// call; zero means DefaultCloseOnMergeRecheck.
+	RecheckAfter time.Duration
+	// MergedAfter, when set, restricts the ledger sweep to claims whose PR
+	// merged at or after that instant: the between-sweeps path, which must
+	// still close an issue promptly for a PR that just merged without paying
+	// for the whole ledger.
+	MergedAfter time.Time
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
+	// LabelDriven reports a repo that opted in to label-driven triage; the
+	// backfill posts no "What to reply" notice there when it reclassifies a
+	// dedupe checklist as needs-decision. nil means no repo opts in.
+	LabelDriven func(repo string) bool
+}
+
+func (o CloseOnMergeOptions) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+func (o CloseOnMergeOptions) recheckAfter() time.Duration {
+	if o.RecheckAfter <= 0 {
+		return DefaultCloseOnMergeRecheck
+	}
+	return o.RecheckAfter
+}
+
+// CloseOnMergeSweep is one ledger pass: the per-claim results plus the
+// claims the pass did not spend an API call on.
+type CloseOnMergeSweep struct {
+	Results []CloseOnMergeResult
+	// SkippedSettled counts claims skipped on their CloseOnMergeSettledAt
+	// marker.
+	SkippedSettled int
+	// SkippedNotFresh counts claims older than Options.MergedAfter.
+	SkippedNotFresh int
+	// SkippedReopened counts merged claims whose issue a person reopened
+	// after the merge (IssueClaim.ReopenedAfterMerge); they are never
+	// re-closed for that PR and cost no API call.
+	SkippedReopened int
+	// Marked counts claims whose settled marker this pass set or refreshed.
+	Marked int
 }
 
 type CloseOnMergeAction string
@@ -52,12 +106,72 @@ type CloseOnMergeResult struct {
 	MergeCommit string
 }
 
-func (c *Client) CloseOnMergeForLedger(ctx context.Context, ledger *ClaimLedger, opts CloseOnMergeOptions) []CloseOnMergeResult {
-	if c == nil || c.client == nil || ledger == nil {
-		return nil
+// closeOnMergeTransientReasons are the result reasons that describe a failed
+// or deferred API step rather than a verdict: the next sweep must retry them,
+// so they never settle a ledger claim.
+var closeOnMergeTransientReasons = map[string]bool{
+	"issue_read_failed":       true,
+	"timeline_read_failed":    true,
+	"awaiting_comment_failed": true,
+	"close_comment_failed":    true,
+	"close_failed":            true,
+}
+
+// Settles reports whether the result is a final verdict for its PR/issue
+// pair — one that re-running the sweep could not change without new
+// evidence — so the ledger can skip the claim on later passes.
+func (r CloseOnMergeResult) Settles() bool {
+	if r.Action == "" || closeOnMergeTransientReasons[r.Reason] {
+		return false
 	}
+	switch r.Action {
+	case CloseOnMergeClosed, CloseOnMergeAlreadyDone, CloseOnMergeAwaiting, CloseOnMergeSkipped, CloseOnMergeNoop:
+		return true
+	}
+	return false
+}
+
+// closeOnMergeClaimSettled reports whether claim's settled marker is still
+// within the recheck window at now.
+func closeOnMergeClaimSettled(claim IssueClaim, now time.Time, recheck time.Duration) bool {
+	if claim.CloseOnMergeSettledAt.IsZero() {
+		return false
+	}
+	return now.Sub(claim.CloseOnMergeSettledAt) < recheck
+}
+
+// closeOnMergeClaimMergedAt is the instant the sweep treats as the claim's
+// merge time for MergedAfter filtering: MergedAt, else the first observation.
+func closeOnMergeClaimMergedAt(claim IssueClaim) time.Time {
+	if !claim.MergedAt.IsZero() {
+		return claim.MergedAt
+	}
+	if !claim.FirstObservedAt.IsZero() {
+		return claim.FirstObservedAt
+	}
+	return claim.ObservedAt
+}
+
+// CloseOnMergeForLedger runs CloseOnMergeLedgerSweep and returns only its
+// per-claim results.
+func (c *Client) CloseOnMergeForLedger(ctx context.Context, ledger *ClaimLedger, opts CloseOnMergeOptions) []CloseOnMergeResult {
+	return c.CloseOnMergeLedgerSweep(ctx, ledger, opts).Results
+}
+
+// CloseOnMergeLedgerSweep applies close-on-merge to the ledger's merged
+// strong claims. A claim whose previous verdict settled within
+// opts.RecheckAfter is skipped without an API call; with opts.MergedAfter set
+// only claims merged since then are considered. Every settling verdict is
+// stamped on the ledger and the ledger is saved once if anything changed.
+func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedger, opts CloseOnMergeOptions) CloseOnMergeSweep {
+	var sweep CloseOnMergeSweep
+	if c == nil || c.client == nil || ledger == nil {
+		return sweep
+	}
+	now := opts.now()
+	recheck := opts.recheckAfter()
 	claims := ledger.Claims()
-	out := make([]CloseOnMergeResult, 0, len(claims))
+	sweep.Results = make([]CloseOnMergeResult, 0, len(claims))
 	candidate := func(claim IssueClaim) bool {
 		return claim.MergedPR && !claim.Reference && claim.PRNumber > 0 && claim.Issue > 0 && strings.TrimSpace(claim.Repo) != ""
 	}
@@ -66,30 +180,57 @@ func (c *Client) CloseOnMergeForLedger(ctx context.Context, ledger *ClaimLedger,
 	// in the ledger for settledClaimRetention, so reading every one of them on
 	// every pass exhausts the App quota after a restart empties the caches.
 	openIssues := map[string]map[int]*gh.Issue{}
+	openIssueListFailed := map[string]bool{}
+	eligibleByRepo := map[string]int{}
 	for _, claim := range claims {
-		if !candidate(claim) {
+		if !candidate(claim) || claim.ReopenedAfterMerge() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
 			continue
 		}
-		key := c.closeOnMergeRepoKey(claim.Repo)
-		if _, seen := openIssues[key]; seen {
-			continue
-		}
-		open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
-		if err != nil {
-			if opts.Logger != nil {
-				opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
-			}
-			open = map[int]*gh.Issue{}
-		}
-		openIssues[key] = open
+		eligibleByRepo[c.closeOnMergeRepoKey(claim.Repo)]++
 	}
 	for _, claim := range claims {
 		if !candidate(claim) {
 			continue
 		}
-		issue, ok := openIssues[c.closeOnMergeRepoKey(claim.Repo)][claim.Issue]
-		if !ok {
+		// A person reopened the issue after this PR merged: never close it
+		// for this PR again, and spend no API call finding that out.
+		if claim.ReopenedAfterMerge() {
+			sweep.SkippedReopened++
+			sweep.Results = append(sweep.Results, CloseOnMergeResult{Repo: claim.Repo, Issue: claim.Issue, PR: claim.PRNumber, Action: CloseOnMergeSkipped, Reason: "reopened_after_merge"})
 			continue
+		}
+		if closeOnMergeClaimSettled(claim, now, recheck) {
+			sweep.SkippedSettled++
+			continue
+		}
+		if !opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter) {
+			sweep.SkippedNotFresh++
+			continue
+		}
+		var issue *gh.Issue
+		key := c.closeOnMergeRepoKey(claim.Repo)
+		if eligibleByRepo[key] >= closeOnMergeOpenIssueBatchThreshold {
+			if _, seen := openIssues[key]; !seen && !openIssueListFailed[key] {
+				open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
+				if err != nil {
+					if opts.Logger != nil {
+						opts.Logger.Warn("close-on-merge: listing open issues failed", "repo", claim.Repo, "error", err)
+					}
+					openIssueListFailed[key] = true
+				} else {
+					openIssues[key] = open
+				}
+			}
+		}
+		if open, ok := openIssues[key]; ok {
+			if issue = open[claim.Issue]; issue == nil {
+				res := CloseOnMergeResult{Repo: claim.Repo, Issue: claim.Issue, PR: claim.PRNumber, Action: CloseOnMergeAlreadyDone, Reason: "issue_not_open"}
+				sweep.Results = append(sweep.Results, res)
+				if ledger.MarkCloseOnMergeSettled(claim.Repo, claim.Issue, claim.PRNumber, now) {
+					sweep.Marked++
+				}
+				continue
+			}
 		}
 		pr, err := c.getPullRequestForCloseOnMerge(ctx, claim.PRRepo, claim.PRNumber)
 		if err != nil {
@@ -99,9 +240,17 @@ func (c *Client) CloseOnMergeForLedger(ctx context.Context, ledger *ClaimLedger,
 			continue
 		}
 		res := c.closeIssueForMergedPRClaimWithIssue(ctx, claim.Repo, claim.Issue, pr, true, opts, issue)
-		out = append(out, res)
+		sweep.Results = append(sweep.Results, res)
+		if res.Settles() && ledger.MarkCloseOnMergeSettled(claim.Repo, claim.Issue, claim.PRNumber, now) {
+			sweep.Marked++
+		}
 	}
-	return out
+	if sweep.Marked > 0 {
+		if err := ledger.Save(); err != nil && opts.Logger != nil {
+			opts.Logger.Warn("close-on-merge: failed to persist settled markers", "error", err)
+		}
+	}
+	return sweep
 }
 
 func (c *Client) closeOnMergeRepoKey(repo string) string {
@@ -159,6 +308,10 @@ func (c *Client) CloseOnMergeBackfill(ctx context.Context, opts CloseOnMergeOpti
 			}
 			for _, issue := range issues {
 				if issue == nil || issue.IsPullRequest() || !strings.EqualFold(issue.GetState(), "open") {
+					continue
+				}
+				if res, ok := c.sweepDedupeAdvisoryChecklist(ctx, repo, issue, opts); ok {
+					out = append(out, res)
 					continue
 				}
 				if !closeOnMergeBackfillCandidate(issue) {
