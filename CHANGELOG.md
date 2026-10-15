@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-15 (v5.173.0)
+
+### Added
+
+- dashboard settings: expose every `release_sentinel.*` key — enable switch, watched repo, repair agent, max rounds, round timeout, poll interval, ignored and release workflows, release branch, and the retag-after-merge switches — on the Governor Features tab, with YAML-key hints and env-override notes (#11854)
+- Expose governor project observability target settings in the dashboard Settings dialog.
+- Expose governor claims, rotation and trajectory settings in the dashboard Settings dialog.
+- Expose governor logging settings in the dashboard Settings dialog.
+- Expose governor watchdog settings in the dashboard Settings dialog.
+
+### Fixed
+
+- Hub auto-upgrade tests now opt into the instant schedule explicitly where they assert immediate upgrades, preserving the empty-mode daily default.
+
 ## 2026-10-15 (v5.172.0)
 
 ### Added

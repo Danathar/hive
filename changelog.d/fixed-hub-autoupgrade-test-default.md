@@ -1,1 +1,0 @@
-- Hub auto-upgrade tests now opt into the instant schedule explicitly where they assert immediate upgrades, preserving the empty-mode daily default.

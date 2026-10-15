@@ -1,1 +1,0 @@
-- Expose governor logging settings in the dashboard Settings dialog.

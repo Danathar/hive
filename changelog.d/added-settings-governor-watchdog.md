@@ -1,1 +1,0 @@
-- Expose governor watchdog settings in the dashboard Settings dialog.
