@@ -4,6 +4,10 @@ import "regexp"
 
 var statusTokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`)
 
+var statusJWTRedactor = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
+
+var statusBearerRedactor = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b`)
+
 var deviceCodeRedactor = regexp.MustCompile(`(?i)(one-time code:\s*)[A-Z0-9]{4}-[A-Z0-9]{4}`)
 
 var deviceCodeLineRedactor = regexp.MustCompile(`(?m)^.*(?:login/device|Waiting for authorization|one-time code:|Press any key to copy).*$`)
@@ -34,6 +38,8 @@ var apiKeyRedactor = regexp.MustCompile(`(^|[^A-Za-z0-9._-])(sk-[A-Za-z0-9._\-]{
 // RedactPaneTokens masks GitHub tokens, sk- API keys and device-login one-time
 // codes/lines in text derived from an agent pane.
 func RedactPaneTokens(s string) string {
+	s = statusJWTRedactor.ReplaceAllString(s, "[REDACTED]")
+	s = statusBearerRedactor.ReplaceAllString(s, "[REDACTED]")
 	s = statusTokenRedactor.ReplaceAllStringFunc(s, func(m string) string {
 		// The pattern guarantees at least 14 characters, so m[:7] is always valid.
 		return m[:7] + "***"
