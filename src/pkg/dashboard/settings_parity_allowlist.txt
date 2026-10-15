@@ -165,12 +165,9 @@ classification.review_bots.resolve_after_fix # TODO #11854
 compliance.frameworks[] # TODO #11854
 compliance.posture_checks.history_days # TODO #11854
 compliance.posture_checks.window_days # TODO #11854
-data.agents_dir # TODO #11854
 data.bob_sessions_dir # TODO #11854
 data.claude_sessions_dir # TODO #11854
 data.copilot_sessions_dir # TODO #11854
-data.logs_dir # TODO #11854
-data.metrics_dir # TODO #11854
 data.session_retention_days # TODO #11854
 deployment.podman_mode # TODO #11854
 deployment.upgrade_helper # TODO #11854
@@ -184,7 +181,6 @@ escalation.threshold # TODO #11854
 evidence.enabled # TODO #11854
 evidence.signing_key_file # TODO #11854
 gitea.gitea_url # TODO #11854
-gitea.token_env # TODO #11854
 github.additional_bot_logins[] # TODO #11854
 github.agent_reserve_floor # TODO #11854
 github.api_critical # TODO #11854
@@ -202,7 +198,6 @@ github.pr_detail_ttl_s # TODO #11854
 github.reporter_trust_hold # TODO #11854
 github.token # TODO #11854
 gitlab.gitlab_url # TODO #11854
-gitlab.token_env # TODO #11854
 governor.advisory.linear_issue # TODO #11854
 governor.advisory.max_findings # TODO #11854
 governor.advisory.post_retry_backoff_s # TODO #11854
@@ -297,11 +292,9 @@ governor.sensing.gh_rate_patterns[] # TODO #11854
 governor.sensing.login_patterns[] # TODO #11854
 governor.sensing.pullback_seconds # TODO #11854
 governor.sensing.ttl_seconds # TODO #11854
-governor.threshold_scaling # TODO #11854
 governor.thresholds_source # TODO #11854
 governor.trajectory.api_key_file # TODO #11854
 governor.trajectory.enabled # TODO #11854
-governor.trajectory.endpoint # TODO #11854
 governor.trajectory.exempt_agents[] # TODO #11854
 governor.trajectory.interval_s # TODO #11854
 governor.trajectory.model # TODO #11854
