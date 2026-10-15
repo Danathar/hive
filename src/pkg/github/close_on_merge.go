@@ -183,7 +183,7 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 	openIssueListFailed := map[string]bool{}
 	eligibleByRepo := map[string]int{}
 	for _, claim := range claims {
-		if !candidate(claim) || claim.ReopenedAfterMerge() || !closeOnMergeClaimMergedAt(claim).IsZero() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
+		if !candidate(claim) || claim.ReopenedAfterMerge() || !claim.MergedAt.IsZero() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
 			continue
 		}
 		eligibleByRepo[c.closeOnMergeRepoKey(claim.Repo)]++
