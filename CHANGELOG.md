@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-15 (v5.172.0)
+
+### Added
+
+- Expose governor question auto-close settings in the dashboard Settings dialog.
+
+### Changed
+
+- Hosted hives with `auto_upgrade: true` but no `auto_upgrade_mode` now upgrade on the `daily` schedule instead of restarting immediately on every `:stable` retag ([#11822](https://github.com/hivecommons/hive/issues/11822), part of [#11812](https://github.com/hivecommons/hive/issues/11812)). An empty mode previously resolved to `instant`, so legacy records were restarted at any hour; explicit `instant` is unchanged, and the dashboard now shows `daily` for an empty mode so hub card, spoke card and scheduler agree.
+
 ## 2026-10-15 (v5.171.0)
 
 ### Added
