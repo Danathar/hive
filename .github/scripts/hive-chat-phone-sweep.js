@@ -4,7 +4,9 @@
 // command through #hiveChatInput/#hiveChatSend and fails when one gets no
 // reply or an error-shaped reply. Env: HIVE_URL (required), HIVE_TOKEN
 // (owner dashboard token) or HIVE_SESSION (seeded hive_session cookie),
-// SWEEP_OUT (screenshot dir), SWEEP_REPLY_TIMEOUT_MS.
+// SWEEP_OUT (screenshot dir), SWEEP_REPLY_TIMEOUT_MS,
+// MIN_MESSAGES_HEIGHT_412x839 / MIN_MESSAGES_HEIGHT_412x480_KEYBOARD (px;
+// #hiveChatMessages height minimums, #11870), GITHUB_STEP_SUMMARY.
 const fs = require('fs');
 const path = require('path');
 const { chromium, devices } = require('playwright');
@@ -25,10 +27,24 @@ const BAD = [
   const ctx = await browser.newContext({ ...devices['Pixel 7'] });
   if (process.env.HIVE_TOKEN) await ctx.addInitScript(t => localStorage.setItem('hive-token', t), process.env.HIVE_TOKEN);
   if (process.env.HIVE_SESSION) await ctx.addCookies([{ name: 'hive_session', value: process.env.HIVE_SESSION, url: base }]);
+  // Suppress the first-run welcome checklist (hive-welcome-state-v1.dismissed).
+  await ctx.addInitScript(() => {
+    try { localStorage.setItem('hive-welcome-state-v1', JSON.stringify({ dismissed: true, checks: {} })); } catch (_) {}
+  });
   const page = await ctx.newPage();
   const httpErrors = [];
   page.on('response', r => { if (new URL(r.url()).pathname.startsWith('/api/chat') && r.status() >= 400) httpErrors.push(r.status() + ' ' + r.url()); });
   await page.goto(base + '/', { waitUntil: 'domcontentloaded' });
+  // Best-effort: dismiss any modal overlay (welcome, then later
+  // data-hive-modal-sequence ones) that still opens and would block the FAB.
+  const overlay = '.config-overlay[data-hive-modal-sequence]:not(.hidden)';
+  await page.waitForSelector(overlay, { state: 'visible', timeout: 3000 }).catch(() => {});
+  for (let i = 0; i < 5 && await page.$(overlay); i++) {
+    const btn = await page.$(`${overlay} [data-action="dismissWelcomeDialog"]`);
+    if (btn) await btn.click({ timeout: 5000 }).catch(() => {});
+    else await page.keyboard.press('Escape');
+    await page.waitForTimeout(600);
+  }
   await page.click('#hiveChatFab');
   await page.waitForSelector('#hiveChatInput', { state: 'visible' });
 
@@ -55,19 +71,30 @@ const BAD = [
   const chips = await page.$$eval('[data-chat-suggestion], .hive-chat-example',
     els => els.map(e => e.getAttribute('data-chat-suggestion') || e.getAttribute('data-chat-example') || ''));
   const help = await send('!help', 0);
-  const commands = [...help.matchAll(/^\s*`(![a-z][a-z-]*)/gim)].map(m => m[1].toLowerCase());
+  // innerText of a rendered reply has no literal backtick once the dashboard
+  // renders `!cmd` as <code>, so the backtick is optional.
+  const commands = [...help.matchAll(/^\s*`?(![a-z][a-z-]*)/gim)].map(m => m[1].toLowerCase());
   const queue = [...new Set([...chips.filter(Boolean), ...commands])];
   if (!commands.length) failures.push('!help: listed no commands');
   for (let i = 0; i < queue.length; i++) await send(queue[i], i + 1);
 
-  // Layout numbers are recorded only; enforcing minimums waits on #11836.
-  for (const [w, h] of [[412, 839], [412, 480]]) {
+  const layouts = [
+    [412, 839, 'MIN_MESSAGES_HEIGHT_412x839', ''],
+    [412, 480, 'MIN_MESSAGES_HEIGHT_412x480_KEYBOARD', ' (keyboard up)'],
+  ];
+  const summary = ['### Hive Chat message-list height', '', '| Viewport | Measured | Minimum | Result |', '|---|---|---|---|'];
+  for (const [w, h, key, note] of layouts) {
     await page.setViewportSize({ width: w, height: h });
     await page.waitForTimeout(300);
-    const listH = await page.$eval('#hiveChatMessages', el => el.getBoundingClientRect().height);
-    console.log(`layout: #hiveChatMessages height at ${w}x${h} = ${Math.round(listH)}px`);
+    const listH = Math.round(await page.$eval('#hiveChatMessages', el => el.getBoundingClientRect().height));
+    const min = Number(process.env[key] || 0);
+    const ok = listH >= min;
+    console.log(`layout: #hiveChatMessages height at ${w}x${h} = ${listH}px (minimum ${min}px)`);
+    summary.push(`| ${w}x${h}${note} | ${listH}px | ${min}px | ${ok ? '✅' : '❌'} |`);
+    if (!ok) failures.push(`layout: #hiveChatMessages height at ${w}x${h}${note} is ${listH}px, below ${key}=${min}px`);
     await page.screenshot({ path: path.join(out, `layout-${w}x${h}.png`) });
   }
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary.join('\n') + '\n');
   await browser.close();
   console.log(`swept ${queue.length + 1} prompts (${chips.length} chips, ${commands.length} commands)`);
   if (failures.length) {
