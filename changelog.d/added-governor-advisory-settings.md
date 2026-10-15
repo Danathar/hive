@@ -1,1 +1,0 @@
-- Expose governor advisory digest and queue-health settings in the dashboard Settings dialog.
