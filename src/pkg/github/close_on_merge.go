@@ -209,7 +209,8 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 		}
 		var issue *gh.Issue
 		key := c.closeOnMergeRepoKey(claim.Repo)
-		if eligibleByRepo[key] >= closeOnMergeOpenIssueBatchThreshold {
+		batchOpenIssues := eligibleByRepo[key] >= closeOnMergeOpenIssueBatchThreshold
+		if batchOpenIssues {
 			if _, seen := openIssues[key]; !seen && !openIssueListFailed[key] {
 				open, err := c.closeOnMergeOpenIssues(ctx, claim.Repo)
 				if err != nil {
@@ -222,10 +223,11 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 				}
 			}
 		}
+		if batchOpenIssues && openIssueListFailed[key] {
+			continue
+		}
 		if open, ok := openIssues[key]; ok {
 			if issue = open[claim.Issue]; issue == nil {
-				res := CloseOnMergeResult{Repo: claim.Repo, Issue: claim.Issue, PR: claim.PRNumber, Action: CloseOnMergeAlreadyDone, Reason: "issue_not_open"}
-				sweep.Results = append(sweep.Results, res)
 				if ledger.MarkCloseOnMergeSettled(claim.Repo, claim.Issue, claim.PRNumber, now) {
 					sweep.Marked++
 				}
