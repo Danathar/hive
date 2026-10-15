@@ -13,6 +13,7 @@ import (
 	"github.com/hivecommons/hive/pkg/claude"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/effects"
+	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/pushbroker"
 	"github.com/hivecommons/hive/pkg/sandbox"
 	"github.com/hivecommons/hive/pkg/taskmcp"
@@ -1130,11 +1131,13 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	if backend == "copilot" {
 		m.runCopilotCacheJanitor()
 		if reason, full := copilotDiskFullCondition(); full {
+			fleetreport.Observe(fleetreport.ClassDataDiskPressure, DataDiskPressureKey, "data disk pressure: "+reason, "")
 			if err := m.Pause(name, DiskFullTrigger, reason); err != nil {
 				return err
 			}
 			return fmt.Errorf("%s", reason)
 		}
+		fleetreport.Clear(fleetreport.ClassDataDiskPressure, DataDiskPressureKey)
 	}
 
 	// Runs with m.mu RELEASED — see mintAgentTokenUnlocked for why holding

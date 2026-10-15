@@ -3146,9 +3146,10 @@ func (b *boot) bootKnowledgeWith(deps bootKnowledgeDeps) {
 		// the promoter in production. Passing it through is what makes the
 		// threshold gate real for the scheduled sweep (#5430).
 		b.knowledgeAPI = knowledge.NewKnowledgeAPI(layers, knowledge.KnowledgeConfig{
-			Enabled: b.cfg.Knowledge.Enabled,
-			Engine:  b.cfg.Knowledge.Engine,
-			Curator: curatorConfigFromHive(b.cfg.Knowledge.Curator),
+			Enabled:  b.cfg.Knowledge.Enabled,
+			Engine:   b.cfg.Knowledge.Engine,
+			Curator:  curatorConfigFromHive(b.cfg.Knowledge.Curator),
+			Context7: knowledgeContext7FromHive(b.cfg.Knowledge.Context7),
 		}, b.logger)
 	}
 
@@ -10674,4 +10675,12 @@ func (b *boot) chatDashboardToken() string {
 		return b.cfg.Dashboard.AuthToken
 	}
 	return os.Getenv("HIVE_DASHBOARD_TOKEN")
+}
+
+func knowledgeContext7FromHive(c config.KnowledgeContext7) knowledge.Context7Config {
+	var out knowledge.Context7Config
+	for _, it := range c.AutoImport {
+		out.AutoImport = append(out.AutoImport, knowledge.Context7AutoImport{ID: it.ID, Query: it.Query})
+	}
+	return out
 }
