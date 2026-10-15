@@ -295,25 +295,30 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-	if body.AutonomyPromoteAfter != nil && *body.AutonomyPromoteAfter < 1 {
-		jsonError(w, "autonomy promote_after must be at least 1", http.StatusBadRequest)
+	// Autonomy policy (autonomy.* in hive.yaml): one canonicalising validator
+	// so every path agrees on bounds and case handling. Zero means "use the
+	// default" for the numeric keys, matching AutonomyConfig.Effective*.
+	if body.AutonomyPromoteAfter != nil && *body.AutonomyPromoteAfter < 0 {
+		jsonError(w, "autonomy promote_after must be 0 (default) or greater", http.StatusBadRequest)
 		return
 	}
+	if body.AutonomyCooldownDays != nil && *body.AutonomyCooldownDays < 0 {
+		jsonError(w, "autonomy cooldown_days must be 0 (default) or greater", http.StatusBadRequest)
+		return
+	}
+	if body.AutonomyMaxLevel != nil && *body.AutonomyMaxLevel != 0 &&
+		(*body.AutonomyMaxLevel < config.MinACMMLevel || *body.AutonomyMaxLevel > config.MaxACMMLevel) {
+		jsonError(w, fmt.Sprintf("autonomy max_level must be %d-%d", config.MinACMMLevel, config.MaxACMMLevel), http.StatusBadRequest)
+		return
+	}
+	var autonomyDemoteOn string
 	if body.AutonomyDemoteOn != nil {
-		switch strings.TrimSpace(*body.AutonomyDemoteOn) {
-		case "", "rollback", "rework", "either":
-		default:
-			jsonError(w, "autonomy demote_on must be rollback, rework, or either", http.StatusBadRequest)
+		canonical, ok := config.CanonicalAutonomyDemoteOn(*body.AutonomyDemoteOn)
+		if !ok {
+			jsonError(w, fmt.Sprintf("autonomy demote_on must be one of %s", strings.Join(config.AutonomyDemoteOnValues(), ", ")), http.StatusBadRequest)
 			return
 		}
-	}
-	if body.AutonomyMaxLevel != nil && (*body.AutonomyMaxLevel < config.MinACMMLevel || *body.AutonomyMaxLevel > config.MaxACMMLevel) {
-		jsonError(w, "autonomy max_level must be 1-6", http.StatusBadRequest)
-		return
-	}
-	if body.AutonomyCooldownDays != nil && *body.AutonomyCooldownDays < 1 {
-		jsonError(w, "autonomy cooldown_days must be at least 1", http.StatusBadRequest)
-		return
+		autonomyDemoteOn = canonical
 	}
 
 	// --- apply ---
@@ -480,7 +485,7 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 		cfg.Autonomy.PromoteAfter = *body.AutonomyPromoteAfter
 	}
 	if body.AutonomyDemoteOn != nil {
-		cfg.Autonomy.DemoteOn = strings.TrimSpace(*body.AutonomyDemoteOn)
+		cfg.Autonomy.DemoteOn = autonomyDemoteOn
 	}
 	if body.AutonomyMaxLevel != nil {
 		cfg.Autonomy.MaxLevel = *body.AutonomyMaxLevel
@@ -849,13 +854,15 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body struct {
-		MaxFindings     *int    `json:"max_findings"`
-		ShowAll         *bool   `json:"show_all"`
-		StalenessDays   *int    `json:"staleness_days"`
-		PRAutoClose     *bool   `json:"pr_autoclose"`
-		UpdateIntervalS *int    `json:"update_interval_s"`
-		Target          *string `json:"target"`
-		LinearIssue     *string `json:"linear_issue"`
+		MaxFindings       *int                              `json:"max_findings"`
+		ShowAll           *bool                             `json:"show_all"`
+		StalenessDays     *int                              `json:"staleness_days"`
+		PRAutoClose       *bool                             `json:"pr_autoclose"`
+		UpdateIntervalS   *int                              `json:"update_interval_s"`
+		PostRetryBackoffS *int                              `json:"post_retry_backoff_s"`
+		Target            *string                           `json:"target"`
+		LinearIssue       *string                           `json:"linear_issue"`
+		QueueHealth       *config.AdvisoryQueueHealthConfig `json:"queue_health"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -891,6 +898,14 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 		jsonError(w, fmt.Sprintf("update_interval_s must be 0 (default cadence) or between %d and %d seconds",
 			config.MinAdvisoryUpdateIntervalS, config.MaxAdvisoryUpdateIntervalS), http.StatusBadRequest)
 		return
+	}
+	if body.QueueHealth != nil {
+		qh := body.QueueHealth
+		if qh.BlockedPRPct < 0 || qh.NeedsHumanPRPct < 0 || qh.NeedsHumanIssuePct < 0 ||
+			qh.StaleBlockedPRs < 0 || qh.LaneSharePct < 0 || qh.CheckSharePct < 0 {
+			jsonError(w, "queue_health thresholds must be zero or greater", http.StatusBadRequest)
+			return
+		}
 	}
 
 	cfg := s.deps.Config
@@ -939,6 +954,12 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 	if body.UpdateIntervalS != nil {
 		cfg.Governor.Advisory.UpdateIntervalS = *body.UpdateIntervalS
 	}
+	if body.PostRetryBackoffS != nil {
+		cfg.Governor.Advisory.PostRetryBackoffS = *body.PostRetryBackoffS
+	}
+	if body.QueueHealth != nil {
+		cfg.Governor.Advisory.QueueHealth = *body.QueueHealth
+	}
 
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config after advisory update", "error", err)
@@ -954,13 +975,22 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 func advisorySectionResponse(cfg *config.Config) map[string]interface{} {
 	a := cfg.Governor.Advisory
 	return map[string]interface{}{
-		"max_findings":      a.MaxFindings,
-		"show_all":          a.ShowAll,
-		"staleness_days":    a.StalenessDays,
-		"pr_autoclose":      a.PRAutoCloseEnabled(),
-		"update_interval_s": a.UpdateIntervalS,
-		"target":            a.ResolvedTarget(),
-		"linear_issue":      a.LinearIssue,
+		"max_findings":         a.MaxFindings,
+		"show_all":             a.ShowAll,
+		"staleness_days":       a.StalenessDays,
+		"pr_autoclose":         a.PRAutoCloseEnabled(),
+		"update_interval_s":    a.UpdateIntervalS,
+		"post_retry_backoff_s": a.PostRetryBackoffS,
+		"queue_health": map[string]interface{}{
+			"blocked_pr_pct":        a.QueueHealth.BlockedPRPct,
+			"needs_human_pr_pct":    a.QueueHealth.NeedsHumanPRPct,
+			"needs_human_issue_pct": a.QueueHealth.NeedsHumanIssuePct,
+			"stale_blocked_prs":     a.QueueHealth.StaleBlockedPRs,
+			"lane_share_pct":        a.QueueHealth.LaneSharePct,
+			"check_share_pct":       a.QueueHealth.CheckSharePct,
+		},
+		"target":       a.ResolvedTarget(),
+		"linear_issue": a.LinearIssue,
 	}
 }
 
