@@ -1,1 +1,0 @@
-- The dashboard Channel card can no longer report a successful upgrade to a commit other than the one the hive is running; such a record is now shown as superseded, with the running commit first (#11194).

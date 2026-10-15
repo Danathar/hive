@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-15 (v5.173.1)
+
+### Fixed
+
+- The dashboard Channel card can no longer report a successful upgrade to a commit other than the one the hive is running; such a record is now shown as superseded, with the running commit first (#11194).
+
 ## 2026-10-15 (v5.173.0)
 
 ### Added
