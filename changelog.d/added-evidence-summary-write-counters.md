@@ -1,1 +1,0 @@
-- Expose per-tier proxy attempted-vs-blocked write counters as `write_counters` in `GET /api/evidence/summary`, and point to the endpoint from the review evidence docs (#12177, #12255).

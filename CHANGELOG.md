@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-16 (v5.177.0)
+
+### Added
+
+- The bead synthesizer now sends conditional (`If-None-Match`) PR GETs and reuses cached PRs on 304, and `knowledge.bead_synthesizer.max_api_calls_per_cycle` (default 40; `HIVE_BEAD_SYNTH_MAX_API_CALLS` still overrides) caps charged calls per cycle (#12252, part of #12005).
+- Expose per-tier proxy attempted-vs-blocked write counters as `write_counters` in `GET /api/evidence/summary`, and point to the endpoint from the review evidence docs (#12177, #12255).
+- Spokes now send a 90-day review-evidence summary (verdicts, false approves/blocks, merged and reverted counts, confidence calibration, reviewer/author model families and the self-authored auto-merge posture) as an `evidence` block on the hub heartbeat; the hub sanitizes and stores it with the other quadrant inputs. Spokes without the block are unchanged ([#12114](https://github.com/hivecommons/hive/issues/12114)).
+- Re-run the failed jobs on open PRs stamped `<!-- hive-shared-ci-<n> -->` once `[shared-ci]` incident `#<n>` closes, at most once per PR per incident (recorded with a `<!-- hive-shared-ci-rerun-<n> -->` comment), so PRs left red by a broken baseline get a fresh verdict without a human push. On by default; disable with `shared_ci_rerun.enabled: false` (#12253).
+
+### Fixed
+
+- fix(github): reuse labelPresent in hasIssueNeedsHumanLabel (#12256)
+
 ## 2026-10-16 (v5.176.0)
 
 ### Added
