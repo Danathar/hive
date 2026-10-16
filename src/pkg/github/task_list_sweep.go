@@ -624,12 +624,7 @@ func hasIssueHandoffLabel(labels []string) bool {
 }
 
 func hasIssueNeedsHumanLabel(labels []string) bool {
-	for _, label := range labels {
-		if strings.EqualFold(strings.TrimSpace(label), issueNeedsHumanLabel) {
-			return true
-		}
-	}
-	return false
+	return labelPresent(labels, issueNeedsHumanLabel)
 }
 
 func (c *Client) tryAnnotateNonTaskListRefs(ctx context.Context, owner, repo string, number int, labels []string, mergedRefs []mergedPRRef, untouched []string) error {
