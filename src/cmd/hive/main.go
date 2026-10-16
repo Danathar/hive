@@ -8615,6 +8615,7 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 		opts.MinHeadAge = cfg.AutoMerge.EffectiveMinHeadAge()
 		opts.RepoAutoMergeEnabled = func(repo string) bool { return cfg.RepoAutoMergeEnabled(repo) }
 		opts.HumanMergePaths = func(repo string) []string { return humanMergePathsFor(cfg, repo) }
+		opts.TrustedBotAuthors = func() map[string]bool { return cfg.AutoMerge.TrustedBotAuthorSet() }
 	}
 	audit := func(event automerge.AutoMergeSweepEvent) {
 		if dashSrv == nil {
@@ -8638,8 +8639,9 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 	remaining := automerge.DefaultAutoMergeSweepMaxMerges - len(result.Merged)
 	if remaining > 0 && opts.TrustedAuthorPolicy().Enabled {
 		trustedResult, trustedErr := automerge.SweepTrustedAuthorAutoMerges(ctx, ghClient, opts, automerge.AutoMergeSweepOptions{
-			MaxMerges: remaining,
-			Audit:     audit,
+			MaxMerges:              remaining,
+			Audit:                  audit,
+			SelfAuthoredLaneActive: cfg != nil && cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(cfg.ACMMLevel),
 		})
 		if trustedErr != nil {
 			logger.Warn("trusted-author automerge sweep failed", "error", trustedErr)

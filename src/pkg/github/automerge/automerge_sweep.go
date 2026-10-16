@@ -388,6 +388,14 @@ func mergeMethodFor(pr *gh.PullRequest) string {
 type AutoMergeSweepOptions struct {
 	MaxMerges int
 	Audit     func(AutoMergeSweepEvent)
+	// SelfAuthoredLaneActive tells SweepTrustedAuthorAutoMerges that the
+	// self-authored sweep is running alongside it, so trusted-bot PRs are
+	// left to that lane (which reports their real eligibility) instead of
+	// being judged by the human-author role gate. When false — ACMM below
+	// SelfMergeMinACMMLevel or auto_merge.self_authored off — the
+	// trusted-author tier evaluates them as before, so a bot an operator
+	// granted the required role still has a sweep that can merge it.
+	SelfAuthoredLaneActive bool
 }
 
 type TrustedAuthorPolicy struct {
@@ -968,6 +976,15 @@ func (c *Engine) SweepTrustedAuthorAutoMerges(ctx context.Context, opts AutoMerg
 				number = pr.GetNumber()
 			}
 			result.Seen++
+			if opts.SelfAuthoredLaneActive && c.isTrustedBotLaneAuthor(hgithub.SafeGetLogin(pr.GetUser())) {
+				// The self-authored sweep owns trusted-bot PRs and records
+				// their eligibility verdict; the tier hand-off is logged here
+				// so every Seen PR still has a reason and Skipped stays
+				// consistent, without a misleading untrusted-author-role.
+				c.info("automerge skip", "repo", displayRepo, "pr", number, "reason", trustedBotLaneSkipReason, "tier", "trusted-author")
+				result.Skipped++
+				continue
+			}
 			if reason := c.prefilterTrustedAuthorPR(pr, policy); reason != "" {
 				c.info("automerge skip", "repo", displayRepo, "pr", number, "reason", reason, "tier", "trusted-author")
 				result.Skipped++
@@ -1109,7 +1126,7 @@ func (c *Engine) StartSelfAuthoredAutoMergeSweep(ctx context.Context, maxMerges 
 				}
 				remaining -= len(result.Merged)
 				if remaining > 0 && c.currentTrustedAuthorPolicy().Enabled {
-					trustedResult, trustedErr := c.SweepTrustedAuthorAutoMerges(ctx, AutoMergeSweepOptions{MaxMerges: remaining})
+					trustedResult, trustedErr := c.SweepTrustedAuthorAutoMerges(ctx, AutoMergeSweepOptions{MaxMerges: remaining, SelfAuthoredLaneActive: acmmAllowed})
 					if trustedErr != nil {
 						c.warn("trusted-author automerge sweep failed", "error", trustedErr)
 						if isRateLimited(trustedErr) {
@@ -1431,10 +1448,6 @@ func (c *Engine) releaseLevelHoldIfEligible(ctx context.Context, owner, repo str
 	return transport.ReleaseLevelHoldIfEligible(ctx, owner, repo, pr)
 }
 
-// isHeld is the sweep's single hold predicate. It defers to the transport so
-// the configured hold set (generic substrings plus the exact hive-scoped
-// `hive-pause/<hive-id>` dashboard hold) gates merges exactly as it gates
-// enumeration. A nil engine or transport fails closed to the generic set.
 // sweepLaneForAuthor reports which self-authored-sweep lane a PR author falls
 // in: "self-authored" for the App's own login, "trusted-bot" for a login in
 // the operator's trusted_bot_authors set, or ok=false for anyone else. The
@@ -1457,6 +1470,21 @@ func (c *Engine) sweepLaneForAuthor(author string) (string, bool) {
 	return "", false
 }
 
+// trustedBotLaneSkipReason is the trusted-author tier's skip reason for a PR
+// it hands off to the self-authored sweep's "trusted-bot" lane.
+const trustedBotLaneSkipReason = "trusted-bot-lane"
+
+// isTrustedBotLaneAuthor reports whether author falls in the "trusted-bot"
+// lane of sweepLaneForAuthor.
+func (c *Engine) isTrustedBotLaneAuthor(author string) bool {
+	lane, ok := c.sweepLaneForAuthor(author)
+	return ok && lane == "trusted-bot"
+}
+
+// isHeld is the sweep's single hold predicate. It defers to the transport so
+// the configured hold set (generic substrings plus the exact hive-scoped
+// `hive-pause/<hive-id>` dashboard hold) gates merges exactly as it gates
+// enumeration. A nil engine or transport fails closed to the generic set.
 func (c *Engine) isHeld(labels []string) bool {
 	if c == nil || c.transport == nil {
 		return hgithub.HasHoldLabel(labels)
