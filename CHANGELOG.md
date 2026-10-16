@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-16 (v5.177.2)
+
+### Fixed
+
+- dashboard: lower the contributor landing inline-style ratchet baseline to the current count so TestStyleRatchet stops reporting stale drift on v5 (#12270)
+- The `kick_failed_repeatedly` self-report now states why a kick was undeliverable instead of an empty `()` ([#12268](https://github.com/hivecommons/hive/issues/12268)).
+
 ## 2026-10-16 (v5.177.1)
 
 ### Fixed
