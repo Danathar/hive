@@ -95,6 +95,9 @@ type Options struct {
 	// ContributorSoak overrides the process-wide soak tracker. nil shares
 	// the package default so one-shot engines still soak across ticks.
 	ContributorSoak *ContributorSoakTracker
+	// HeadFirstSeen overrides the process-wide head-age tracker. nil shares
+	// the package default so one-shot engines keep a head's pinned age.
+	HeadFirstSeen *HeadFirstSeenTracker
 	// SentinelLabel returns the configured sentinel alert label. The label also
 	// travels through the transport's hold-label set, but the sweep names this
 	// skip distinctly so operators can tell a sentinel block from an ordinary
@@ -151,6 +154,7 @@ type Engine struct {
 	contributorRegistryTier           ContributorRegistryTierFunc
 	contributorLaneVerdict            ContributorLaneVerdictFunc
 	contributorSoak                   *ContributorSoakTracker
+	headFirstSeen                     *HeadFirstSeenTracker
 	sentinelLabel                     func() string
 	minHeadAge                        time.Duration
 	now                               func() time.Time
@@ -200,6 +204,7 @@ func New(transport Transport, opts Options) *Engine {
 		contributorLaneVerdict:            opts.ContributorLaneVerdict,
 		contributorRegistryTier:           opts.ContributorRegistryTier,
 		contributorSoak:                   opts.ContributorSoak,
+		headFirstSeen:                     opts.HeadFirstSeen,
 		sentinelLabel:                     opts.SentinelLabel,
 		minHeadAge:                        opts.MinHeadAge,
 		now:                               opts.Now,
@@ -215,6 +220,9 @@ func New(transport Transport, opts Options) *Engine {
 	}
 	if e.contributorSoak == nil {
 		e.contributorSoak = sharedContributorSoak
+	}
+	if e.headFirstSeen == nil {
+		e.headFirstSeen = sharedHeadFirstSeen
 	}
 
 	if e.mutation == nil {
@@ -1357,10 +1365,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	} else if held {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
-	var headPushedAt time.Time
-	if updatedAt := pr.GetUpdatedAt(); !updatedAt.IsZero() {
-		headPushedAt = updatedAt.Time
-	}
+	headPushedAt := c.headPushedAt(owner, repo, number, evaluatedHeadSHA, pr)
 	green, reason, err := c.commitGreenForPR(ctx, owner, repo, baseBranch, evaluatedHeadSHA, number, headPushedAt, expectedCheckCacheFromContext(ctx))
 	if err != nil {
 		return AutoMergeSweepEvent{}, reason, err
@@ -1760,10 +1765,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	} else if held {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
-	var headPushedAt time.Time
-	if updatedAt := pr.GetUpdatedAt(); !updatedAt.IsZero() {
-		headPushedAt = updatedAt.Time
-	}
+	headPushedAt := c.headPushedAt(owner, repo, number, headSHA, pr)
 	green, reason, err := c.commitGreenForPR(ctx, owner, repo, baseBranch, headSHA, number, headPushedAt, expectedCheckCacheFromContext(ctx))
 	if err != nil {
 		return AutoMergeSweepEvent{}, reason, err
@@ -2036,10 +2038,7 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 	} else if held {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
-	var headPushedAt time.Time
-	if updatedAt := pr.GetUpdatedAt(); !updatedAt.IsZero() {
-		headPushedAt = updatedAt.Time
-	}
+	headPushedAt := c.headPushedAt(owner, repo, number, headSHA, pr)
 	green, reason, err := c.commitGreenForPR(ctx, owner, repo, baseBranch, headSHA, number, headPushedAt, expectedCheckCacheFromContext(ctx))
 	if err != nil {
 		return AutoMergeSweepEvent{}, reason, err
