@@ -22,8 +22,8 @@ import (
 func TestLoadNousStateStatusConsistency(t *testing.T) {
 	state := loadNousState(nousstore.New(filepath.Join(t.TempDir(), "nous")), restoreTestLogger())
 
-	if state.Mode != "observe" || state.Scope != "governor" {
-		t.Errorf("mode/scope = %q/%q, want observe/governor", state.Mode, state.Scope)
+	if state.Mode != "observe" || state.Scope != dashboard.NousScopeRepo {
+		t.Errorf("mode/scope = %q/%q, want observe/repo", state.Mode, state.Scope)
 	}
 
 	wantPhase := "collecting"
