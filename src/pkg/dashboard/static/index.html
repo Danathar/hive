@@ -43929,6 +43929,216 @@ function burnAreaChart() {
       scheduleSync();
     }
 
+    function extensionRelayURL() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return proto + '//' + location.host + '/contribute';
+    }
+
+    function extensionToggleHTML(enabled, key, label) {
+      return `<div class="config-toggle extension-toggle">
+        <div class="config-toggle-switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled ? 'true' : 'false'}" tabindex="0" aria-label="${esc(label)}" data-action="toggleConfigSwitch" data-section="features" data-key="${esc(key)}" data-keydown-action="toggleConfigSwitch" data-arg-types="t,s,s" data-arg1="features" data-arg2="${esc(key)}" data-keys="Enter, " data-prevent="1"></div>
+        <span class="config-toggle-label">${esc(label)}</span>
+      </div>`;
+    }
+
+    function extensionStatusBadge(enabled) {
+      return enabled ? '<span class="status-badge done">Enabled</span>' : '<span class="status-badge disabled">Disabled</span>';
+    }
+
+    function extensionCard(id, title, subtitle, opts, body) {
+      opts = opts || {};
+      const enabled = !!opts.enabled;
+      const badges = (opts.badges || []).join('');
+      const docs = opts.docs ? `<a class="hv-btn btn-secondary btn-sm" href="${esc(opts.docs)}" target="_blank" rel="noopener">Docs ↗</a>` : '';
+      const toggle = opts.toggleKey ? extensionToggleHTML(enabled, opts.toggleKey, opts.toggleLabel || `${title} enabled`) : '';
+      const detailsOpen = opts.forceOpen || enabled ? ' open' : '';
+      const detailsLabel = enabled ? `Configure ${title}` : `${title} details`;
+      const notice = opts.notice || '';
+      return `<section class="extension-card${enabled ? '' : ' is-disabled'}" id="${esc(id)}">
+        <div class="extension-card-header">
+          <div class="extension-card-copy">
+            <div class="extension-title-row"><h3>${esc(title)}</h3>${extensionStatusBadge(enabled)}${badges}</div>
+            <p>${esc(subtitle)}</p>
+          </div>
+          <div class="extension-card-actions">${docs}${toggle}</div>
+        </div>
+        ${notice}
+        <details class="extension-details"${detailsOpen}>
+          <summary>${esc(detailsLabel)}</summary>
+          <div class="extension-details-body">${body}</div>
+        </details>
+      </section>`;
+    }
+
+    function extensionSubsection(title, body, extraClass) {
+      return `<div class="extension-section ${extraClass || ''}"><h4>${esc(title)}</h4>${body}</div>`;
+    }
+
+    function renderRelayConnectionBlock(capability) {
+      const relayURL = extensionRelayURL();
+      const peerId = `ext-peers-${esc(capability).replace(/[^a-zA-Z0-9_-]/g,'-')}`;
+      return `<div class="extension-relay-block">
+        <div class="config-field-row">
+          <div class="config-field"><label for="relay-url-${peerId}">Relay URL</label><input id="relay-url-${peerId}" type="text" readonly value="${esc(relayURL)}"></div>
+          <div class="config-field"><label for="relay-cap-${peerId}">Required capability</label><input id="relay-cap-${peerId}" type="text" readonly value="${esc(capability)}"></div>
+        </div>
+        <div class="extension-relay-actions"><a class="hv-btn btn-secondary btn-sm" href="/contribute" target="_blank" rel="noopener">Mint / rotate registration token</a><span>Uses the existing /contribute registration-token flow; paste the token into the external relay.</span></div>
+        <div class="extension-peer-list"><b>Connected peers declaring <code>${esc(capability)}</code></b><div id="${peerId}">Loading…</div></div>
+      </div>`;
+    }
+
+    // Maps the features save response's spektacularApply field (#9172) to an
+    // operator-facing toast; null when the save did not touch runs config or
+    // the change is already live.
+    function spektacularApplyMessage(apply) {
+      if (apply === 'deferred') return { level: 'warning', msg: 'Spektacular settings saved — they apply once the hub executor finishes its running stage.' };
+      if (apply === 'restart') return { level: 'warning', msg: 'Spektacular settings saved — restart the hive for the runner to pick them up.' };
+      return null;
+    }
+
+    function renderGovExtensions(f) {
+      const status = window._lastStatus || {};
+      const spek = status.spektacular || status.spektacular_status || (((status.health || {}).spektacular) || {});
+      const spekVersion = spek.version || spek.binary_version || 'unknown';
+      const runStagesAuto = !!f.spektacularEnabled;
+      const flueBuilt = !!f.extFlueLinked;
+      const wavefrontEnabled = !!f.wavefrontEnabled;
+      const extensions = [
+        { id: 'ext-spektacular', name: 'Spektacular', enabled: !!f.spektacularEnabled, meta: spekVersion !== 'unknown' ? `v${spekVersion}` : 'version unknown' },
+        { id: 'ext-flue', name: 'Flue', enabled: !!f.extFlueEnabled, meta: flueBuilt ? (f.extFlueMode || 'shadow') : 'not built in' },
+        { id: 'ext-omp', name: 'OMP', enabled: !!f.extOmpEnabled, meta: f.extOmpMode || 'off' },
+        { id: 'ext-wavefront', name: 'Crustify / Wavefront', enabled: wavefrontEnabled, meta: 'run-stage relay' },
+        { id: 'ext-relays', name: 'Relays', enabled: true, meta: 'connection details' },
+      ];
+      const summary = extensions.map(ext => `<a class="extension-summary-item" href="#${esc(ext.id)}">
+        <span><strong>${esc(ext.name)}</strong><small>${esc(ext.meta)}</small></span>${extensionStatusBadge(ext.enabled)}
+      </a>`).join('');
+      return `<div class="extensions-tab">
+        <p class="extensions-intro">Configure built-in and relay-backed extensions from the dashboard. Spektacular runner and hub-executor settings apply on Save (a hub executor mid-stage picks them up once that stage finishes); relay lists update live when peers connect.</p>
+        <nav class="extension-summary" aria-label="Extension summary">${summary}</nav>
+        ${extensionCard('ext-spektacular', 'Spektacular', 'Built-in long-running spec → plan → implement runner', {
+          enabled: !!f.spektacularEnabled,
+          toggleKey: 'spektacularEnabled',
+          toggleLabel: 'Spektacular enabled',
+          docs: 'https://docs.hivecommons.dev/docs/hive/spektacular-runs',
+          badges: [`<span class="status-badge">${esc(spekVersion)}</span>`],
+        }, `
+          ${extensionSubsection('Runner', `
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-spektacular-binary">Binary</label><input id="ext-spektacular-binary" type="text" value="${esc(f.spektacularBinary || '')}" placeholder="spektacular" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularBinary" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-spektacular-version">Detected version</label><input id="ext-spektacular-version" type="text" readonly value="${esc(spekVersion)}"></div>
+            </div>
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-spektacular-poll">Poll interval seconds</label><input id="ext-spektacular-poll" type="number" min="1" step="1" value="${esc(String(f.spektacularPollS || 30))}" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularPollS" data-arg-types="s,s,N"></div>
+              <div class="config-field"><label for="ext-spektacular-retries">Max stage retries</label><input id="ext-spektacular-retries" type="number" min="0" step="1" value="${esc(String(f.maxStageRetries || 2))}" data-change-action="markDirty" data-arg0="features" data-arg1="maxStageRetries" data-arg-types="s,s,N"></div>
+            </div>
+            <div class="config-field"><label for="ext-spektacular-interview">Interview mode ${settingHelpMark('settings', 'features', 'Help', `human pauses interview/clarification steps for dashboard answers. auto preserves the previous headless self-answering behavior.`)}</label><select id="ext-spektacular-interview" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularInterview" data-arg-types="s,s,v"><option value="human" ${(f.spektacularInterview || 'human') === 'human' ? 'selected' : ''}>human</option><option value="auto" ${f.spektacularInterview === 'auto' ? 'selected' : ''}>auto</option></select></div>
+            <div class="extension-callout ${runStagesAuto ? 'success' : 'muted'}"><b>Run stages:</b> ${runStagesAuto ? '<span class="status-badge done">AUTO ON</span> Spektacular requires Governor work_source.run_stages, so Hive sets it automatically when enabled.' : '<span class="status-badge disabled">manual/off</span> Enable Spektacular to turn run-stage work on automatically.'}</div>
+          `)}
+          ${extensionSubsection('Hub executor', `
+            ${extensionToggleHTML(!!f.spektacularHubExecutor, 'spektacularHubExecutor', 'Hub executes unclaimed spec/plan stages (no ClankeR needed)')}
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-spektacular-hub-backend">Backend</label><input id="ext-spektacular-hub-backend" type="text" value="${esc(f.spektacularHubExecutorBackend || 'copilot')}" placeholder="copilot" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularHubExecutorBackend" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-spektacular-hub-model">Model</label><input id="ext-spektacular-hub-model" type="text" value="${esc(f.spektacularHubExecutorModel || '')}" placeholder="backend default" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularHubExecutorModel" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-spektacular-hub-timeout">Timeout seconds</label><input id="ext-spektacular-hub-timeout" type="number" min="1" step="1" value="${esc(String(f.spektacularHubExecutorTimeoutS || 1800))}" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularHubExecutorTimeoutS" data-arg-types="s,s,N"></div>
+            </div>
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-spektacular-hub-max">Max concurrent stages</label><input id="ext-spektacular-hub-max" type="number" min="1" step="1" value="${esc(String(f.spektacularHubExecutorMaxConcurrent || 1))}" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularHubExecutorMaxConcurrent" data-arg-types="s,s,N"></div>
+            </div>
+            <div class="extension-callout muted">When on, the hub claims admitted runs no relay has taken, prepares a worktree, and drives the Spektacular spec/plan stage itself. A ClankeR that claims first still wins.</div>
+          `)}
+          ${extensionSubsection('Checkpoints', `<div class="extension-chip-row">${['Spec','Plan','Implement'].map(n => `<label class="extension-chip" for="ext-checkpoint-${n.toLowerCase()}"><input id="ext-checkpoint-${n.toLowerCase()}" type="checkbox" ${f['checkpoint'+n+'Enabled'] ? 'checked' : ''} data-change-action="markDirty" data-arg0="features" data-arg1="checkpoint${n}Enabled" data-arg-types="s,s,c"> ${n}</label>`).join('')}</div>`)}
+          ${extensionSubsection('Triage', `
+            ${extensionToggleHTML(!!f.triageEnabled, 'triageEnabled', 'Triage enabled')}
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-triage-spec-labels">Spec labels</label><input id="ext-triage-spec-labels" type="text" value="${esc((f.triageSpecLabels || []).join(', '))}" data-change-action="markCSVDirty" data-arg0="features" data-arg1="triageSpecLabels" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-triage-fix-labels">Fix labels</label><input id="ext-triage-fix-labels" type="text" value="${esc((f.triageFixLabels || []).join(', '))}" data-change-action="markCSVDirty" data-arg0="features" data-arg1="triageFixLabels" data-arg-types="s,s,w"></div>
+            </div>
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-triage-min-body">Min body chars</label><input id="ext-triage-min-body" type="number" min="0" step="1" value="${esc(String(f.triageMinBodyChars || 80))}" data-change-action="markDirty" data-arg0="features" data-arg1="triageMinBodyChars" data-arg-types="s,s,N"></div>
+              <div class="config-field extension-toggle-field"><label id="ext-triage-clarify-label">Clarify comment</label>${extensionToggleHTML(f.triageClarifyComment !== false, 'triageClarifyComment', 'Post clarify comment')}</div>
+            </div>
+          `)}
+        `)}
+        ${extensionCard('ext-flue', 'Flue', 'External workflow admission binding', {
+          enabled: !!f.extFlueEnabled,
+          toggleKey: 'extFlueEnabled',
+          toggleLabel: 'Flue binding enabled',
+          docs: 'https://github.com/hivecommons/hive/blob/v6/src/docs/design/external-workflow-admission.md',
+          badges: flueBuilt ? [`<span class="status-badge">${esc(f.extFlueMode || 'shadow')}</span>`] : ['<span class="status-badge needs-context">not built into this binary</span>'],
+          notice: flueBuilt ? '' : '<div class="extension-callout warning"><b>Build tag required.</b> This binary was built without the <code>extwork_flue</code> tag; settings can be staged but no Flue peer will dispatch until a tagged build is deployed.</div>',
+        }, `
+          ${extensionSubsection('Admission', `
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-flue-mode">Mode</label><select id="ext-flue-mode" data-change-action="markDirty" data-arg0="features" data-arg1="extFlueMode" data-arg-types="s,s,v">${(f.extFlueModes || ['shadow','report-only']).map(m => `<option value="${esc(m)}" ${(f.extFlueMode || 'shadow') === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
+              <div class="config-field"><label for="ext-flue-version">Workflow version</label><input id="ext-flue-version" type="text" value="${esc(f.extFlueWorkflowVersion || '')}" data-change-action="markDirty" data-arg0="features" data-arg1="extFlueWorkflowVersion" data-arg-types="s,s,w"></div>
+            </div>
+            <div class="config-field"><label for="ext-flue-endpoint">Endpoint</label><input id="ext-flue-endpoint" type="text" value="${esc(f.extFlueEndpoint || '')}" placeholder="https://flue.example" data-change-action="markDirty" data-arg0="features" data-arg1="extFlueEndpoint" data-arg-types="s,s,w"></div>
+          `)}
+          <details class="extension-advanced"><summary>Advanced relay connection</summary>${renderRelayConnectionBlock('ext-exec/flue')}</details>
+        `)}
+        ${extensionCard('ext-omp', 'OMP', 'Workbench host for externally admitted run-stage work', {
+          enabled: !!f.extOmpEnabled,
+          toggleKey: 'extOmpEnabled',
+          toggleLabel: 'OMP workbench host enabled',
+          docs: 'https://github.com/hivecommons/hive/blob/v6/src/docs/design/external-workflow-admission.md',
+          badges: [`<span class="status-badge">${esc(f.extOmpMode || 'off')}</span>`, `<span class="status-badge">${f.extOmpVersionSet ? 'workflow pinned' : 'version auto'}</span>`],
+          notice: f.extOmpLinked ? '' : '<div class="extension-callout warning"><b>Build tag required.</b> This binary was built without the <code>extwork_omp</code> tag; settings can be staged but no OMP workbench host will dispatch until a tagged build is deployed.</div>',
+        }, `
+          ${extensionSubsection('Admission', `
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-omp-mode">Mode</label><select id="ext-omp-mode" data-change-action="markDirty" data-arg0="features" data-arg1="extOmpMode" data-arg-types="s,s,v">${(f.extOmpModes || ['shadow','report-only']).map(m => `<option value="${esc(m)}" ${(f.extOmpMode || 'shadow') === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
+              <div class="config-field"><label for="ext-omp-version-status">Workflow version</label><input id="ext-omp-version-status" type="text" readonly value="${f.extOmpVersionSet ? 'Pinned in config' : 'Not pinned'}"></div>
+            </div>
+            <div class="extension-callout"><b>Report-only host:</b> OMP uses an already-connected relay peer declaring <code>ext-exec/omp</code>; it receives bounded context and returns receipts without repository credentials.</div>
+          `)}
+          <details class="extension-advanced"><summary>Advanced relay connection</summary>${renderRelayConnectionBlock('ext-exec/omp')}</details>
+        `)}
+        ${extensionCard('ext-wavefront', 'Crustify / Wavefront', 'External migration graph work source over run-stage relays', {
+          enabled: wavefrontEnabled,
+          toggleKey: 'wavefrontEnabled',
+          toggleLabel: 'Wavefront enabled',
+          docs: 'https://github.com/hivecommons/hive/blob/v6/src/docs/work-sources.md#wavefront',
+          badges: ['<span class="status-badge">run-stage</span>'],
+        }, `
+          ${extensionSubsection('Graph source', `
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-wavefront-path">Graph path</label><input id="ext-wavefront-path" type="text" value="${esc(f.wavefrontPath || '')}" data-change-action="markDirty" data-arg0="features" data-arg1="wavefrontPath" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-wavefront-url">Graph URL</label><input id="ext-wavefront-url" type="text" value="${esc(f.wavefrontUrl || '')}" data-change-action="markDirty" data-arg0="features" data-arg1="wavefrontUrl" data-arg-types="s,s,w"></div>
+            </div>
+            <div class="config-field-row">
+              <div class="config-field"><label for="ext-wavefront-repo">Repo</label><input id="ext-wavefront-repo" type="text" value="${esc(f.wavefrontRepo || '')}" placeholder="owner/repo" data-change-action="markDirty" data-arg0="features" data-arg1="wavefrontRepo" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label for="ext-wavefront-receipts">Receipts dir</label><input id="ext-wavefront-receipts" type="text" value="${esc(f.wavefrontReceiptsDir || '')}" data-change-action="markDirty" data-arg0="features" data-arg1="wavefrontReceiptsDir" data-arg-types="s,s,w"></div>
+            </div>
+          `)}
+          <details class="extension-advanced"><summary>Advanced relay connection</summary>${renderRelayConnectionBlock('run-stage')}</details>
+        `)}
+        ${extensionCard('ext-relays', 'Relays', 'Generic contributor relay connection details', {
+          enabled: true,
+          forceOpen: true,
+          docs: 'https://github.com/hivecommons/hive/blob/v6/src/docs/contributor-relay.md#pointing-external-extensions-at-hive',
+          badges: ['<span class="status-badge">shared</span>'],
+        }, `${renderRelayConnectionBlock('*')}<p class="extension-footnote">Full fleet controls remain in <a href="#config/governor/Hub">Settings → Hub</a> and <a href="/contribute" target="_blank" rel="noopener">/contribute</a>.</p>`)}
+      </div>`;
+    }
+
+    async function loadExtensionRelayStatus() {
+      try {
+        const res = await fetch('/api/contribute/fleet');
+        const data = await res.json();
+        const peers = Array.isArray(data.clankers) ? data.clankers : [];
+        ['ext-exec/flue','ext-exec/omp','run-stage','*'].forEach(cap => {
+          const id = 'ext-peers-' + cap.replace(/[^a-zA-Z0-9_-]/g,'-');
+          const el = document.getElementById(id);
+          if (!el) return;
+          const rows = peers.filter(p => cap === '*' || (((p.capabilities || {}).relay_capabilities || []).includes(cap)));
+          el.innerHTML = rows.length ? rows.map(p => `${esc(p.github_username || p.contributor_id || 'peer')} <span class="status-badge">${esc(((p.capabilities || {}).relay_capabilities || []).join(', ') || 'no capabilities')}</span>`).join('<br>') : 'None connected.';
+        });
+      } catch (e) {
+        document.querySelectorAll('[id^="ext-peers-"]').forEach(el => el.textContent = 'Unable to load relay fleet.');
+      }
+    }
+
     // renderGovFeatures renders operational features that are not security posture
     // controls. ioscan moved to Security/Input Defense; OpenTelemetry and retro
     // stay here as observability/quality-loop settings. The tab is organised
