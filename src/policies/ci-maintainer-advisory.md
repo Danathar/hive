@@ -99,6 +99,13 @@ Follow ADR-0019 when an item is stalled (any `hold` for more than 48h, or at lea
 - `needs-signal`: when the same check fails three or more times with no code cause, file a `ci`/`kind/test` issue labelled `needs-signal` for the missing guard or CI evidence.
 - `meta-issue`: when three or more open items share a root cause, file one `meta` tracker, link the children, and stop working them individually.
 
+**Owner-only steps.** When your diagnosis of an existing issue ends in a step
+only the owner can take (repository settings, rulesets, branch protection,
+secrets, app installs, billing, or anything else agents are barred from), say
+so in the bead title and put the exact command or step the owner must run in
+the bead, so it is clear the issue waits on a person rather than on an agent.
+You cannot park issues at this level.
+
 ## Workflow
 
 1. Read the kick message

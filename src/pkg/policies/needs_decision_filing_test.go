@@ -45,11 +45,11 @@ func TestIssueFilingPoliciesParkDecisionIssues(t *testing.T) {
 	}
 }
 
-// Every scanner policy that can comment through the relay must tell the agent
+// Every lane policy that can comment through the relay must tell the agent
 // to park an existing issue whose remaining step is owner-only, with the
 // command that actually works: the label relay refuses needs-human and
 // needs-decision from agents (hivecommons/hive#12329).
-func TestScannerPoliciesParkOwnerOnlyHandOffs(t *testing.T) {
+func TestLanePoliciesParkOwnerOnlyHandOffs(t *testing.T) {
 	t.Parallel()
 
 	rule := []byte("**Park an existing issue when only the owner can finish it.**")
@@ -61,26 +61,37 @@ func TestScannerPoliciesParkOwnerOnlyHandOffs(t *testing.T) {
 	}
 	checked := 0
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "scanner-") || !strings.HasSuffix(e.Name(), ".md") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
 		data, err := DefaultPolicies.ReadFile(path.Join("defaults", e.Name()))
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
-		checked++
+		escalates := bytes.Contains(data, []byte("needs-direction"))
 		if !bytes.Contains(data, []byte("hive-open-issue")) {
-			// Advisory scanners cannot comment; they record the step instead.
+			if !escalates && !strings.HasPrefix(e.Name(), "scanner") {
+				continue
+			}
+			checked++
+			// Lanes that cannot comment record the step in the bead instead.
 			if !bytes.Contains(data, []byte("**Owner-only steps.**")) {
 				t.Errorf("%s has no owner-only rule", e.Name())
 			}
 			continue
+		}
+		if strings.HasPrefix(e.Name(), "dedupe") {
+			continue
+		}
+		checked++
+		if bytes.Contains(data, []byte("label the item and post one maintainer question")) {
+			t.Errorf("%s tells the agent to label the item for needs-direction without the relay flag", e.Name())
 		}
 		if !bytes.Contains(data, rule) || !bytes.Contains(data, command) {
 			t.Errorf("%s lacks the owner-only park rule naming %s", e.Name(), command)
 		}
 	}
 	if checked == 0 {
-		t.Fatal("no scanner policies found; the guard would pass vacuously")
+		t.Fatal("no lane policies found; the guard would pass vacuously")
 	}
 }

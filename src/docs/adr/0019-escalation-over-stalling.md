@@ -23,9 +23,11 @@ Hive agents escalate stalled work instead of silently parking it. Each
 escalation must choose one of four moves:
 
 1. **`needs-direction`** — Use when the next step is a maintainer decision,
-   authority grant, risk acceptance, or product/voice choice. Add the
-   `needs-direction` label and post exactly one comment to the maintainer with a
-   short question and concrete options `A`, `B`, and `C`.
+   authority grant, risk acceptance, or product/voice choice. Post exactly
+   one comment to the maintainer with a short question and concrete options `A`,
+   `B`, and `C`, and park the item in the same request with
+   `hive-open-issue comment … --needs-decision`; the relay applies the park label
+   as part of the comment, so no separate label step is needed.
 2. **`needs-spec`** — Use when the issue cannot be implemented safely because
    the expected behavior, API contract, acceptance criteria, or compatibility
    rule is missing. File one issue labelled `kind/spec` and `needs-spec` that

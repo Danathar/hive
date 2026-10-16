@@ -151,6 +151,8 @@ before any write (a PR that needs a person is a `requires_human` review
 verdict, not a needs-decision label). The flag applies only to `issue` and
 `comment`; on any other kind the script exits `2` and writes nothing.
 
+Every lane that can comment or file issues carries this rule in its policy (ci-maintainer, sec-check, quality, architect, outreach, strategist, guide and scanner), including the ADR-0019 `needs-direction` escalation and workflow-file hand-offs. Lanes that only record beads (advisory) note the owner-only step in the bead instead.
+
 ### `comment`
 
 `--repo`, a number or URL, and `--body` are all required, or the script exits

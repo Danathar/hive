@@ -205,3 +205,16 @@ checks are green — waiting buys nothing.
 - Do NOT spend time debugging TLS certs or proxy config — use the auth recipe above
 
 ${KNOWLEDGE}
+
+**Park an existing issue when only the owner can finish it.** When your
+diagnosis of an existing issue ends in a step only the owner can take
+(repository settings, rulesets, branch protection, secrets, app installs,
+billing, or anything else agents are barred from), do not leave the issue
+unlabelled for your claim to lapse on. Post the diagnosis with the exact
+command or step the owner must run, and park the issue in the same request:
+`hive-open-issue comment --repo <owner/repo> <number> --body-file <file> --needs-decision`.
+Hive applies its configured needs-decision label itself, so the issue leaves
+the work queue and reaches the owner's "Your turn" inbox. The label relay
+refuses `needs-human` and `needs-decision` from agents, so use this flag
+rather than `gh issue edit --add-label`. Park only when a person must act; if
+another lane could do the work, leave the issue for that lane.

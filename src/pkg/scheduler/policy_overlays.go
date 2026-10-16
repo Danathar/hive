@@ -122,7 +122,9 @@ When a fix belongs in a workflow file:
 2. File the issue with the exact replacement text, so applying it is mechanical.
 3. Say plainly in the issue that the change needs a human or an
    ISSUES_PRS_MERGE agent to land, and why — otherwise "issue, no PR" reads as
-   a judgement call you did not make.
+   a judgement call you did not make. Park it in the same request with
+   ` + "`hive-open-issue comment --repo <owner/repo> <number> --body-file <file> --needs-decision`" + `
+   (or ` + "`--needs-decision`" + ` on the create), since you cannot add the park label yourself.
 4. If part of the fix lives outside ` + "`.github/workflows/`" + `, PR that part and say
    in both the issue and the PR which part is still waiting.
 
