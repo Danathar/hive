@@ -2261,15 +2261,17 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// privilege. A denied request is quarantined, never opened.
 	// holdLabel (F6): at hold-gated ACMM levels (L3/L4/L5) every agent-opened
 	// PR must carry the "hold" label so the merge gate holds it for human
-	// approval. Outreach content is public speech on the project's behalf, so
-	// it remains human-reviewed at L6 too. This is decided server-side from the
-	// authenticated agent identity and authoritative hive level
+	// approval. Outreach content aimed at a repository the hive does not
+	// manage is public speech into someone else's project, so it remains
+	// human-reviewed at L6 too; outreach PRs into the agent's own repos are
+	// ordinary hive PRs. This is decided server-side from the authenticated
+	// agent identity, the PR's target repo and the authoritative hive level
 	// (GetACMMLevel), NOT from a client flag — the gh-wrapper.sh tail that used
 	// to add the label was dead code after `exec hive-open-pr`. L1/L2 open no
 	// agent PRs (manual); non-outreach L6 PRs retain their existing automerge
 	// behavior.
-	holdLabel := func(agentName string) bool {
-		return shouldHoldAgentPR(agentName, b.agentMgr.GetACMMLevel())
+	holdLabel := func(agentName, repo string) bool {
+		return shouldHoldAgentPR(agentName, repo, b.agentMgr.GetACMMLevel(), b.cfg.AgentOwnsRepo)
 	}
 	selfAuthorizationHoldEnabled := b.selfAuthorizationHoldEnabled
 

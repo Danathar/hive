@@ -251,7 +251,7 @@ func (c *Client) CheckPRRepoPolicy(agent, repo string) error {
 	return nil
 }
 
-func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func(agent string) bool, nowFn func() time.Time) <-chan struct{} {
+func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func(agent, repo string) bool, nowFn func() time.Time) <-chan struct{} {
 	done := make(chan struct{})
 	if c == nil {
 		close(done)
@@ -560,7 +560,7 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// path; and where it is a human's PR, hive has no standing to gate it at
 	// all. Evaluating the gate here would additionally spend GitHub calls to
 	// compute a hold that must not be applied.
-	holdByLevel := c.prHoldLabel != nil && c.prHoldLabel(req.Agent)
+	holdByLevel := c.prHoldLabel != nil && c.prHoldLabel(req.Agent, req.Repo)
 	var selfAuth SelfAuthorization
 	if !res.IsDuplicate() && !holdByLevel {
 		if !c.selfAuthorizationHoldActive(req.Repo) {

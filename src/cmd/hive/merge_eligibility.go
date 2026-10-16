@@ -193,14 +193,27 @@ const (
 	acmmHoldGatedMaxLevel = 5
 )
 
-// shouldHoldAgentPR keeps public outreach claims human-reviewed even at L6,
-// where ordinary agent PRs may auto-merge. The general ACMM hold gate remains
-// unchanged for all roles at L3-L5.
-func shouldHoldAgentPR(agentName string, level int) bool {
-	if strings.EqualFold(strings.TrimSpace(agentName), "outreach") {
-		return true
+// shouldHoldAgentPR decides whether a freshly opened agent PR must carry the
+// "hold" label. The general ACMM hold gate applies to every role at L3-L5.
+// Outreach adds one level-independent reason: a PR that targets a repository
+// OTHER than the ones the outreach agent is working on behalf of (ownsRepo
+// false) is public speech into somebody else's project and stays
+// human-reviewed even at L6. An outreach PR into the agent's own repo —
+// README, ADOPTERS.md, docs, keyword tweaks in a hive-managed repo — is an
+// ordinary hive PR and flows through normal review and auto-merge (operator
+// decision, 2026-10-16). A nil ownsRepo fails closed to "cross-repo", so a
+// wiring mistake can only hold too much, never too little.
+func shouldHoldAgentPR(agentName, repo string, level int, ownsRepo func(agent, repo string) bool) bool {
+	if isOutreachAgent(agentName) {
+		if ownsRepo == nil || !ownsRepo(agentName, repo) {
+			return true
+		}
 	}
 	return level >= acmmHoldGatedMinLevel && level <= acmmHoldGatedMaxLevel
+}
+
+func isOutreachAgent(agentName string) bool {
+	return strings.EqualFold(strings.TrimSpace(agentName), "outreach")
 }
 
 // mergeableJSONUnknown is the explicit wire value for "mergeability was never
