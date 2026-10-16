@@ -271,7 +271,43 @@ type NousPrinciple struct {
 	Source     string  `json:"source"`
 }
 
-const NousBaselineTarget = 672
+// NousBaselineTarget is how many hive-state snapshots a campaign's baseline
+// needs: one every governor evaluation cycle (NousBaselinePerHour at the
+// default 15-minute interval) for NousBaselineDays — 4 × 24 × 7 = 672, about
+// one week of observations, so the baseline sees every weekday and weekend
+// regime once.
+const (
+	NousBaselinePerHour = 4
+	NousBaselineDays    = 7
+	NousBaselineTarget  = NousBaselinePerHour * 24 * NousBaselineDays
+)
+
+// NousBaselineTargetExplainer is the plain-language meaning of
+// NousBaselineTarget shown next to every "N / 672" in the Experiment Lab.
+const NousBaselineTargetExplainer = "≈ 7 days of observations (4/hour)"
+
+// NousPrinciplesExplainer says what the "Principles" tile counts and how the
+// number grows (#12532): principles are not a prerequisite for starting an
+// experiment, so a new lab legitimately shows 0.
+const NousPrinciplesExplainer = "Principles are durable lessons the lab distils from judged experiments (principles.json). A new lab starts at 0 and the count grows as experiments conclude; none are needed to start an experiment."
+
+// Per-campaign lifecycle stages (#12532). They are derived on every status
+// read from the campaign's baseline, the lab mode and the experiment rows
+// attributed to the campaign, so the card always says what happens next.
+const (
+	NousStageBaseline  = "baseline"  // collecting baseline snapshots
+	NousStageReady     = "ready"     // baseline complete, no proposals yet
+	NousStageProposed  = "proposed"  // a proposal awaits operator review
+	NousStageRunning   = "running"   // an experiment is in flight
+	NousStageConcluded = "concluded" // archived, or every experiment judged
+	NousStagePaused    = "paused"
+)
+
+// NousActionGenerateProposals is the single primary card action offered
+// when a campaign's baseline is complete but the lab is still in observe
+// mode: it flips the trust-ladder mode to suggest so the experiment loop
+// may design proposals for review.
+const NousActionGenerateProposals = "generate_proposals"
 
 // NousBaselinePct reports baseline-collection progress as a percentage,
 // capped at 100 once count reaches NousBaselineTarget. count keeps growing
