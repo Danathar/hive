@@ -1,1 +1,0 @@
-- dashboard: lower the contributor landing inline-style ratchet baseline to the current count so TestStyleRatchet stops reporting stale drift on v5 (#12270)
