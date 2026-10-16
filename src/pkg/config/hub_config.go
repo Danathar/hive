@@ -3,6 +3,7 @@ package config
 import (
 	"path"
 	"strings"
+	"time"
 )
 
 // GitHubActivityConfig gates the hub's org-wide GitHub issue/PR activity feed.
@@ -60,6 +61,35 @@ type ContributeAnnouncement struct {
 // are not admission/queue controls.
 type ContributeConfig struct {
 	HelpLinks []ContributeHelpLink `yaml:"help_links,omitempty" json:"help_links,omitempty"`
+	// MaxParallelFixes caps how many red-PR fix sessions the hive dispatches
+	// to one contributor at a time, regardless of what their relay advertises
+	// (hivecommons/hive#12436). 0/unset = DefaultMaxParallelFixes. A relay
+	// that advertises no parallel capability always gets capacity 1.
+	MaxParallelFixes int `yaml:"max_parallel_fixes,omitempty" json:"max_parallel_fixes,omitempty"`
+	// MinFocusWindow is the minimum uninterrupted time a preempted primary
+	// task runs after resuming before the hive may preempt it again
+	// (default 30m). Only applies to relays without parallel sessions.
+	MinFocusWindow string `yaml:"min_focus_window,omitempty" json:"min_focus_window,omitempty"`
+}
+
+// DefaultMaxParallelFixes is contribute.max_parallel_fixes's default.
+const DefaultMaxParallelFixes = 2
+
+// DefaultMinFocusWindow is contribute.min_focus_window's default.
+const DefaultMinFocusWindow = 30 * time.Minute
+
+// EffectiveMaxParallelFixes returns the server-side ceiling on per-contributor
+// fix sessions.
+func (c ContributeConfig) EffectiveMaxParallelFixes() int {
+	if c.MaxParallelFixes <= 0 {
+		return DefaultMaxParallelFixes
+	}
+	return c.MaxParallelFixes
+}
+
+// EffectiveMinFocusWindow parses MinFocusWindow with the 30m default.
+func (c ContributeConfig) EffectiveMinFocusWindow() time.Duration {
+	return parseDurationOr(c.MinFocusWindow, DefaultMinFocusWindow)
 }
 
 type ContributeHelpLink struct {
@@ -355,8 +385,8 @@ const (
 	// rounding to zero.
 	contributeCooldownMinHours        = 1
 	contributeCooldownMaxHours        = 8760
-	contributeAlreadyDoneLabelDefault = "hive/already-done"
-	contributeAlreadyDoneDefaultDays  = 30
+	contributeAlreadyDoneLabelDefault = DefaultContributeAlreadyDoneLabel
+	contributeAlreadyDoneDefaultDays  = DefaultContributeAlreadyDoneHoldDays
 	contributeAlreadyDoneMinDays      = 1
 	contributeAlreadyDoneMaxDays      = 365
 )

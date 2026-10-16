@@ -190,14 +190,15 @@ type Client struct {
 	// StartPRRequestWatcher.
 	prAuthz PRRequestAuthorizer
 	// prHoldLabel decides, at PR-creation time, whether a freshly-opened PR must
-	// carry the "hold" label (F6). It receives the authoring agent so role-specific
-	// safety rules (for example, mandatory human review of outreach content) can
+	// carry the "hold" label (F6). It receives the authoring agent and the PR's
+	// target repo so role-specific safety rules (for example, mandatory human
+	// review of outreach content aimed at a repo the hive does not manage) can
 	// be enforced alongside the authoritative ACMM level. It is consulted
 	// server-side, NOT trusted from a client flag — the
 	// gh-wrapper.sh tail that used to add the label is dead code (it sits after
 	// `exec hive-open-pr`). nil means "never hold" (backward-compatible no-op).
 	// Set by StartPRRequestWatcher.
-	prHoldLabel func(agent string) bool
+	prHoldLabel func(agent, repo string) bool
 	// selfAuthorizationHoldEnabled returns the live per-repo config switch for
 	// the #5117 self-authorization hold. It is a callback so dashboard/config
 	// changes are honoured at evaluation time rather than frozen at watcher
@@ -307,6 +308,12 @@ type Client struct {
 	// under its current spelling (hivecommons/hive#11888). Zero value is
 	// ready to use.
 	coveredByPRLabel coveredByPRLabelState
+	// stageFamily memoises repos whose stage/author label family has been
+	// provisioned this process (hivecommons/hive#12436). Zero value is ready.
+	stageFamily coveredByPRLabelState
+	// issueStage resolves the live `governor.labels.stage` policy for the
+	// issue stage reconciler; nil disables it.
+	issueStage func() IssueStagePolicy
 	// mergeReEngage is Fix #2's re-engagement hook. When a merge attempt fails
 	// terminally BECAUSE a required check failed (not a true conflict or a
 	// permission error), the watcher calls this instead of silently abandoning
@@ -644,6 +651,11 @@ type Issue struct {
 	// (the check close-on-merge uses). The your-turn decision reads it for
 	// likely-done issues (hivecommons/hive#11592).
 	ReporterConfirmationGate bool `json:"reporter_confirmation_gate,omitempty"`
+	// ClaimKind is the marker's kind= (agent, human, contributor, external)
+	// when the live claim came from a `hive:claim` marker; empty otherwise.
+	// The issue stage reconciler reads it to tell stage/030-pr-in-progress
+	// (an agent kick is working) from stage/020-claimed.
+	ClaimKind string `json:"claim_kind,omitempty"`
 }
 
 // IssueDependency is the transport form of a source-aware work dependency.
@@ -2500,6 +2512,7 @@ func (c *Client) ensureLabel(ctx context.Context, owner, repo, name string) erro
 }
 
 // EnsureIssueLabel creates an issue label if it does not already exist.
+// origin/* labels are additionally recoloured to the shared family colour.
 func (c *Client) EnsureIssueLabel(ctx context.Context, repo, name, color, description string) error {
 	if c == nil {
 		return ErrNoGitHubClient
@@ -2509,6 +2522,9 @@ func (c *Client) EnsureIssueLabel(ctx context.Context, repo, name, color, descri
 		return nil
 	}
 	owner, repoName := c.splitRepo(repo)
+	if IsOriginLabel(name) {
+		return c.ensureOriginLabel(ctx, owner, repoName, name)
+	}
 	if _, _, err := c.client.Issues.GetLabel(ctx, owner, repoName, name); err == nil {
 		return nil
 	} else if ghErr, ok := err.(*gh.ErrorResponse); !ok || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusNotFound {
@@ -3732,6 +3748,8 @@ type RepoWorkIssue struct {
 	Reason            string    `json:"reason,omitempty"`
 	// ReporterConfirmationGate mirrors Issue.ReporterConfirmationGate.
 	ReporterConfirmationGate bool `json:"reporter_confirmation_gate,omitempty"`
+	// ClaimKind is Issue.ClaimKind, copied for the issue stage reconciler.
+	ClaimKind string `json:"claim_kind,omitempty"`
 	// LinkedPRs and ClaimContext carry the PR-claim evidence of an issue the
 	// duplicate-PR guard suppressed into the claimed_by_pr bucket
 	// (hivecommons/hive#12144), so the repo card can render the same
@@ -3757,6 +3775,7 @@ func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
 		Reason:            reason,
 
 		ReporterConfirmationGate: issue.ReporterConfirmationGate,
+		ClaimKind:                issue.ClaimKind,
 		LinkedPRs:                append([]IssueLinkedPR(nil), issue.LinkedPRs...),
 		ClaimContext:             issue.ClaimContext,
 	}

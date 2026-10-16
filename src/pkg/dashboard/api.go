@@ -406,6 +406,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/config/knowledge/connectors/{name}/sync", s.handleKnowledgeConnectorsSync)
 	s.mux.HandleFunc("GET /api/config/knowledge/agent-scopes", s.handleKnowledgeAgentScopesGet)
 	s.mux.HandleFunc("PUT /api/config/knowledge/agent-scopes", s.handleKnowledgeAgentScopesPut)
+	s.mux.HandleFunc("GET /api/config/knowledge/pipeline", s.handleKnowledgePipelineGet)
+	s.mux.HandleFunc("PUT /api/config/knowledge/pipeline", s.handleKnowledgePipelinePut)
 	s.mux.HandleFunc("GET /api/knowledge/git-sources", s.handleGitSourcesList)
 	s.mux.HandleFunc("POST /api/knowledge/git-sources", s.handleGitSourcesConnect)
 	s.mux.HandleFunc("DELETE /api/knowledge/git-sources", s.handleGitSourcesDisconnect)
@@ -475,6 +477,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("DELETE /api/nous/principles/{id}", s.handleNousDeletePrinciple)
 	s.mux.HandleFunc("POST /api/nous/artifacts/sync", s.handleNousArtifactSync)
 	s.mux.HandleFunc("POST /api/nous/reset", s.handleNousReset)
+	s.mux.HandleFunc("POST /api/nous/campaign/start", s.handleNousCampaignStart)
 
 	s.mux.HandleFunc("GET /api/beads", s.handleBeadsList)
 	s.mux.HandleFunc("GET /api/beads/{agent}", s.handleBeadsList)

@@ -3800,6 +3800,31 @@
                       "type": "object",
                       "nullable": true
                     },
+                    "baseline": {
+                      "type": "object",
+                      "description": "Observe-phase snapshot collection progress and retention/collection details.",
+                      "properties": {
+                        "snapshots": { "type": "integer" },
+                        "target": { "type": "integer" },
+                        "percent": { "type": "number" },
+                        "evalIntervalSeconds": { "type": "integer" },
+                        "remainingSnapshots": { "type": "integer" },
+                        "etaSeconds": { "type": "integer" },
+                        "complete": { "type": "boolean" },
+                        "collecting": { "type": "array", "items": { "type": "string" } },
+                        "retention": { "type": "string" }
+                      }
+                    },
+                    "experiments": {
+                      "type": "array",
+                      "description": "Server-computed phase progress for pending, active, and judged experiments.",
+                      "items": { "type": "object" }
+                    },
+                    "results": {
+                      "type": "array",
+                      "description": "Judged experiment outputs with verdicts and PR/issue/principle links when recorded.",
+                      "items": { "type": "object" }
+                    },
                     "hasRecommendations": {
                       "type": "boolean"
                     },
@@ -9244,6 +9269,46 @@
                   "tier_limits": {
                     "type": "object",
                     "description": "Map of tier name to rate limit object"
+                  },
+                  "contribute_wall_retention_days": {
+                    "type": "integer",
+                    "description": "Days contributor-wall posts are kept, 0-3650. 0 restores the default (90)."
+                  },
+                  "contribute_already_done_label": {
+                    "type": "string",
+                    "description": "Label applied to issues a contributor found already resolved. Empty restores the default (hive/already-done)."
+                  },
+                  "contribute_already_done_hold_days": {
+                    "type": "integer",
+                    "description": "Offer suppression after an already-done verdict, 0-365 days. 0 restores the default (30)."
+                  },
+                  "contribute_require_explicit_accept": {
+                    "type": "boolean",
+                    "description": "Withhold the scoped credential until the contributor accepts the task."
+                  },
+                  "nps_enabled": {
+                    "type": "boolean",
+                    "description": "Enable the dashboard NPS feedback prompt."
+                  },
+                  "snapshot_interval_min": {
+                    "type": "integer",
+                    "description": "Minutes before /snapshot is rebuilt: 0 (default 15) or 5-1440."
+                  },
+                  "task_status_push": {
+                    "type": "boolean",
+                    "description": "Run the separate hub task-status push loop. Requires restart."
+                  },
+                  "upgrade_drain_timeout_s": {
+                    "type": "integer",
+                    "description": "Seconds a self-upgrade waits for in-flight kicks, at most 86400. 0 restores the default (2700); negative disables draining."
+                  },
+                  "notifications_discord_requests_webhook_url": {
+                    "type": "string",
+                    "description": "Write-only hub.notifications.discord.requests_webhook_url (https). A masked echo is ignored; empty clears it."
+                  },
+                  "nps_relay_pull_secret": {
+                    "type": "string",
+                    "description": "Write-only hub.nps_relay_pull_secret. A masked echo is ignored; empty clears it."
                   }
                 }
               }
@@ -12901,6 +12966,462 @@
           },
           "403": {
             "description": "Owner role required"
+          }
+        }
+      }
+    },
+    "/api/config/knowledge/pipeline": {
+      "get": {
+        "tags": [
+          "Knowledge"
+        ],
+        "summary": "Knowledge pipeline settings",
+        "description": "Returns the scalar knowledge.bead_synthesizer, knowledge.curator, knowledge.code_maps and knowledge.primer settings, plus the read-only engine, vault paths and primer merge strategy. Requires owner role.",
+        "responses": {
+          "200": {
+            "description": "Knowledge pipeline settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "description": "Read-only: knowledge.engine"
+                    },
+                    "bead_synthesizer": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Starts or stops the bead synthesizer at once"
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty restores hourly. Requires restart."
+                        },
+                        "min_confidence": {
+                          "type": "number",
+                          "description": "0-1; 0 restores the default (0.5). Requires restart."
+                        },
+                        "target_layer": {
+                          "type": "string",
+                          "description": "personal, project, org or community; empty restores project. Requires restart."
+                        },
+                        "max_facts_per_cycle": {
+                          "type": "integer",
+                          "description": "0 restores the default (20). Requires restart."
+                        },
+                        "max_api_calls_per_cycle": {
+                          "type": "integer",
+                          "description": "0 restores the default (40). Requires restart."
+                        },
+                        "retention_policy": {
+                          "type": "object",
+                          "properties": {
+                            "max_beads": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (5000). Requires restart."
+                            },
+                            "archive_after_synth_days": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (7). Requires restart."
+                            },
+                            "high_priority_retain_days": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (30). Requires restart."
+                            },
+                            "preserve_with_deps": {
+                              "type": "boolean",
+                              "description": "Never archive a bead with open dependents. Requires restart."
+                            }
+                          }
+                        },
+                        "vault_path": {
+                          "type": "string",
+                          "description": "Read-only: the directory the synthesizer writes to"
+                        }
+                      }
+                    },
+                    "curator": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Scheduled auto-promotion opt-in. Requires restart."
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty uses daily once enabled. Requires restart."
+                        },
+                        "auto_promote_threshold": {
+                          "type": "number",
+                          "description": "0-1; 0 restores the default (0.9). Requires restart."
+                        },
+                        "promote_from": {
+                          "type": "string",
+                          "description": "Source layer; empty = project. Must differ from promote_to. Requires restart."
+                        },
+                        "promote_to": {
+                          "type": "string",
+                          "description": "Target layer; empty = org. Requires restart."
+                        }
+                      }
+                    },
+                    "code_maps": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Code map generation opt-in. Requires restart."
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty = hourly. Requires restart."
+                        },
+                        "layer": {
+                          "type": "string",
+                          "description": "Layer recorded on each map; empty = project. Requires restart."
+                        },
+                        "max_bytes": {
+                          "type": "integer",
+                          "description": "Per-map size cap; 0 uses the generator default (16384). Requires restart."
+                        },
+                        "vault_path": {
+                          "type": "string",
+                          "description": "Read-only: the directory maps are written to; empty = /data/vaults/code-maps"
+                        }
+                      }
+                    },
+                    "primer": {
+                      "type": "object",
+                      "properties": {
+                        "max_facts": {
+                          "type": "integer",
+                          "description": "0 restores the default (25). Requires restart."
+                        },
+                        "max_bytes": {
+                          "type": "integer",
+                          "description": "0 restores the default (4096). Requires restart."
+                        },
+                        "merge_strategy": {
+                          "type": "string",
+                          "description": "Read-only: precedence is the only implemented strategy"
+                        }
+                      }
+                    },
+                    "schedules": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "layers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "defaults": {
+                      "type": "object",
+                      "description": "Defaults a cleared field restores"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires owner role"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Knowledge"
+        ],
+        "summary": "Update knowledge pipeline settings",
+        "description": "Updates the scalar bead synthesizer, curator, code map and primer settings. Fields are pointer-typed; absent fields are left unchanged and 0 or empty restores the default. Validated with config.ValidateKnowledgePipeline before anything is applied, then persisted and audited as config_knowledge_pipeline. bead_synthesizer.enabled starts or stops the synthesizer at once; every other field applies after a restart. Requires owner role.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "bead_synthesizer": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "description": "Starts or stops the bead synthesizer at once"
+                      },
+                      "schedule": {
+                        "type": "string",
+                        "description": "hourly or daily; empty restores hourly. Requires restart."
+                      },
+                      "min_confidence": {
+                        "type": "number",
+                        "description": "0-1; 0 restores the default (0.5). Requires restart."
+                      },
+                      "target_layer": {
+                        "type": "string",
+                        "description": "personal, project, org or community; empty restores project. Requires restart."
+                      },
+                      "max_facts_per_cycle": {
+                        "type": "integer",
+                        "description": "0 restores the default (20). Requires restart."
+                      },
+                      "max_api_calls_per_cycle": {
+                        "type": "integer",
+                        "description": "0 restores the default (40). Requires restart."
+                      },
+                      "retention_policy": {
+                        "type": "object",
+                        "properties": {
+                          "max_beads": {
+                            "type": "integer",
+                            "description": "0 uses the lifecycle default (5000). Requires restart."
+                          },
+                          "archive_after_synth_days": {
+                            "type": "integer",
+                            "description": "0 uses the lifecycle default (7). Requires restart."
+                          },
+                          "high_priority_retain_days": {
+                            "type": "integer",
+                            "description": "0 uses the lifecycle default (30). Requires restart."
+                          },
+                          "preserve_with_deps": {
+                            "type": "boolean",
+                            "description": "Never archive a bead with open dependents. Requires restart."
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "curator": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "description": "Scheduled auto-promotion opt-in. Requires restart."
+                      },
+                      "schedule": {
+                        "type": "string",
+                        "description": "hourly or daily; empty uses daily once enabled. Requires restart."
+                      },
+                      "auto_promote_threshold": {
+                        "type": "number",
+                        "description": "0-1; 0 restores the default (0.9). Requires restart."
+                      },
+                      "promote_from": {
+                        "type": "string",
+                        "description": "Source layer; empty = project. Must differ from promote_to. Requires restart."
+                      },
+                      "promote_to": {
+                        "type": "string",
+                        "description": "Target layer; empty = org. Requires restart."
+                      }
+                    }
+                  },
+                  "code_maps": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "description": "Code map generation opt-in. Requires restart."
+                      },
+                      "schedule": {
+                        "type": "string",
+                        "description": "hourly or daily; empty = hourly. Requires restart."
+                      },
+                      "layer": {
+                        "type": "string",
+                        "description": "Layer recorded on each map; empty = project. Requires restart."
+                      },
+                      "max_bytes": {
+                        "type": "integer",
+                        "description": "Per-map size cap; 0 uses the generator default (16384). Requires restart."
+                      }
+                    }
+                  },
+                  "primer": {
+                    "type": "object",
+                    "properties": {
+                      "max_facts": {
+                        "type": "integer",
+                        "description": "0 restores the default (25). Requires restart."
+                      },
+                      "max_bytes": {
+                        "type": "integer",
+                        "description": "0 restores the default (4096). Requires restart."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated knowledge pipeline settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "engine": {
+                      "type": "string",
+                      "description": "Read-only: knowledge.engine"
+                    },
+                    "bead_synthesizer": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Starts or stops the bead synthesizer at once"
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty restores hourly. Requires restart."
+                        },
+                        "min_confidence": {
+                          "type": "number",
+                          "description": "0-1; 0 restores the default (0.5). Requires restart."
+                        },
+                        "target_layer": {
+                          "type": "string",
+                          "description": "personal, project, org or community; empty restores project. Requires restart."
+                        },
+                        "max_facts_per_cycle": {
+                          "type": "integer",
+                          "description": "0 restores the default (20). Requires restart."
+                        },
+                        "max_api_calls_per_cycle": {
+                          "type": "integer",
+                          "description": "0 restores the default (40). Requires restart."
+                        },
+                        "retention_policy": {
+                          "type": "object",
+                          "properties": {
+                            "max_beads": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (5000). Requires restart."
+                            },
+                            "archive_after_synth_days": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (7). Requires restart."
+                            },
+                            "high_priority_retain_days": {
+                              "type": "integer",
+                              "description": "0 uses the lifecycle default (30). Requires restart."
+                            },
+                            "preserve_with_deps": {
+                              "type": "boolean",
+                              "description": "Never archive a bead with open dependents. Requires restart."
+                            }
+                          }
+                        },
+                        "vault_path": {
+                          "type": "string",
+                          "description": "Read-only: the directory the synthesizer writes to"
+                        }
+                      }
+                    },
+                    "curator": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Scheduled auto-promotion opt-in. Requires restart."
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty uses daily once enabled. Requires restart."
+                        },
+                        "auto_promote_threshold": {
+                          "type": "number",
+                          "description": "0-1; 0 restores the default (0.9). Requires restart."
+                        },
+                        "promote_from": {
+                          "type": "string",
+                          "description": "Source layer; empty = project. Must differ from promote_to. Requires restart."
+                        },
+                        "promote_to": {
+                          "type": "string",
+                          "description": "Target layer; empty = org. Requires restart."
+                        }
+                      }
+                    },
+                    "code_maps": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Code map generation opt-in. Requires restart."
+                        },
+                        "schedule": {
+                          "type": "string",
+                          "description": "hourly or daily; empty = hourly. Requires restart."
+                        },
+                        "layer": {
+                          "type": "string",
+                          "description": "Layer recorded on each map; empty = project. Requires restart."
+                        },
+                        "max_bytes": {
+                          "type": "integer",
+                          "description": "Per-map size cap; 0 uses the generator default (16384). Requires restart."
+                        },
+                        "vault_path": {
+                          "type": "string",
+                          "description": "Read-only: the directory maps are written to; empty = /data/vaults/code-maps"
+                        }
+                      }
+                    },
+                    "primer": {
+                      "type": "object",
+                      "properties": {
+                        "max_facts": {
+                          "type": "integer",
+                          "description": "0 restores the default (25). Requires restart."
+                        },
+                        "max_bytes": {
+                          "type": "integer",
+                          "description": "0 restores the default (4096). Requires restart."
+                        },
+                        "merge_strategy": {
+                          "type": "string",
+                          "description": "Read-only: precedence is the only implemented strategy"
+                        }
+                      }
+                    },
+                    "schedules": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "layers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "defaults": {
+                      "type": "object",
+                      "description": "Defaults a cleared field restores"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schedule, layer, confidence or negative count"
+          },
+          "403": {
+            "description": "Requires owner role"
           }
         }
       }
@@ -18241,6 +18762,65 @@
           },
           "500": {
             "description": "Failed to save"
+          }
+        }
+      }
+    },
+    "/api/nous/campaign/start": {
+      "post": {
+        "tags": [
+          "Strategy Lab"
+        ],
+        "summary": "Start a new Nous experiment campaign",
+        "description": "Archives the active campaign (its baseline snapshot count, hypotheses and judged results are frozen read-only) and starts a new one whose baseline restarts at 0 / 672. The research question defaults to the active campaign's question. PUT /api/nous/config/goals with a materially different question does the same implicitly. Requires owner role.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "type": "string",
+                    "description": "Research question for the new campaign; empty keeps the active one."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "example": "started"
+                    },
+                    "campaign": {
+                      "type": "object",
+                      "description": "The new active campaign: id, question, status, startedAt, snapshots, target, percent, complete, experiments, principles."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "404": {
+            "description": "Nous not configured"
+          },
+          "409": {
+            "description": "Campaigns not enabled (no snapshot directory)"
           }
         }
       }
@@ -23804,6 +24384,10 @@
                     "max_reviews_per_head": {
                       "type": "integer",
                       "description": "Cap on top-level hive reviews per PR head before the relay refuses more (revisions and thread replies excepted). 0 derives: 1 with combined_perspectives, one per perspective otherwise; negative disables."
+                    },
+                    "shadow": {
+                      "type": "boolean",
+                      "description": "Evaluate the review-approval gate as require_approval would but never hold the PR; records shadow.review_gate.would_have_held on the evidence bundle (hivecommons/hive#12104)."
                     }
                   }
                 }
@@ -23858,6 +24442,11 @@
                     "type": "integer",
                     "nullable": true,
                     "description": "Cap on top-level hive reviews per PR head before the relay refuses more (revisions and thread replies excepted). 0 derives: 1 with combined_perspectives, one per perspective otherwise; negative disables."
+                  },
+                  "shadow": {
+                    "type": "boolean",
+                    "nullable": true,
+                    "description": "Evaluate the review-approval gate as require_approval would but never hold the PR; records shadow.review_gate.would_have_held on the evidence bundle (hivecommons/hive#12104)."
                   },
                   "severity": {
                     "type": "object",

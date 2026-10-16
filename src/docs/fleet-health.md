@@ -386,7 +386,9 @@ spoke, or a minimal upgrade beat) keeps the last stored profile.
 
 The hub Fleet table (`my-hives`) does not yet render this data: there is no
 Compliance column in the hub UI. The stored profile is exposed only through the
-API below.
+API below, and only to the hive owner and hub admins: the compliance summary is
+omitted from `/api/registry` entirely and from other members' rows in
+`/api/saas/my-hives`.
 
 `GET /api/hub/compliance` (hub admin only) exports the fleet-wide aggregate:
 spoke counts, per-framework spoke counts, total pass/fail with the overall
@@ -418,12 +420,108 @@ same store behind `GET /api/evidence/summary`):
   level (`AutoMerge.SelfAuthoredAutoMergeAllowed`).
 - `reviewer_families` / `author_families` — model families (`claude`, `gpt`,
   …) seen on verdicts and agent-authored PRs; unknown models are omitted.
+- Fleet-panel aggregates (#12370), each optional and omitted when the spoke
+  has nothing to report: `outcomes_by_author_kind` (`human`/`agent`/`bot` →
+  `{n, merged, reverted}` PRs, `reverted` ⊆ `merged`), `write_counters`
+  (intent tier → `{attempted, blocked}` agent writes seen by the proxy since it
+  started — not a 90-day window), and `shadow_gate` (`review_gate` / `intent`
+  → `{held, passed}`, each `{n, merged, reverted}`: what the shadow gate would
+  have done versus how the PR turned out). A spoke predating #12370 sends none
+  of them and the hub shows "not reported", never zero.
+- `windows` ([RFC #12062](https://github.com/hivecommons/hive/issues/12062)) —
+  the same counts (verdicts, false approves/blocks, merged, reverted,
+  calibration, author-kind outcomes, shadow gates) re-counted over trailing
+  windows keyed `24h`, `7d` and `30d`, so the hub evidence view can switch
+  between windows. The field names keep their `_90d` suffix for wire
+  compatibility; `write_counters` (lifetime) and `automerge_self_authored`
+  are not repeated. A spoke predating windows sends none and the hub lists it
+  as "not reported for this window" when a shorter window is selected.
+- `hive_state` — the spoke's 24 h / 7 d hive state trends
+  ([#12339](https://github.com/hivecommons/hive/issues/12339)): per window
+  (`24h`, `7d`) `samples`, `coverage_hours`, median/p90 `queue_issues`,
+  `queue_prs` and `queue_hold`, `sla_violation_rate`, `agent_idle_ratio`,
+  `kicks_per_day` and `tokens_per_day`. Omitted when the spoke has no snapshot
+  in the last 7 days. See
+  [Hive state time series](experiment-lab.md#hive-state-time-series).
 
 The hub clamps every count (subset counts never exceed their total), caps and
-de-duplicates the family lists, and stores the result with the other per-hive
+de-duplicates the family lists, bounds `hive_state` (ratios to `[0, 1]`,
+coverage to the window, p90 never below the median), and stores the result with the other per-hive
 quadrant inputs. A beat without the block (an older spoke, a minimal upgrade
 beat, or a spoke whose evidence directory was unreadable that cycle) keeps the
 last stored summary. Reporting only: nothing here gates a merge.
+
+## Fleet quadrant
+
+The **Fleet quadrant** card on the hub dashboard (and the kite in each hive's
+Quadrant column) scores every hive on four axes — Trust, Productivity,
+Satisfaction, Efficiency — from 0 to 100. The rules are deliberately simple so
+a reader can check any number by hand:
+
+- **Every criterion maps to 0–100 on a fixed, named curve.** Scores are
+  absolute, not ranks: a hive's Trust does not change because a different set
+  of hives is in view. The curves are the `curve*` constants in
+  `pkg/hub/quadrant_curve.go`; the table below is their documentation.
+- **An axis is the weighted mean of its *measured* criteria only.** A
+  criterion whose input the spoke has not reported (or whose sample is too
+  small to be honest) is listed as *not measured yet* with the reason, and is
+  left out of the average — it is never scored 0. An axis with no measured
+  criterion is unscored and draws collapsed to the centre of the kite with a
+  "—".
+- **The fleet card is the per-axis median across the hives in view**, with
+  `n` shown ("median of 61"). A median cannot be dragged by one runaway hive
+  the way the previous fleet mean could. Each hive's `delta` is against that
+  median.
+- **The ⓘ beside each axis label** opens the same explainer on the fleet card
+  and in the per-hive hover: *What this covers* (each criterion with its
+  current value, sub-score and weight, or its not-measured reason), *How it's
+  scored*, *What good looks like* and *What ours shows*. A one-line plain
+  summary of the weakest scored axis sits under the glyph.
+
+Weights: ×3 is the criterion the axis is named for, ×2 a major signal, ×1
+supporting. "Measured when" states the input and its minimum sample. Linear
+curves interpolate straight between worst and best; log curves interpolate on
+log₁₀ so an order of magnitude is worth the same anywhere on the scale. Values
+past either end clamp.
+
+| Axis | Criterion | Input | Curve (0 → 100) | Weight | Measured when |
+|---|---|---|---|---|---|
+| Trust | Reverted within 14 days | heartbeat `evidence.reverted_14d_90d / merged_90d` | linear 10% → 0% | ×2 | ≥10 merges with evidence |
+| Trust | Approved then fixed by a human | `evidence.false_approve_90d / verdicts_90d` | linear 10% → 0% | ×2 | ≥10 reviewer verdicts |
+| Trust | Autonomy level | ACMM level | linear L1 → L6 | ×2 | always |
+| Trust | Self-merge delegated | App may merge its own PRs | yes = 100, no = 0 | ×1 | setting reported |
+| Trust | Merge acceptance | merged / (merged + rejected) 90d | linear 50% → 100% | ×1 | ≥4 agent PRs reached a verdict |
+| Trust | Merges with evidence | `evidence.merged_90d / prs_merged_90d` | linear 0% → 100% | ×1 | PR counts and evidence reported |
+| Trust | Agent writes blocked at the boundary | Σ `evidence.write_counters` blocked / attempted | linear 20% → 0% | ×1 | ≥10 proxied writes |
+| Trust | Org repos enrolled | enrolled / org repo count | linear 0% → 100% | ×1 | *not yet* — spokes do not report the org count |
+| Productivity | Merges per active repo per week | Σ `repo_activity[].merges` / weeks / active repos; falls back to org-wide `prs_merged_90d` per enrolled repo | log 0.1 → 10 per week | ×3 | PR counts reported |
+| Productivity | Contributor-relay tasks (7d) | `tasks_completed_7d` | linear 0 → 20 | ×1 | relay reported |
+| Productivity | Contributors active | active / enrolled contributors | linear 0% → 100% | ×1 | contributors reported |
+| Productivity | Finds its own work | scanner-sourced vs human-filed | yes = 100, no = 0 | ×1 | always |
+| Productivity | Items waiting on a human | hold labels + plans awaiting review | linear 20 → 0 | ×1 | queues reported |
+| Productivity | Items past SLA | `sla_violations` | linear 10 → 0 | ×1 | SLA counts reported |
+| Productivity | Time to merge | median open → merge | log 14 days → 0.5 day | ×2 | *not yet* — spokes do not report it |
+| Efficiency | Tokens per merged PR | tokens/day × 90 / `prs_merged_90d` | log 20M → 100k | ×3 | ≥5 merges and a token trend |
+| Efficiency | Token burn rate | budget window or `hive_state.last_7d.tokens_per_day` | log 10M → 100k per day | ×1 | hive is shipping |
+| Efficiency | Agent PRs rejected | rejected / (merged + rejected) 90d | linear 50% → 0% | ×1 | ≥4 agent PRs reached a verdict |
+| Efficiency | Merged PRs per agent (90d) | `prs_merged_90d` / agents | linear 0 → 10 | ×1 | agents configured |
+| Efficiency | Agent time idle (7d) | `hive_state.last_7d.agent_idle_ratio` | linear 100% → 0% | ×1 | ≥6 hive-state samples |
+| Efficiency | Cost per merged PR | spoke `GET /api/launch-cost` | log $100 → $1 | ×2 | *not yet* — stays on the spoke, not in the heartbeat |
+| Satisfaction | Swarm blocks lifted by a human | `evidence.false_block_90d / verdicts_90d` | linear 10% → 0% | ×2 | ≥10 reviewer verdicts |
+| Satisfaction | SLA kept (7d) | 1 − `hive_state.last_7d.sla_violation_rate` | linear 0% → 100% | ×1 | ≥6 hive-state samples |
+| Satisfaction | Time to lift a hold | median hold → lift | log 7 days → 6 hours | ×1 | *not yet* — not reported |
+| Satisfaction | Contributors who come back | relay users who return | linear 0% → 100% | ×1 | *not yet* — not reported |
+| Satisfaction | Direct feedback on agent output | thumbs up share | linear 0% → 100% | ×2 | *not yet* — no feedback signal exists; a thumbs up/down on agent output would feed it |
+
+Why Satisfaction used to read "—" for the whole fleet: it had a single
+criterion (human-override rate) that needed ten verdicts *and* a five-hive
+percentile population, so a fleet where most spokes had not yet shipped the
+evidence heartbeat was declared "too small" everywhere. It is now scored for
+any hive that reports ten verdicts or six hive-state samples, and where it is
+still unscored the explainer says exactly which input is missing.
+
+The quadrant is reporting only: it reads the heartbeat evidence summary
+(read-only, see above) and never feeds a merge decision.
 
 ## Troubleshooting: symptom → hint → fix
 

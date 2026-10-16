@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/evidence"
+	"github.com/hivecommons/hive/pkg/evidence/complexity"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/review"
 )
@@ -29,12 +30,20 @@ var evidenceSummaryBuckets = []struct {
 // EvidenceSummary is the GET /api/evidence/summary response. It is read-only
 // reporting over stored evidence bundles; nothing here gates or alters a merge.
 type EvidenceSummary struct {
-	Hours      int    `json:"hours"`
-	AllTime    bool   `json:"all_time"`
+	Hours   int  `json:"hours"`
+	AllTime bool `json:"all_time"`
+	// From/To are set only for a custom range (?from=&to=); Hours is then the
+	// rounded-up span so existing readers keep working.
+	From       string `json:"from,omitempty"`
+	To         string `json:"to,omitempty"`
 	Repo       string `json:"repo,omitempty"`
 	AuthorKind string `json:"author_kind,omitempty"`
 	// N is the number of PRs (latest bundle per PR) in the window.
-	N                int                             `json:"n"`
+	N int `json:"n"`
+	// AvailableWindows is the PR count the same repo/author_kind filter
+	// would yield for each preset window ("24", "168", "720" hours and
+	// "all"), so a client can tell "not enough data" from "window too short".
+	AvailableWindows map[string]int                  `json:"available_windows"`
 	Outcomes         map[string]EvidenceOutcomes     `json:"outcomes_by_author_kind"`
 	Calibration      []EvidencePerspectiveCalib      `json:"reviewer_calibration"`
 	ReviewerModels   []EvidenceModelAccuracy         `json:"reviewer_accuracy_by_model"`
@@ -44,13 +53,123 @@ type EvidenceSummary struct {
 	// WriteCounters is the proxy's attempted-vs-blocked agent write totals per
 	// intent tier (#12069); omitted when the counter file is absent or unreadable.
 	WriteCounters map[string]EvidenceWriteCount `json:"write_counters,omitempty"`
-	Missing       EvidenceMissing               `json:"missing"`
+	// ClaimVsVerdict is panel 5 (#12365): per ISO week, agent-authored PRs
+	// whose author said "done" versus what CI and the swarm said.
+	ClaimVsVerdict []EvidenceClaimWeek `json:"claim_vs_verdict"`
+	// IntentCounters is the intent gate's evaluated-vs-would-block totals per
+	// tier (#12362), same shape as WriteCounters: Attempted is evaluations,
+	// Blocked is the subset BlocksMerge(true) would have withheld, whether or
+	// not intent.enforce was on. Omitted when the counter file is absent or
+	// unreadable. Record-only; it never feeds back into eligibility.
+	IntentCounters map[string]EvidenceWriteCount `json:"intent_counters,omitempty"`
+	// ComplexityByRepo is the latest evidenceComplexityMonths monthly
+	// complexity snapshots per managed repo (#12363), oldest first; omitted
+	// when no repo has a snapshot yet.
+	ComplexityByRepo []EvidenceComplexityRepo `json:"complexity_by_repo,omitempty"`
+	// WorkBalance is panel 6 (#12366): per ISO week, audited issues opened by
+	// actor kind against issues closed, over the same window and repo.
+	WorkBalance []EvidenceWorkBalanceWeek `json:"work_balance"`
+	Missing     EvidenceMissing           `json:"missing"`
+}
+
+// EvidenceClaimWeek is one ISO week of agent-authored PRs (latest bundle per
+// PR). Claimed counts every such PR: opening or marking it ready is the agent
+// saying "done". CINotGreen counts PRs with at least one captured check whose
+// conclusion is not success; CICaptured is that column's denominator, since a
+// record with no captured checks is disclosed under missing.records_empty_ci
+// and never counted as agreement. VerdictNotApprove counts PRs with any
+// perspective verdict other than approve; Both counts PRs in both columns.
+type EvidenceClaimWeek struct {
+	Week              string `json:"week"`
+	N                 int    `json:"n"`
+	Claimed           int    `json:"claimed"`
+	CICaptured        int    `json:"ci_captured"`
+	CINotGreen        int    `json:"ci_not_green"`
+	VerdictNotApprove int    `json:"verdict_not_approve"`
+	Both              int    `json:"both"`
+}
+
+// evidenceCINotGreen reports whether any captured check concluded with
+// something other than success. Empty CI is not disagreement; callers must
+// check len(b.CI.Checks) first.
+func evidenceCINotGreen(b *evidence.Bundle) bool {
+	for _, c := range b.CI.Checks {
+		if c.Conclusion != "success" {
+			return true
+		}
+	}
+	return false
+}
+
+// evidenceVerdictNotApprove reports whether any perspective verdict is
+// something other than approve. No verdicts is not disagreement.
+func evidenceVerdictNotApprove(b *evidence.Bundle) bool {
+	for _, v := range b.Verdicts {
+		if v.Verdict != string(review.VerdictApprove) {
+			return true
+		}
+	}
+	return false
+}
+
+// evidenceComplexityMonths caps how many monthly snapshots per repo the
+// summary carries; the full retention (complexity.RetainMonths) stays on disk.
+const evidenceComplexityMonths = 12
+
+// EvidenceComplexityRepo is one repo's monthly complexity series.
+type EvidenceComplexityRepo struct {
+	Repo   string                    `json:"repo"`
+	Months []EvidenceComplexityMonth `json:"months"`
+}
+
+// EvidenceComplexityMonth is one monthly snapshot without its hotspot list.
+type EvidenceComplexityMonth struct {
+	Month                  string         `json:"month"`
+	Ref                    string         `json:"ref,omitempty"`
+	CapturedAt             time.Time      `json:"captured_at"`
+	Files                  int            `json:"files"`
+	Functions              int            `json:"functions"`
+	MeanCyclomatic         float64        `json:"mean_cyclomatic"`
+	MedianCyclomatic       int            `json:"median_cyclomatic"`
+	P90Cyclomatic          int            `json:"p90_cyclomatic"`
+	MaxCyclomatic          int            `json:"max_cyclomatic"`
+	FunctionsOverThreshold int            `json:"functions_over_threshold"`
+	Threshold              int            `json:"threshold"`
+	StaticWarnings         int            `json:"static_warnings"`
+	StaticWarningsByTool   map[string]int `json:"static_warnings_by_tool,omitempty"`
+}
+
+// loadEvidenceComplexity reads the per-repo monthly series under root; any
+// failure yields nil (the summary omits the field rather than failing).
+func loadEvidenceComplexity(root string) []EvidenceComplexityRepo {
+	series, err := complexity.LoadSeries(root, evidenceComplexityMonths)
+	if err != nil || len(series) == 0 {
+		return nil
+	}
+	out := make([]EvidenceComplexityRepo, 0, len(series))
+	for _, rs := range series {
+		r := EvidenceComplexityRepo{Repo: rs.Repo, Months: make([]EvidenceComplexityMonth, 0, len(rs.Snapshots))}
+		for _, s := range rs.Snapshots {
+			r.Months = append(r.Months, EvidenceComplexityMonth{
+				Month: s.Month, Ref: s.Ref, CapturedAt: s.CapturedAt,
+				Files: s.Files, Functions: s.Functions,
+				MeanCyclomatic: s.MeanCyclo, MedianCyclomatic: s.MedianCyclo,
+				P90Cyclomatic: s.P90Cyclo, MaxCyclomatic: s.MaxCyclo,
+				FunctionsOverThreshold: s.OverThreshold, Threshold: s.Threshold,
+				StaticWarnings: s.Warnings, StaticWarningsByTool: s.WarningsByTool,
+			})
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // EvidenceWriteCount is one tier's attempted and proxy-blocked write counts.
+// BlockedByReason is keyed by the proxy's DenyReason* code (#12368).
 type EvidenceWriteCount struct {
-	Attempted int64 `json:"attempted"`
-	Blocked   int64 `json:"blocked"`
+	Attempted       int64            `json:"attempted"`
+	Blocked         int64            `json:"blocked"`
+	BlockedByReason map[string]int64 `json:"blocked_by_reason,omitempty"`
 }
 
 // loadEvidenceWriteCounters reads the durable counter file; any failure yields nil.
@@ -68,9 +187,10 @@ func loadEvidenceWriteCounters(path string) map[string]EvidenceWriteCount {
 	return f.Totals
 }
 
-// EvidenceOutcomes counts PRs for one author kind. Closed is always 0 today:
-// a v1 bundle records a merge but not a close-without-merge. RevertedWithin14d
-// is nil because revert tracking is not recorded in bundles.
+// EvidenceOutcomes counts PRs for one author kind. Closed counts PRs whose
+// backfilled record says closed without merge (hivecommons/hive#12371); a
+// live-only v1 bundle records a merge but not a close, so such PRs stay Open.
+// RevertedWithin14d is nil because revert tracking is not recorded in bundles.
 type EvidenceOutcomes struct {
 	N                 int  `json:"n"`
 	Merged            int  `json:"merged"`
@@ -119,10 +239,65 @@ type EvidenceSentinelWeek struct {
 	Hits int    `json:"hits"`
 }
 
-// EvidenceShadowGate stays zero until the shadow gate records bundles.
+// EvidenceShadowGate summarises shadow-mode gate observations (#12068). N is
+// the PRs whose latest bundle carries any shadow observation; WouldHaveHeld
+// (review gate) and WouldHaveBlocked (intent) count the PRs the gate would
+// have stopped. ReviewGate and Intent compare those PRs' recorded outcomes
+// with the PRs the gate would have let through.
 type EvidenceShadowGate struct {
-	N             int `json:"n"`
-	WouldHaveHeld int `json:"would_have_held"`
+	N                int                    `json:"n"`
+	WouldHaveHeld    int                    `json:"would_have_held"`
+	WouldHaveBlocked int                    `json:"would_have_blocked"`
+	ReviewGate       EvidenceShadowGateSide `json:"review_gate"`
+	Intent           EvidenceShadowGateSide `json:"intent"`
+}
+
+// EvidenceShadowGateSide is one shadow gate: N PRs evaluated, split into the
+// ones it would have stopped (Held) and the ones it would have passed.
+type EvidenceShadowGateSide struct {
+	N      int                   `json:"n"`
+	Held   EvidenceShadowOutcome `json:"held"`
+	Passed EvidenceShadowOutcome `json:"passed"`
+}
+
+// EvidenceShadowOutcome is how a set of PRs actually turned out. Reverted is
+// a subset of Merged (the bundle has reverted_by links). Closed comes from a
+// backfilled record of the same PR; a live-only v1 bundle does not record a
+// close-without-merge.
+type EvidenceShadowOutcome struct {
+	N        int `json:"n"`
+	Merged   int `json:"merged"`
+	Closed   int `json:"closed"`
+	Open     int `json:"open"`
+	Reverted int `json:"reverted"`
+}
+
+func (o *EvidenceShadowOutcome) add(b *evidencePR) {
+	o.N++
+	if b.Merge == nil {
+		if b.Closed {
+			o.Closed++
+		} else {
+			o.Open++
+		}
+		return
+	}
+	o.Merged++
+	if len(b.RevertedBy) > 0 {
+		o.Reverted++
+	}
+}
+
+func (s *EvidenceShadowGateSide) add(b *evidencePR, flag *bool) {
+	if flag == nil {
+		return
+	}
+	s.N++
+	if *flag {
+		s.Held.add(b)
+	} else {
+		s.Passed.add(b)
+	}
 }
 
 type EvidenceMissing struct {
@@ -130,22 +305,109 @@ type EvidenceMissing struct {
 	RecordsEmptyCI       int  `json:"records_empty_ci"`
 	RecordsUnreadable    int  `json:"records_unreadable"`
 	ReviewerAccuracy     bool `json:"reviewer_accuracy_unavailable"`
+	// IssuesHumanOpensUnobserved is always true today: the audit log only
+	// records hive-mediated issue writes, so issues humans or third-party bots
+	// open directly on GitHub never reach work_balance.
+	IssuesHumanOpensUnobserved bool `json:"issues_human_opens_unobserved"`
+	// ThrottleWindows is always true today: this hive reports no governor
+	// issue-creation throttle windows, so work_balance carries no shading.
+	ThrottleWindows bool `json:"throttle_windows_unavailable"`
 }
 
-// handleEvidenceSummary serves GET /api/evidence/summary?hours=&repo=&author_kind=.
-func (s *Server) handleEvidenceSummary(w http.ResponseWriter, r *http.Request) {
+// evidenceSummaryMaxRangeDays caps a custom ?from=&to= range. Backfilled
+// history (hivecommons/hive#12371) reaches back years, so the cap is three
+// years rather than one; the summary is a single pass over the bundles either
+// way.
+const evidenceSummaryMaxRangeDays = 3 * 366
+
+// evidenceWindow is the time slice a summary covers. A zero From with Hours
+// 0 means all time; a custom range sets both From and To.
+type evidenceWindow struct {
+	Hours  int
+	From   time.Time
+	To     time.Time
+	Custom bool
+}
+
+// parseEvidenceTime accepts RFC3339 or YYYY-MM-DD (UTC midnight).
+func parseEvidenceTime(raw string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), true
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// parseEvidenceWindow reads hours= or from=/to= from the query. A date-only
+// `to` is inclusive (end of that UTC day); a missing `to` means now.
+func parseEvidenceWindow(q map[string][]string, now time.Time) (evidenceWindow, error) {
+	get := func(k string) string {
+		if v := q[k]; len(v) > 0 {
+			return strings.TrimSpace(v[0])
+		}
+		return ""
+	}
+	fromRaw, toRaw := get("from"), get("to")
+	if fromRaw == "" && toRaw != "" {
+		return evidenceWindow{}, errors.New("to requires from")
+	}
+	if fromRaw != "" {
+		from, ok := parseEvidenceTime(fromRaw)
+		if !ok {
+			return evidenceWindow{}, errors.New("from must be RFC3339 or YYYY-MM-DD")
+		}
+		to := now
+		if toRaw != "" {
+			t, ok := parseEvidenceTime(toRaw)
+			if !ok {
+				return evidenceWindow{}, errors.New("to must be RFC3339 or YYYY-MM-DD")
+			}
+			if len(toRaw) == len("2006-01-02") {
+				t = t.Add(24 * time.Hour)
+			}
+			to = t
+		}
+		if to.Before(from) {
+			return evidenceWindow{}, errors.New("to must not be before from")
+		}
+		if to.Sub(from) > evidenceSummaryMaxRangeDays*24*time.Hour {
+			return evidenceWindow{}, fmt.Errorf("range must not exceed %d days", evidenceSummaryMaxRangeDays)
+		}
+		hours := int((to.Sub(from) + time.Hour - 1) / time.Hour)
+		if hours < 1 {
+			hours = 1
+		}
+		return evidenceWindow{Hours: hours, From: from, To: to, Custom: true}, nil
+	}
 	hours := prThroughputDefaultHours
-	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
+	if raw := get("hours"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 0 {
-			jsonError(w, "hours must be a non-negative integer (0 = all time)", http.StatusBadRequest)
-			return
+			return evidenceWindow{}, errors.New("hours must be a non-negative integer (0 = all time)")
 		}
 		hours = n
 	}
 	if hours > prThroughputMaxHours {
 		hours = prThroughputMaxHours
 	}
+	win := evidenceWindow{Hours: hours, To: now}
+	if hours > 0 {
+		win.From = now.Add(-time.Duration(hours) * time.Hour)
+	}
+	return win, nil
+}
+
+// handleEvidenceSummary serves GET /api/evidence/summary?hours=&from=&to=&repo=&author_kind=.
+func (s *Server) handleEvidenceSummary(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
+	win, werr := parseEvidenceWindow(r.URL.Query(), now)
+	if werr != nil {
+		jsonError(w, werr.Error(), http.StatusBadRequest)
+		return
+	}
+	hours := win.Hours
 	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
 	if repo != "" && !validPRThroughputRepo(repo) {
 		jsonError(w, "repo must be owner/name", http.StatusBadRequest)
@@ -159,15 +421,18 @@ func (s *Server) handleEvidenceSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
 	bundles, unreadable, err := loadEvidenceBundles(ghpkg.ReviewEvidenceRoot)
 	if err != nil {
 		jsonError(w, "review evidence unreadable: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	resp := buildEvidenceSummary(bundles, now, hours, repo, kind)
+	resp := buildEvidenceSummaryWindow(bundles, win, repo, kind)
+	resp.AvailableWindows = evidenceAvailableWindows(bundles, now, repo, kind)
 	resp.Missing.RecordsUnreadable = unreadable
 	resp.WriteCounters = loadEvidenceWriteCounters(writeCountersPath)
+	resp.IntentCounters = loadEvidenceWriteCounters(intentCountersPath)
+	resp.ComplexityByRepo = loadEvidenceComplexity(ghpkg.ReviewEvidenceRoot)
+	resp.WorkBalance = buildEvidenceWorkBalance(evidenceWorkBalanceEntries(s.audit), win, repo)
 
 	days := (hours + 23) / 24
 	if days < 1 || days > reviewerAccuracyMaxWindowDays {
@@ -202,7 +467,15 @@ func loadEvidenceBundles(root string) ([]*evidence.Bundle, int, error) {
 			}
 			return err
 		}
-		if d.IsDir() || filepath.Ext(path) != ".json" {
+		if d.IsDir() {
+			// Monthly complexity snapshots (#12363) share the root but are
+			// not review bundles.
+			if d.Name() == complexity.DirName && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".json" {
 			return nil
 		}
 		b, lerr := ghpkg.LoadReviewEvidence(path)
@@ -216,25 +489,40 @@ func loadEvidenceBundles(root string) ([]*evidence.Bundle, int, error) {
 	return out, unreadable, err
 }
 
-// buildEvidenceSummary aggregates the newest bundle per PR whose creation
-// falls in the window. hours==0 means all time.
-func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, repo, kind string) EvidenceSummary {
-	resp := EvidenceSummary{
-		Hours: hours, AllTime: hours == 0, Repo: repo, AuthorKind: kind,
-		Outcomes:        map[string]EvidenceOutcomes{},
-		Calibration:     []EvidencePerspectiveCalib{},
-		ReviewerModels:  []EvidenceModelAccuracy{},
-		SentinelPerWeek: EvidenceSentinelSeries{Weeks: []EvidenceSentinelWeek{}},
-	}
-	for _, k := range []string{evidence.AuthorHuman, evidence.AuthorAgent, evidence.AuthorBot} {
-		resp.Outcomes[k] = EvidenceOutcomes{}
-	}
-	cutoff := time.Time{}
-	if hours > 0 {
-		cutoff = now.Add(-time.Duration(hours) * time.Hour)
-	}
+// evidencePR is one PR's bundles folded into a single view. Bundle is the
+// newest record (verdicts, CI, sentinel, shadow); OpenedAt, Merge, RevertedBy
+// and Closed come from whichever record of the same PR knows them. A live
+// bundle is created when review starts and only gains a merge event when the
+// hive itself merges, while a backfilled bundle (hivecommons/hive#12371) is
+// stamped with the PR's open time and its forge outcome; folding the two
+// keeps the verdicts and the outcome together, and windows select on PR
+// open time rather than on when any record happened to be written.
+type evidencePR struct {
+	*evidence.Bundle
+	OpenedAt   time.Time
+	Merge      *evidence.MergeEvent
+	RevertedBy []string
+	Closed     bool
+}
 
-	latest := map[string]*evidence.Bundle{}
+// evidenceBundleClosed reports whether a bundle records a close without merge.
+func evidenceBundleClosed(b *evidence.Bundle) bool {
+	return b.Merge == nil && b.Backfill != nil && b.Backfill.State == evidence.BackfillStateClosed
+}
+
+// evidenceBundleOpenedAt is the PR open time a bundle knows: merge.opened_at
+// when captured, else the record's created_at (a backfilled record's
+// created_at is the PR's open time; a live record's is when review started).
+func evidenceBundleOpenedAt(b *evidence.Bundle) time.Time {
+	if b.Merge != nil && !b.Merge.OpenedAt.IsZero() && b.Merge.OpenedAt.Before(b.CreatedAt) {
+		return b.Merge.OpenedAt
+	}
+	return b.CreatedAt
+}
+
+// evidenceFoldPRs groups bundles by PR after the repo/author_kind filter.
+func evidenceFoldPRs(bundles []*evidence.Bundle, repo, kind string) map[string]*evidencePR {
+	prs := map[string]*evidencePR{}
 	for _, b := range bundles {
 		if repo != "" && !strings.EqualFold(b.Repo, repo) {
 			continue
@@ -242,14 +530,121 @@ func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, 
 		if kind != "" && b.Author.Kind != kind {
 			continue
 		}
-		if hours > 0 && b.CreatedAt.Before(cutoff) {
-			continue
-		}
 		key := strings.ToLower(b.Repo) + "#" + strconv.Itoa(b.Number)
-		if cur, ok := latest[key]; !ok || b.CreatedAt.After(cur.CreatedAt) {
-			latest[key] = b
+		opened := evidenceBundleOpenedAt(b)
+		p := prs[key]
+		if p == nil {
+			p = &evidencePR{Bundle: b, OpenedAt: opened}
+			prs[key] = p
+		} else {
+			if b.CreatedAt.After(p.CreatedAt) || (b.CreatedAt.Equal(p.CreatedAt) && b.UpdatedAt.After(p.UpdatedAt)) {
+				p.Bundle = b
+			}
+			if opened.Before(p.OpenedAt) {
+				p.OpenedAt = opened
+			}
+		}
+		if b.Merge != nil && (p.Merge == nil || b.Merge.At.After(p.Merge.At)) {
+			p.Merge = b.Merge
+		}
+		if len(b.RevertedBy) > len(p.RevertedBy) {
+			p.RevertedBy = b.RevertedBy
+		}
+		if evidenceBundleClosed(b) {
+			p.Closed = true
 		}
 	}
+	for _, p := range prs {
+		if p.Merge != nil {
+			p.Closed = false
+		}
+	}
+	return prs
+}
+
+// evidenceWindowHas reports whether a PR opened inside the window.
+func evidenceWindowHas(win evidenceWindow, opened time.Time) bool {
+	bounded := win.Custom || win.Hours > 0
+	if bounded && opened.Before(win.From) {
+		return false
+	}
+	if win.Custom && !opened.Before(win.To) {
+		return false
+	}
+	return true
+}
+
+// evidenceLatestPerPR folds bundles per PR and keeps the PRs opened in win.
+func evidenceLatestPerPR(bundles []*evidence.Bundle, win evidenceWindow, repo, kind string) map[string]*evidencePR {
+	prs := evidenceFoldPRs(bundles, repo, kind)
+	for k, p := range prs {
+		if !evidenceWindowHas(win, p.OpenedAt) {
+			delete(prs, k)
+		}
+	}
+	return prs
+}
+
+// evidenceAvailableWindowHours are the preset windows reported in
+// available_windows; 0 is all time and is keyed "all".
+var evidenceAvailableWindowHours = []int{24, 168, 720, 0}
+
+// evidenceAvailableWindows counts PRs per preset window under the same
+// repo/author_kind filter, so the card can say "window too short" instead
+// of "not enough data" when a longer window would have samples.
+func evidenceAvailableWindows(bundles []*evidence.Bundle, now time.Time, repo, kind string) map[string]int {
+	prs := evidenceFoldPRs(bundles, repo, kind)
+	out := make(map[string]int, len(evidenceAvailableWindowHours))
+	for _, h := range evidenceAvailableWindowHours {
+		key := "all"
+		win := evidenceWindow{Hours: h, To: now}
+		if h > 0 {
+			key = strconv.Itoa(h)
+			win.From = now.Add(-time.Duration(h) * time.Hour)
+		}
+		n := 0
+		for _, p := range prs {
+			if evidenceWindowHas(win, p.OpenedAt) {
+				n++
+			}
+		}
+		out[key] = n
+	}
+	return out
+}
+
+// buildEvidenceSummary aggregates the newest bundle per PR whose open time
+// falls in the trailing window. hours==0 means all time.
+func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, repo, kind string) EvidenceSummary {
+	win := evidenceWindow{Hours: hours, To: now}
+	if hours > 0 {
+		win.From = now.Add(-time.Duration(hours) * time.Hour)
+	}
+	return buildEvidenceSummaryWindow(bundles, win, repo, kind)
+}
+
+// buildEvidenceSummaryWindow is buildEvidenceSummary over an explicit window;
+// a custom range keeps PRs opened in [From, To).
+func buildEvidenceSummaryWindow(bundles []*evidence.Bundle, win evidenceWindow, repo, kind string) EvidenceSummary {
+	hours := win.Hours
+	resp := EvidenceSummary{
+		Hours: hours, AllTime: hours == 0 && !win.Custom, Repo: repo, AuthorKind: kind,
+		Outcomes:        map[string]EvidenceOutcomes{},
+		Calibration:     []EvidencePerspectiveCalib{},
+		ReviewerModels:  []EvidenceModelAccuracy{},
+		SentinelPerWeek: EvidenceSentinelSeries{Weeks: []EvidenceSentinelWeek{}},
+		ClaimVsVerdict:  []EvidenceClaimWeek{},
+		WorkBalance:     []EvidenceWorkBalanceWeek{},
+		Missing:         EvidenceMissing{IssuesHumanOpensUnobserved: true, ThrottleWindows: true},
+	}
+	for _, k := range []string{evidence.AuthorHuman, evidence.AuthorAgent, evidence.AuthorBot} {
+		resp.Outcomes[k] = EvidenceOutcomes{}
+	}
+	if win.Custom {
+		resp.From = win.From.Format(time.RFC3339)
+		resp.To = win.To.Format(time.RFC3339)
+	}
+	latest := evidenceLatestPerPR(bundles, win, repo, kind)
 	keys := make([]string, 0, len(latest))
 	for k := range latest {
 		keys = append(keys, k)
@@ -263,6 +658,7 @@ func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, 
 	calibs := map[string]*calib{}
 	models := map[string]*EvidenceModelAccuracy{}
 	weeks := map[string]int{}
+	claims := map[string]*EvidenceClaimWeek{}
 
 	for _, key := range keys {
 		b := latest[key]
@@ -270,18 +666,62 @@ func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, 
 		o := resp.Outcomes[b.Author.Kind]
 		o.N++
 		merged := b.Merge != nil
-		if merged {
+		switch {
+		case merged:
 			o.Merged++
-		} else {
+		case b.Closed:
+			o.Closed++
+		default:
 			o.Open++
 		}
 		resp.Outcomes[b.Author.Kind] = o
 		if len(b.CI.Checks) == 0 {
 			resp.Missing.RecordsEmptyCI++
 		}
+		if b.Author.Kind == evidence.AuthorAgent {
+			y, w := b.OpenedAt.UTC().ISOWeek()
+			wk := fmt.Sprintf("%04d-W%02d", y, w)
+			c := claims[wk]
+			if c == nil {
+				c = &EvidenceClaimWeek{Week: wk}
+				claims[wk] = c
+			}
+			c.N++
+			c.Claimed++
+			ciBad := false
+			if len(b.CI.Checks) > 0 {
+				c.CICaptured++
+				ciBad = evidenceCINotGreen(b.Bundle)
+			}
+			swarmBad := evidenceVerdictNotApprove(b.Bundle)
+			if ciBad {
+				c.CINotGreen++
+			}
+			if swarmBad {
+				c.VerdictNotApprove++
+			}
+			if ciBad && swarmBad {
+				c.Both++
+			}
+		}
+
+		if sh := b.Shadow; sh != nil {
+			var held, blocked *bool
+			if sh.ReviewGate != nil {
+				held = sh.ReviewGate.WouldHaveHeld
+			}
+			if sh.Intent != nil {
+				blocked = sh.Intent.WouldHaveBlocked
+			}
+			if held != nil || blocked != nil {
+				resp.ShadowGate.N++
+			}
+			resp.ShadowGate.ReviewGate.add(b, held)
+			resp.ShadowGate.Intent.add(b, blocked)
+		}
 
 		for range b.Sentinel {
-			y, w := b.CreatedAt.UTC().ISOWeek()
+			y, w := b.OpenedAt.UTC().ISOWeek()
 			weeks[fmt.Sprintf("%04d-W%02d", y, w)]++
 			resp.SentinelPerWeek.N++
 		}
@@ -369,5 +809,15 @@ func buildEvidenceSummary(bundles []*evidence.Bundle, now time.Time, hours int, 
 	for _, w := range wk {
 		resp.SentinelPerWeek.Weeks = append(resp.SentinelPerWeek.Weeks, EvidenceSentinelWeek{Week: w, Hits: weeks[w]})
 	}
+	cw := make([]string, 0, len(claims))
+	for w := range claims {
+		cw = append(cw, w)
+	}
+	sort.Strings(cw)
+	for _, w := range cw {
+		resp.ClaimVsVerdict = append(resp.ClaimVsVerdict, *claims[w])
+	}
+	resp.ShadowGate.WouldHaveHeld = resp.ShadowGate.ReviewGate.Held.N
+	resp.ShadowGate.WouldHaveBlocked = resp.ShadowGate.Intent.Held.N
 	return resp
 }

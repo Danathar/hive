@@ -78,7 +78,11 @@ func ValidateReviewModelsFallback(v string) bool {
 // review-verdicts.json aggregate approval unless an operator opts in.
 type ReviewConfig struct {
 	RequireApproval bool `yaml:"require_approval,omitempty" json:"require_approval,omitempty"`
-	FanOut          bool `yaml:"fan_out,omitempty" json:"fan_out,omitempty"`
+	// Shadow evaluates the approval gate without enforcing it, recording
+	// shadow.review_gate.would_have_held on the evidence bundle. It never
+	// blocks a merge and never weakens an enabled require_approval.
+	Shadow bool `yaml:"shadow,omitempty" json:"shadow,omitempty"`
+	FanOut bool `yaml:"fan_out,omitempty" json:"fan_out,omitempty"`
 	// EventDriven lets pull_request webhooks trigger review dispatches when
 	// the review swarm is otherwise enabled. Nil keeps the safe derived default.
 	EventDriven *bool `yaml:"event_driven,omitempty" json:"event_driven,omitempty"`

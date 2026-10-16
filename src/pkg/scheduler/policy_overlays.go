@@ -206,9 +206,11 @@ func (s *Scheduler) addRedPRFixFirst(agentName string, message string) string {
 const heldRedPRNote = "held for human review — fix CI, do not remove the hold"
 
 // heldRedPRExemptAgent is the one agent whose held PRs are NOT routed back
-// for repair: the level-hold comment tells humans that outreach PRs are
-// always held for their review, so an outreach PR must not be edited after a
-// human may have started reading it.
+// for repair: the level-hold comment tells humans that cross-repo outreach
+// PRs are held for their review, so a held outreach PR must not be edited
+// after a human may have started reading it. A same-repo outreach PR carries
+// no outreach hold (hivecommons/hive, operator decision 2026-10-16) and so is
+// routed for repair like any other lane's red PR.
 const heldRedPRExemptAgent = "outreach"
 
 // formatRedPRFixData renders the fix-before-new section for one agent from

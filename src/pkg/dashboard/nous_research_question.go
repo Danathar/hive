@@ -25,7 +25,7 @@ func (ns *NousState) researchQuestionLocked() string {
 	if goals == nil {
 		return ""
 	}
-	return firstGoalString(goals, nousRepoGoalKeys)
+	return normalizeNousResearchQuestion(firstGoalString(goals, nousRepoGoalKeys))
 }
 
 func firstGoalString(goals map[string]interface{}, keys []string) string {

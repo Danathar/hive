@@ -475,8 +475,9 @@ func TestStaticNoStrategyLabCopy(t *testing.T) {
 // the Experiment Lab header no longer renders the "OBSERVING · GOVERNOR"
 // mode×scope pill left over from the first Nous integration (#330/#338). In
 // its place the header carries the research question for the active scope
-// (status.researchQuestion), escaped via textContent and truncated with the
-// full text in a tooltip, and renders nothing at all when none is set.
+// (status.researchQuestion), escaped via textContent, wrapping to the header
+// width instead of clipping (#12498), and renders nothing at all when none is
+// set.
 func TestStaticExperimentLabHeaderShowsResearchQuestionNotModePill(t *testing.T) {
 	body, err := os.ReadFile("../static/index.html")
 	if err != nil {
@@ -495,14 +496,13 @@ func TestStaticExperimentLabHeaderShowsResearchQuestionNotModePill(t *testing.T)
 	}
 	for _, want := range []string{
 		`🧪 Experiment Lab (nous) <span id="nous-research-question" class="nous-research-question" hidden></span></h2>`,
-		`#review-pipeline-count, #nous-research-question, #kb-status-badge`,
-		`function renderNousResearchQuestion(value)`,
-		`renderNousResearchQuestion(s.status === 'not_configured' ? '' : s.researchQuestion);`,
-		`el.hidden = true;`,
-		`el.textContent = q.length > NOUS_RESEARCH_QUESTION_MAX_CHARS`,
-		`el.setAttribute('title', 'Research question: ' + q);`,
-		`const nous = document.getElementById('nous-research-question');`,
-		`.nous-research-question[hidden] { display: none !important; }`,
+		`querySelectorAll('#nous-research-question')`,
+		`function nousResearchQuestionText(raw)`,
+		`const rq = nousResearchQuestionText(s.researchQuestion);`,
+		`const rqEl = document.getElementById('nous-research-question');`,
+		`rqEl.title = text;`,
+		`rqEl.hidden = !text;`,
+		`.nous-research-question[hidden] { display: none; }`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("static dashboard missing Experiment Lab research-question header wiring %q", want)

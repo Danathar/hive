@@ -35,8 +35,15 @@ func TestDashboardInternalImportCountRatchet(t *testing.T) {
 	// the /api/logs read path that shares the admin MCP log-read engine
 	// (hivecommons/hive#11942), plus pkg/evidence for the schema-v1 bundle types
 	// behind the read-only GET /api/evidence/summary aggregate
-	// (hivecommons/hive#12063).
-	const maxDashboardInternalImports = 56
+	// (hivecommons/hive#12063), plus pkg/hivestate for the state-snapshot time
+	// series behind the nous self-report and fleet report (hivecommons/hive#12339),
+	// plus pkg/fixqueue for the per-contributor red-PR fix budget the contribute
+	// hub schedules stage-072 fix-pr interrupts through (hivecommons/hive#12436),
+	// plus pkg/stagelabels so the Operations fleet payload can derive
+	// new-vs-rework from the persisted stage-label store (hivecommons/hive#12502),
+	// plus pkg/nous for the per-campaign experiment store that scopes the
+	// Experiment Lab baseline to the active research question (hivecommons/hive#12501).
+	const maxDashboardInternalImports = 60
 
 	entries, err := os.ReadDir(".")
 	if err != nil {

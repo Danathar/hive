@@ -343,6 +343,10 @@ type RegistryEntry struct {
 	// self-upgrade while agent kicks drain. Until it passes the upgrade is
 	// waiting, not stuck. Zero when the spoke is not draining.
 	UpgradeDrainUntil time.Time `json:"upgradeDrainUntil,omitempty"`
+	// SpokeReportedUpgrading is the spoke's own latest heartbeat
+	// payload.Upgrading, unlike Upgrading above, which is also the hub's
+	// durable latch. In-memory only.
+	SpokeReportedUpgrading bool `json:"-"`
 	// UpgradeFailed records that the spoke reported an upgrade it could not
 	// complete, with the cause. Distinct from Upgrading: "failed" is a terminal
 	// state a human must see, not an in-flight one.
@@ -1686,6 +1690,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	s.mux.HandleFunc("GET /api/fleet-stats", s.handleFleetStats)
 	s.mux.HandleFunc("GET "+complianceRollupPath, s.requireAdmin(s.handleComplianceRollup))
 	s.mux.HandleFunc("GET "+evidencePath, s.requireAdmin(s.handleEvidence))
+	s.mux.HandleFunc("GET "+evidenceReportPath, s.requireAdmin(s.handleEvidenceReport))
 	s.mux.HandleFunc("GET /api/gh-rate-limits", s.requireAdmin(s.handleGHRateLimits))
 	s.mux.HandleFunc("GET /api/hub/version", s.handleHubVersion)
 	// Delegation-chain verification material (JWKS-equivalent). Registered
@@ -2252,6 +2257,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		entry.ClusterName = c.Name
 	}
 
+	entry.SpokeReportedUpgrading = payload.Upgrading
 	if payload.Upgrading {
 		entry.Upgrading = true
 	}
@@ -3572,6 +3578,11 @@ func (s *HubServer) handleRegistry(w http.ResponseWriter, r *http.Request) {
 		if h.HiveType != "hosted" && !h.Online && hostedNames[h.Name] {
 			continue
 		}
+		// The compliance profile is admin-only (#11083, #12264): the rollup
+		// view is behind requireAdmin and the per-hive row is gated in my-hives,
+		// so it must not ride the unauthenticated public registry. h is a copy,
+		// so the stored entry (and what saveRegistryNow persists) is untouched.
+		h.Compliance = nil
 		filtered.Hives = append(filtered.Hives, h)
 	}
 	// #5691: repo-ownership overlaps, derived from the repo lists already in the
@@ -5045,11 +5056,11 @@ const maxFleetCount = 10_000_000
 const maxRunWaitSeconds int64 = 365 * 24 * 60 * 60
 
 // maxQuadrantSpend bounds a hive's reported per-window token spend for the same
-// reason maxFleetCount bounds counts, but the stakes differ: quadrant scores are
-// fleet-RELATIVE percentiles, so one absurd value does not merely look wrong on
-// its own row — it stretches the distribution and pushes every honest hive
-// toward the same end of the axis. A trillion tokens in one budget window is
-// orders of magnitude beyond any real usage.
+// reason maxFleetCount bounds counts: quadrant criteria map it onto fixed
+// curves and the fleet view takes a median, so one absurd value cannot flatten
+// other hives, but it would still render as a nonsense row and feed the
+// per-hive Delta. A trillion tokens in one budget window is orders of magnitude
+// beyond any real usage.
 const maxQuadrantSpend int64 = 1_000_000_000_000
 
 // clampFleetCount validates a spoke-reported fleet count pointer. nil stays nil
@@ -5100,7 +5111,7 @@ func sanitizeRunsSummary(in *RunsSummary) *RunsSummary {
 //
 // The upper bound is deliberately generous — this is a token count over a
 // budget window, not a small tally — but it exists so a corrupt payload cannot
-// dominate a fleet-relative percentile and flatten every other hive's score.
+// render as an absurd efficiency reading or skew the fleet median.
 func clampQuadrantSpend(v *int64) *int64 {
 	if v == nil || *v < 0 {
 		return nil

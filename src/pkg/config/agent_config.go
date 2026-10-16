@@ -276,6 +276,7 @@ type AgentConfig struct {
 	StaleTimeout int `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
 	// BusyNoActivityThreshold is how long a Working pane may go without any visible activity
 	// before dashboards surface it as possibly stuck. Zero uses DefaultBusyNoActivityThreshold.
+	// A pane that stays in that condition for twice the threshold is restarted.
 	BusyNoActivityThreshold time.Duration `yaml:"busy_no_activity_threshold,omitempty" json:"busy_no_activity_threshold,omitempty"`
 	// MaxTurnDuration is an optional visibility-only ceiling for a Working turn.
 	MaxTurnDuration time.Duration `yaml:"max_turn_duration,omitempty" json:"max_turn_duration,omitempty"`

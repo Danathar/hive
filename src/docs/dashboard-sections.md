@@ -440,11 +440,11 @@ An experimental planner that tries out code changes in your repositories and rec
 
 **What it tells you.** The Experiment Lab (formerly the Strategy Lab) runs small experiments on your repositories' code (tests, CI config, automation scripts). It shows its goal, its plan and a ledger of results. The header shows the research question you set in the gear dialog, if there is one; otherwise nothing appears beside the title. Mode (Observe, Suggest, Evolve) is shown by the buttons inside the card, not in the header. The lab is repo-only: there is no scope selector.
 
-**How the numbers are worked out.** The ledger lists each experiment and its result. The section has no other numbers.
+**How the numbers are worked out.** The ledger lists each experiment and its result. The **Baseline snapshots** tile and the **Data Collection** bar count the hive-state snapshots recorded since the current research question was set, out of a target of 672. Each research question is its own experiment: entering a new question (or choosing **Start a new experiment** in the configuration dialog, after a confirmation) starts the count again at 0 / 672, moves the previous question to **Previous experiments** with its results, and keeps the full history visible as the muted line *Observation history: N snapshots since <date>*.
 
 **What it is good for.** Try it only if you want Hive to propose code changes on its own. You approve or stop each experiment.
 
-**Example.** The lab proposes splitting a slow test package across two CI jobs. You approve it, and the ledger records the result.
+**Example.** The lab proposes splitting a slow test package across two CI jobs. You approve it, and the ledger records the result. Later you enter a different research question; the tile reads 0 / 672 again, the earlier question is listed under Previous experiments, and the observation history still shows every snapshot the hive has recorded.
 
 **When it appears.** Only when the Experiment Lab setting is on and the autonomy level is L3 or above. The autonomy level is how much Hive may do on its own, from L1 to L6. Turning the setting on adds the **Experiment Lab (nous)** sidebar entry and section on the next status refresh, without a page reload (#12076); the toggle's helper text names the L3 requirement. The parenthetical is the codename of the planner behind it, the same way the Inception entry reads "Inception (spektacular)".
 
@@ -638,15 +638,15 @@ One line per worker showing what it is doing now, how long since it last acted, 
 
 ## FAQ
 
-Short answers to the questions people most often ask when they start using Hive.
+Short answers to the questions people ask once a hive is running, each linking to the guide that explains it fully.
 
-**What it tells you.** It answers common questions about levels, advice, contributors, cost and where to get help.
+**What it tells you.** It answers common questions about levels and `hold` labels, the Evidence card, release channels and upgrades, the Model Gateway, pausing, cost, the audit log and where to get help. Every question is a collapsible row; a filter box at the top hides rows that do not match what you type.
 
-**How the numbers are worked out.** This section has no numbers.
+**How the numbers are worked out.** This section has no numbers. The collapsed summary counts the questions.
 
-**What it is good for.** Read it in your first week. Each answer links to a fuller guide.
+**What it is good for.** Read it when something on the dashboard surprises you. Each answer links to a fuller guide, and the footer says where to ask when the answer is missing.
 
-**Example.** You wonder why Hive does not merge anything. The FAQ explains that merging starts at a higher level.
+**Example.** You wonder why Hive does not merge anything. The FAQ explains that merging starts at a higher level and that a `hold` label keeps a pull request out of every merge lane.
 
 **When it appears.** Always, at every level.
 

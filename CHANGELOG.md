@@ -11,6 +11,28 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-16 (v5.178.0)
+
+### Added
+
+- The dashboard Throughput section gains an Evidence sub-panel with reviewer calibration (merge and block rate by confidence bucket per perspective) and reviewer accuracy by model family (false-approve/false-block split by author kind), read from `GET /api/evidence/summary` and following the Throughput window and repo selector (#12064).
+- Added a recovery runbook for agent backend-auth failures (`src/docs/backend-auth-recovery-runbook.md`) covering detection, per-status remedies and verification.
+- Expose the knowledge pipeline settings in the dashboard Settings dialog: a new Knowledge pipeline block on the Knowledge tab edits the bead synthesizer (on/off applies at once; schedule, target layer, minimum confidence, per-cycle fact and GitHub API caps, bead retention), scheduled curator promotion, repository code maps and the kick primer caps through the owner-only `PUT /api/config/knowledge/pipeline`, shows the engine, vault paths and primer merge strategy read-only, and labels the public read-only MCP switch with its YAML key (#11854).
+
+### Changed
+
+- The hub's owner-only `GET /api/hub/evidence` drill-down now also reports revert rate by ACMM level, same- vs cross-family reviewer false-approve rates, and per-hive evidence record coverage, each with `n` and a Wilson interval (null below 10 samples).
+
+### Fixed
+
+- Fixed the hub advancing and re-arming a new upgrade target for an auto-upgrade hive whose upgrade was merely slow (#12142): stale-upgrade recovery now leaves the target alone while the spoke's latest heartbeat still reports `Upgrading`, so a slow rollout no longer triggers extra rolls on top of the load that slowed it. Stuck-upgrade alerting is unchanged.
+
+## 2026-10-16 (v5.177.5)
+
+### Security
+
+- Go builder images (`src/Dockerfile`, `src/Dockerfile.contributor`, `src/Dockerfile.hub`) now pin the `golang:1.27-alpine` index digest that resolves to Go 1.27.2, picking up the 1.27.2 standard-library fixes in `net/http`, `net/http/internal/http2`, `net/http/httputil`, `net/textproto`, `crypto/tls` and `html/template` that `govulncheck` reported as reachable from the dashboard, proxy, hub and spoke heartbeat ([#12301](https://github.com/hivecommons/hive/issues/12301)).
+
 ## 2026-10-16 (v5.177.4)
 
 ### Changed

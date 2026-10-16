@@ -25,6 +25,7 @@ sequenceDiagram
 - The **work queue** is built from the hive's monitored repos: open candidate issues that pass every contributor admission gate (including disabled repositories, holds, cooldowns, in-flight work, dependencies, assignments, and the admin's title/author/label filters). `GET /api/contribute/status` reports that offerable total as `actionable_items`; its additive `candidate_items` field is the raw pre-admission scanner population. `GET /api/contribute/queue` returns the bounded ordered rows plus the uncapped offerable `queue_total` and separately visible `held_total`.
 - The **relay** authenticates with a registration token, receives one task at a time, drives the local CLI inside a tmux session, injects a short-lived GitHub token for the PR, and reports the result. It heartbeats every 30 s and reconnects with exponential backoff; a task is abandoned if the relay observes no forward progress for 30 minutes, or if it crosses an absolute 4-hour backstop. The GitHub token is valid for 55 minutes and is re-minted by the hub before it expires, so a task may outlive any single token ([below](#the-github-token-outlives-the-task-because-the-hub-re-mints-it)).
 - Every contributor has a **trust tier** with per-tier rate limits. See [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md).
+- Hives **advertise a few open issues** to newcomers: issues that score as small and well-specified get GitHub's `good first issue` + `help wanted` labels and a welcome comment that deep-links this page for that issue (`/contribute?issue=<owner>/<repo>%23<n>`) with the claim → DCO-signed PR → `Fixes #n` steps. The label is not a reservation — if a hive agent starts the issue first the label comes off — so claim first. See [Hive-curated good first issues](good-first-issue.md).
 
 ### What your agent can see
 
@@ -1122,6 +1123,51 @@ The prompt also says, in the same breath, that **opening the PR *is* finishing**
 ### When the agent prints both verdict lines
 
 The prompt forbids printing `no_work_needed` *and* `complete` for one task, but a model that narrates a closing "complete" after its real verdict keeps doing it. The scanner reads newest-first, so the narrated `complete` won; with no PR behind it the hub's ledger degraded that to a bare `idle`, while the informative verdict — blocked on a maintainer decision, with the reason — sat one line above ([#7861](https://github.com/hivecommons/hive/issues/7861)). `detectCompletionVerdict()` now keeps the `no_work_needed` when a `complete` follows it *within the same task* (both newer than the [#5650](https://github.com/hivecommons/hive/issues/5650) delivery baseline; a `no_work_needed` at or above the baseline is a previous task's and is never preferred). A `complete` that revises a `no_work_needed` *upward* — the other order — still wins as the newest line, and a PR this task opened still overrides `no_work_needed` where the verdict is acted on (`resolveTaskPR`'s confirmed-PR suppression), so the preference can never demote a real shipment. The delivery baseline itself is still the newest sentinel of any kind, or a previous task's trailing `complete` would complete the next task on its first tick.
+
+### fix-pr tasks
+
+The one place a declaration DOES shape dispatch is the stage-072 contributor nudge ([labels-and-control-signals.md](labels-and-control-signals.md#off-the-happy-path-072--nudge--074--takeover)), and only in the client's favour: the hub never grants more than the relay asked for. When one of a contributor's earlier PRs goes red (failing checks, `changes_requested`, conflicts) and the contributor is online — a heartbeat within `governor.labels.stage.presence_window`, default 15m — the hub pushes the diagnosis to their relay as a `task_assign` the relay may receive **while a task is already running**:
+
+```json
+{ "type": "task_assign", "task_id": "…", "task_gen": 7,
+  "kind": "fix-pr", "priority": "interrupt", "mode": "spawn",
+  "repo": "owner/repo", "number": 99, "url": "https://github.com/owner/repo/pull/99",
+  "fix_prs": [ { "repo": "owner/repo", "number": 99, "url": "…", "head_sha": "abc…",
+                 "title": "…", "failing_checks": ["build"], "review_asks": ["…"], "reason": "check-failing:build" } ],
+  "prompt": "…work on the EXISTING PR branch, push a new head, same sign-off…" }
+```
+
+| Field | Meaning |
+|---|---|
+| `kind: fix-pr` | Not a fresh issue: rework an existing PR of this author on its own branch (push a new head; same DCO sign-off; never open a second PR). |
+| `priority` | `interrupt` when sent mid-task; `queued` when handed out at a task boundary (the relay's `ready`). |
+| `mode` | What the hub expects the relay to do, chosen from its DECLARE: `spawn` (parallel sub-session) or `preempt` (park the primary task, fix, resume). |
+| `fix_prs[]` | One entry per PR. Several of the author's PRs failing for the same cause (same check + error signature) arrive coalesced in ONE task. |
+
+**What the relay advertises.** `relay_capabilities` carries `fix_pr_interrupt_v1` (understands the kind — without it the hub never interrupts, the PR gets the GitHub comment only, and queued fixes are still served at `ready` as ordinary tasks) and, when it can run a one-shot headless child beside the interactive pane, `parallel_sessions` with `max_parallel_fixes: N` — the relay's `HIVE_MAX_PARALLEL_FIXES` (default 1; `0` disables parallel fixes and forces preempt mode). The hub clamps `N` to `contribute.max_parallel_fixes` (default 2) and keeps at most that many fix tasks in flight per contributor; the rest wait server-side, oldest PR first, human changes-requested before CI-red.
+
+**What the shipped relay does.**
+
+- `mode=spawn` with a free slot: `task_accepted`, then a headless child (`buildHeadlessArgv` for the configured backend, cwd `.hive-fix-<task_id>` under the workspace) runs the fix; exit 0 → `task_complete`, anything else → `task_failed` with the exit code, after `HIVE_FIX_PR_TIMEOUT_MS` (2h) the child is killed. `currentTask` is never touched: the primary lease keeps being renewed.
+- `mode=preempt`, interactive pane: `task_accepted`, then the pane receives an `INTERRUPT (hive fix-pr, preempt mode)` prompt telling the agent to park the current issue (commit/stash WIP; the claim stays alive), fix the PR, print exactly `HIVE_FIX_PR_DONE <task_id>` (or `HIVE_FIX_PR_FAILED <task_id> <reason>`), then resume. The progress tick reads the marker off the pane and reports `task_complete`/`task_failed` for the fix's `task_id`. Only one fix preempts at a time; more are queued locally.
+- `mode=preempt`, headless primary: there is no pane to interrupt, so the fix is deferred (`task_accepted` immediately) and runs before the relay's next `ready` — "fix what you broke before taking new work" holds on the client too.
+- With no task running, a `fix-pr` is just the next task.
+
+The hub records the mode it used in the nudge comment's marker (`mode=spawn|preempt|queued|comment`) and exposes queue depth / in-flight as `fix_queue` on the contributor profile API.
+
+#### What the operator sees (Operations → Connected contributor agents)
+
+Each row of the "Connected contributor agents (ClankeR)" list on `/contribute/operations` reads the same declaration back (hivecommons/hive#12502), so an operator can check whether the rework the stage labels promise is actually reaching the agent. The row is fed by `/api/contribute/fleet`; each `clankers[]` entry carries:
+
+| Field | Meaning |
+|---|---|
+| `parallel_capacity` | Total sessions the hub will use for this relay: `max_parallel_fixes + 1` once `parallel_sessions` is advertised (clamped by `contribute.max_parallel_fixes`); `1` for a relay that advertises `fix_pr_interrupt_v1` without parallel sessions (preempt); `0` when neither is advertised — the row reads **capacity: not advertised**. |
+| `fix_mode` | `spawn` or `preempt`, the interrupt mode that capacity implies. |
+| `in_flight[]` | One entry per work item on the connection — the primary task plus every `fix-pr` sub-session — each with `kind` (`new` or `rework`), `task_kind`, `repo`, `number`, `title`, `url`, `stage` (the item's `stage/NNN-*` label as the hive last observed it), `mode` and `started_at`. The row shows one line per item with a **NEW** / **REWORK** badge. A relay running only a boundary-dispatched fix therefore shows as *working*, not *idle*. |
+| `fix_queue_depth` | Red PRs waiting in the contributor's server-side fix queue (not dispatched). |
+| `pending_rework`, `pending_rework_prs[]` | The contributor's open PRs in `stage/072-returned-to-contributor` that have **not** been dispatched to them. The row prints a red **N PRs awaiting rework (not yet dispatched)** line, and an idle relay reads **idle · N PRs awaiting rework** instead of `idle: no matching work`. |
+
+`kind: rework` means the item repairs one of the contributor's own PRs: any `fix-pr` task, or a task whose target the stage store has in a repair stage (`070-fixing`, `072-returned-to-contributor`, `074-adopted-by-hive`). Everything else is `new`. `pending_rework` is derived without a GitHub call: the stage-label store (which remembers each PR's author) ∪ the fix queue, minus the fix tasks in flight on any of the contributor's connections. A non-zero `pending_rework` on an idle row is the signal to look at — typically a relay that did not advertise `fix_pr_interrupt_v1`, a preempt-mode relay inside its `contribute.min_focus_window`, or a contributor who is offline.
 
 ## Reconnecting without losing in-flight work
 
