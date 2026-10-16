@@ -149,7 +149,8 @@ const (
 // WaitingElsewhere marks a not-your-turn item that is gated on someone other
 // than the operator: a hold whose sources include a person or the dashboard's
 // pause, a hive needs-human PR still within the adjudicator wait, a pending
-// reporter confirmation, or an issue an open PR covers. The Overview equation
+// reporter confirmation, an issue an open PR covers, or a blocked issue with
+// an open GitHub blocked-by link. The Overview equation
 // and charts read it; it is never set on a your-turn item and is not part of
 // the ownership identity.
 type Ownership struct {
@@ -221,6 +222,10 @@ type ownershipEnv struct {
 	// unparkCommandsRefused reports a repo whose sweep refuses the `/hive`
 	// un-park commands (labelDrivenRefusesUnparkCommands). Nil means none.
 	unparkCommandsRefused func(repo string) bool
+	// mergeLaneTakesAuthor reports whether a Hive merge lane admits PRs by
+	// author in repo (automerge.Engine.MergeLaneTakesAuthor); nil turns the
+	// hand-merge rule off.
+	mergeLaneTakesAuthor func(repo, author string) bool
 }
 
 func (e ownershipEnv) laneCanOpenPRFor(lane, repo string) bool {
@@ -395,6 +400,9 @@ type issueOwnershipInput struct {
 	// openLinkedPR is set when the issue has an open (unmerged) linked PR or
 	// open PR claim context.
 	openLinkedPR bool
+	// openBlockers are the issue's open GitHub blocked-by links
+	// (Issue.OpenBlockers).
+	openBlockers []string
 	createdAt    time.Time
 	updatedAt    time.Time
 
@@ -678,6 +686,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 					labels:       issue.Labels,
 					acknowledged: issue.HumanAcknowledged,
 					openLinkedPR: issueHasOpenLinkedPR(issue),
+					openBlockers: issue.OpenBlockers(),
 					createdAt:    issue.CreatedAt,
 					updatedAt:    issue.UpdatedAt,
 					lane:         lane,
@@ -688,7 +697,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 					holdSources:  sources,
 					band:         IssueBand(issue, held, cfg, env.now, env.selfAuthorizationHoldFor).Band,
 				}
-				record(ownershipKindIssue, issue.Number, issue.URL, decideIssueOwnership(in, env), issue.CreatedAt, issue.UpdatedAt)
+				record(ownershipKindIssue, issue.Number, issue.URL, decideIssueOwnershipGated(in, env), issue.CreatedAt, issue.UpdatedAt)
 			}
 		}
 		issueRows(repo.ActionableIssues, false)
@@ -709,7 +718,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 				bucket:       item.Bucket,
 				bucketReason: item.Reason,
 			}
-			record(ownershipKindIssue, item.Number, item.URL, decideIssueOwnership(in, env), item.CreatedAt, item.UpdatedAt)
+			record(ownershipKindIssue, item.Number, item.URL, decideIssueOwnershipGated(in, env), item.CreatedAt, item.UpdatedAt)
 		}
 		prRows := func(items []any, held bool) {
 			for _, raw := range items {
@@ -719,7 +728,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 				}
 				pr := entry.pr
 				pr.Repo = nonEmpty(pr.Repo, repoName)
-				record(ownershipKindPR, pr.Number, pr.URL, decidePROwnership(pr, held, env), pr.CreatedAt, pr.UpdatedAt)
+				record(ownershipKindPR, pr.Number, pr.URL, decidePROwnershipGated(pr, entry.verdict, held, cfg, env), pr.CreatedAt, pr.UpdatedAt)
 			}
 		}
 		prRows(repo.OpenPrs, false)
@@ -960,8 +969,11 @@ func recordEscalationFirstSeen(repos []FrontendRepo, now time.Time) func(repo st
 
 // applyOwnershipDecisions computes the your-turn decision for every row of a
 // freshly built snapshot, using the snapshot's generated time as now.
-func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time, hub *ContributeWSHub) {
+func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStatuses map[string]*agent.AgentProcess, currentMode string, now time.Time, hub *ContributeWSHub, adjust ...func(*ownershipEnv)) {
 	env := newOwnershipEnv(cfg, agentStatuses, currentMode, now, hub)
+	for _, fn := range adjust {
+		fn(&env)
+	}
 	env.routeLane = classify.KeywordLane
 	env.loadReviewSwarm()
 	if env.hiveLevel >= ownershipAdjudicatorMinLevel {
