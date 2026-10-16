@@ -579,6 +579,11 @@ func (c *Client) closeIssueForMergedPRClaimWithIssue(ctx context.Context, issueR
 		res.Action, res.Reason = CloseOnMergeAwaiting, "needs_confirmation_or_human"
 		return res
 	}
+	if cov := c.closeOnMergeCoverage(ctx, prRepo, issueRepo, issueNumber, pr, issue, opts); cov.partialForDirectClose(closeOnMergePRRefsIssue(pr, prRepo, issueRepo, issueNumber)) {
+		c.markPartiallyAddressed(ctx, issueRepo, issueNumber, pr.GetNumber(), issue, cov, opts)
+		res.Action, res.Reason = CloseOnMergeSkipped, "partially_addressed"
+		return res
+	}
 	if _, _, err := c.client.Issues.CreateComment(WithRESTCaller(ctx, "hive:close_on_merge"), owner, repoName, issueNumber, &gh.IssueComment{Body: gh.Ptr(closeOnMergeCloseComment(pr))}); err != nil {
 		res.Action, res.Reason = CloseOnMergeNoop, "close_comment_failed"
 		return res
@@ -613,6 +618,20 @@ type closeOnMergeCoverage struct {
 func (cov closeOnMergeCoverage) partial() bool {
 	if !cov.Closing || cov.Remainder {
 		return true
+	}
+	return cov.FilesKnown && len(cov.Cited) > 0 && len(cov.Untouched) == len(cov.Cited)
+}
+
+// partialForDirectClose is the guard for the direct close path, where the
+// claim may come from the branch name, claim metadata or a comment link rather
+// than a closing keyword. A missing keyword alone is therefore not partial
+// coverage; a textual reference without a closing keyword (`Refs #N`) is.
+func (cov closeOnMergeCoverage) partialForDirectClose(refsIssue bool) bool {
+	if cov.Remainder {
+		return true
+	}
+	if !cov.Closing {
+		return refsIssue
 	}
 	return cov.FilesKnown && len(cov.Cited) > 0 && len(cov.Untouched) == len(cov.Cited)
 }
@@ -774,7 +793,7 @@ func closeOnMergeNeedsConfirmation(issue *gh.Issue) bool {
 	for _, l := range issue.Labels {
 		name := strings.ToLower(strings.TrimSpace(l.GetName()))
 		switch name {
-		case "needs-reporter-confirmation", "epic", "needs-human":
+		case "needs-reporter-confirmation", "epic", "needs-human", "needs-decision", "needs-direction":
 			return true
 		}
 	}

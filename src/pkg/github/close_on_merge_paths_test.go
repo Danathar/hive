@@ -434,7 +434,8 @@ func TestCloseOnMergeDecisionSkipAndFailurePaths(t *testing.T) {
 		{name: "untrusted author skipped", author: "stranger", body: "Fixes #7", claimMetadata: true, wantAction: CloseOnMergeSkipped, wantReason: "untrusted_author"},
 		{name: "trusted author func admits external author", author: "friend", trusted: func(repo, login string) bool { return repo == "o/r" && login == "friend" }, body: "Fixes #7", claimMetadata: true, wantAction: CloseOnMergeClosed, wantReason: "closed_completed"},
 		{name: "no claim metadata without closing keyword skipped", author: "hive[bot]", body: "unrelated", head: "scanner/other", claimMetadata: false, wantAction: CloseOnMergeSkipped, wantReason: "no_closing_or_claim_metadata"},
-		{name: "refs-only claim flagged wrong refs but still closes", author: "hive[bot]", body: "Refs #7", head: "scanner/other", claimMetadata: true, wantAction: CloseOnMergeClosed, wantReason: "closed_completed", wantWrongRefs: true},
+		{name: "refs-only claim flagged wrong refs and is not closed", author: "hive[bot]", body: "Refs #7", head: "scanner/other", claimMetadata: true, wantAction: CloseOnMergeSkipped, wantReason: "partially_addressed", wantWrongRefs: true},
+		{name: "closing keyword with remainder paragraph is not closed", author: "hive[bot]", body: "Fixes #7\n\nRecommendation 2 is deliberately left open; what remains needs a maintainer.", claimMetadata: true, wantAction: CloseOnMergeSkipped, wantReason: "partially_addressed"},
 		{name: "issue read failure noops", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, issueGetStatus: http.StatusInternalServerError, wantAction: CloseOnMergeNoop, wantReason: "issue_read_failed"},
 		{name: "closed issue already done", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, issueState: "closed", wantAction: CloseOnMergeAlreadyDone, wantReason: "issue_not_open"},
 		{name: "close comment failure noops", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, commentStatus: http.StatusForbidden, wantAction: CloseOnMergeNoop, wantReason: "close_comment_failed"},
@@ -478,6 +479,10 @@ func TestCloseOnMergeDecisionSkipAndFailurePaths(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
 				case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/labels/"):
 					w.WriteHeader(http.StatusNotFound)
+				case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/o/r/labels/"):
+					_ = json.NewEncoder(w).Encode(map[string]any{"name": strings.TrimPrefix(r.URL.Path, "/repos/o/r/labels/")})
+				case r.Method == "POST" && r.URL.Path == "/repos/o/r/issues/7/labels":
+					_ = json.NewEncoder(w).Encode([]map[string]any{})
 				default:
 					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 				}
