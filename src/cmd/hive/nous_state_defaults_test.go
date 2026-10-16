@@ -304,7 +304,8 @@ func TestLoadNousStateIgnoresCorruptPanelConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := loadNousStateFrom(layout, "", restoreTestLogger())
-	if state.Mode != "observe" || state.Scope != "governor" {
+	// The lab is repo-only (#12207): the default scope is "repo".
+	if state.Mode != "observe" || state.Scope != "repo" {
 		t.Fatalf("mode/scope = %q/%q, want defaults", state.Mode, state.Scope)
 	}
 }
