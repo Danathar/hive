@@ -1,1 +1,0 @@
-- Evidence bundles now record the CI conclusion (status, checks, `captured_at`) when merge eligibility is evaluated, so `ci.captured_at` is no longer zero when the merge-time capture fails; capture is best-effort and never affects a merge decision (#12066).

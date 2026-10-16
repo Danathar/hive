@@ -1,1 +1,0 @@
-- The task-list sweep no longer hard-parks issues with `needs-human` from remainder prose; only the explicit `Refs #N (needs-human: …)` marker does, and prose hand-offs get the soft `hive/handoff` label so another lane can claim the issue (#12002).
