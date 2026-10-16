@@ -18235,6 +18235,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (own.verb === 'INSPECT') {
         after.push({ type: 'note', text: 'Removing the ' + (ctx.sentinelLabel || 'sentinel') + ' label after review releases it.' });
       }
+      // A run or approval-desk wait links to the section that acts on it (#12380).
+      if (own.link && String(own.link).charAt(0) === '#') {
+        actions.push({ type: 'link', label: String(own.reason_code || '').indexOf('run_') === 0 ? 'Open in Runs' : 'Open in Approvals', href: own.link, sameTab: true });
+      }
       if (own.verb === 'CLOSE' && own.reason_code === 'reporter_confirmation_stale') {
         after.push({ type: 'copy', text: '/fixed' });
       }
@@ -18251,6 +18255,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           return `<button type="button" role="menuitem" tabindex="-1" class="yt-item" data-yt-act="${esc(e.id)}" data-repo="${esc(ctx.repo)}" data-number="${Number(ctx.number)}" data-url="${esc(ctx.url)}" data-title="${esc(ctx.title || '')}">${esc(e.label)}</button>`;
         }
         if (e.type === 'link') {
+          if (e.sameTab) return `<a role="menuitem" tabindex="-1" class="yt-item" href="${esc(e.href)}">${esc(e.label)}</a>`;
           return `<a role="menuitem" tabindex="-1" class="yt-item" href="${esc(e.href)}" target="_blank" rel="noopener">${esc(e.label)}</a>`;
         }
         if (e.type === 'copy') {

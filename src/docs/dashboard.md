@@ -528,6 +528,8 @@ so the reason text can change without breaking them.
 | `person_pr_needs_human` | `REVIEW` |
 | `review_requires_human` | `REVIEW` |
 | `stale_safety_net` | `REVIEW` |
+| `run_checkpoint`, `run_stale_plan`, `run_stage_exhausted` | `REVIEW` |
+| `approval_pending` | `REVIEW` |
 
 **Ownership by level.** "Parked" means an issue in one of the four hard-suppress
 buckets the scanner records (`needs_human`, `needs_direction`,
@@ -572,6 +574,21 @@ only to items that came out Not yours. `hive/verified-open` (the agent found
 the work unfinished) cancels `hive/likely-done` for rules (6) and (7) and for
 the safety net, so an issue carrying both is neither awaiting the reporter nor
 verified done; `hive/already-done` and `hive/covered-by-pr` are unaffected.
+
+**Runs and the approval desk.** Two waits live outside GitHub, so no label
+records them. An active run the Runs tab shows as `waiting_on: human` makes the
+issue it works on your turn: `run_checkpoint` for a plan, spec or implement
+checkpoint, a design review or unanswered interview questions (approve or
+reject it), `run_stale_plan` for a stale plan, and `run_stage_exhausted` when
+the stage used up `runs.max_stage_retries` (reset the stage or abandon the
+run). A pending approval-desk item makes its pull request (self-merge, queued
+merge) or issue (plan approval, plan from label) your turn with
+`approval_pending` and the desk rule in the reason; agent tool calls have no
+row. These rows link to the Runs tab or the Approvals card, need no escalation
+sink, and replace any Not yours decision (a claim, a lease, a hold or an open
+PR) and the safety net; another your-turn reason is kept. The row clears on the
+next refresh once the run is approved, reset or abandoned, or the approval is
+resolved; with the approval desk disabled there are no approval rows.
 
 **Hold sources.** Every held issue or PR carries the set of sources currently
 requiring its hold (`hold_sources` in the payload): `level_gate` (the ACMM

@@ -162,6 +162,9 @@ type Ownership struct {
 	Action           string `json:"action,omitempty"`
 	InboxRank        int    `json:"inbox_rank,omitempty"`
 	WaitingElsewhere bool   `json:"waiting_elsewhere,omitempty"`
+	// Link points at the dashboard section that acts on the item (a run or
+	// the approval desk; hivecommons/hive#12380). Display only.
+	Link string `json:"link,omitempty"`
 }
 
 func notYourTurn() Ownership { return Ownership{} }
@@ -207,6 +210,9 @@ type ownershipEnv struct {
 	// reviewVerdicts are the review swarm's verdict artifact entries
 	// (review.LoadArtifact), the record /api/review/pipeline reads.
 	reviewVerdicts []review.Aggregate
+	// operatorWaits are the runs and approval-desk items waiting on the
+	// operator (ownership_runs.go). Nil adds none.
+	operatorWaits *operatorWaits
 }
 
 // reviewRequiresHumanOnHead reports whether the review swarm's verdict on the
@@ -647,7 +653,7 @@ func decideRepoOwnership(repos []FrontendRepo, cfg config.DashboardIssueBandsCon
 				return
 			}
 			key := ownershipKey(kind, number)
-			decisions[key] = decision
+			decisions[key] = env.operatorWaits.apply(kind, repoName, number, decision)
 			urls[key] = url
 			activity[key] = ownershipActivity(created, updated)
 		}
@@ -971,6 +977,11 @@ func applyOwnershipDecisions(cfg *config.Config, repos []FrontendRepo, agentStat
 	if cfg != nil {
 		bandsCfg = cfg.Dashboard.IssueBands
 	}
+	org := ""
+	if cfg != nil {
+		org = cfg.Project.Org
+	}
+	env.operatorWaits = collectOperatorWaits(hub, org)
 	decideRepoOwnership(repos, bandsCfg, env)
 	recordOwnershipTransitions(repos, now)
 }
