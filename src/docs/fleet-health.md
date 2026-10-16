@@ -442,7 +442,7 @@ same store behind `GET /api/evidence/summary`):
   `queue_prs` and `queue_hold`, `sla_violation_rate`, `agent_idle_ratio`,
   `kicks_per_day` and `tokens_per_day`. Omitted when the spoke has no snapshot
   in the last 7 days. See
-  [Hive state time series](strategy-lab.md#hive-state-time-series).
+  [Hive state time series](experiment-lab.md#hive-state-time-series).
 
 The hub clamps every count (subset counts never exceed their total), caps and
 de-duplicates the family lists, bounds `hive_state` (ratios to `[0, 1]`,

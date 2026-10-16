@@ -123,7 +123,7 @@ Alongside the rendered body, each report — and the hub relay request to
 hive's 24 h / 7 d state trends from `pkg/hivestate` (median/p90 queue depth
 for issues, PRs and held items, SLA-violation rate, agent idle ratio,
 kicks/day, tokens/day; see
-[Hive state time series](strategy-lab.md#hive-state-time-series)). It contains
+[Hive state time series](experiment-lab.md#hive-state-time-series)). It contains
 only aggregate counts and rates — no agent names, issue numbers, or repository
 content — and is kept out of the body, so moving trends never make an open
 report look changed. It is omitted when the hive has no snapshot in the last
