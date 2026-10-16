@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-16 (v5.177.3)
+
+### Changed
+
+- dashboard: refresh cli_models.go CLI-version comment (#12291)
+- Expose the remaining GitHub connection settings in the dashboard Settings dialog: API quota floors, the agent reserve floor, the PR detail cache TTL, GraphQL PR batching, App-authored PRs and GitHub-signed commits are editable on the Forge App tab (forge, API URL, docs installation, OAuth client and token shown read-only, token masked), plus the good-first-issue scorer tuning and the github-actions[bot] PR takeover toggle under Features (#11854).
+
+### Fixed
+
+- Saving GitHub settings from the dashboard (GraphQL PR batching, PR detail cache TTL, App-authored PRs, App-signed commits, self-authorization hold) no longer races the GitHub client reading them live (#12279).
+- fix(dashboard): don't report inference-blocked agents as hive-code backend-auth defects (#12282)
+- Inference gateway 401/403 auth failures are no longer self-reported as an attributable hive-code `backend-auth` defect (#12284).
+
 ## 2026-10-16 (v5.177.2)
 
 ### Fixed
