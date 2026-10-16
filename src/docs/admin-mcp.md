@@ -136,7 +136,9 @@ podman rm hive-admin-mcp-extract
 
 Or build it from a checkout of the `v6` branch: `cd src && go build -o hive-admin-mcp ./cmd/hive-admin-mcp`.
 
-The tool catalogue is compiled into the binary, so re-extract or rebuild it after each hub upgrade (HTTP has no such step). `version_read` shows the binary's own `stdio_build` and a `skew` flag next to the hub build, and `initialize` reports `serverInfo.version` as `<version>+<short sha>`.
+The tool catalogue is compiled into the binary, so re-extract or rebuild it after each hub upgrade (HTTP has no such step). `version_read` shows the binary's own `stdio_build` and a `skew` flag next to the hub build, and `initialize` reports `serverInfo.version` as `<version>+<short sha>`. Over HTTP, `version_read` returns the recorded last-seen stdio build (`last_seen_stdio_build`) and timestamp (`last_seen_stdio_at`) alongside `hub_build`.
+
+The stdio binary sends `User-Agent: hive-admin-mcp/<version>+<short sha>` on every hub request. The hub records the last-seen stdio client build and the time it was seen from that header on the REST paths the binary's read tools call — `GET /api/version`, `GET /api/status` and `GET /api/status/summary` — and on HTTP admin MCP read tool calls (`/api/admin/mcp`). Only a well-formed `hive-admin-mcp/<version>+<7–40 hex short sha|unknown>` of at most 64 bytes is recorded; any other User-Agent (browsers, `curl`, the regular `hivectl` CLI's default `hivectl/0.1`) is ignored and never overwrites a recorded sighting. The dashboard displays this in the Version menu under **Stdio client** next to the hub build, with a warning badge (`⚠ build skew`) when the short SHAs differ.
 
 ### Skew notice
 
@@ -198,7 +200,7 @@ capped at 256 KiB.
 |------|---------|
 | `hive_status` | Hive status summary |
 | `fleet_status` | Fleet state; `systemResources` also carries the container's memory limit (`memLimit`, `unlimited` when none is set, with `memLimitBytes`) and out-of-memory kill count (`oomKillCount`), see [Start records, crash traces and out-of-memory evidence](#start-records-crash-traces-and-out-of-memory-evidence) |
-| `version_read` | Running build from `/api/version`: `currentCommit`, `branch`, `channel`, `commitsBehind`, `behind`; over stdio also `stdio_build` (`version`, `sha`, `short`, `branch`) and `skew` (true when the stdio and hub short SHAs are both known and differ) |
+| `version_read` | Running build from `/api/version`: `currentCommit`, `branch`, `channel`, `commitsBehind`, `behind`; over stdio also `stdio_build` (`version`, `sha`, `short`, `branch`) and `skew` (true when the stdio and hub short SHAs are both known and differ); over HTTP also `last_seen_stdio_build` and `last_seen_stdio_at` alongside `hub_build` |
 | `agents_list` | Agents |
 | `runs_list` | Runs |
 | `leases_list` | Leases |

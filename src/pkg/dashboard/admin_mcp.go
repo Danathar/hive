@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/hivecommons/hive/pkg/adminmcp"
 )
@@ -24,6 +26,37 @@ type dashboardAdminMCPProvider struct {
 	// the outer request as a verified owner (dashboard token or verified
 	// owner session); see adminMCPOwnerVerified.
 	ownerVerified bool
+	userAgent     string
+}
+
+// stdioBuildMaxLen caps the recorded build string so a hostile User-Agent
+// cannot park a header-sized blob in /api/version (#12318).
+const stdioBuildMaxLen = 64
+
+// stdioBuildPattern is the shape hive-admin-mcp sends: <version>+<short sha>,
+// where <short> is a 7-40 hex short SHA or the literal "unknown" (see
+// cmd/hive-admin-mcp serverVersion).
+var stdioBuildPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._-]*\+(?:[0-9a-fA-F]{7,40}|unknown)$`)
+
+// parseStdioBuildFromUserAgent extracts the stdio client build from an incoming
+// User-Agent header (#12318). Only `hive-admin-mcp/<version>+<short>` is
+// recognised; anything else (including hivectl's default `hivectl/0.1`, which
+// the regular CLI also sends to /api/status and /api/version) returns "" so it
+// never overwrites a genuine sighting. The build must match stdioBuildPattern
+// and fit in stdioBuildMaxLen bytes, or it is dropped.
+func parseStdioBuildFromUserAgent(ua string) string {
+	ua = strings.TrimSpace(ua)
+	if !strings.HasPrefix(ua, "hive-admin-mcp/") {
+		return ""
+	}
+	build := strings.TrimPrefix(ua, "hive-admin-mcp/")
+	if i := strings.IndexAny(build, " \t"); i >= 0 {
+		build = build[:i]
+	}
+	if build == "" || len(build) > stdioBuildMaxLen || !stdioBuildPattern.MatchString(build) {
+		return ""
+	}
+	return build
 }
 
 func (s *Server) handleAdminMCP(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +66,7 @@ func (s *Server) handleAdminMCP(w http.ResponseWriter, r *http.Request) {
 		role:          r.Header.Get("X-Hive-Role"),
 		authorization: r.Header.Get("Authorization"),
 		ownerVerified: adminMCPOwnerVerified(r),
+		userAgent:     r.Header.Get("User-Agent"),
 	}
 	adminmcp.NewHandler(provider,
 		adminmcp.WithWritesEnabled(adminMCPWritesEnabled()),
@@ -65,6 +99,11 @@ func (p dashboardAdminMCPProvider) Read(_ context.Context, tool string, args map
 	if p.server == nil {
 		return nil, fmt.Errorf("%w: dashboard server unavailable", adminmcp.ErrForbidden)
 	}
+	if p.userAgent != "" {
+		if build := parseStdioBuildFromUserAgent(p.userAgent); build != "" {
+			p.server.RecordStdioBuild(build, time.Now().UTC())
+		}
+	}
 	if tool == adminmcp.ToolReviewQueue {
 		return adminmcp.ReadReviewQueue(func(path string) (any, error) { return p.get(tool, path) }, args)
 	}
@@ -93,6 +132,19 @@ func (p dashboardAdminMCPProvider) Read(_ context.Context, tool string, args map
 	}
 	if tool == adminmcp.ToolGovernorSetup {
 		return adminmcp.GovernorSetupProposal(data)
+	}
+	if tool == adminmcp.ToolVersionRead {
+		if m, ok := data.(map[string]any); ok {
+			if build, at := p.server.LastSeenStdio(); build != "" {
+				m["last_seen_stdio_build"] = build
+				if !at.IsZero() {
+					m["last_seen_stdio_at"] = at.Format(time.RFC3339)
+				}
+			}
+			if _, ok := m["hub_build"]; !ok {
+				m["hub_build"] = versionShort
+			}
+		}
 	}
 	return adminmcp.CapResult(data, adminmcp.LimitFromArgs(args)), nil
 }
