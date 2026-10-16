@@ -338,6 +338,7 @@ type mergeGates struct {
 	enforceIntent         bool
 	intentVerdicts        map[string]intent.Verdict
 	requireReviewApproval bool
+	shadowReview          bool
 	reviewArtifact        review.Artifact
 	reviewLoaded          bool
 	requiredChecks        map[string]bool
@@ -805,11 +806,15 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 	var escalated []failingPR
 	var reviewArtifact review.Artifact
 	reviewLoaded := false
-	if requireReviewApproval {
+	if requireReviewApproval || (cfg != nil && cfg.Review.Shadow) {
 		var err error
 		reviewArtifact, err = review.LoadArtifact("")
 		if err != nil {
-			logger.Warn("review approval required but review-verdicts.json is unavailable; merge eligibility will fail closed", "error", err)
+			if requireReviewApproval {
+				logger.Warn("review approval required but review-verdicts.json is unavailable; merge eligibility will fail closed", "error", err)
+			} else {
+				logger.Warn("review.shadow is on but review-verdicts.json is unavailable; shadow will record would_have_held=true, merges are not affected", "error", err)
+			}
 		} else {
 			reviewLoaded = true
 		}
@@ -835,6 +840,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		enforceIntent:         enforceIntent,
 		intentVerdicts:        intentVerdicts,
 		requireReviewApproval: requireReviewApproval,
+		shadowReview:          cfg != nil && cfg.Review.Shadow && !requireReviewApproval,
 		reviewArtifact:        reviewArtifact,
 		reviewLoaded:          reviewLoaded,
 		requiredChecks:        requiredChecks,
@@ -867,7 +873,9 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			logger.Info("excluding PR from merge-eligible due to intent verification", "repo", fullRepo, "number", pr.Number, "tier", iv.Tier, "reason", intentReason)
 		}
 		if bucket == mergeBucketEligible {
-			recordIntentShadow(cfg, logger, enforceIntent, intentVerdicts, pr, fullRepo, time.Now())
+			now := time.Now()
+			recordReviewShadow(cfg, logger, pr, fullRepo, prGates, now)
+			recordIntentShadow(cfg, logger, enforceIntent, intentVerdicts, pr, fullRepo, now)
 		}
 		row := failingPR{
 			Number:          pr.Number,
