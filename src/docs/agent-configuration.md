@@ -257,7 +257,8 @@ spec omits `launch_cmd`, Hive still builds the backend command normally.
                                  #   must exceed its longest cadence
     busy_no_activity_threshold: 30m
                                  # surface Working/no-transcript activity after repeated
-                                 #   undeliverable kicks; default 30m
+                                 #   undeliverable kicks; default 30m. At twice
+                                 #   this silence the session is restarted
     max_turn_duration: 0s        # optional visibility-only Working ceiling; 0 disables
     restart_strategy: immediate  # how to bring a dead session back
     beads_dir: /data/beads/scanner   # work-record (bead) storage; default per-agent
@@ -700,7 +701,7 @@ You don't have to design a roster. Hive ships six **ACMM packs** (`level-1.yaml`
 | L3 | Quality-Gated (Measured) | quality opens issues and test PRs gated by literal `hold`; the rest stay advisory |
 | L4 | Security-Aware (Adaptive) | scanner/guide file issues; quality, ci-maintainer, and sec-check can open PRs gated by literal `hold` |
 | L5 | Semi-Autonomous (Semi-Automated) | issues **and** PRs; PRs are gated by literal `hold`; humans batch-approve |
-| L6 | Fully Autonomous | auto-merge on green CI; non-outreach PRs have no level hold, outreach PRs remain held |
+| L6 | Fully Autonomous | auto-merge on green CI; no level hold, except cross-repo outreach PRs (target repo not managed by this hive) remain held |
 
 Applying a level **reconciles the whole roster**, not just the diff: missing agents are created (as overlay files in `/data/agent-configs/`), existing agents are merged — pack values fill blanks, but your explicit `backend:`, `model:`, and `enabled: false` always win — and the level's `kick_template`, `mode` and `on_demand` are updated so the agent's *policy* matches the level (an `on_demand` you toggled yourself in the agent's settings dialog is operator-owned and left alone; leaving on-demand starts the agent, entering it stops it). A failed agent doesn't abort the rest; the level is only recorded as cleanly applied when every agent reconciled.
 

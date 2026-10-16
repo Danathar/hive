@@ -17,6 +17,20 @@ Some sweeps bypass that enumeration and list items themselves, but every one of 
 
 The "respect hold labels" text in policy templates names the enforced set (`hold`, `on-hold`, `hold/review`, `hive-pause/<hive-id>`, any label containing `hold`, plus `do-not-merge` as exempt) but is a prompt-level backstop. The hard gate is the enumerator or sweep named in the table.
 
+## Label axes
+
+Hive-authored labels answer different questions. Read them as independent axes, not as one taxonomy: an issue can carry one label from each axis at the same time, and swapping a label on one axis never changes what the others mean.
+
+| Axis | Shape | Question it answers | Signal? | Notes |
+| --- | --- | --- | --- | --- |
+| **Stage** | `stage/<step>` | Where is this item in the pipeline? | Control (read by claims/auto-merge) | Being added by a parallel change together with `author/*`; see that PR and the reference table once it lands. |
+| **Agent** | `agent/<lane>` | Which agent works it (filed/owning lane)? | Routing + ownership | The suffix is always the lane name from `HIVE_AGENT`. The classifier routes on it and PR ownership compares against it, so `agent/reviewer` would hand the item to a reviewer lane — never use it to say "a review produced this". |
+| **Origin** | `origin/<source>` | Where did this item come from? | Provenance only, never a gate | One neutral colour (`#8250df`) for the whole family. `origin/review` is a review-swarm backlog finding (`src/pkg/github/origin_labels.go`, `src/pkg/config/review_severity.go`). It replaces the retired `from-review`; the startup reconciler (`Client.MigrateOriginLabels`) swaps the old name for the new one on open items once, and `review.backlog.labels` still accepts `from-review` and maps it to `origin/review` without double-labelling. |
+| **Author** | `author/<tier>` | What trust tier did the author have? | Control (auto-merge) | Parallel change, alongside `stage/*`. |
+| **Modifiers** | `blocked`, `hold`, `needs-*`, `hive-pause/<hive-id>` | What is stopping it right now? | Hold / suppress | See the reference table; these are the hard gates. |
+
+Some hive-authored labels look like provenance but are read as signals, so they stay outside `origin/*` on purpose: `hive/selfreport` is the dedupe key the self-report joiner searches (`label:hive/selfreport` in `src/pkg/github/fleet_report.go`) and the hub relay re-applies it; `hive/advisory` makes an issue a standing meta issue that enumeration excludes (`src/pkg/github/standing_issues.go`); `hive/<hive-id>` is the legacy hold/provenance label the hold migration still consults. `hive/sentinel`, `hive/fleet` and `fleet` are only consulted by the good-first-issue exclusion list (`src/pkg/gfi/gfi.go`) and are no longer written by this code base.
+
 ## Categories
 
 - **Informational / display-only** changes how Hive explains an item, not whether agents can act.
@@ -34,7 +48,7 @@ The "respect hold labels" text in policy templates names the enforced set (`hold
 | `hive-pause/<hive-id>` | Issues, PRs | GitHub enumeration, dashboard hold toggle, auto-merge sweeps, task-list sweep | Exact, hive-scoped dashboard hold. It is not provenance and intentionally avoids the substring `hold`. | Hard hold | Dashboard operator | Enumeration and sweeps | Dashboard Release removes labels causing the hold, including this one | Canonicalized from hive id (`src/pkg/github/client.go:1898-1932`, `src/pkg/github/client.go:1936-1945`, `src/docs/dashboard.md:80-96`) |
 | GitHub "blocked by" dependency | Issues | GitHub enumeration, kick-list assembly | An open issue whose GitHub dependency list names an open blocker is enumerated with `DependsOn` edges and kept out of the ACTIONABLE ISSUES an agent picks from; the kick names it once in a `Blocked by open dependencies` footer with its blockers. A blocker that is closed resolves the edge; a mutual pair (A↔B) is dropped with a warning so neither hides the other. The blocker list failing to load fails open (issue offered). | Soft hold | Human (GitHub UI) or agent via `hive-open-issue --blocked-by` when splitting ordered children | Enumeration | Close the blocker, or remove the dependency on GitHub | None (`src/pkg/github/issue_dependencies.go`, `src/pkg/scheduler/kickmessage.go` `partitionBlockedIssues`/`formatBlockedIssuesNote`) |
 | `hive/<hive-id>` | Issues | Provenance/migration fallback only | Marks hive provenance. It is no longer a hold label except a temporary failed-migration fallback during upgrade. | Informational | Hive | Display/migration | Remove if unwanted; do not use as a hold | Hive id (`src/pkg/github/client.go:1947-1953`) |
-| `hold` from ACMM level gate | PRs | PR-request watcher, self-authored auto-merge release | Non-outreach agent PRs at L3-L5 get literal `hold`; `outreach` PRs are held at every level. The watcher, not the policy prompt, applies it. | Hard merge gate | Hive App | PR creation, later self-authored auto-merge release | Auto-release only when current policy no longer requires the level hold, latest hold event was by the App, and the release path runs; otherwise a human removes it | Hive-wide ACMM and agent (`src/pkg/github/pr_request_watcher.go:452-524`, `src/pkg/github/pr_level_hold.go:16-124`) |
+| `hold` from ACMM level gate | PRs | PR-request watcher, self-authored auto-merge release | Agent PRs at L3-L5 get literal `hold`; `outreach` PRs whose target repo is not one the hive manages (cross-repo outreach) are held at every level, while same-repo outreach PRs follow the level. The watcher, not the policy prompt, applies it from the PR's target repo (`config.AgentOwnsRepo`). | Hard merge gate | Hive App | PR creation, later self-authored auto-merge release | Auto-release only when current policy no longer requires the level hold, latest hold event was by the App, and the release path runs; otherwise a human removes it | Hive-wide ACMM and agent (`src/pkg/github/pr_request_watcher.go:452-524`, `src/pkg/github/pr_level_hold.go:16-124`) |
 | `hold` from #5117 self-authorization | PRs | PR-request watcher and self-authorization release | A PR whose only rationale is unacknowledged hive-filed issues gets literal `hold`. Acknowledging the issue later does not remove an existing PR hold by itself. At ACMM L6 Fully Autonomous, the unset default is off; lower levels default on. | Hard merge gate | Hive App | PR creation; evaluated only when no level hold applies | Acknowledge the issue and remove the PR `hold`; disabled policy release can remove Hive's own hold. At L6, that release path also clears existing Hive-applied #5117 holds when no explicit config keeps the policy on. | `github.self_authorization_hold`, per-repo `project.repo_policies[].self_authorization_hold`, `HIVE_SELF_AUTHORIZATION_HOLD` (`src/pkg/github/pr_self_authorization.go:14-226`, `src/pkg/github/pr_request_watcher.go:452-524`) |
 | `triage/accepted` (or `project.issue_filter.reporter_trust.untrusted_require_labels`) | Human-filed issues from untrusted reporters | GitHub enumeration | With `reporter_trust.enabled: true`, an issue whose reporter's GitHub `author_association` is outside the trusted set (default `OWNER`, `MEMBER`, `COLLABORATOR`) and whose login is not in `trusted_logins` is not actionable until it carries one of these labels. Trusted reporters' issues pass untouched. Runs after holds/exempts and before `require_labels`, so the ordinary allow-list still applies afterwards. Hive- and bot-filed issues are not judged here (#5117 owns them). On the first excluded scan, core `github.Client.fetchIssues` posts one marked explanation comment and applies `needs-triage` (or `awaiting_label`); later scans do not repeat the comment. This is a poller-side write, not an agent prompt, and is capped at 10 new notices per poll. When the triage label appears, the same poll loop removes `needs-triage` only if the marker records that Hive added it, then the issue enters the backlog. Counted as "needs triage" on the repo card, not as a generic filter refusal. | Hard admission gate (off by default) | Human | Enumeration | Add the label, trust the login or association under **Settings → Labels → Reporter trust**, or disable the gate | `project.issue_filter.reporter_trust.{enabled,trusted_associations,trusted_logins,untrusted_require_labels,awaiting_label,comment}` (`src/pkg/config/reporter_trust.go`, `src/pkg/github/client.go` `fetchIssues`) |
 | `hold` from #9665 reporter trust | PRs | PR-request watcher, level-hold release | A PR whose rationale (closing or referencing links, or the request's declared issues) traces to an issue filed by an untrusted reporter gets literal `hold` at **every** ACMM level, including L6, plus `needs-human` (so it surfaces as waiting on a person, #10773) and a marked notice naming the untrusted reporter and stating the PR itself was authored by the hive. Any one untrusted citation holds. Evaluated even at hold-gated levels, because the notice is what stops promotion to L6 from releasing the label. | Hard merge gate | Hive App | PR creation; re-checked by the level-hold release path | A human removes `hold`. Hive never auto-releases it: the release sweep sees the notice (or re-evaluates and re-posts it) and leaves the label. Holdguard re-holds on a new head SHA. | `github.reporter_trust_hold` (nil follows `reporter_trust.enabled`), per-repo `project.repo_policies[].reporter_trust_hold`, `HIVE_REPORTER_TRUST_HOLD` (`src/pkg/github/pr_reporter_trust.go`, `src/pkg/github/pr_level_hold.go`) |
@@ -71,8 +85,8 @@ The "respect hold labels" text in policy templates names the enforced set (`hold
 | `reviewer-recommend-close` | PRs | Reviewer lane | Reviewer recommends closing rather than continuing automated repair. | Workflow | Reviewer lane | Reviewer pass | Human decides/clears | Fixed label (`src/pkg/scheduler/reviewer_lane.go:296-305`) |
 | `review.human_decision_label` | PRs | Human-decision mirror | Mirrors review `requires_human` verdict to an existing repo label. It gates nothing and Hive does not create/remove it. | Informational | Hive if label exists | Review verdict | Human removes | `review.human_decision_label` (`src/pkg/github/human_decision_label.go:1-36`, `src/pkg/config/review_config.go:201-218`) |
 | `needs-rebase` | PRs | Scanner/kick annotation | Fills mergeability annotation in kick data. | Informational | Scanner/Hive | PR status processing | Remove after rebase | Fixed label (`src/pkg/scheduler/pr_annotations.go:117-144`) |
-| `🐝 covered by PR` (formerly `hive/covered-by-pr`; Hive renames the legacy label in place on first use, so existing issues keep it) | Issues | PR-claim label sync and dashboard | Open PR is verified as related; issue remains actionable. For a closing or branch-name claim Hive also links the PR to the issue via GitHub's `addCloseIssueReferences`, so GitHub's own issue list shows the PR icon ([#11888](https://github.com/hivecommons/hive/issues/11888), [#12091](https://github.com/hivecommons/hive/issues/12091)). A reference claim (`Refs #N`, `Part of #N` — including a branch named after the issue when the body says `Refs #N`) is never linked, because a closing link makes GitHub close the issue when the partial PR merges; if the hive App itself linked such a pair earlier, the next sweep retracts the link with `removeCloseIssueReferences`, while links made by a person are left in place and logged ([#12144](https://github.com/hivecommons/hive/issues/12144)). The dashboard's own `🔗` pill does not depend on the GitHub link. Labels are synced only for actionable issues, so stale labels can remain on held/exempt/filtered issues. | Display-only | Hive | Claim sync after enumeration | Hive removes when actionable issue no longer has open PR evidence | Fixed label (`src/pkg/github/prclaims.go:1380-1435`) |
-| `hive/likely-done` | Issues | PR-claim label sync and dashboard | Merged PR is verified as related while issue remains open; issue remains actionable until GitHub/operator closes or confirms. | Display-only | Hive | Claim sync after enumeration | Hive removes when actionable evidence no longer says likely done | Fixed label (`src/pkg/github/prclaims.go:1380-1435`) |
+| `🐝 covered by PR` (formerly `hive/covered-by-pr`; **retired in favour of `stage/040-covered-by-pr`**, see [Stage labels](#stage-labels-stagennn--the-pipeline-state-machine); the stage reconciler removes it from open items) | Issues | PR-claim label sync and dashboard | Open PR is verified as related; issue remains actionable. For a closing or branch-name claim Hive also links the PR to the issue via GitHub's `addCloseIssueReferences`, so GitHub's own issue list shows the PR icon ([#11888](https://github.com/hivecommons/hive/issues/11888), [#12091](https://github.com/hivecommons/hive/issues/12091)). A reference claim (`Refs #N`, `Part of #N` — including a branch named after the issue when the body says `Refs #N`) is never linked, because a closing link makes GitHub close the issue when the partial PR merges; if the hive App itself linked such a pair earlier, the next sweep retracts the link with `removeCloseIssueReferences`, while links made by a person are left in place and logged ([#12144](https://github.com/hivecommons/hive/issues/12144)). The dashboard's own `🔗` pill does not depend on the GitHub link. Labels are synced only for actionable issues, so stale labels can remain on held/exempt/filtered issues. | Display-only | Hive | Claim sync after enumeration | Hive removes when actionable issue no longer has open PR evidence | Fixed label (`src/pkg/github/prclaims.go:1380-1435`) |
+| `hive/likely-done` | Issues | PR-claim label sync and dashboard | Merged PR is verified as related while issue remains open; issue remains actionable until GitHub/operator closes or confirms. Requires a closing keyword or branch-name claim: a merged `Refs #N` / `Part of #N` applies `hive/partially-addressed` instead ([#12383](https://github.com/hivecommons/hive/issues/12383)). | Display-only | Hive | Claim sync after enumeration | Hive removes when actionable evidence no longer says likely done | Fixed label (`src/pkg/github/prclaims.go`) |
 | `hive/partially-addressed` | Issues | Close-on-merge sweep, PR-claim label sync and task-list sweep | A merged PR covered only part of the issue ([#11931](https://github.com/hivecommons/hive/issues/11931)): applied instead of `hive/likely-done` when the PR has no closing keyword (`Fixes`/`Closes`/`Resolves #N`) for the issue, its body carries a remainder/out-of-scope paragraph, or none of the backtick-quoted paths cited in the issue body is among its changed files. No `/fixed` prompt is posted, `hive/likely-done` is suppressed, and the issue stays in the actionable pool; the `<!-- hive:task-list-sweep -->` comment lists the cited paths no merged PR changed as `Not yet touched: ...`. | Display; suppresses likely-done | Hive | Close-on-merge sweep for issues behind a confirmation gate | Hive removes it when a later merged PR fully covers the issue and `hive/likely-done` is applied; humans may remove it | Fixed label (`src/pkg/github/close_on_merge.go`, `src/pkg/github/task_list_sweep.go`) |
 | `hive/already-done` | Issues | Contributor queue, already-done verdict close path, and dashboard | Contributor already-done verdict/confirmation; default contributor skip label and done band. When the verdict cites a PR that the API verifies as merged on the default branch, Hive labels the issue and runs the normal completed close path; human-filed bugs still wait for reporter confirmation unless they opted into close-on-merge. | Contributor hard skip; dashboard display; conditional close | Hive/contributor flow | Contributor admission, verified verdict settlement, issue close gate | Human removes/reopens or confirms reporter-gated bugs | `hub.contribute_already_done_label`, fixed label (`src/pkg/config/hub_config.go:196-208`, `src/pkg/config/defaults.go:275-289`, `src/pkg/dashboard/contribute_verdict_settle.go`, `src/pkg/github/issue_close.go`) |
 | `blocked` | Issues | Contributor queue, dashboard issue bands, un-park sweep | Always included in contributor skip patterns and default waiting band. Does not by itself stop spoke-agent enumeration unless also exempt/held/filtered. It parks the issue on a person for the un-park sweep (#12376): Hive keeps the "What to reply" notice on it, and `/hive approve` (lift and re-offer) or `/hive decision <text>` (lift with instructions) remove it; label approval removes it only when the App bot applied it. A contributor blocked verdict whose reason says a person must act (an admin, maintainer, owner or operator; no other item, upstream or release named) is labelled `needs-human` instead. The label records no reason: the dashboard row signal and BLOCKED pill hover name the open GitHub "blocked by" links when the issue has them (`Issue.DependsOn`), and otherwise say the label records no reason. Blocked-by links are read for actionable issues only, so held and parked rows always show the label-only text. | Contributor hard skip; display | Human, or Hive App on a contributor blocked verdict | Contributor admission/dashboard render | Remove label. Hive's hard-suppress reconcile (#12002) lifts a `blocked` whose newest label event is a `labeled` by the App bot once a PR referencing the issue merges after it, posting one note carrying `<!-- hive:hard-suppress-lifted -->`; a human-applied (or re-applied) `blocked` is never lifted. | `hub.contribute_skip_labels`, dashboard bands (`src/pkg/config/hub_config.go:136-155`, `src/pkg/config/hub_config.go:469-492`, `src/docs/dashboard.md:105-140`) |
@@ -81,12 +95,328 @@ The "respect hold labels" text in policy templates names the enforced set (`hold
 | `needs-triage`, `discussion`, `question`, `tracking`, `epic` | Issues | Contributor queue | Default contributor skip labels/patterns. | Contributor hard skip | Human/Hive | Contributor admission | Remove label or config | `hub.contribute_skip_labels`, `HIVE_CONTRIBUTE_SKIP_LABELS` (`src/pkg/config/hub_config.go:136-155`, `src/pkg/config/hub_config.go:469-492`) |
 | Contributor allow/deny label filters | Issues | Contributor queue | Hive-wide label filters can run in deny mode (skip if any label matches) or allow mode (offer only if at least one label matches); per-repo filters layer on top and can only narrow offers. Patterns use Hive wildcard/substring matching, not GitHub hold matching. | Contributor hard gate | Operator | Contributor admission | Edit filter mode/list or per-repo filter | `hub.contribute_labels_mode`, `contribute_deny_labels`, `contribute_allow_labels`, `contribute_repo_filters` (`src/pkg/config/hub_config.go:114-155`, `src/pkg/config/defaults.go:251-305`, `src/pkg/config/contribute_repo_filter.go:9-84`) |
 | `1-triage`, `2-discussing`, stage labels | Issues | Dashboard repo-card bands/legend | Stage vocabulary is display-only unless another consumer names the same label. `2-discussing` ships in the default waiting band; `1-triage` is just a visible repo taxonomy label unless configured elsewhere. | Display-only | Human/repo automation | Dashboard render | Remove label or change band config | `dashboard.issue_bands` (`src/docs/dashboard.md:105-140`) |
-| `claimed`, `preempted:<login>`, `hive/claimed-by-<agent>` | Issues | Claims/dashboard | A claim is a comment; the `claimed` label is a mirror Hive keeps in sync. Go claim gates use comments/assignees/ledger, not these labels. | Display-only | Hive/claim flows | Dashboard render | Cleared by claim flow or human | `governor.claims.*` (`src/docs/dashboard.md:105-140`) |
-| `hive/in-progress` | Issues | Agent claim relay, ledger mirror, enumeration sweep and dashboard in-progress band | States that a hive agent (normally the scanner) has started work on a PR for this issue ([#11841](https://github.com/hivecommons/hive/issues/11841)). Applied by `hive-open-issue claim` next to `hive/claimed-by-<agent>` in one label call, together with a bot comment carrying `<!-- hive:claim who=<agent> kind=agent hive=<spoke> at=<RFC3339> until=<at+agent TTL> -->` (the ledger's 🔒 comment carries the same `at=` when `governor.claims` is on). While the marker is live (`until` in the future) every hive scanning the repo withholds the issue from kicks, so two spokes never start the same issue; the `at=` instant is the start timestamp for per-repo SLA spans (`kicked → started → pr_opened`). | Kick withhold while marker live; display | Hive | Claim relay, ledger `OnClaimed`, enumeration sweep | Hive removes when the agent's PR opens (`hive-open-pr --issues`), when the ledger releases the agent claim, or at enumeration once PR evidence exists (`hive/covered-by-pr`, `hive/likely-done`, linked PRs) or the marker lapsed (default 2h `agent_ttl_s`); `governor.claims.label: false` disables it | Fixed label (`src/pkg/github/issue_inprogress.go`, `src/cmd/hive/claimswire.go`) |
-| `from-review` | Issues | Review backlog filing | Marks issues filed from review findings. No code path uses it as a gate. | Informational | Hive | Issue creation/display | Remove label | Fixed label (`src/pkg/github/review_backlog.go:1-40`) |
+| `claimed` (**retired → `stage/020-claimed`**), `preempted:<login>`, `hive/claimed-by-<agent>` | Issues | Claims/dashboard | A claim is a comment; the `claimed` label is a mirror Hive keeps in sync. Go claim gates use comments/assignees/ledger, not these labels. | Display-only | Hive/claim flows | Dashboard render | Cleared by claim flow or human | `governor.claims.*` (`src/docs/dashboard.md:105-140`) |
+| `hive/in-progress` (**retired → `stage/020-claimed` / `stage/030-pr-in-progress`**; the claim marker comment below remains the detection signal) | Issues | Agent claim relay, ledger mirror, enumeration sweep and dashboard in-progress band | States that a hive agent (normally the scanner) has started work on a PR for this issue ([#11841](https://github.com/hivecommons/hive/issues/11841)). Applied by `hive-open-issue claim` next to `hive/claimed-by-<agent>` in one label call, together with a bot comment carrying `<!-- hive:claim who=<agent> kind=agent hive=<spoke> at=<RFC3339> until=<at+agent TTL> -->` (the ledger's 🔒 comment carries the same `at=` when `governor.claims` is on). While the marker is live (`until` in the future) every hive scanning the repo withholds the issue from kicks, so two spokes never start the same issue; the `at=` instant is the start timestamp for per-repo SLA spans (`kicked → started → pr_opened`). | Kick withhold while marker live; display | Hive | Claim relay, ledger `OnClaimed`, enumeration sweep | Hive removes when the agent's PR opens (`hive-open-pr --issues`), when the ledger releases the agent claim, or at enumeration once PR evidence exists (`hive/covered-by-pr`, `hive/likely-done`, linked PRs) or the marker lapsed (default 2h `agent_ttl_s`); `governor.claims.label: false` disables it | Fixed label (`src/pkg/github/issue_inprogress.go`, `src/cmd/hive/claimswire.go`) |
+| `origin/review` (was `from-review`) | Issues | Review backlog filing, origin-label reconciler | Marks issues filed from review findings (`origin/*` provenance axis). No code path uses it as a gate; `agent/<lane>` on the same issue still says who works it. Open items carrying the retired `from-review` are swapped to `origin/review` once at startup. | Informational | Hive | Issue creation/display; one-time migration at startup (`/data/origin-label-migration.done`) | Remove label | `review.backlog.labels` (default `[origin/review]`; `from-review` accepted and mapped) (`src/pkg/github/origin_labels.go`, `src/pkg/github/review_backlog.go`) |
 | `hive: churn-triaged` | Issues | Contributor churn guard | Marks churn triage acknowledgement for contributor flow. | Workflow signal | Human/Hive | Contributor/churn checks | Remove label to re-triage | Fixed phrase in contributor flow docs/config (`src/pkg/dashboard/contribute_admission.go:302-338`) |
 | `good first issue`, `help wanted`, `bug`, `enhancement` | Issues | Contributor opportunistic ordering | Small ordering boost/visibility in contributor panels; `good first issue`, `help wanted`, and `bug` also appear in default actionable priority labels for human-filed issues. | Soft ordering | Human/Hive | Contributor queue/ranking | Remove label | Contributor/ranking config (`src/pkg/github/client.go:2740-2832`) |
-| `good first issue` + `help wanted` (hive-curated, `<!-- hive:gfi -->` comment) | Issues | Contributor advertising | With `good_first_issue.enabled`, hive applies both labels to a few qualifying open, unclaimed issues and leaves one welcome comment linking its relay. Not a hold — the issue stays in the hive's queue; a hive agent starting it removes the label and marks the comment superseded. Never in the hard-suppress set. See [good-first-issue.md](good-first-issue.md). | Soft (advertising) | Hive | Sweep (`src/pkg/gfi`) | Hive agent start, or remove label | `good_first_issue.*` |
+| `good first issue` + `help wanted` (hive-curated, `<!-- hive:gfi -->` comment) | Issues | Contributor advertising | On by default (`good_first_issue.enabled: false` opts out), hive applies both labels to a few qualifying open, unclaimed issues and leaves one welcome comment linking its relay. Not a hold — the issue stays in the hive's queue; a hive agent starting it removes the label and marks the comment superseded. Never in the hard-suppress set. See [good-first-issue.md](good-first-issue.md). | Soft (advertising) | Hive | Sweep (`src/pkg/gfi`) | Hive agent start, or remove label | `good_first_issue.*` |
+
+## Stage labels (`stage/NNN-*`): the pipeline state machine
+
+Operator request ([#12429](https://github.com/hivecommons/hive/issues/12429)):
+"the labeling of issues and prs has to give hints as to what stage the work is
+in … the labels must be clear and reflect the state machine … this needs to be
+dead simple." The hive therefore owns ONE ordered, mutually exclusive
+`stage/NNN-slug` family shared by issues and PRs, an orthogonal `author/*`
+family that answers "would the hive auto-merge this?", and two red health
+markers (`stage/stalled`, `stage/regressed`) that say the progression was
+disrupted. Exactly one `stage/*` stage label per open item; closed, merged or
+superseded items carry none (terminal = no stage).
+
+The engine lives in `src/pkg/stagelabels` (the table, the reconciler plan, the
+persisted stage timing) and `src/pkg/github/automerge/automerge_stage_labels.go`
+(the mapping from each automerge lane's per-PR reason to a stage, applied once
+per sweep cycle under the `hive:stage_labels` REST caller). Labels come from
+the PR list payload the sweep already fetched — no per-item GETs — and are
+written only when the planned set differs from the current one.
+
+### Numbering rules
+
+- **Sparse, zero-padded, 3 digits.** GitHub sorts labels lexically, so the
+  padding is what keeps `stage/100-…` after `stage/090-…`.
+- **100 is always the merge queue.** New stages are inserted *between*
+  existing numbers (e.g. `035`), never above 100.
+- **Renaming or inserting a stage = edit ONE table**, `stagelabels.Table`.
+  Stages are keyed in code by Go identifiers (`ReviewPending`, `MergeQueue`,
+  …); the label string (number + slug), description, dwell and colour are all
+  derived from that row. The reconciler treats any `stage/*` label not in the
+  current table as stale and removes it, so a renumber ripples to every open
+  item on the next cycle; the old labels can then be deleted from the repo.
+- **Colours**: every `stage/NNN-*` label is the same hive amber `#f5a623`
+  (the colour the retired `🐝 covered by PR` used) so the eye tracks the family
+  across lists; `stage/stalled` `#d73a4a` and `stage/regressed` `#b60205` are
+  red; `author/*` is neutral grey `#6e7781` except `author/trusted` `#0e8a16`.
+  The ensure-label step creates missing labels and PATCHes the colour of an
+  existing one only when it differs from the table, once per repo per
+  process.
+
+### The table
+
+| Label | Applies to | Meaning | Expected dwell (then `stage/stalled`) |
+|---|---|---|---|
+| `stage/010-actionable` | issue | triaged; eligible for the hive to pick up | 24h |
+| `stage/020-claimed` | issue | claimed by the scanner or a relay contributor (replaces `claimed`, `hive/in-progress`) | 2h |
+| `stage/030-pr-in-progress` | issue | an agent kick / contributor session is actively working; no PR yet | 90m |
+| `stage/040-covered-by-pr` | issue | an open PR covers it (replaces `🐝 covered by PR`); from here the issue mirrors the PR's stage | n/a (mirrors) |
+| `stage/050-review-pending` | PR | review swarm requested/dispatched; awaiting a verdict for the current head (or CI still pending with no verdict) | 1h |
+| `stage/060-reviewed` | PR | swarm verdict approve but a gate is still pending (CI running, soak not started) | 30m |
+| `stage/070-fixing` | PR | hive-authored (App/taken-over) PR: CI red, changes requested or needs-rebase; a hive agent is reworking it | 2h |
+| `stage/072-returned-to-contributor` | PR | contributor PR (relay or external): CI red / changes requested / conflicting; the hive posted its diagnosis, the ball is in the author's court | 24h |
+| `stage/074-adopted-by-hive` | PR | the author was unavailable past the grace (see below); the hive pushed `hive/adopt-<n>` at the contributor's head, opened a superseding App PR that keeps the author's commits, and the scanner's red-PR fix kick is finishing it. The original closes automatically when the superseder merges | 3h |
+| `stage/080-awaiting-merge-admission` | PR | nothing left for the author: CI green, verdict approve, no modifiers — and the automerge lane has not admitted it yet (prefilter not evaluated for this head, labels not synced, lane tripped). A stall here means a lane problem, so the hive also posts one `<!-- hive:stage-stalled -->` comment with the lane's last skip reason | 30m |
+| `stage/090-needs-human` | PR | cannot auto-merge; a person must act. Always read with the `author/*` label and any `hold`/`needs-human`/`needs-decision` modifier | none |
+| `stage/100-merge-queue` | PR | lane admitted: soaking, merge-eligible or waiting for tide / the merge window | 3h |
+
+Dwell thresholds are overridable per slug under `governor.labels.stage.dwell`
+(`review-pending: 1h`, `0` = never). The whole family is switched by
+`governor.labels.stage.enabled` (default `true`); both are on the Settings →
+Labels tab.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> s010: issue triaged
+    s010: 010 actionable
+    s020: 020 claimed
+    s030: 030 pr-in-progress
+    s040: 040 covered-by-pr
+    s050: 050 review-pending
+    s060: 060 reviewed
+    s070: 070 fixing
+    s072: 072 returned-to-contributor
+    s074: 074 adopted-by-hive
+    s080: 080 awaiting-merge-admission
+    s090: 090 needs-human
+    s100: 100 merge-queue
+    s010 --> s020: scanner / relay claim
+    s020 --> s030: kick running
+    s030 --> s040: PR opened
+    s040 --> s050: issue mirrors PR
+    s050 --> s060: swarm approve
+    s060 --> s080: CI green, author side done
+    s080 --> s100: lane admits (soak / merge-eligible)
+    s050 --> s070: hive PR red / changes requested
+    s050 --> s072: contributor PR red / changes requested
+    s060 --> s070: new head red
+    s100 --> s070: new head red (regressed)
+    s100 --> s072: contributor head red (regressed)
+    s070 --> s050: fixed head pushed
+    s072 --> s050: author pushes a new head
+    s072 --> s074: grace expired, superseding App PR opened
+    s074 --> [*]: superseder merged (original closed)
+    s074 --> s072: superseder closed unmerged (handed back)
+    s050 --> s090: untrusted author, hold, human merge path
+    s090 --> s050: hold lifted
+    s100 --> [*]: merged (labels removed)
+```
+
+### How an issue's stage is decided
+
+The enumeration cycle already sorts every open issue into a work bucket
+(actionable, live claim, in-progress start mark, covered by an open PR,
+filtered …) before the scanner kicks anything. `src/pkg/github/issue_stage_labels.go`
+(`SyncIssueStageLabels`, REST caller `hive:issue_stage_labels`) runs once per
+cycle after the claim guards and the in-progress sweep, so the buckets are
+final, and maps each row ([#12436](https://github.com/hivecommons/hive/issues/12436)):
+
+| Enumeration bucket | Stage |
+|---|---|
+| carries `hive/likely-done` (a PR merged, awaiting confirmation) | no stage — every hive-owned label removed, timing forgotten |
+| actionable (no claim, no PR) | `010-actionable` |
+| live claim (`<!-- hive:claim … -->` marker / ledger) by a human or relay contributor | `020-claimed` |
+| live claim by one of the hive's own agents, or an in-progress start mark (`kind=agent` marker from `hive-open-issue claim`) | `030-pr-in-progress` |
+| covered by an open PR, PR not yet staged by the automerge sweep | `040-covered-by-pr` |
+| covered by an open PR the sweep has staged (≥ 050) | **mirrors the PR's stage** (`050-review-pending` … `100-merge-queue`) so the issue list reads the same as the PR list |
+| exempt / filtered / reporter triage / advisory / dependency dashboard | no stage |
+
+Labels come from the issue list payload the cycle already fetched — no
+per-issue GETs — and are written only when the planned set differs from the
+current one. When the stage is mirrored from a PR, `stage/stalled` and
+`stage/regressed` belong to the PR and are not written on the issue; when the
+issue falls back between its *own* stages (a claim or kick lapsed with no PR:
+030 → 010) it gets `stage/regressed` and one explanatory comment. The claim
+relay (`hive-open-issue claim`) writes `stage/020-claimed` /
+`stage/030-pr-in-progress` directly alongside `hive/claimed-by-<who>` so the
+label is right as soon as the claim lands; `hive-open-pr --issues` swaps 030
+for 040 when the PR opens; close-on-merge strips every hive-owned label from
+an issue it closes. Timing and mirroring share the PR engine's state file
+(`/data/stage-labels.json`, issues and PRs share a number space per repo).
+
+### How a PR's stage is decided
+
+The automerge sweep already computes one reason per PR per lane each cycle
+(self-authored, trusted-author, contributor lane — see
+[hive-merge.md](hive-merge.md)). `automerge_stage_labels.go` maps that reason,
+the review-swarm verdict for the head, and the author tier the lane actually
+used to admit the PR:
+
+| Lane reason (examples) | Stage |
+|---|---|
+| merged / `closed` / `gone` | terminal: every hive-owned label removed, timing forgotten |
+| `draft` | no stage (stale stage removed) |
+| `contributor-lane:no-verdict`, CI pending with no verdict | `050-review-pending` |
+| CI pending, verdict approve | `060-reviewed` |
+| CI green, verdict approve, no modifier, yet the lane stopped on a reason no stage claims or tripped on a transient error (`review-state-check`, …) | `080-awaiting-merge-admission` (weak opinion: any lane's definite stage wins) |
+| CI red (`check-failing:*`, `required-check-failing:*`, `status-*`), `conflicting`, `not-mergeable`, `changes-requested`, verdict changes_requested/reject, `needs-rebase` present | `070-fixing` (self-authored lane) / `072-returned-to-contributor` (trusted-author or contributor lane) |
+| `contributor-lane:soaking(...)`, `head-changed-since-eval`, `merge-failed`, `required-checks-expected`, `behind`, `updated-branch`, `release-hold*` | `100-merge-queue` |
+| `label:hold`, `held`, `label:needs-human`, `exempt-label`, `excluded-label:*`, `sentinel`, `human-merge-path*`, `intent-*`, `contributor-lane:no-claim` / `claim-*` / `author-association` / `no-linked-issue` / `workflow-path` / `tests-removed` / `no-reviewer`, `untrusted-author-role`, `author-permission-missing` | `090-needs-human` |
+| hand-offs (`not-app-authored`, `trusted-bot-lane`, `contributor-lane:app-authored`), transient fetch errors | no opinion — the owning lane decides; nothing is written |
+
+When several lanes see the same PR the self-authored lane outranks the
+trusted-author lane, which outranks the contributor lane; the trusted-author
+lane's bare `untrusted-author-role` is a weak opinion the contributor lane
+refines.
+
+### `author/*` — would the hive auto-merge this?
+
+One per PR, derived from what the lane used for admission (registry tier,
+claim-marker `tier=`, trusted-author list, App-authored), recomputed with the
+stage but written only on change:
+
+| Label | Source |
+|---|---|
+| `author/trusted` | App-authored or self-authored lane; trusted-author lane allowed the author; registry/claim tier in the contributor lane's `require_tiers` (default `trusted`, `merger`) → auto-merge eligible |
+| `author/contributor` | registry/claim tier `contributor` → needs human lgtm/approve |
+| `author/newcomer` | registry/claim tier `newcomer` |
+| `author/untrusted` | no claim and no registry profile (external PR), `revoked`, or not a trusted author |
+
+### `stage/stalled` and `stage/regressed`
+
+- **`stage/stalled`** — the item sat in its current stage longer than the
+  table's dwell. "Entered stage at" is tracked in the hive's persisted state
+  (`/data/stage-labels.json`), not GitHub's timeline, so no extra API calls.
+  Cleared automatically when the stage changes. Only a stall in
+  `080-awaiting-merge-admission` is explained in a comment (the lane's last
+  skip reason), because that stall is the hive's fault, not the author's.
+- **`stage/regressed`** — the stage number went DOWN (e.g. `100 → 070`
+  because a new head went red). On every backward transition the hive posts
+  one short idempotent comment carrying `<!-- hive:stage-regressed -->`:
+  `stage 100-merge-queue → 070-fixing: check-failing:unit`. The label stays
+  until the stage reaches the point it regressed from (or the item closes).
+  Leaving a repair stage (`070`/`072`/`074`) for `050`/`060` is the repair
+  route itself and is not counted as a second regression.
+- At most one health label at a time; `regressed` wins over `stalled`.
+- **Filter `label:stage/stalled` or `label:stage/regressed` across repos =
+  everything off the happy path.**
+
+### Off the happy path: 072 → nudge → 074 → takeover
+
+When a contributor PR goes red the hive does not just relabel it (full flow in
+[hive-merge.md](hive-merge.md#stage-labels)):
+
+1. `stage/072-returned-to-contributor` and ONE `<!-- hive:contributor-nudge
+   head=<sha> n=<1|2> mode=<comment|queued|spawn|preempt> -->` comment
+   @-mentioning the author with the failing checks / review asks and "reply
+   here or push a new head". Re-posted only for a new head; re-nudged once
+   more after `governor.labels.stage.contributor_nudge.renudge_interval`
+   (default = the stage's 24h dwell, i.e. at `stage/stalled`), then no more
+   — **cap: 2 nudges per head**. `mode=` records how the relay side was
+   handled so the comment itself answers "did their agent get interrupted?".
+   `governor.labels.stage.contributor_nudge.enabled: false` turns the
+   comment and the relay task off; the stage label still moves.
+2. Relay contributors (the author has a contributor profile and a live relay
+   connection) also receive the diagnosis in their relay session as a
+   `fix-pr` task with `priority: interrupt`. Presence = a relay heartbeat
+   within `governor.labels.stage.presence_window` (default 15m); an offline
+   or external author gets the GitHub comment only (`mode=comment`). The hub
+   picks the delivery mode from what the relay advertised at DECLARE:
+   - `mode=spawn` — the relay declared `parallel_sessions` and
+     `max_parallel_fixes` (its `HIVE_MAX_PARALLEL_FIXES`, default 1, only
+     when the backend has a headless entry point): a bounded parallel
+     sub-session fixes the red PR while the primary session keeps its task.
+   - `mode=preempt` — no parallel capability: the primary agent is told to
+     park its current issue (WIP committed/stashed; the claim and lease stay
+     alive), fix the PR on its existing branch with the same sign-off, print
+     `HIVE_FIX_PR_DONE <task_id>` (or `HIVE_FIX_PR_FAILED <task_id> <reason>`),
+     then resume. A headless primary cannot be interrupted, so the relay
+     defers the fix and runs it before its next `ready`.
+   - `mode=queued` — the contributor is over their fix budget (below); the
+     task waits server-side and the PR carries stage 072 + the comment only.
+   Protocol fields and client behaviour:
+   [contributor-relay.md § fix-pr tasks](contributor-relay.md#fix-pr-tasks).
+3. If the author stays unavailable past the grace — counted from the FIRST
+   nudge for the head: `governor.labels.stage.contributor_grace_online`
+   (default 2h) when the nudge reached a relay (`mode=spawn|preempt|queued`),
+   `governor.labels.stage.contributor_grace_offline` (default 1h) after a
+   comment-only nudge (offline relay or external author) — the hive adopts
+   the PR (`governor.labels.stage.adoption.enabled`, default `true`):
+   - pushes `hive/adopt-<n>` in the base repo at the contributor's head SHA
+     (the fork's commits, authorship and `Signed-off-by` preserved byte for
+     byte — "sign-off survives the squash");
+   - opens an App PR from it against the same base, titled like the original,
+     whose body starts `Supersedes #N (adopted after CI went red and the
+     contributor was unavailable; original commits by @author preserved)`,
+     carries the original's `Closes/Fixes/Resolves` lines and instructs the
+     fix agent to rebase on the base and fix CI **on that branch** without
+     opening another PR;
+   - posts ONE `<!-- hive:adopted by=#M head=<sha> -->` comment on the
+     original and moves it to `stage/074-adopted-by-hive` (its linked issue
+     mirrors the stage). The hub drops the PR from the contributor's fix queue.
+   The superseding PR is App-authored and red with the same failures, so the
+   existing machinery takes over: it lands in `ci-failing.json` and the
+   scanner's FIX-BEFORE-NEW kick (the route every red hive-authored PR takes,
+   [hive-merge.md](hive-merge.md#stage-labels)) rebases and fixes it on
+   `hive/adopt-<n>`; it then runs the normal `050 → 100` path. No second
+   takeover mechanism exists. One adoption attempt per contributor head,
+   whatever the outcome. While in 074 the hive polls the superseder at most
+   every 10 minutes: merged → one `<!-- hive:adopted-merged -->` note and the
+   original is closed; closed unmerged (a maintainer declined) → the adoption
+   is forgotten and the original returns to 072 (not a regression).
+4. A new head from the author at any point before adoption re-arms the nudge
+   (grace restarts) or, if green, returns the PR to the normal `050 → 100`
+   path; no adoption. After adoption the author can still push a new head on
+   the original and say so on the superseder.
+5. Backpressure — the per-contributor fix budget. Capacity = the relay's
+   advertised `max_parallel_fixes` (fix sub-sessions beside the primary),
+   clamped by `contribute.max_parallel_fixes` (default 2); an unadvertised
+   relay has capacity 1 (preempt mode). At most that many `fix-pr` tasks are
+   in flight per contributor; the rest wait in a per-contributor FIFO
+   (oldest PR first, a human changes-requested before CI-red) carrying stage
+   072 and the GitHub comment only. Preempt mode allows ONE preemption at a
+   time and never preempts again until the parked task has resumed and run
+   for `contribute.min_focus_window` (default 30m). Failures with the same
+   cause (same failing check + error signature) are coalesced into one task
+   listing every affected PR. A queued PR whose adoption grace expires goes
+   to 074 instead of interrupting — the hive absorbs the overflow, not the
+   human. Queue depth / in-flight is exposed as `fix_queue` on the
+   contributor profile API and on the contribute page; the hub logs one line
+   per enqueue/dequeue (`fixqueue: … event=…`).
+6. Governing rule of the contributor fix scheduler, verbatim from the
+   operator: **"contributors should clean up their mess before taking on new
+   stuff."** Every ordering decision — task boundary, dequeue, a new-issue
+   claim via the relay or the contribute page — checks the contributor's
+   red-PR queue first: queued `fix-pr` tasks are handed out oldest first
+   (even to a relay that advertises no fix-pr support, as an ordinary task)
+   and a fresh issue is served only when that queue is empty. The contribute
+   page shows "You have N PRs to fix first" and offers those PRs before new
+   issues. Preemption of in-progress work still obeys the single-preempt +
+   focus-window rule; this ordering applies at task-boundary time.
+7. Capacity ≥ 2: fixes are dispatched immediately as parallel sub-sessions,
+   up to the advertised count so the primary session keeps going and is
+   never preempted; further failures queue, and each finished fix session
+   (`task_complete`/`task_failed` for the fix's `task_id`) frees a slot that
+   is refilled automatically with the next queued `fix-pr`.
+
+All seven steps ship with the stage engine and the contribute hub
+(hivecommons/hive#12436).
+
+### Modifiers, not stages
+
+These existing labels qualify a stage and may coexist with any stage label;
+the reconciler never touches them: `hold` / `hold/*`, `needs-human`,
+`needs-decision`, `needs-direction`, `blocked`, `needs-rebase`,
+`hive/likely-done`, `hive/partially-addressed`, `hive/claimed-by-<who>` (the
+grey "who" modifier a stage cannot carry), `lgtm`, `author/*`, and the agent
+provenance labels.
+
+### Migration from retired labels
+
+`🐝 covered by PR` (and its pre-#11888 spelling `hive/covered-by-pr`), the bare
+`claimed` label and `hive/in-progress` are **retired**: their meaning is
+carried by `stage/040-covered-by-pr`, `stage/020-claimed` and
+`stage/020-claimed` / `stage/030-pr-in-progress`. Claim *detection* never read
+those labels — it uses the `<!-- hive:claim … -->` marker comment
+(`claim_source=marker`), assignees and the ledger — so removing them changes
+no gate. On the first cycle after upgrade the reconciler removes them from
+every open item it writes a stage for, so open items lose
+`claimed` / `hive/in-progress` / `🐝 covered by PR` and gain their stage label;
+the repo-level labels can be deleted afterwards. The legacy writers are gone:
+the claim relay and ledger mirror write `stage/020-claimed` /
+`stage/030-pr-in-progress`, the PR-claim sync writes `stage/040-covered-by-pr`,
+and the in-progress sweep still recognises `hive/in-progress` as a trigger for
+one migration cycle so a lapsed mark from an older spoke is cleared rather
+than orphaned. `hive/claimed-by-<who>` is kept as the grey "who" modifier.
 
 ## Matching rules
 
@@ -158,7 +488,7 @@ The Governor dialog's Features tab has a "Question Auto-Close" section: a switch
 ### Holding a PR
 
 1. The PR receives `hold` from a human, the level gate, #5117, holdguard, or SHA-related policy, or receives `needs-human` from a human/escalation workflow.
-2. It is not merge-eligible or auto-merged; self-authored and queued auto-merge sweeps treat `needs-human` like a live hold label. If CI is red and it is not outreach/escalated, its owning agent may still be asked to fix CI without removing the hold.
+2. It is not merge-eligible or auto-merged; self-authored and queued auto-merge sweeps treat `needs-human` like a live hold label. If CI is red and it is not a held outreach PR or escalated, its owning agent may still be asked to fix CI without removing the hold.
 3. If the branch moves while held and then the hold is lifted, holdguard re-adds `hold`; removing it again is the fresh approval.
 
 ### Escalation

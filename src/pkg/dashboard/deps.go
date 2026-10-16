@@ -2,8 +2,6 @@ package dashboard
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,9 +21,11 @@ import (
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/governor"
+	"github.com/hivecommons/hive/pkg/hivestate"
 	"github.com/hivecommons/hive/pkg/hooks"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/mention"
+	"github.com/hivecommons/hive/pkg/nous"
 	"github.com/hivecommons/hive/pkg/review/eventdispatch"
 	"github.com/hivecommons/hive/pkg/rotation"
 	"github.com/hivecommons/hive/pkg/scheduler"
@@ -330,11 +330,22 @@ type NousState struct {
 	// and POST /api/nous/artifacts/sync answers 404.
 	ArtifactSync func(ctx context.Context) (interface{}, error) `json:"-"`
 	// Now is the clock for decision timestamps; nil means time.Now.
+	// CampaignFile is the per-campaign baseline store (pkg/nous). Empty
+	// means "<dir of SnapshotDir>/campaigns.json"; with no SnapshotDir
+	// either, campaigns are disabled and the baseline is global.
+	CampaignFile string `json:"-"`
+	// Now is the clock for decision timestamps; nil means time.Now.
 	Now func() time.Time `json:"-"`
 	Mu  sync.Mutex       `json:"-"`
 
 	gateNotifyMu     sync.Mutex
 	lastNotifiedGate string
+
+	stateOnce  sync.Once
+	stateStore *hivestate.Store
+
+	campaignOnce  sync.Once
+	campaignStore *nous.Store
 }
 
 // NousPrinciple is one learned principle as served by GET /api/nous/principles.
@@ -370,20 +381,23 @@ func NousBaselinePct(count int) float64 {
 	return pct
 }
 
-type NousSnapshot struct {
-	Timestamp     string            `json:"timestamp"`
-	Mode          string            `json:"mode"`
-	QueueIssues   int               `json:"queue_issues"`
-	QueuePRs      int               `json:"queue_prs"`
-	QueueHold     int               `json:"queue_hold"`
-	SLAViolations int               `json:"sla_violations"`
-	AgentsKicked  []string          `json:"agents_kicked,omitempty"`
-	AgentStates   map[string]string `json:"agent_states,omitempty"`
-	TotalTokens   int64             `json:"total_tokens"`
+// NousSnapshot is one per-eval-cycle hive state record. The series now lives
+// in pkg/hivestate (#12339); the alias keeps existing callers compiling.
+type NousSnapshot = hivestate.Snapshot
+
+// HiveState returns the hive state time series backed by SnapshotDir, or nil
+// when no directory is configured. Collection is independent of Nous mode.
+func (ns *NousState) HiveState() *hivestate.Store {
+	if ns == nil || ns.SnapshotDir == "" {
+		return nil
+	}
+	ns.stateOnce.Do(func() { ns.stateStore = hivestate.NewStore(ns.SnapshotDir) })
+	return ns.stateStore
 }
 
 func (ns *NousState) RecordSnapshot(govState governor.State, actionable *ghpkg.ActionableResult, agentsKicked []string, agentStatuses map[string]*agent.AgentProcess, tokenSummary *tokens.AggregateSummary) error {
-	if ns.SnapshotDir == "" {
+	store := ns.HiveState()
+	if store == nil {
 		return nil
 	}
 
@@ -406,18 +420,9 @@ func (ns *NousState) RecordSnapshot(govState governor.State, actionable *ghpkg.A
 		snap.TotalTokens = tokenSummary.TotalTokens
 	}
 
-	data, err := json.Marshal(snap)
-	if err != nil {
-		return fmt.Errorf("marshaling snapshot: %w", err)
-	}
-
-	filename := fmt.Sprintf("%s/%d.json", ns.SnapshotDir, time.Now().UnixMilli())
-	if err := os.WriteFile(filename, data, 0o644); err != nil {
-		return fmt.Errorf("writing snapshot: %w", err)
-	}
-
+	err := store.Record(snap)
 	ns.refreshStatus()
-	return nil
+	return err
 }
 
 func (ns *NousState) refreshStatus() {
@@ -433,9 +438,15 @@ func (ns *NousState) refreshStatus() {
 		ns.Phase = "observing"
 	}
 
+	// snapshots/snapshotCount stay the whole observation history; the
+	// baseline percentage is scoped to the active campaign (#12501).
+	baselineCount := count
+	if c, ok := ns.ActiveCampaign(); ok {
+		baselineCount = ns.CampaignSnapshots(c)
+	}
 	ns.Status["snapshots"] = count
 	ns.Status["snapshotCount"] = count
-	ns.Status["baseline_pct"] = NousBaselinePct(count)
+	ns.Status["baseline_pct"] = NousBaselinePct(baselineCount)
 	ns.Status["baseline_target"] = NousBaselineTarget
 	ns.Status["snapshotTarget"] = NousBaselineTarget
 	ns.Status["phase"] = ns.Phase

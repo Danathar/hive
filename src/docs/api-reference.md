@@ -176,7 +176,7 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | `GET` | `/api/compliance/export` | Owner only | Evidence download for `?since=`/`?until=`: `kind=controls` (`json`/`md`), `posture` (`json`/`csv`), `audit` (`json`), `config` (redacted effective config + sha256, `json`), `attestations` (`json`/`csv`) or `bundle` (`json`); audited as `compliance_export` ([#11081](https://github.com/hivecommons/hive/issues/11081)) | `pkg/dashboard/api.go:352` |
 | `GET` | `/api/compliance/attestations` | Owner only | Owner attestations, newest first (`?framework=` filters) ([#11081](https://github.com/hivecommons/hive/issues/11081)) | `pkg/dashboard/api.go:353` |
 | `POST` | `/api/compliance/attestations` | Owner only | Record `{"framework", "reviewed_on", "note"}` for the signed-in owner; audited as `compliance_attestation`; `201` with the attestation, `400` for an unknown framework, a bad or future date, or a note over 2000 characters ([#11081](https://github.com/hivecommons/hive/issues/11081)) | `pkg/dashboard/api.go:354` |
-| `PUT` | `/api/config/governor/compliance` | Owner only | Settings → Compliance framework picker: `{"frameworks": [...]}` sets `compliance.frameworks` (empty list deselects all, absent key leaves it unchanged; unknown/duplicate ids are a `400` before any change); audited as `config_compliance`; returns the re-evaluated `compliance.Report` ([#11080](https://github.com/hivecommons/hive/issues/11080)) | `pkg/dashboard/api.go:520` |
+| `PUT` | `/api/config/governor/compliance` | Owner only | Settings → Compliance framework picker: `{"frameworks": [...]}` sets `compliance.frameworks` (empty list deselects all, absent key leaves it unchanged; unknown/duplicate ids are a `400` before any change); audited as `config_compliance`; returns the re-evaluated `compliance.Report` ([#11080](https://github.com/hivecommons/hive/issues/11080)) | `pkg/dashboard/api.go:523` |
 
 | `GET` | `/api/config/governor/threshold-scaling` | Owner only | Governor Threshold Scaling Get | `pkg/dashboard/api.go:216` |
 | `PUT` | `/api/config/governor/threshold-scaling` | Owner only | Governor Threshold Scaling Set | `pkg/dashboard/api.go:217` |
@@ -185,8 +185,8 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | `PUT` | `/api/config/governor/watchdog` | Owner only | Governor Watchdog | `pkg/dashboard/api.go:226` |
 | `GET` | `/api/config/escalation` | Owner only | Escalation Config Get | `pkg/dashboard/api.go:229` |
 | `PUT` | `/api/config/escalation` | Owner only | Escalation Config Set | `pkg/dashboard/api.go:230` |
-| `GET` | `/api/config/write-surface` | Owner only | Lane write allowlist (`write_surface.allowlist`, [#9587](https://github.com/hivecommons/hive/issues/9587)): `allowlist`, `ops`, `warnings` | `pkg/dashboard/api.go:516` |
-| `PUT` | `/api/config/write-surface` | Owner only | Replace the lane write allowlist; `{"allowlist": {}}` clears it; unknown operation or bad lane name is a 400 with nothing changed | `pkg/dashboard/api.go:517` |
+| `GET` | `/api/config/write-surface` | Owner only | Lane write allowlist (`write_surface.allowlist`, [#9587](https://github.com/hivecommons/hive/issues/9587)): `allowlist`, `ops`, `warnings` | `pkg/dashboard/api.go:519` |
+| `PUT` | `/api/config/write-surface` | Owner only | Replace the lane write allowlist; `{"allowlist": {}}` clears it; unknown operation or bad lane name is a 400 with nothing changed | `pkg/dashboard/api.go:520` |
 | `GET` | `/api/config/review` | Dashboard auth/session | Review Config Get | `pkg/dashboard/api.go:233` |
 | `PUT` | `/api/config/review` | Owner only | Review Config Set | `pkg/dashboard/api.go:236` |
 | `PUT` | `/api/config/governor/features` | Owner only | Governor Features | `pkg/dashboard/api.go:242` |
@@ -230,15 +230,15 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | `GET` | `/api/model-advisor` | Dashboard auth/session | Model Advisor | `pkg/dashboard/api.go:175` |
 | `GET` | `/api/governor/pr-models` | Dashboard auth/session | Agent-authored PR distribution by normalized attribution model/backend for `window=7d`, `30d`, or `all`, including per-model rework stats and the top 10 most-reworked PRs | `pkg/dashboard/api.go:176` |
 | `GET` | `/api/reviewer/accuracy` | Dashboard auth/session | Reviewer verdict calibration for the configured window: false-approve/false-block rates and confidence buckets per perspective and reviewer model | `pkg/dashboard/api.go:235` |
-| `GET` | `/api/review/queue` | Dashboard auth/session | PR review queue: every open PR (agent and contributor, actionable and held) ranked by triage class, confidence band, CI state and age, with per-PR `reasons`; unreviewed items carry `pending_since` and `redispatch_count` from the review dispatch state; paged with `limit` (1-200, default 50) and `offset` | `pkg/dashboard/api.go:495` |
-| `POST` | `/api/review/queue/{owner}/{repo}/{number}/superseded/close` | Owner only | Close a PR in the supersession grace window now: posts the close comment, adds `hive/superseded`, closes it | `pkg/dashboard/api.go:498` |
-| `POST` | `/api/review/queue/{owner}/{repo}/{number}/superseded/keep-open` | Owner only | Keep a superseded PR open: adds `hive/keep-open`, which the supersession sweep never auto-closes | `pkg/dashboard/api.go:499` |
-| `GET` | `/api/review/pipeline` | Dashboard auth/session | Review pipeline: one card per review-queue PR placed in its stage (`unreviewed`, `reviewing`, `changes_requested`, `fixing`, `human_hold`, `approved`, `merged`, `abandoned`) with `since`, `reviewers`, P0–P3 `severity` counts, `loop_count`/`loop_cap`, `next_action` and `reasons`; filtered by `repo` and `stage`, paged with `limit` (1-200, default 50) and `offset` | `pkg/dashboard/api.go:503` |
+| `GET` | `/api/review/queue` | Dashboard auth/session | PR review queue: every open PR (agent and contributor, actionable and held) ranked by triage class, confidence band, CI state and age, with per-PR `reasons`; unreviewed items carry `pending_since` and `redispatch_count` from the review dispatch state; paged with `limit` (1-200, default 50) and `offset` | `pkg/dashboard/api.go:498` |
+| `POST` | `/api/review/queue/{owner}/{repo}/{number}/superseded/close` | Owner only | Close a PR in the supersession grace window now: posts the close comment, adds `hive/superseded`, closes it | `pkg/dashboard/api.go:501` |
+| `POST` | `/api/review/queue/{owner}/{repo}/{number}/superseded/keep-open` | Owner only | Keep a superseded PR open: adds `hive/keep-open`, which the supersession sweep never auto-closes | `pkg/dashboard/api.go:502` |
+| `GET` | `/api/review/pipeline` | Dashboard auth/session | Review pipeline: one card per review-queue PR placed in its stage (`unreviewed`, `reviewing`, `changes_requested`, `fixing`, `human_hold`, `approved`, `merged`, `abandoned`) with `since`, `reviewers`, P0–P3 `severity` counts, `loop_count`/`loop_cap`, `next_action` and `reasons`; filtered by `repo` and `stage`, paged with `limit` (1-200, default 50) and `offset` | `pkg/dashboard/api.go:506` |
 | `GET` | `/api/review/dispatch/events` | Dashboard auth/session | Webhook review dispatch queue: `enabled`, `webhooks_configured`, `debounce_s`, `pending` (soonest first) and `recent` (newest first) dispatches with repo, number, head SHA, action, timestamps and coalesced count, plus `stats` counters; in memory, never calls GitHub | `pkg/dashboard/api_review_event_dispatch.go:16` |
-| `GET` | `/api/review/evidence` | Merger or owner | [Review evidence bundle](review-evidence.md) for one PR head. Query `repo` (`owner/name`), `number`, optional `head` (full SHA or unique prefix of at least 7 characters; `409` when ambiguous; default is the newest head), `format=json\|zip` (default `json`) and `download=1` for an attachment. `json` returns the bundle bytes exactly as sealed (verdicts, posted reviews, policy, CI check runs, sentinel findings, human actions, merge event, `hash`, optional `signature`); `zip` adds `verdicts.json`, `review-links.json` and a `manifest.json` of SHA-256s plus the signing public key when readable. `400` for a bad `repo`/`number`; `404` with `status: "expired"`/`expired: true` when retention removed a bundle Hive can prove existed, otherwise `status: "not_found"` | `pkg/dashboard/api.go:507` |
-| `GET` | `/api/review/evidence/list` | Merger or owner | Every retained evidence bundle id and head for one PR (`repo`, `number`), oldest first, with the newest marked latest; `400` for a bad `repo`/`number` | `pkg/dashboard/api.go:508` |
-| `GET` | `/api/evidence/write-counters` | Merger or owner | Durable attempted vs blocked agent GitHub write counters ([#12069](https://github.com/hivecommons/hive/issues/12069)): `totals` by intent tier (ACMM mode) with `blocked_by_reason`, and `weeks` keyed by the UTC Monday of each ISO week with per-tier and per-reason counts. Persisted across restarts; observation only, never gates a write or merge. Empty `totals`/`weeks` before anything is recorded | `pkg/dashboard/api.go:510` |
-| `GET` | `/api/evidence/summary` | Dashboard auth/session | Read-only aggregate over `/data/evidence` bundles (schema v1) plus reviewer accuracy. Query `hours` (default 24, capped like `/api/pr-throughput`; `0` = all time), `repo` (`owner/name`) and `author_kind=human\|agent\|bot`; `400` for a bad value. Returns `outcomes_by_author_kind` (merged/open; `closed` is 0 and `reverted_14d` null until bundles record them), `reviewer_calibration` buckets per perspective, `reviewer_accuracy_by_model` split by author kind, `sentinel_hits_per_week`, `shadow_gate.would_have_held` (0 until the shadow gate lands), `write_counters` (per intent tier `{attempted, blocked}` from the proxy write counter file; omitted when absent or unreadable), the `/api/reviewer/accuracy` summary, and `n` plus `missing` counts (unknown-model verdicts, empty CI, unreadable records). Never consulted by merge decisions. | `pkg/dashboard/api.go:513` |
+| `GET` | `/api/review/evidence` | Merger or owner | [Review evidence bundle](review-evidence.md) for one PR head. Query `repo` (`owner/name`), `number`, optional `head` (full SHA or unique prefix of at least 7 characters; `409` when ambiguous; default is the newest head), `format=json\|zip` (default `json`) and `download=1` for an attachment. `json` returns the bundle bytes exactly as sealed (verdicts, posted reviews, policy, CI check runs, sentinel findings, human actions, merge event, `hash`, optional `signature`); `zip` adds `verdicts.json`, `review-links.json` and a `manifest.json` of SHA-256s plus the signing public key when readable. `400` for a bad `repo`/`number`; `404` with `status: "expired"`/`expired: true` when retention removed a bundle Hive can prove existed, otherwise `status: "not_found"` | `pkg/dashboard/api.go:510` |
+| `GET` | `/api/review/evidence/list` | Merger or owner | Every retained evidence bundle id and head for one PR (`repo`, `number`), oldest first, with the newest marked latest; `400` for a bad `repo`/`number` | `pkg/dashboard/api.go:511` |
+| `GET` | `/api/evidence/write-counters` | Merger or owner | Durable attempted vs blocked agent GitHub write counters ([#12069](https://github.com/hivecommons/hive/issues/12069)): `totals` by intent tier (ACMM mode) with `blocked_by_reason`, and `weeks` keyed by the UTC Monday of each ISO week with per-tier and per-reason counts. Persisted across restarts; observation only, never gates a write or merge. Empty `totals`/`weeks` before anything is recorded | `pkg/dashboard/api.go:513` |
+| `GET` | `/api/evidence/summary` | Dashboard auth/session | Read-only aggregate over `/data/evidence` bundles (schema v1) plus reviewer accuracy. Query `hours` (default 24, capped like `/api/pr-throughput`; `0` = all time) or a custom `from`/`to` range (RFC3339 or `YYYY-MM-DD`, date-only `to` inclusive, `to` defaults to now; `400` when `to` precedes `from`, the span exceeds 3 × 366 days, or `to` is given without `from`; the response echoes `from`/`to`), `repo` (`owner/name`) and `author_kind=human\|agent\|bot`; `400` for a bad value. A PR falls in the window by its open time (earliest bundle `created_at` or `merge.opened_at`), never by when a bundle was written; all bundles of a PR are folded so the newest supplies verdicts and the merge / `reverted_by` / backfilled close come from whichever record knows them. Returns `available_windows` (`{"24","168","720","all"}` → PR count under the same filters), `outcomes_by_author_kind` (merged/closed/open; `closed` comes from backfilled records, `reverted_14d` is null until bundles record it), `reviewer_calibration` buckets per perspective, `reviewer_accuracy_by_model` split by author kind, `sentinel_hits_per_week`, `shadow_gate` (`n`, `would_have_held`, `would_have_blocked`, and per gate `review_gate` / `intent` the evaluated `n` with `held` / `passed` outcomes `{n, merged, closed, open, reverted}`), `write_counters` (per intent tier `{attempted, blocked, blocked_by_reason}` from the proxy write counter file; omitted when absent or unreadable), `claim_vs_verdict` (per ISO week of agent-authored PRs: `n`, `claimed`, `ci_captured`, `ci_not_green`, `verdict_not_approve`, `both`; records with empty CI are excluded from the CI column and disclosed under `missing.records_empty_ci`), `work_balance` (per ISO week from the same audit entries as `/api/pr-throughput`: `n`, `opened` by actor kind `{human, agent, bot}`, `closed`, `throttled`; `missing.issues_human_opens_unobserved` and `missing.throttle_windows_unavailable` disclose that only hive-mediated issue writes are audited and that no governor throttle windows are reported), `intent_counters` (per intent tier `{attempted, blocked}` from `/var/run/hive-metrics/intent-counters.json` — evaluations and the subset the intent gate would have blocked with enforcement on, [#12362](https://github.com/hivecommons/hive/issues/12362); omitted when absent or unreadable), `complexity_by_repo` (per managed repo the newest 12 monthly complexity snapshots, oldest first, each `{month, ref, captured_at, files, functions, mean_cyclomatic, median_cyclomatic, p90_cyclomatic, max_cyclomatic, functions_over_threshold, threshold, static_warnings, static_warnings_by_tool}`; omitted when no repo has a snapshot), the `/api/reviewer/accuracy` summary, and `n` plus `missing` counts (unknown-model verdicts, empty CI, unreadable records). Never consulted by merge decisions. | `pkg/dashboard/api.go:516` |
 | `GET` | `/api/agents` | Dashboard auth/session | Agents List | `pkg/dashboard/api.go:315` |
 | `POST` | `/api/agents` | Owner only | Agent Create | `pkg/dashboard/api.go:316` |
 | `POST` | `/api/agents/import` | Owner only | Agent Import | `pkg/dashboard/api.go:317` |
@@ -345,19 +345,21 @@ Read the result from `GET /api/kick/{agent}/status`, which returns `status` of `
 | `POST` | `/api/config/knowledge/connectors/{name}/sync` | Owner only | Start an immediate background sync of one connector | `pkg/dashboard/api.go` |
 | `GET` | `/api/config/knowledge/agent-scopes` | Dashboard auth/session | Per-agent knowledge scopes (`knowledge.agent_scopes`: layers, repos, types, tags, include_states) ([docs](knowledge-toc.md#per-agent-scopes)) | `pkg/dashboard/api.go` |
 | `PUT` | `/api/config/knowledge/agent-scopes` | Owner only | Replace `knowledge.agent_scopes` after validating layer and state names; persisted and audited as `config_knowledge_agent_scopes` | `pkg/dashboard/api.go` |
-| `GET` | `/api/knowledge/git-sources` | Dashboard auth/session | Git Sources List | `pkg/dashboard/api.go:409` |
-| `POST` | `/api/knowledge/git-sources` | Owner only | Git Sources Connect | `pkg/dashboard/api.go:410` |
-| `DELETE` | `/api/knowledge/git-sources` | Owner only | Git Sources Disconnect | `pkg/dashboard/api.go:411` |
-| `POST` | `/api/knowledge/obsidian/sync` | Dashboard auth/session | Obsidian Sync | `pkg/dashboard/api.go:412` |
-| `GET` | `/api/knowledge/documents` | Dashboard auth/session | Documents List | `pkg/dashboard/api.go:413` |
-| `POST` | `/api/knowledge/documents` | Dashboard auth/session | Documents Import | `pkg/dashboard/api.go:414` |
-| `GET` | `/api/knowledge/documents/{slug}` | Dashboard auth/session | Document Get | `pkg/dashboard/api.go:415` |
-| `DELETE` | `/api/knowledge/documents/{slug}` | Dashboard auth/session | Document Delete | `pkg/dashboard/api.go:416` |
-| `POST` | `/api/knowledge/documents/{slug}/reimport` | Dashboard auth/session | Document Reimport | `pkg/dashboard/api.go:417` |
-| `GET` | `/api/knowledge/context7/search` | Dashboard auth/session | Context7 Search | `pkg/dashboard/api.go:418` |
-| `POST` | `/api/knowledge/cleanup-orphans` | Dashboard auth/session | Cleanup Orphans | `pkg/dashboard/api.go:419` |
+| `GET` | `/api/knowledge/git-sources` | Dashboard auth/session | Git Sources List | `pkg/dashboard/api.go:411` |
+| `POST` | `/api/knowledge/git-sources` | Owner only | Git Sources Connect | `pkg/dashboard/api.go:412` |
+| `DELETE` | `/api/knowledge/git-sources` | Owner only | Git Sources Disconnect | `pkg/dashboard/api.go:413` |
+| `POST` | `/api/knowledge/obsidian/sync` | Dashboard auth/session | Obsidian Sync | `pkg/dashboard/api.go:414` |
+| `GET` | `/api/knowledge/documents` | Dashboard auth/session | Documents List | `pkg/dashboard/api.go:415` |
+| `POST` | `/api/knowledge/documents` | Dashboard auth/session | Documents Import | `pkg/dashboard/api.go:416` |
+| `GET` | `/api/knowledge/documents/{slug}` | Dashboard auth/session | Document Get | `pkg/dashboard/api.go:417` |
+| `DELETE` | `/api/knowledge/documents/{slug}` | Dashboard auth/session | Document Delete | `pkg/dashboard/api.go:418` |
+| `POST` | `/api/knowledge/documents/{slug}/reimport` | Dashboard auth/session | Document Reimport | `pkg/dashboard/api.go:419` |
+| `GET` | `/api/knowledge/context7/search` | Dashboard auth/session | Context7 Search | `pkg/dashboard/api.go:420` |
+| `POST` | `/api/knowledge/cleanup-orphans` | Dashboard auth/session | Cleanup Orphans | `pkg/dashboard/api.go:421` |
 | `GET` | `/api/knowledge/channels` | Dashboard auth/session | Knowledge Channels List | `pkg/dashboard/api.go:384` |
 | `POST` | `/api/knowledge/channels` | Dashboard auth/session | Knowledge Channel Create | `pkg/dashboard/api.go:385` |
+| `GET` | `/api/config/knowledge/pipeline` | Owner only | Scalar bead synthesizer, curator, code map and primer settings, plus the read-only engine, vault paths and primer merge strategy ([docs](settings.md#knowledge)) | `pkg/dashboard/api.go` |
+| `PUT` | `/api/config/knowledge/pipeline` | Owner only | Update those settings after `config.ValidateKnowledgePipeline`; 0 or empty restores the default; the bead synthesizer switch applies at once, the rest after a restart; audited as `config_knowledge_pipeline` | `pkg/dashboard/api.go` |
 | `GET` | `/api/knowledge/connectors` | Dashboard auth/session | Knowledge connector statuses and publish mirror status (`{"connectors": [...], "publish": {...}\|null}`, see [knowledge-connectors.md](knowledge-connectors.md)) | `pkg/dashboard/api_knowledge_connectors.go:23` |
 | `POST` | `/api/knowledge/connectors/{name}/sync` | Owner only | Start one connector sync now (202; 404 unknown, 409 running) | `pkg/dashboard/api_knowledge_connectors.go:24` |
 | `POST` | `/api/knowledge/publish/sync` | Owner only | Run a publish mirror batch now (202 with publish status; 503 mirror not running, 409 batch in progress) | `pkg/dashboard/api_knowledge_connectors.go:25` |
@@ -468,66 +470,67 @@ always resolved server-side from the validated token.
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
-| `GET` | `/api/nous/status` | Dashboard auth/session | Nous Status | `pkg/dashboard/api.go:454` |
-| `GET` | `/api/nous/ledger` | Dashboard auth/session | Nous Ledger | `pkg/dashboard/api.go:455` |
-| `GET` | `/api/nous/principles` | Dashboard auth/session | Nous Principles | `pkg/dashboard/api.go:456` |
-| `POST` | `/api/nous/approve` | Owner only | Nous Approve | `pkg/dashboard/api.go:457` |
-| `POST` | `/api/nous/abort` | Owner only | Nous Abort | `pkg/dashboard/api.go:458` |
-| `POST` | `/api/nous/promote` | Owner only | Nous Promote (manual verdict promotion to an issue or Spektacular run; see [experiment-lab.md](experiment-lab.md#verdict-card-and-manual-promote)) | `pkg/dashboard/api.go:459` |
-| `PUT` | `/api/nous/mode` | Owner only | Nous Mode | `pkg/dashboard/api.go:460` |
-| `PUT` | `/api/nous/scope` | Owner only | Nous Scope | `pkg/dashboard/api.go:461` |
-| `GET` | `/api/nous/phase` | Dashboard auth/session | Nous Phase | `pkg/dashboard/api.go:462` |
-| `PUT` | `/api/nous/gate-decision` | Owner only | Nous Gate Decision | `pkg/dashboard/api.go:463` |
-| `GET` | `/api/nous/gate-pending` | Dashboard auth/session | Nous Gate Pending | `pkg/dashboard/api.go:464` |
-| `POST` | `/api/nous/gate-respond` | Owner only | Nous Gate Respond | `pkg/dashboard/api.go:465` |
-| `GET` | `/api/nous/gate-response` | Dashboard auth/session | Nous Gate Response | `pkg/dashboard/api.go:466` |
-| `GET` | `/api/nous/config` | Dashboard auth/session | Nous Config Get | `pkg/dashboard/api.go:467` |
-| `PUT` | `/api/nous/config/goals` | Owner only | Nous Config Goals | `pkg/dashboard/api.go:468` |
-| `PUT` | `/api/nous/config/repos` | Owner only | Nous Config Repos | `pkg/dashboard/api.go:469` |
-| `PUT` | `/api/nous/config/output` | Owner only | Nous Config Output | `pkg/dashboard/api.go:470` |
-| `PUT` | `/api/nous/config/fast-fail` | Owner only | Nous Config Fast Fail | `pkg/dashboard/api.go:471` |
-| `PUT` | `/api/nous/config/schedule` | Owner only | Nous Config Schedule | `pkg/dashboard/api.go:472` |
-| `PUT` | `/api/nous/config/controllables` | Owner only | Nous Config Controllables | `pkg/dashboard/api.go:473` |
-| `PUT` | `/api/nous/config/principles` | Owner only | Nous Config Principles | `pkg/dashboard/api.go:474` |
-| `DELETE` | `/api/nous/principles/{id}` | Owner only | Nous Delete Principle | `pkg/dashboard/api.go:475` |
-| `POST` | `/api/nous/artifacts/sync` | Owner only | Nous Artifact Sync | `pkg/dashboard/api.go:476` |
-| `POST` | `/api/nous/reset` | Owner only | Nous Reset (wipe baseline snapshots, learned knowledge or everything; see [experiment-lab.md](experiment-lab.md#resetting-data)) | `pkg/dashboard/api.go:477` |
+| `GET` | `/api/nous/status` | Dashboard auth/session | Nous Status | `pkg/dashboard/api.go:456` |
+| `GET` | `/api/nous/ledger` | Dashboard auth/session | Nous Ledger | `pkg/dashboard/api.go:457` |
+| `GET` | `/api/nous/principles` | Dashboard auth/session | Nous Principles | `pkg/dashboard/api.go:458` |
+| `POST` | `/api/nous/approve` | Owner only | Nous Approve | `pkg/dashboard/api.go:459` |
+| `POST` | `/api/nous/abort` | Owner only | Nous Abort | `pkg/dashboard/api.go:460` |
+| `POST` | `/api/nous/promote` | Owner only | Nous Promote (manual verdict promotion to an issue or Spektacular run; see [experiment-lab.md](experiment-lab.md#verdict-card-and-manual-promote)) | `pkg/dashboard/api.go:461` |
+| `PUT` | `/api/nous/mode` | Owner only | Nous Mode | `pkg/dashboard/api.go:462` |
+| `PUT` | `/api/nous/scope` | Owner only | Nous Scope | `pkg/dashboard/api.go:463` |
+| `GET` | `/api/nous/phase` | Dashboard auth/session | Nous Phase | `pkg/dashboard/api.go:464` |
+| `PUT` | `/api/nous/gate-decision` | Owner only | Nous Gate Decision | `pkg/dashboard/api.go:465` |
+| `GET` | `/api/nous/gate-pending` | Dashboard auth/session | Nous Gate Pending | `pkg/dashboard/api.go:466` |
+| `POST` | `/api/nous/gate-respond` | Owner only | Nous Gate Respond | `pkg/dashboard/api.go:467` |
+| `GET` | `/api/nous/gate-response` | Dashboard auth/session | Nous Gate Response | `pkg/dashboard/api.go:468` |
+| `GET` | `/api/nous/config` | Dashboard auth/session | Nous Config Get | `pkg/dashboard/api.go:469` |
+| `PUT` | `/api/nous/config/goals` | Owner only | Nous Config Goals | `pkg/dashboard/api.go:470` |
+| `PUT` | `/api/nous/config/repos` | Owner only | Nous Config Repos | `pkg/dashboard/api.go:471` |
+| `PUT` | `/api/nous/config/output` | Owner only | Nous Config Output | `pkg/dashboard/api.go:472` |
+| `PUT` | `/api/nous/config/fast-fail` | Owner only | Nous Config Fast Fail | `pkg/dashboard/api.go:473` |
+| `PUT` | `/api/nous/config/schedule` | Owner only | Nous Config Schedule | `pkg/dashboard/api.go:474` |
+| `PUT` | `/api/nous/config/controllables` | Owner only | Nous Config Controllables | `pkg/dashboard/api.go:475` |
+| `PUT` | `/api/nous/config/principles` | Owner only | Nous Config Principles | `pkg/dashboard/api.go:476` |
+| `DELETE` | `/api/nous/principles/{id}` | Owner only | Nous Delete Principle | `pkg/dashboard/api.go:477` |
+| `POST` | `/api/nous/artifacts/sync` | Owner only | Nous Artifact Sync | `pkg/dashboard/api.go:478` |
+| `POST` | `/api/nous/reset` | Owner only | Nous Reset (wipe baseline snapshots, learned knowledge or everything; see [experiment-lab.md](experiment-lab.md#resetting-data)) | `pkg/dashboard/api.go:479` |
+| `POST` | `/api/nous/campaign/start` | Owner only | Nous Campaign Start — archives the active campaign and starts a new experiment whose baseline restarts at 0 ([#12501](https://github.com/hivecommons/hive/issues/12501)) | `pkg/dashboard/api.go:480` |
 
 ## Inception
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
-| `POST` | `/api/inception/start` | Owner only | Inception Start | `pkg/dashboard/api.go:424` |
-| `POST` | `/api/inception/scan` | Owner only | Inception Scan | `pkg/dashboard/api.go:425` |
-| `GET` | `/api/inception/state` | Dashboard auth/session | Inception State | `pkg/dashboard/api.go:426` |
-| `POST` | `/api/inception/questions` | Owner only | Inception Set Questions | `pkg/dashboard/api.go:427` |
-| `POST` | `/api/inception/answer` | Owner only | Inception Answer | `pkg/dashboard/api.go:428` |
-| `POST` | `/api/inception/facts` | Owner only | Inception Record Facts | `pkg/dashboard/api.go:429` |
-| `GET` | `/api/inception/scaffold` | Dashboard auth/session | Inception Scaffold | `pkg/dashboard/api.go:430` |
-| `POST` | `/api/inception/approve` | Owner only | Inception Approve | `pkg/dashboard/api.go:431` |
-| `POST` | `/api/inception/reset` | Owner only | Inception Reset | `pkg/dashboard/api.go:432` |
-| `GET` | `/api/inception/ideation-facts` | Dashboard auth/session | Inception Ideation Facts | `pkg/dashboard/api.go:433` |
-| `GET` | `/api/inception/download` | Dashboard auth/session | Inception Download | `pkg/dashboard/api.go:434` |
-| `GET` | `/api/inception/has-files` | Dashboard auth/session | Inception Has Files | `pkg/dashboard/api.go:435` |
-| `PUT` | `/api/inception/wiki-name` | Owner only | Inception Rename Wiki | `pkg/dashboard/api.go:436` |
-| `POST` | `/api/inception/import` | Owner only | Inception Import | `pkg/dashboard/api.go:437` |
+| `POST` | `/api/inception/start` | Owner only | Inception Start | `pkg/dashboard/api.go:426` |
+| `POST` | `/api/inception/scan` | Owner only | Inception Scan | `pkg/dashboard/api.go:427` |
+| `GET` | `/api/inception/state` | Dashboard auth/session | Inception State | `pkg/dashboard/api.go:428` |
+| `POST` | `/api/inception/questions` | Owner only | Inception Set Questions | `pkg/dashboard/api.go:429` |
+| `POST` | `/api/inception/answer` | Owner only | Inception Answer | `pkg/dashboard/api.go:430` |
+| `POST` | `/api/inception/facts` | Owner only | Inception Record Facts | `pkg/dashboard/api.go:431` |
+| `GET` | `/api/inception/scaffold` | Dashboard auth/session | Inception Scaffold | `pkg/dashboard/api.go:432` |
+| `POST` | `/api/inception/approve` | Owner only | Inception Approve | `pkg/dashboard/api.go:433` |
+| `POST` | `/api/inception/reset` | Owner only | Inception Reset | `pkg/dashboard/api.go:434` |
+| `GET` | `/api/inception/ideation-facts` | Dashboard auth/session | Inception Ideation Facts | `pkg/dashboard/api.go:435` |
+| `GET` | `/api/inception/download` | Dashboard auth/session | Inception Download | `pkg/dashboard/api.go:436` |
+| `GET` | `/api/inception/has-files` | Dashboard auth/session | Inception Has Files | `pkg/dashboard/api.go:437` |
+| `PUT` | `/api/inception/wiki-name` | Owner only | Inception Rename Wiki | `pkg/dashboard/api.go:438` |
+| `POST` | `/api/inception/import` | Owner only | Inception Import | `pkg/dashboard/api.go:439` |
 
 ## Beads
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
-| `GET` | `/api/beads` | Dashboard auth/session | Beads List | `pkg/dashboard/api.go:479` |
-| `GET` | `/api/beads/{agent}` | Dashboard auth/session | Beads List | `pkg/dashboard/api.go:480` |
-| `POST` | `/api/beads/{agent}` | Owner only | Beads Create | `pkg/dashboard/api.go:481` |
-| `POST` | `/api/beads/reset` | Owner only | Beads Reset | `pkg/dashboard/api.go:482` |
-| `POST` | `/api/beads/reset/{agent}` | Owner only | Beads Reset Agent | `pkg/dashboard/api.go:483` |
+| `GET` | `/api/beads` | Dashboard auth/session | Beads List | `pkg/dashboard/api.go:482` |
+| `GET` | `/api/beads/{agent}` | Dashboard auth/session | Beads List | `pkg/dashboard/api.go:483` |
+| `POST` | `/api/beads/{agent}` | Owner only | Beads Create | `pkg/dashboard/api.go:484` |
+| `POST` | `/api/beads/reset` | Owner only | Beads Reset | `pkg/dashboard/api.go:485` |
+| `POST` | `/api/beads/reset/{agent}` | Owner only | Beads Reset Agent | `pkg/dashboard/api.go:486` |
 
 ## Dashboard miscellaneous
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
 | `GET` | `/api/audit` | Read-write role | Audit Log — `{"entries": [...]}` envelope, newest first, capped at 200; response shape and the serve-time `user_name` field in [audit-log.md](audit-log.md#get-apiaudit) | `pkg/dashboard/api.go:54` |
-| `GET` | `/api/watchdog/activity` | Read-write role | Watchdog activity readout for the Health tab (#7254): `watchdog-*` audit actions over `?days=` (default 30, clamped to 90) — total / taken / observed / `byAction`, a zero-filled per-day `daily` histogram, per-agent `agents` liveness, and the Observe → Heal `promotion` hint; see [agent-watchdog.md](agent-watchdog.md#watchdog-activity-strip) | `pkg/dashboard/api.go:490` |
+| `GET` | `/api/watchdog/activity` | Read-write role | Watchdog activity readout for the Health tab (#7254): `watchdog-*` audit actions over `?days=` (default 30, clamped to 90) — total / taken / observed / `byAction`, a zero-filled per-day `daily` histogram, per-agent `agents` liveness, and the Observe → Heal `promotion` hint; see [agent-watchdog.md](agent-watchdog.md#watchdog-activity-strip) | `pkg/dashboard/api.go:493` |
 | `GET` | `/api/logs/sources` | Dashboard auth/session | Log sources (#11942): every source name this hive knows (`hive`, the default, plus `proxy`, `hive-output`, `litellm` and `requests` from #11944, and `starts` and `crash` from #11945), each marked `available` or not with a `reason`; names only, no log text. Wrapped by the admin MCP `log_sources` tool; see [design/admin-mcp.md](design/admin-mcp.md#log-read) | `pkg/dashboard/api_logs.go:19` |
 | `GET` | `/api/logs/read` | Read-write role (checked by the handler) | Log read (#11942): the newest matching lines of the hive's own log and its rotated, compressed history, or of another source (#11944: auth proxy output, early hive output, litellm output, dashboard request log), oldest first, as `{time, source, level, stream, text}`; `?source=&lines=&since=&until=&min_level=&include=&exclude=&cursor=`. Default 100 lines, at most 1000, 128 KiB per result, 8 KiB per line; `since`/`until` need an explicit offset; scrubbed at read time with redactions counted; `coverage`, `next_cursor`, `status` `incomplete` (stopped on the scan bound; follow `next_cursor`) / `not_available` / `cursor_expired`. Wrapped by the admin MCP `log_read` tool; see [design/admin-mcp.md](design/admin-mcp.md#log-read) | `pkg/dashboard/api_logs.go:20` |
 | `POST` | `/api/presence` | Dashboard auth/session | Presence | `pkg/dashboard/api.go:63` |
@@ -551,11 +554,11 @@ always resolved server-side from the validated token.
 
 
 | `GET` | `/api/convergence/soak` | Owner only | Convergence Soak Status | `pkg/dashboard/api.go:258` |
-| `POST` | `/api/plan/from-issue` | Dashboard auth/session | Plan From Issue | `pkg/dashboard/api.go:442` |
-| `GET` | `/api/plan/{epicID}` | Dashboard auth/session | Plan Tree | `pkg/dashboard/api.go:445` |
-| `POST` | `/api/plan/{epicID}/approve` | Owner only | Plan Approve | `pkg/dashboard/api.go:446` |
-| `POST` | `/api/plan/{epicID}/reject` | Owner only | Plan Reject | `pkg/dashboard/api.go:448` |
-| `POST` | `/api/plan/{epicID}/child/{childID}` | Owner only | Plan Child Action | `pkg/dashboard/api.go:449` |
+| `POST` | `/api/plan/from-issue` | Dashboard auth/session | Plan From Issue | `pkg/dashboard/api.go:444` |
+| `GET` | `/api/plan/{epicID}` | Dashboard auth/session | Plan Tree | `pkg/dashboard/api.go:447` |
+| `POST` | `/api/plan/{epicID}/approve` | Owner only | Plan Approve | `pkg/dashboard/api.go:448` |
+| `POST` | `/api/plan/{epicID}/reject` | Owner only | Plan Reject | `pkg/dashboard/api.go:450` |
+| `POST` | `/api/plan/{epicID}/child/{childID}` | Owner only | Plan Child Action | `pkg/dashboard/api.go:451` |
 | `POST` | `/api/linear/agent/install` | Owner only | Linear Agent Install (OAuth start) | `pkg/dashboard/api_linear_agent.go:219` |
 | `GET` | `/api/linear/agent/status` | Owner only | Linear Agent Status | `pkg/dashboard/api_linear_agent.go:220` |
 | `POST` | `/api/linear/agent/disconnect` | Owner only | Linear Agent Disconnect | `pkg/dashboard/api_linear_agent.go:221` |
@@ -571,10 +574,10 @@ always resolved server-side from the validated token.
 | `GET` | `/api/summaries` | Dashboard auth/session | Summaries | `pkg/dashboard/api.go:190` |
 | `POST` | `/api/prs/{owner}/{repo}/{number}/queue-automerge` | Merger/owner role | Queue PRAuto Merge | `pkg/dashboard/api.go:191` |
 | `GET` | `/api/inference/models/{backend}` | Dashboard auth/session | Inference Models | `pkg/dashboard/api.go:361` |
-| `GET` | `/api/hive-id` | Dashboard auth/session | Hive IDGet | `pkg/dashboard/api.go:421` |
-| `PUT` | `/api/hive-id` | Owner only | Hive IDSet | `pkg/dashboard/api.go:422` |
-| `POST` | `/api/chat` | Dashboard auth/session | Chat | `pkg/dashboard/api.go:451` |
-| `GET` | `/api/auth/token` | Public | Auth Token | `pkg/dashboard/api.go:485` |
+| `GET` | `/api/hive-id` | Dashboard auth/session | Hive IDGet | `pkg/dashboard/api.go:423` |
+| `PUT` | `/api/hive-id` | Owner only | Hive IDSet | `pkg/dashboard/api.go:424` |
+| `POST` | `/api/chat` | Dashboard auth/session | Chat | `pkg/dashboard/api.go:453` |
+| `GET` | `/api/auth/token` | Public | Auth Token | `pkg/dashboard/api.go:488` |
 | `GET` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:248` |
 | `POST` | `/api/v1/` | GitHub token | Contributor v1 API dispatcher | `pkg/dashboard/api_contribute.go:249` |
 | `GET` | `/api/docs` | Dashboard auth/session | APIDocs | `pkg/dashboard/api_contribute.go:250` |
@@ -598,7 +601,7 @@ always resolved server-side from the validated token.
 
 | Method | Path | Auth | Purpose | Source |
 |---|---|---|---|---|
-| `GET` | `/api/saas/my-hives` | Hub auth | My Hives | `pkg/hub/saas.go:371` |
+| `GET` | `/api/saas/my-hives` | Hub auth | My Hives. Each row carries `quadrant` and the payload carries `fleet_quadrant` ([#12458](https://github.com/hivecommons/hive/issues/12458)): `axes[]` of `{axis, score, scored, reason?, delta, nudge?, criteria[], measured, unmeasured, summary?, n?}` where each `criteria[]` entry is `{name, label, measured, value, display?, score, weight, how, good, reason?, n?}`; every criterion maps to 0–100 on a fixed named curve, an axis is the weighted mean of its *measured* criteria only (an unmeasured criterion is listed with `reason` and excluded, never scored 0), `composite` averages the scored axes, and `fleet_quadrant` is the per-axis **median** across hives in view (`aggregate: "median"`, `n` hives) with each criterion's median value. `delta` is the hive minus the fleet median. Shape is additive over the earlier `axes[]{axis,score,scored,reason,delta,nudge}`/`composite`/`scored_axes` payload. See [Fleet quadrant](fleet-health.md#fleet-quadrant) | `pkg/hub/saas.go:371`, `pkg/hub/quadrant.go` |
 | `GET` | `/api/hub/widget` | Hub auth | iPhone fleet widget ([#12148](https://github.com/hivecommons/hive/issues/12148)): every hive the caller can see (hub admins: all; others: hives they own or hold a role on; pool placeholders excluded), sorted by `act_issues + act_prs` descending. Per hive `id`, `project`, `url`, `online`, `acmm_level`, `issues`, `prs` (all open, from the heartbeat; 0 from spokes that do not report them), `act_issues`, `act_prs`, `agents_running`, `agents_total`, `last_heartbeat`; `totals` (`hives`, `online`, `need_you`, the same counts summed) and `history` (fleet `act_issues`/`act_prs` per 15-minute bucket, `t` in Unix seconds, at most 48 points). See [iOS widget](ios-widget.md#fleet-widget-hub-mode) | `pkg/hub/saas.go:372` |
 | `GET` | `/api/saas/usage` | Hub auth | Usage | `pkg/hub/saas.go:381` |
 | `POST` | `/api/saas/hives` | Hub auth | Create Hive | `pkg/hub/saas.go:394` |
@@ -608,7 +611,7 @@ always resolved server-side from the validated token.
 | `GET` | `/api/saas/hives/{id}/digest-pin` | Hub auth (owner) | Digest Pin - the pin with provenance and whether the spoke reports running it | `pkg/hub/digest_pin.go` |
 | `GET` | `/api/saas/hives/{id}/open` | Hub handler-specific | Open Hive | `pkg/hub/saas.go:400` |
 | `DELETE` | `/api/saas/hives/{id}` | Hub auth | Delete Hive | `pkg/hub/saas.go:401` |
-| `POST` | `/api/saas/hives/{id}/upgrade` | Hub auth | Upgrade Hive | `pkg/hub/saas.go:402` |
+| `POST` | `/api/saas/hives/{id}/upgrade` | Hub auth | Upgrade Hive - arms heartbeat delivery (`200 {"status":"upgrading"}`); a spoke already at its reachable target is a no-op `200 {"status":"current","current","target","channel","message"}`, not an error | `pkg/hub/saas.go:402` |
 | `POST` | `/api/saas/hives/{id}/switch-branch` | Hub auth | Switch Branch | `pkg/hub/saas.go:403` |
 | `PUT` | `/api/saas/hives/{id}/visibility` | Hub auth | Toggle Visibility | `pkg/hub/saas.go:410` |
 | `PUT` | `/api/saas/hives/{id}/auto-upgrade` | Hub auth | Toggle Auto Upgrade | `pkg/hub/saas.go:411` |
@@ -722,29 +725,31 @@ always resolved server-side from the validated token.
 | `GET` | `/api/hub/clusters` | Hub auth | List Clusters | `pkg/hub/saas.go:528` |
 | `GET` | `/api/hub/image-pulls` | Hub auth | Per-Release Image Pull Series | `pkg/hub/saas.go:377` |
 | `GET` | `/api/reach` | Hub admin | PR Reach Report (?pr=NNN or ?recent=K) | `pkg/hub/saas.go:519` |
-| `GET` | `/fleet` | Hub handler-specific | My-Hives Fleet Page (static; data via `/api/saas/my-hives`) | `pkg/hub/server.go:1732` |
-| `GET` | `/my-hives` | Hub handler-specific | 301 redirect to `/fleet` (query preserved) | `pkg/hub/server.go:1733` |
-| `POST` | `/api/heartbeat` | Hub handler-specific | Heartbeat | `pkg/hub/server.go:1674` |
-| `POST` | `/api/task-status` | Hub handler-specific | Task Status | `pkg/hub/server.go:1675` |
-| `GET` | `/api/registry` | Hub handler-specific | Registry | `pkg/hub/server.go:1683` |
-| `GET` | `/api/hub/leaderboard` | Hub handler-specific | Leaderboard | `pkg/hub/server.go:1684` |
-| `GET` | `/api/hub/stats` | Hub handler-specific | Stats | `pkg/hub/server.go:1685` |
-| `GET` | `/api/fleet-stats` | Hub handler-specific | Fleet Stats | `pkg/hub/server.go:1686` |
-| `GET` | `/api/hub/version` | Hub handler-specific | Hub Version | `pkg/hub/server.go:1690` |
-| `DELETE` | `/api/hub/registry/{id}` | Hub handler-specific | Registry Delete | `pkg/hub/server.go:1700` |
-| `POST` | `/api/contribute/register` | Hub handler-specific | Contribute Proxy | `pkg/hub/server.go:1701` |
-| `GET` | `/api/contribute/status` | Hub handler-specific | Contribute Status | `pkg/hub/server.go:1702` |
-| `GET` | `/api/contribute/ws` | Hub handler-specific | Contribute WSProxy | `pkg/hub/server.go:1703` |
-| `POST` | `/api/github/webhook` | Hub handler-specific | GitHub Webhook | `pkg/hub/server.go:1704` |
-| `GET` | `/gh-setup` | Hub handler-specific | GitHub App Setup Router | `pkg/hub/server.go:1705` |
-| `GET` | `/learn` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1706` |
-| `GET` | `/get-started` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1707` |
-| `GET` | `/api/docs` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1710` |
-| `GET` | `/api/reading-list` | Hub handler-specific | Reading List | `pkg/hub/server.go:1713` |
-| `GET` | `/reading` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1714` |
-| `GET` | `/cncf-reference-architecture` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1721` |
-| `GET` | `/cncf-reference-architecture/console` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1722` |
-| `GET` | `/cncf-reference-architecture/bluefin` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1723` |
-| `GET` | `/{$}` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1740` |
-| `GET` | `/og-card.png` | Hub handler-specific | OGCard | `pkg/hub/server.go:1745` |
-| `GET` | `/` | Public | Static asset fallback (`http.FileServerFS` over the embedded `static/` tree) for any path no other route claims | `pkg/hub/server.go:1747` |
+| `GET` | `/fleet` | Hub handler-specific | My-Hives Fleet Page (static; data via `/api/saas/my-hives`) | `pkg/hub/server.go:1737` |
+| `GET` | `/my-hives` | Hub handler-specific | 301 redirect to `/fleet` (query preserved) | `pkg/hub/server.go:1738` |
+| `POST` | `/api/heartbeat` | Hub handler-specific | Heartbeat | `pkg/hub/server.go:1678` |
+| `POST` | `/api/task-status` | Hub handler-specific | Task Status | `pkg/hub/server.go:1679` |
+| `GET` | `/api/registry` | Hub handler-specific | Registry | `pkg/hub/server.go:1687` |
+| `GET` | `/api/hub/leaderboard` | Hub handler-specific | Leaderboard | `pkg/hub/server.go:1688` |
+| `GET` | `/api/hub/stats` | Hub handler-specific | Stats | `pkg/hub/server.go:1689` |
+| `GET` | `/api/fleet-stats` | Hub handler-specific | Fleet Stats | `pkg/hub/server.go:1690` |
+| `GET` | `/api/hub/version` | Hub handler-specific | Hub Version | `pkg/hub/server.go:1695` |
+| `DELETE` | `/api/hub/registry/{id}` | Hub handler-specific | Registry Delete | `pkg/hub/server.go:1705` |
+| `POST` | `/api/contribute/register` | Hub handler-specific | Contribute Proxy | `pkg/hub/server.go:1706` |
+| `GET` | `/api/contribute/status` | Hub handler-specific | Contribute Status | `pkg/hub/server.go:1707` |
+| `GET` | `/api/contribute/ws` | Hub handler-specific | Contribute WSProxy | `pkg/hub/server.go:1708` |
+| `POST` | `/api/github/webhook` | Hub handler-specific | GitHub Webhook | `pkg/hub/server.go:1709` |
+| `GET` | `/gh-setup` | Hub handler-specific | GitHub App Setup Router | `pkg/hub/server.go:1710` |
+| `GET` | `/learn` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1711` |
+| `GET` | `/get-started` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1712` |
+| `GET` | `/api/docs` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1715` |
+| `GET` | `/api/reading-list` | Hub handler-specific | Reading List | `pkg/hub/server.go:1718` |
+| `GET` | `/reading` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1719` |
+| `GET` | `/cncf-reference-architecture` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1726` |
+| `GET` | `/cncf-reference-architecture/console` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1727` |
+| `GET` | `/cncf-reference-architecture/bluefin` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1728` |
+| `GET` | `/{$}` | Hub handler-specific | Static HTML page | `pkg/hub/server.go:1745` |
+| `GET` | `/og-card.png` | Hub handler-specific | OGCard | `pkg/hub/server.go:1750` |
+| `GET` | `/` | Public | Static asset fallback (`http.FileServerFS` over the embedded `static/` tree) for any path no other route claims | `pkg/hub/server.go:1752` |
+| `GET` | `/api/hub/evidence` | Hub admin | Read-only cross-hive evidence drill-down from each spoke's stored heartbeat `evidence` summary ([#12116](https://github.com/hivecommons/hive/issues/12116)); non-admins get `403`. Returns `spokes`, `reporting`, pooled `calibration` (bucket 0–5 → `{n, bad, rate, lo, hi}`; the hub view folds the six buckets into four reviewer-confidence ranges), `findings[]` (the plain-language *What this says* sentences, generated from the same fields; [#12456](https://github.com/hivecommons/hive/issues/12456)), `by_acmm_level` (`level`, `hives`, `merged_90d`, `revert_rate`), `family_false_approve_rate` (`same`/`cross`/`mixed`, hives classed by their reviewer vs author family sets), fleet `record_coverage` (merged PRs with an evidence record over `prs_merged_90d`), fleet panels ([#12370](https://github.com/hivecommons/hive/issues/12370)) `outcomes_by_author_kind[]` (`kind`, `hives`, `n`, `merged`, `reverted`, `merge_rate`, `revert_rate`), `write_counters[]` (`tier`, `hives`, `attempted`, `blocked`, `block_rate`) and `shadow_gate` (`review_gate` / `intent` → `held` / `passed` outcomes with `revert_rate`), each omitted while no spoke reports it and repeated per `by_acmm_level[]` row, and per hive `hives[]` with `acmm_level`, `prs_merged_90d`, `record_coverage`, `family_mix`, false-approve / false-block / revert rates, families, a calibration series and the raw `counts` behind them so the drill-down can re-pool a hive / ACMM-level selection client-side. Every rate is `{n, rate, lo, hi}` with a 95% Wilson interval; `rate`/`lo`/`hi` are null when `n` < 10. Window selection ([RFC #12062](https://github.com/hivecommons/hive/issues/12062)): `?hours=24|168|720` pools each hive's matching heartbeat `windows` block instead of its 90-day block (any other or absent `hours` → 90 days); `?from=YYYY-MM-DD|RFC3339[&to=…]` (date-only `to` is inclusive, `to` defaults to now, `to` ≥ `from`, span ≤ 366 days, else `400`) is served from the smallest reported window that reaches back to `from` and flagged `window.approximate`. The response carries `window` (`hours`, `key`, `label`, `from`, `to`, `approximate`, `coverage_available` — `record_coverage` is only computed for the 90-day window because `prs_merged_90d` is a 90-day count), `window_unreported` and per-hive `window_unreported` for hives whose spoke predates per-window reporting. `?hive=<id>[,<id>…]` (repeatable) and `?level=<n>` restrict the registry server-side to those hives / that ACMM level before pooling. Hub admins open it from the Fleet quadrant card or its **🔬 Evidence** button ([#12117](https://github.com/hivecommons/hive/issues/12117)), pick a window (24h / 7d / 30d / 90d / custom), filter it by hive and ACMM level and read each section's ⓘ explainer; median time-to-merge and author-kind revert rate are not emitted yet ([#12326](https://github.com/hivecommons/hive/issues/12326)). Never consulted by merge decisions | `pkg/hub/evidence.go` |
+| `GET` | `/api/hub/evidence/report` | Hub admin | Plain-language report of the hub evidence view ([#12456](https://github.com/hivecommons/hive/issues/12456)), rendered server-side from the same `EvidenceView` as `/api/hub/evidence` so every figure reconciles with the modal; non-admins get `403`. Same `hours=` / `from=` / `to=` window and `hive=` / `level=` filter parameters. `format=md` (default, `text/markdown`) or `format=html` (standalone page, inline CSS, no scripts or external assets, hive names escaped); any other value → `400`. `download=1` sets `Content-Disposition: attachment; filename="hive-evidence-<hive|fleet>-<from>-<to>.md|html"`, otherwise inline. Sections: Summary (the generated findings), What we measured and why, The numbers, How to read these, What is not reported yet and why, Grade per section, footer link to `review-evidence.md`. `Cache-Control: no-store`. Read-only; never consulted by merge decisions | `pkg/hub/evidence_report.go` |

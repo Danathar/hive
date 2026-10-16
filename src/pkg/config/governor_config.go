@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -182,6 +183,17 @@ type FleetReportConfig struct {
 	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
 	// MaxPerDay caps new issues this hive may open per 24h. 0 = default 5.
 	MaxPerDay int `yaml:"max_per_day,omitempty" json:"max_per_day,omitempty"`
+	// IncludeRepos controls whether a self-report names the repositories
+	// this hive watches (project.repos) and the owners derived from them
+	// (#12338). nil = true. The report repo is public and hive.yaml does not
+	// record repo visibility, so operators whose project.repos include
+	// private repositories set this to false; the fields then render as "—".
+	IncludeRepos *bool `yaml:"include_repos,omitempty" json:"include_repos,omitempty"`
+}
+
+// IncludesRepos resolves include_repos: nil defaults to true.
+func (f FleetReportConfig) IncludesRepos() bool {
+	return f.IncludeRepos == nil || *f.IncludeRepos
 }
 
 type FleetConfig struct {
@@ -233,6 +245,151 @@ type LabelsConfig struct {
 	// every managed repo to grow a second label meaning the same thing.
 	// Defaults to DefaultAutoMergeLabel.
 	AutoMerge string `yaml:"automerge"`
+	// Stage configures the hive-owned stage/NN-* pipeline labels
+	// (hivecommons/hive#12429; docs/labels-and-control-signals.md).
+	Stage StageLabelsConfig `yaml:"stage"`
+}
+
+// StageLabelsConfig is governor.labels.stage: the hive-owned stage/NN-*,
+// author/* and stage/stalled|regressed label families.
+type StageLabelsConfig struct {
+	// Enabled turns the stage reconciler on. nil = true.
+	Enabled *bool `yaml:"enabled"`
+	// Dwell overrides the expected time an item may sit in a stage before
+	// it is marked stage/stalled, keyed by stage slug (e.g. "review-pending":
+	// "1h"). Unset slugs keep the built-in table default; "0" means never.
+	Dwell map[string]string `yaml:"dwell,omitempty"`
+	// ContributorNudge configures the comment + relay interrupt the hive
+	// sends a contributor whose PR entered stage/072-returned-to-contributor
+	// (hivecommons/hive#12436).
+	ContributorNudge ContributorNudgeConfig `yaml:"contributor_nudge"`
+	// PresenceWindow is how recent a relay heartbeat must be for the
+	// contributor to count as online (default 15m). Online contributors get
+	// the fix-pr relay interrupt immediately; offline ones only the comment.
+	PresenceWindow string `yaml:"presence_window,omitempty"`
+	// ContributorGraceOnline is how long after the nudge an ONLINE
+	// contributor (relay heartbeat within presence_window) has to push a new
+	// head before the hive adopts the PR (default 2h).
+	ContributorGraceOnline string `yaml:"contributor_grace_online,omitempty"`
+	// ContributorGraceOffline is the same grace for an offline or external
+	// author who only got the GitHub comment (default 1h).
+	ContributorGraceOffline string `yaml:"contributor_grace_offline,omitempty"`
+	// Adoption configures stage/074-adopted-by-hive: the hive supersedes a
+	// contributor PR that is still red after the grace with an App PR that
+	// preserves the author's commits, and the scanner finishes it.
+	Adoption StageAdoptionConfig `yaml:"adoption"`
+}
+
+// StageAdoptionConfig is governor.labels.stage.adoption.
+type StageAdoptionConfig struct {
+	// Enabled turns adoption on. nil = true. Off, PRs stay in 072 and only
+	// stall.
+	Enabled *bool `yaml:"enabled"`
+}
+
+// IsEnabled reports whether adoption runs (default on).
+func (c StageAdoptionConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
+
+// Default graces before a red contributor PR is adopted (stage 074).
+const (
+	DefaultContributorGraceOnline  = 2 * time.Hour
+	DefaultContributorGraceOffline = time.Hour
+)
+
+// EffectiveContributorGraceOnline parses ContributorGraceOnline (default 2h).
+func (s StageLabelsConfig) EffectiveContributorGraceOnline() time.Duration {
+	return parseDurationOr(s.ContributorGraceOnline, DefaultContributorGraceOnline)
+}
+
+// EffectiveContributorGraceOffline parses ContributorGraceOffline (default 1h).
+func (s StageLabelsConfig) EffectiveContributorGraceOffline() time.Duration {
+	return parseDurationOr(s.ContributorGraceOffline, DefaultContributorGraceOffline)
+}
+
+// ContributorNudgeConfig is governor.labels.stage.contributor_nudge.
+type ContributorNudgeConfig struct {
+	// Enabled turns the nudge on. nil = true.
+	Enabled *bool `yaml:"enabled"`
+	// RenudgeInterval is how long after the first nudge the hive nudges once
+	// more (the documented cap is 2 nudges per head). Default: the stage's
+	// dwell (24h), i.e. the re-nudge coincides with stage/stalled.
+	RenudgeInterval string `yaml:"renudge_interval,omitempty"`
+}
+
+// IsEnabled reports whether the contributor nudge runs (default on).
+func (c ContributorNudgeConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
+
+// DefaultPresenceWindow is governor.labels.stage.presence_window's default.
+const DefaultPresenceWindow = 15 * time.Minute
+
+// EffectiveRenudgeInterval parses RenudgeInterval; unset/invalid returns 0
+// (the caller falls back to the stage dwell).
+func (c ContributorNudgeConfig) EffectiveRenudgeInterval() time.Duration {
+	return parseDurationOr(c.RenudgeInterval, 0)
+}
+
+// EffectivePresenceWindow parses PresenceWindow with the 15m default.
+func (s StageLabelsConfig) EffectivePresenceWindow() time.Duration {
+	return parseDurationOr(s.PresenceWindow, DefaultPresenceWindow)
+}
+
+// parseDurationOr parses a config duration string; empty, unparsable or
+// non-positive values return def.
+func parseDurationOr(raw string, def time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+// IsEnabled reports whether the stage reconciler runs (default on).
+func (s StageLabelsConfig) IsEnabled() bool {
+	return s.Enabled == nil || *s.Enabled
+}
+
+// stageSlugs is registered by pkg/stagelabels at init so config validation
+// can reject unknown dwell keys without pkg/dashboard importing the table.
+var stageSlugs []string
+
+// RegisterStageSlugs records the known stage slugs (called from pkg/stagelabels).
+func RegisterStageSlugs(slugs []string) { stageSlugs = append([]string(nil), slugs...) }
+
+// KnownStageSlugs returns the registered stage slugs (nil if none registered).
+func KnownStageSlugs() []string { return append([]string(nil), stageSlugs...) }
+
+// KnownStageSlug reports whether slug is a registered stage slug. When no
+// table has been registered (stagelabels not linked) every slug is accepted.
+func KnownStageSlug(slug string) bool {
+	if len(stageSlugs) == 0 {
+		return true
+	}
+	for _, s := range stageSlugs {
+		if s == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// DwellOverrides parses Dwell into durations, skipping unparsable entries.
+func (s StageLabelsConfig) DwellOverrides() map[string]time.Duration {
+	if len(s.Dwell) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(s.Dwell))
+	for slug, raw := range s.Dwell {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d < 0 {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(slug))] = d
+	}
+	return out
 }
 
 type SensingConfig struct {

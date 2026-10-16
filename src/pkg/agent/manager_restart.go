@@ -222,6 +222,10 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 		// to the same screen; re-running prompt dismissal recovers it.
 		if reason := m.sessionStalled(agent, pane, time.Now()); reason != "" {
 			hungSessions = append(hungSessions, sessionRestart{name, agent.LastKickMessage, reason})
+		} else if reason := busyNoActivityStall(agent, pane, time.Now()); reason != "" {
+			// No replayed kick: the governor re-kicks once the pane is
+			// idle, and the storm breaker bounds repeat restarts.
+			hungSessions = append(hungSessions, sessionRestart{name, "", reason})
 		}
 		if IsInferenceBackend(effectiveBackend(agent)) {
 			if paneShowsConsentScreen(pane) {
@@ -1027,8 +1031,7 @@ func (m *Manager) ResetRestartCount(name string) error {
 	agent.RestartEvents = nil
 	agent.LastRestartReason = "operator"
 	agent.restartStormBackoffUntil = time.Time{}
-	agent.tokenRestartAttempts = 0
-	agent.tokenRestartGaveUp = false
+	agent.clearTokenRestartCap()
 	// Resetting the counter is the operator saying "I have looked at this";
 	// lift the restart/kick breaker with it (#7363) so a deliberate kick
 	// need not wait out the hold.

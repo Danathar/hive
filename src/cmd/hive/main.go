@@ -52,6 +52,7 @@ import (
 	"github.com/hivecommons/hive/pkg/hub"
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/inference"
+	"github.com/hivecommons/hive/pkg/intent"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/jev"
 	"github.com/hivecommons/hive/pkg/knowledge"
@@ -2393,15 +2394,17 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// privilege. A denied request is quarantined, never opened.
 	// holdLabel (F6): at hold-gated ACMM levels (L3/L4/L5) every agent-opened
 	// PR must carry the "hold" label so the merge gate holds it for human
-	// approval. Outreach content is public speech on the project's behalf, so
-	// it remains human-reviewed at L6 too. This is decided server-side from the
-	// authenticated agent identity and authoritative hive level
+	// approval. Outreach content aimed at a repository the hive does not
+	// manage is public speech into someone else's project, so it remains
+	// human-reviewed at L6 too; outreach PRs into the agent's own repos are
+	// ordinary hive PRs. This is decided server-side from the authenticated
+	// agent identity, the PR's target repo and the authoritative hive level
 	// (GetACMMLevel), NOT from a client flag — the gh-wrapper.sh tail that used
 	// to add the label was dead code after `exec hive-open-pr`. L1/L2 open no
 	// agent PRs (manual); non-outreach L6 PRs retain their existing automerge
 	// behavior.
-	holdLabel := func(agentName string) bool {
-		return shouldHoldAgentPR(agentName, b.agentMgr.GetACMMLevel())
+	holdLabel := func(agentName, repo string) bool {
+		return shouldHoldAgentPR(agentName, repo, b.agentMgr.GetACMMLevel(), b.cfg.AgentOwnsRepo)
 	}
 	selfAuthorizationHoldEnabled := b.selfAuthorizationHoldEnabled
 
@@ -2421,7 +2424,11 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		ContributorLaneVerdict:  contributorLaneVerdictFunc(b.cfg, b.logger),
 		ContributorRegistryTier: contributorRegistryTierFunc(),
 		ReviewVerdictHold:       reviewVerdictHoldFunc(b.logger),
+		StageLabelPolicy:        stageLabelPolicyFunc(b.cfg),
 		SentinelLabel:           func() string { return b.cfg.Sentinel.LabelOrDefault() },
+	}
+	if hub := b.dashSrv.ContributeHub(); hub != nil {
+		autoMergeOpts.ContributorNudge = hub
 	}
 
 	// commitGreen's required-checks gate (self-merge sweep, see
@@ -2727,6 +2734,10 @@ func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 	b.preShutdownHooks.add("close-contribute-hub", func() {
 		b.dashSrv.CloseContributeHub()
 	})
+	// Monthly per-repo complexity/static-analysis snapshot (RFC #12062,
+	// #12363). Report-only: it writes evidence files and never touches merge
+	// eligibility.
+	b.startComplexityRunner(newComplexityRunner(b.cfg, b.currentGitHubClient, b.logger))
 
 	// Wire ioscan input enforcement (opt-in via ioscan.enabled) to the dashboard
 	// audit log so a blocked/redacted issue title surfaces in the existing
@@ -2812,6 +2823,14 @@ func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 			b.logger.Warn("sla history flush on shutdown failed", "error", err)
 		}
 	})
+
+	// Intent evaluation counters (#12362): one audit-log line per evaluation
+	// and a durable weekly file beside write-counters.json. Record-only;
+	// nothing reads these back into merge eligibility.
+	intent.SetEvaluationAuditSink(func(o intent.Observation) {
+		b.dashSrv.AuditLogRecord("system", intentEvaluatedAuditAction, intentEvaluatedAuditDetail(o), "", o.Repo, o.Number)
+	})
+	b.preShutdownHooks.add("flush-intent-counters", intent.StartEvaluationCounterPersistence(intent.CountersPath, b.logger))
 
 	// The scheduler's classifier pass records KindClassified journeys the
 	// moment lane routing decides an issue's lane — same store, no extra work.
@@ -6271,6 +6290,12 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 				b.dashSrv.AddSystemAlert(holdMigrationFailedAlertID, "warning", holdMigrationFailedAlertMessage(b.cfg.HiveID, reportPath))
 			}
 		}
+		// Provenance-only rename (from-review → origin/review). Nothing reads
+		// either label as a gate, so a failure here only leaves old names on
+		// open items; the marker is not written and the next boot retries.
+		if _, err := b.ghClient.MigrateOriginLabels(b.ctx, github.OriginLabelMigrationOptions{Logger: b.logger}); err != nil {
+			b.logger.Warn("origin provenance label migration incomplete; open items may still carry retired names such as "+github.LegacyFromReviewLabel, "error", err)
+		}
 	}
 	b.evalCycles++
 	deps.runEval(b, nil)
@@ -9137,6 +9162,13 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 		ContributorLaneVerdict:  contributorLaneVerdictFunc(cfg, logger),
 		ContributorRegistryTier: contributorRegistryTierFunc(),
 		ReviewVerdictHold:       reviewVerdictHoldFunc(logger),
+		StageLabelPolicy:        stageLabelPolicyFunc(cfg),
+	}
+	// hivecommons/hive#12436: the contribute hub is the stage-072 nudge sink
+	// (relay fix-pr tasks). Guarded so a nil hub never becomes a typed-nil
+	// interface.
+	if hub := dashSrv.ContributeHub(); hub != nil {
+		opts.ContributorNudge = hub
 	}
 	if cfg != nil {
 		opts.SentinelLabel = func() string { return cfg.Sentinel.LabelOrDefault() }
@@ -9147,6 +9179,7 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 		opts.MinHeadAge = cfg.AutoMerge.EffectiveMinHeadAge()
 		opts.RepoAutoMergeEnabled = func(repo string) bool { return cfg.RepoAutoMergeEnabled(repo) }
 		opts.HumanMergePaths = func(repo string) []string { return humanMergePathsFor(cfg, repo) }
+		opts.TrustedBotAuthors = func() map[string]bool { return cfg.AutoMerge.TrustedBotAuthorSet() }
 	}
 	audit := func(event automerge.AutoMergeSweepEvent) {
 		if dashSrv == nil {
@@ -9170,8 +9203,9 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 	remaining := automerge.DefaultAutoMergeSweepMaxMerges - len(result.Merged)
 	if remaining > 0 && opts.TrustedAuthorPolicy().Enabled {
 		trustedResult, trustedErr := automerge.SweepTrustedAuthorAutoMerges(ctx, ghClient, opts, automerge.AutoMergeSweepOptions{
-			MaxMerges: remaining,
-			Audit:     audit,
+			MaxMerges:              remaining,
+			Audit:                  audit,
+			SelfAuthoredLaneActive: cfg != nil && cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(cfg.ACMMLevel),
 		})
 		if trustedErr != nil {
 			logger.Warn("trusted-author automerge sweep failed", "error", trustedErr)
@@ -9200,6 +9234,13 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 				logger.Info("contributor-lane automerge sweep complete", "seen", laneResult.Seen, "merged", len(laneResult.Merged), "skipped", laneResult.Skipped)
 			}
 		}
+	}
+	// Stage labels (#12429): the lanes above each recorded their per-PR
+	// reason into the process-shared tracker; one pass writes the labels.
+	if stageResult, stageErr := automerge.ApplyStageLabels(ctx, ghClient, opts); stageErr != nil {
+		logger.Warn("stage labels reconcile failed", "error", stageErr, "items", stageResult.Items, "writes", stageResult.Writes)
+	} else if stageResult.Writes+stageResult.Comments > 0 {
+		logger.Info("stage labels reconciled", "items", stageResult.Items, "writes", stageResult.Writes, "comments", stageResult.Comments)
 	}
 	hookDispatcher().Fire(context.Background(), hooks.Payload{
 		Transition: hooks.TransitionSweepCompleted,
@@ -9643,17 +9684,23 @@ func applyDuplicatePRGuard(
 		return
 	}
 	github.ApplyDuplicatePRGuard(ctx, ghClient, ledger, hiveIdentity(cfg), actionable, claimingPRRedStale(cfg, actionable), logger)
-	// hive/in-progress runs after the PR-claim guard so an issue whose PR just
-	// opened sheds the start mark here, and a lapsed mark frees the issue
-	// before kicks are built. Independent of governor.claims: the label is
-	// read from the issue, the marker from the comment, on every hive.
+	// The in-progress sweep runs after the PR-claim guard so an issue whose
+	// PR just opened sheds the start mark here, and a lapsed mark frees the
+	// issue before kicks are built. Independent of governor.claims: the
+	// label is read from the issue, the marker from the comment, on every hive.
 	if withheld := github.SweepInProgressIssues(ctx, ghClient, actionable, time.Now(), logger); withheld > 0 {
 		logger.Info("in-progress guard applied", "withheld", withheld)
+	}
+	// hivecommons/hive#12436: with every bucket final, mirror the cycle's
+	// decision about each open issue onto its stage/NNN label (and strip the
+	// retired claimed / hive/in-progress / 🐝 covered by PR labels).
+	if res := github.SyncIssueStageLabels(ctx, ghClient, actionable, nil, time.Now(), logger); res.Writes+res.Comments > 0 {
+		logger.Info("issue stage labels applied", "items", res.Items, "writes", res.Writes, "comments", res.Comments)
 	}
 	runCloseOnMergeSweep(ctx, cfg, ghClient, ledger, logger)
 }
 
-// inProgressSetting resolves the hive/in-progress label setting from config.
+// inProgressSetting resolves the pr-in-progress stage label setting from config.
 // The label follows the claims label mirror: an operator who set
 // governor.claims.label: false asked for no hive-managed claim labels, and
 // gets none here either; otherwise the start signal is always labelled. The
@@ -9836,6 +9883,12 @@ func installReviewRelaySettings(client *github.Client, cfg *config.Config, logge
 		return cfg.Governor.Claims.Enabled, cfg.Governor.Claims.EffectiveTTL()
 	})
 	client.SetInProgress(func() github.InProgressSetting { return inProgressSetting(cfg) })
+	// hivecommons/hive#12436: the issue stage reconciler follows the same
+	// governor.labels.stage policy as the PR one, read live.
+	client.SetIssueStageLabels(func() github.IssueStagePolicy {
+		p := stageLabelPolicyFunc(cfg)()
+		return github.IssueStagePolicy{Enabled: p.Enabled, Dwell: p.Dwell}
+	})
 	client.SetReviewCadenceLimits(
 		func() bool { return cfg.Review.CombinedPerspectives },
 		func() int { return cfg.Review.MaxReviewsPerHead },

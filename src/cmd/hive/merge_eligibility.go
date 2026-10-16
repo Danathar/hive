@@ -107,6 +107,26 @@ func contributorLanePolicyFunc(cfg *config.Config) func() automerge.ContributorL
 	}
 }
 
+// stageLabelPolicyFunc reads governor.labels.stage live so a config reload
+// turns the stage reconciler on/off and re-times dwell without a restart.
+func stageLabelPolicyFunc(cfg *config.Config) func() automerge.StageLabelPolicy {
+	return func() automerge.StageLabelPolicy {
+		if cfg == nil {
+			return automerge.StageLabelPolicy{}
+		}
+		stage := cfg.Governor.Labels.Stage
+		return automerge.StageLabelPolicy{
+			Enabled:          stage.IsEnabled(),
+			Dwell:            stage.DwellOverrides(),
+			ContributorNudge: stage.ContributorNudge.IsEnabled(),
+			RenudgeInterval:  stage.ContributorNudge.EffectiveRenudgeInterval(),
+			Adoption:         stage.Adoption.IsEnabled(),
+			GraceOnline:      stage.EffectiveContributorGraceOnline(),
+			GraceOffline:     stage.EffectiveContributorGraceOffline(),
+		}
+	}
+}
+
 // contributorRegistryTierFunc answers the contributor-lane registry
 // admission path from the contributor registry on the hive's PVC
 // (dashboard.ContributorTrustTierByLogin), so an operator-granted trusted
@@ -235,14 +255,27 @@ const (
 	acmmHoldGatedMaxLevel = 5
 )
 
-// shouldHoldAgentPR keeps public outreach claims human-reviewed even at L6,
-// where ordinary agent PRs may auto-merge. The general ACMM hold gate remains
-// unchanged for all roles at L3-L5.
-func shouldHoldAgentPR(agentName string, level int) bool {
-	if strings.EqualFold(strings.TrimSpace(agentName), "outreach") {
-		return true
+// shouldHoldAgentPR decides whether a freshly opened agent PR must carry the
+// "hold" label. The general ACMM hold gate applies to every role at L3-L5.
+// Outreach adds one level-independent reason: a PR that targets a repository
+// OTHER than the ones the outreach agent is working on behalf of (ownsRepo
+// false) is public speech into somebody else's project and stays
+// human-reviewed even at L6. An outreach PR into the agent's own repo —
+// README, ADOPTERS.md, docs, keyword tweaks in a hive-managed repo — is an
+// ordinary hive PR and flows through normal review and auto-merge (operator
+// decision, 2026-10-16). A nil ownsRepo fails closed to "cross-repo", so a
+// wiring mistake can only hold too much, never too little.
+func shouldHoldAgentPR(agentName, repo string, level int, ownsRepo func(agent, repo string) bool) bool {
+	if isOutreachAgent(agentName) {
+		if ownsRepo == nil || !ownsRepo(agentName, repo) {
+			return true
+		}
 	}
 	return level >= acmmHoldGatedMinLevel && level <= acmmHoldGatedMaxLevel
+}
+
+func isOutreachAgent(agentName string) bool {
+	return strings.EqualFold(strings.TrimSpace(agentName), "outreach")
 }
 
 // mergeableJSONUnknown is the explicit wire value for "mergeability was never
@@ -380,6 +413,7 @@ type mergeGates struct {
 	enforceIntent         bool
 	intentVerdicts        map[string]intent.Verdict
 	requireReviewApproval bool
+	shadowReview          bool
 	reviewArtifact        review.Artifact
 	reviewLoaded          bool
 	requiredChecks        map[string]bool
@@ -853,11 +887,15 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 	var escalated []failingPR
 	var reviewArtifact review.Artifact
 	reviewLoaded := false
-	if requireReviewApproval {
+	if requireReviewApproval || (cfg != nil && cfg.Review.Shadow) {
 		var err error
 		reviewArtifact, err = review.LoadArtifact("")
 		if err != nil {
-			logger.Warn("review approval required but review-verdicts.json is unavailable; merge eligibility will fail closed", "error", err)
+			if requireReviewApproval {
+				logger.Warn("review approval required but review-verdicts.json is unavailable; merge eligibility will fail closed", "error", err)
+			} else {
+				logger.Warn("review.shadow is on but review-verdicts.json is unavailable; shadow will record would_have_held=true, merges are not affected", "error", err)
+			}
 		} else {
 			reviewLoaded = true
 		}
@@ -883,6 +921,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		enforceIntent:         enforceIntent,
 		intentVerdicts:        intentVerdicts,
 		requireReviewApproval: requireReviewApproval,
+		shadowReview:          cfg != nil && cfg.Review.Shadow && !requireReviewApproval,
 		reviewArtifact:        reviewArtifact,
 		reviewLoaded:          reviewLoaded,
 		requiredChecks:        requiredChecks,
@@ -915,7 +954,9 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			logger.Info("excluding PR from merge-eligible due to intent verification", "repo", fullRepo, "number", pr.Number, "tier", iv.Tier, "reason", intentReason)
 		}
 		if bucket == mergeBucketEligible {
-			recordIntentShadow(cfg, logger, enforceIntent, intentVerdicts, pr, fullRepo, time.Now())
+			now := time.Now()
+			recordReviewShadow(cfg, logger, pr, fullRepo, prGates, now)
+			recordIntentShadow(cfg, logger, enforceIntent, intentVerdicts, pr, fullRepo, now)
 		}
 		row := failingPR{
 			Number:          pr.Number,
