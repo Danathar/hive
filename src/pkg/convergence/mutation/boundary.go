@@ -79,22 +79,51 @@ func (b *Boundary) Execute(ctx context.Context, claim effects.Claim, effect func
 	}
 	mutEffect := boundaryEffect(claim)
 	var out effects.Result
-	op, execErr := executor.Execute(mutEffect, entry.Epoch, holder, func() (string, error) {
+	run := func() (string, error) {
 		res, err := effect(ctx)
 		out = res
 		return res.Provenance, err
-	})
-	// The claim guards the window of the external call only. Every exit path
-	// must release it: a claim left ActiveMutation after a refused or failed
-	// effect holds the repo's writer slot until TTL, and at enforce that
-	// denies every other mutation on the repo for ten minutes (observed on a
-	// live hive as "writers exhausted (max 1)" behind one stuck review).
-	b.release(executor, claim, mclaim, entry)
+	}
+	// Hold the claim through observation and any replay, releasing on every
+	// exit so a failed lookup cannot monopolize the repository writer slot.
+	defer b.release(executor, claim, mclaim, entry)
+	op, execErr := executor.Execute(mutEffect, entry.Epoch, holder, run)
+	if errors.Is(execErr, ErrAlreadyApplied) && claim.Kind == effects.KindLabelMutation && claim.ObserveApplied != nil {
+		state, err := claim.ObserveApplied(ctx)
+		if err != nil {
+			return out, fmt.Errorf("observing already-applied label mutation: %w", err)
+		}
+		if b.Logger != nil {
+			b.Logger.Info("observed already-applied label mutation", "repo", claim.Repo,
+				"kind", claim.Kind, "target", claim.Target, "applied", state.Applied)
+		}
+		if !state.Applied {
+			if err := executor.Ledger.ValidateEpoch(mclaim.Key(), entry.Epoch, executor.now()); err != nil {
+				if FencingEnabled(executor.Mode) {
+					if b.Stats != nil {
+						b.Stats.IncDenied()
+					}
+					return out, fmt.Errorf("%w: %v", effects.ErrDenied, err)
+				}
+				if b.Logger != nil {
+					b.Logger.Warn("shadow fence would have denied label replay",
+						"repo", claim.Repo, "kind", claim.Kind, "target", claim.Target, "error", err)
+				}
+				if b.Stats != nil {
+					b.Stats.IncFenced()
+				}
+			}
+			if err := executor.Journal.reopenLabel(op, executor.now()); err != nil {
+				return out, err
+			}
+			op, execErr = executor.Execute(mutEffect, entry.Epoch, holder, run)
+		}
+	}
 	if execErr != nil {
 		if errors.Is(execErr, ErrAlreadyApplied) {
-			// The journal says this exact effect already happened. The
-			// caller's desired state holds, so this is idempotent success:
-			// hand back the recorded provenance (Execute returns the
+			// The journal says this exact effect already happened. Label
+			// writes with an observer have also verified the current state.
+			// Return idempotent success with the recorded provenance (Execute returns the
 			// journaled operation on a replay) rather than an error that a
 			// retry loop would replay forever.
 			out.Provenance = op.Result

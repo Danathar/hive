@@ -41,9 +41,9 @@ const (
 	// been attempted, or an attempt is in flight.
 	StatusPlanned = "Planned"
 	// StatusApplied: authoritative external state (or an acknowledged
-	// current-epoch result) proves the effect took place. Terminal truth —
-	// a later duplicate, out-of-order, or stale-epoch result can never
-	// regress it.
+	// current-epoch result) proves the effect took place. A later duplicate,
+	// out-of-order, or stale-epoch result cannot regress it. The label replay
+	// path may reopen it after observing that the label state changed.
 	StatusApplied = "Applied"
 	// StatusNotApplied: authoritative external state proves the effect did
 	// NOT take place; the same logical operation may retry through a new
@@ -62,8 +62,8 @@ var (
 	// same logical operation before any retry is authorized. This is what
 	// makes retry-after-uncertainty reconcile rather than duplicate.
 	ErrNeedsReconciliation = errors.New("operation must be reconciled against authoritative external state before retry")
-	// ErrAlreadyApplied: the effect already took place; a new attempt can
-	// never be authorized for the same logical operation.
+	// ErrAlreadyApplied: the effect already took place. Label mutations may
+	// authorize a new attempt after re-observing changed external state.
 	ErrAlreadyApplied = errors.New("operation effect is already applied")
 	// ErrResultRegression: a result or acknowledgment arrived that would
 	// regress terminal journal truth or overwrite a newer attempt from an
@@ -446,8 +446,8 @@ type ExternalState struct {
 //   - !Known         → StatusUnknown: no duplicate retry is authorized.
 //
 // Reconciliation may be performed by any current owner (adoption); it never
-// regresses an Applied entry to NotApplied — terminal truth stands, and a
-// disagreeing later observation is a refusal, not a rewrite.
+// regresses an Applied entry to NotApplied. A disagreeing observation is a
+// refusal here; label replay has a separate, claim-held reopen path.
 func (j *Journal) Reconcile(id string, state ExternalState, now time.Time) (Operation, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()

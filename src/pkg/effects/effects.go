@@ -106,6 +106,11 @@ type Claim struct {
 	Target string
 	Actor  string
 	Inputs map[string]string
+
+	// ObserveApplied revalidates a cached label mutation against current
+	// external state. It is not part of the operation's logical identity.
+	// Other effect kinds retain permanent Applied deduplication.
+	ObserveApplied func(context.Context) (ExternalState, error) `json:"-"`
 }
 
 type Result struct {

@@ -53,8 +53,12 @@ func isDefiniteIssueWriteRefusal(err error) bool {
 // errored ambiguously) is reconciled from the issue's authoritative state via
 // observe and replayed once, mirroring reconcileMerge: a write already present
 // on GitHub replays as idempotent success, an absent one runs again. When the
-// issue cannot be read the original refusal stands (#11556).
+// issue cannot be read the original refusal stands (#11556). Label writes also
+// use observe to revalidate an already-applied entry before returning success.
 func (c *Client) executeIssueWrite(ctx context.Context, claim effects.Claim, effect func(context.Context) (effects.Result, error), observe func(context.Context) (effects.ExternalState, error)) error {
+	if claim.Kind == effects.KindLabelMutation {
+		claim.ObserveApplied = observe
+	}
 	boundary := c.mutationBoundary()
 	_, err := effects.Execute(ctx, boundary, claim, effect)
 	if !errors.Is(err, effects.ErrNeedsReconciliation) {
