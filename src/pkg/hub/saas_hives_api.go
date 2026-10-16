@@ -865,6 +865,14 @@ func (s *HubServer) buildMyHivesResponse(username string, queryValues url.Values
 		if !isAdmin {
 			result[i].Leaderboard = nil
 		}
+		// Compliance profile and posture summary are owner/admin-only (#11083,
+		// #12264): the fleet rollup (/api/hub/compliance) is admin-gated, so a
+		// read/read-write member must not see it on someone else's row. Nothing
+		// downstream (quadrant scoring included) reads Compliance, so it is
+		// scrubbed here alongside the other per-row gates.
+		if h.Role != "owner" && !isAdmin {
+			result[i].Compliance = nil
+		}
 		// Who-has-access is shown only to owners (and admin), matching
 		// handleAccessList's rule. A read/read-write member is deliberately not
 		// told who else shares the hive.

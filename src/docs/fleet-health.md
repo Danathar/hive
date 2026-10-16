@@ -348,7 +348,9 @@ spoke, or a minimal upgrade beat) keeps the last stored profile.
 
 The hub Fleet table (`my-hives`) does not yet render this data: there is no
 Compliance column in the hub UI. The stored profile is exposed only through the
-API below.
+API below, and only to the hive owner and hub admins: the compliance summary is
+omitted from `/api/registry` entirely and from other members' rows in
+`/api/saas/my-hives`.
 
 `GET /api/hub/compliance` (hub admin only) exports the fleet-wide aggregate:
 spoke counts, per-framework spoke counts, total pass/fail with the overall
