@@ -30,13 +30,13 @@ func TestClaimHooksRemoveLabelAfterSecondClaimExpires(t *testing.T) {
 		case http.MethodGet:
 			labels := []map[string]string{}
 			if present {
-				labels = append(labels, map[string]string{"name": "claimed"})
+				labels = append(labels, map[string]string{"name": claims.LabelClaimed})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"number": 63, "labels": labels})
 		case http.MethodPost:
 			adds++
 			present = true
-			_, _ = w.Write([]byte(`[{"name":"claimed"}]`))
+			_, _ = w.Write([]byte(`[{"name":"` + claims.LabelClaimed + `"}]`))
 		case http.MethodDelete:
 			removes++
 			present = false

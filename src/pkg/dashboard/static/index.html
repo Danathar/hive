@@ -25676,12 +25676,6 @@ function burnAreaChart() {
       return fallback;
     }
 
-    function selectNousOutputMode(btn) {
-      const parent = btn.parentElement;
-      parent.querySelectorAll('.nous-config-output-mode').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-    }
-
     // .active stays as the JS hook saveNousConfig() reads; .is-on/.is-off carry
     // the visual state so a selected pill is a filled ✓ chip and an excluded
     // one is a dimmed outline (#12520).

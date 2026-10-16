@@ -270,6 +270,7 @@ func (s *Server) handleNousConfigGoals(w http.ResponseWriter, r *http.Request) {
 	}
 	ns.Config["goals"] = body
 	ns.Mu.Unlock()
+	s.persistNousPanel()
 	s.auditFromRequest(r, "nous_config_update", auditDetail("section", "goals"), "")
 
 	started, err := ns.ApplyQuestion(nousResearchQuestion(body), s.nousCampaignOutcome)

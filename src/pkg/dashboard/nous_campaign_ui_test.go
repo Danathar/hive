@@ -29,7 +29,7 @@ func TestNousCampaignUIRendersPerCampaignBaseline(t *testing.T) {
 		`data-action="nousStartCampaign"`,
 		"case 'nousStartCampaign': nousStartCampaign(); break;",
 		`data-current-question="${escapeHtml(currentQuestion)}"`,
-		"const currentQuestion = (cfg.goals && cfg.goals.repoGoal) || repoCamp.research_question || (activeCamp && activeCamp.question) || '';",
+		"const currentQuestion = repoQuestion || (activeCamp && activeCamp.question) || '';",
 		".nous-observation-note {",
 		".nous-archived-row {",
 	} {
