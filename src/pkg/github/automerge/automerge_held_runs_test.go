@@ -216,6 +216,40 @@ func TestTerminalRequiredCheckHoldLoggedOncePerHeadAndReason(t *testing.T) {
 	}
 }
 
+// #12379: the first report of a terminal hold for a head is also handed to
+// OnTerminalHold so a dependency-bot PR reaches a person; repeat ticks on the
+// same head stay silent, and a new head reports again.
+func TestReportTerminalHoldNotifiesOncePerHead(t *testing.T) {
+	type hold struct {
+		repo   string
+		number int
+		sha    string
+		reason string
+	}
+	var got []hold
+	c := &Engine{onTerminalHold: func(repo string, number int, headSHA, reason string) {
+		got = append(got, hold{repo, number, headSHA, reason})
+	}}
+	c.reportTerminalHold("acme/widget", "acme", "widget", 7, "abc", "required-check-held:ci/build")
+	c.reportTerminalHold("acme/widget", "acme", "widget", 7, "abc", "required-check-held:ci/build")
+	c.reportTerminalHold("acme/widget", "acme", "widget", 7, "def", "required-check-never-started:ci/build")
+
+	want := []hold{
+		{"acme/widget", 7, "abc", "required-check-held:ci/build"},
+		{"acme/widget", 7, "def", "required-check-never-started:ci/build"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("OnTerminalHold calls = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OnTerminalHold call %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	(&Engine{}).reportTerminalHold("acme/widget", "acme", "widget", 7, "abc", "required-check-held:ci/build")
+}
+
 // #11923: a Dependabot head autofix-pushed by github-actions[bot] can never
 // produce a pull_request_target-only required context. The sweep names it
 // required-check-never-ran and asks Dependabot to rebase exactly once per head.

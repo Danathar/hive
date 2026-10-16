@@ -316,9 +316,22 @@ workflow runs when a required check is missing:
   reported as `required-check-never-started:<ctx>`: GitHub never scheduled the
   workflows (seen on hivecommons/hive#11553), and only a new push, a
   close/reopen, or `@dependabot rebase` will create them.
-- `required-check-held:<ctx>` and `required-check-never-started:<ctx>` are
-  logged once per PR head as `automerge hold`; later ticks only count the PR in
-  the skip stats instead of emitting `automerge skip` every tick.
+- `required-check-held:<ctx>`, `required-check-never-started:<ctx>` and
+  `required-check-never-ran:<ctx>` are logged once per PR head as
+  `automerge hold`; later ticks only count the PR in the skip stats instead of
+  emitting `automerge skip` every tick. On a dependency-bot PR (Renovate,
+  Dependabot, mergeraptor) the same first report also hands the PR to a
+  person: one comment naming the check and the action (approve the held runs,
+  re-push or close and reopen, or merge by hand) plus `needs-human`, so it
+  shows as your turn. The label comes off when the head changes or the PR
+  closes.
+- Dependency-bot PRs stay out of the fix loop. The governor's dependency-bot
+  sweep hands them to a person the same way when a required check stays red on
+  the same head for 4 hours, or when the PR conflicts with its base for 24
+  hours (at once for a Renovate PR whose config rebases never). It skips PRs
+  already labelled `needs-human`, `hold` or `do-not-merge`, comments once per
+  head and reason, and removes only the `needs-human` label it added once CI
+  is green, the conflict is gone or the PR closes (#11558, #12379).
 - fork heads and human-authored lanes are never touched; a first-time
   contributor's held run is still a person's decision.
 

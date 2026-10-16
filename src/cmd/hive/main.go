@@ -2504,6 +2504,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// auto_merge.trusted_bot_authors takes effect without a restart.
 	autoMergeOpts.TrustedBotAuthors = func() map[string]bool { return b.cfg.AutoMerge.TrustedBotAuthorSet() }
 	autoMergeOpts.BotTakeoverEnabled = func() bool { return b.cfg.AutoMerge.BotTakeover.IsEnabled() }
+	// A dependency-bot PR parked on a terminal required-check hold is handed
+	// to a person by the governor's dependency-bot sweep (#12379).
+	autoMergeOpts.OnTerminalHold = noteDependencyBotTerminalHold
 	// Intent tier gate (#6258): the human lane only queues PRs that
 	// survive writeMergeEligible's intent check, but this sweep lists
 	// the App's PRs on its own, so it carries the same policy (same
@@ -8432,9 +8435,10 @@ func redPRFixOwner(agent string) string {
 // iterating on them, so a red one is not a fix loop to break: escalating it
 // only pages a human with "1 distinct fix attempts" about a crate bump that
 // renovate will rebase on its own. Mirrors the hub's default contribute
-// deny-authors list (config: hub.contribute_deny_authors). A conflicting
-// Renovate PR in a `rebaseWhen: never` repo will NOT rebase on its own; that
-// case is handled by runDependencyBotConflictSweep (dependency_bot_conflicts.go).
+// deny-authors list (config: hub.contribute_deny_authors). A bot PR that only a
+// person can unstick (a conflict the bot will not rebase, required CI that
+// stays red, a held or never-started required check) is handed to a person by
+// runDependencyBotConflictSweep (dependency_bot_conflicts.go), not the fix loop.
 var dependencyBots = map[string]bool{
 	"renovate[bot]":    true,
 	"dependabot[bot]":  true,

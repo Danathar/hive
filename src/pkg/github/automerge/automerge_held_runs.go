@@ -336,6 +336,19 @@ func (c *Engine) markTerminalHoldLogged(owner, repo string, number int, headSHA,
 	return true
 }
 
+// reportTerminalHold logs a terminal hold once per PR head and reason, and
+// tells OnTerminalHold on that same first report so the caller can hand the PR
+// to a person (#12379). Later ticks on the same head report nothing.
+func (c *Engine) reportTerminalHold(repo, owner, repoName string, number int, headSHA, reason string) {
+	if !c.markTerminalHoldLogged(owner, repoName, number, headSHA, reason) {
+		return
+	}
+	c.info("automerge hold", "repo", repo, "pr", number, "sha", headSHA, "reason", reason)
+	if c.onTerminalHold != nil {
+		c.onTerminalHold(repo, number, headSHA, reason)
+	}
+}
+
 // approveWorkflowRunEffect routes POST /actions/runs/{id}/approve through the
 // mutation boundary. go-github v72 has no binding for this endpoint.
 func (c *Engine) approveWorkflowRunEffect(ctx context.Context, owner, repo string, number int, headSHA string, run *gh.WorkflowRun) error {

@@ -75,6 +75,11 @@ type Options struct {
 	// switch: re-author a trusted github-actions[bot] PR whose
 	// `pull_request` checks can never run (#12003). nil means off.
 	BotTakeoverEnabled func() bool
+	// OnTerminalHold is told, once per PR head, that the self-authored sweep
+	// parked a PR on a terminal required-check hold (held for approval, never
+	// started, never ran) that polling cannot cure. repo is "owner/name". The
+	// caller hands such dependency-bot PRs to a person. nil means log only.
+	OnTerminalHold func(repo string, number int, headSHA, reason string)
 	// TrustedAuthorPolicy returns the live, operator opt-in policy for the
 	// human-authored tier. nil or disabled means the tier is off.
 	TrustedAuthorPolicy func() TrustedAuthorPolicy
@@ -132,6 +137,7 @@ type Engine struct {
 	repoAutoMergeEnabled              func(repo string) bool
 	trustedBotAuthors                 func() map[string]bool
 	botTakeoverEnabledFn              func() bool
+	onTerminalHold                    func(repo string, number int, headSHA, reason string)
 	trustedAuthorPolicy               func() TrustedAuthorPolicy
 	trustedAuthorizer                 TrustedAuthorizer
 	contributorLanePolicy             func() ContributorLanePolicy
@@ -176,6 +182,7 @@ func New(transport Transport, opts Options) *Engine {
 		repoAutoMergeEnabled:              opts.RepoAutoMergeEnabled,
 		trustedBotAuthors:                 opts.TrustedBotAuthors,
 		botTakeoverEnabledFn:              opts.BotTakeoverEnabled,
+		onTerminalHold:                    opts.OnTerminalHold,
 		trustedAuthorPolicy:               opts.TrustedAuthorPolicy,
 		trustedAuthorizer:                 opts.TrustedAuthorizer,
 		contributorLanePolicy:             opts.ContributorLanePolicy,
@@ -885,9 +892,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 			}
 			if reason != "" {
 				if isTerminalRequiredCheckHold(reason) {
-					if c.markTerminalHoldLogged(owner, repoName, number, pr.GetHead().GetSHA(), reason) {
-						c.info("automerge hold", "repo", repo, "pr", number, "sha", pr.GetHead().GetSHA(), "reason", reason)
-					}
+					c.reportTerminalHold(repo, owner, repoName, number, pr.GetHead().GetSHA(), reason)
 				} else {
 					c.info("automerge skip", "repo", repo, "pr", number, "reason", reason)
 				}
