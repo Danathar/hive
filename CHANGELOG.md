@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-16 (v5.177.4)
+
+### Changed
+
+- Expose more governor settings in the dashboard Settings dialog: the eval-loop pacing knobs (max and webhook eval intervals, conserve-mode multiplier, optional-sweep cadence and the provider spend-limit probe interval) are editable on the General tab with the threshold ownership shown read-only, the auto-merge queue label on the Labels tab, and claim comment/label mirroring, the claim stall gate and the rotation headroom source under Features; existing governor controls now show their YAML key (#11854).
+
+### Fixed
+
+- Dashboard Eval interval (seconds) control: help text now states the correct default (300 seconds) and indicates that changes apply from the next eval cycle, matching the adjacent Eval loop pacing block (#12294).
+
 ## 2026-10-16 (v5.177.3)
 
 ### Changed
