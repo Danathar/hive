@@ -206,6 +206,11 @@ machine the banner warns that **nested krun is untested and may be
 unstable**. An exit the runtime reports as OOM-killed names the VM memory as
 the cause; an exit 137 without that report is a stop (every krun stop ends
 in SIGKILL, because the stop signal does not reach the guest).
+The relay also declares the capability `isolation_class: microvm-krun` to the
+hub, which shows it on the Operations tab as `isolation:microvm-krun` and never
+routes or admits on it. The recipe sets it with `HIVE_ISOLATION_CLASS`, and also
+passes your host's kernel release as `HIVE_TEAM_KERNEL_RELEASE`, so opt-in team
+metadata reports the host's kernel, not the guest's (#12200).
 `just contribute-stop` removes contributor containers that podman reports
 ran under krun, which also ends the VMM and deletes the relay's token cache
 with the container, and deletes the relay PID record. `hivectl`'s relay
@@ -930,9 +935,9 @@ Two admission behaviors are worth knowing when your relay seems idle:
 
 ## Capability declaration (DECLARE)
 
-Since protocol 1.2 the relay self-reports coarse client facts on connect — container runtime (docker/podman/none), OS/arch, agent CLI version, relay protocol version, and credential *type* (app/pat/oauth; never the credential itself). The hub records these and shows them on the Operations tab as a `declares: …` sub-line.
+Since protocol 1.2 the relay self-reports coarse client facts on connect — container runtime (docker/podman/none), OS/arch, agent CLI version, relay protocol version, and credential *type* (app/pat/oauth; never the credential itself). A krun launch also declares the isolation class (`isolation_class: microvm-krun`), which the launcher passes in as `HIVE_ISOLATION_CLASS`; the relay never detects it, and without it nothing is declared (#12200). The hub records these and shows them on the Operations tab as a `declares: …` sub-line.
 
-This is **display-only and untrusted**: the hub never routes, gates, or trusts work based on a declared capability — server-side policy still governs everything a contributor may do. Empty declarations render nothing, and older relays that don't declare behave exactly as before.
+Declarations are **untrusted hints, not authorization**: server-side policy still governs everything a contributor may do. The container runtime, OS, architecture, credential type and CLI backend do steer task selection — a task that requires one of them is skipped for a client whose declaration contradicts it (`ContributorCanRunTask`), while an undeclared field always fits. Unlike those, the isolation class is **display-only**: task selection and admission never read it. Empty declarations render nothing, and older relays that don't declare behave exactly as before.
 
 **How each fact is obtained.** All of it is probed once at relay startup, before the first hub connection, and cached for the life of the process — nothing here runs during the handshake. The container runtime is a `command -v docker || command -v podman` presence check. The agent CLI version comes from running the resolved backend binary with `--version` (the same binary `backends.conf` maps your `AGENT_BACKEND` to, so `litellm` reports the `claude` CLI's version), with stdin closed and a short timeout. Every probe is best-effort: if the binary is missing, the flag is unsupported, or the call times out, that one field is simply **omitted**, which reads as unknown. Declaring nothing is always a valid answer and never costs you work.
 
