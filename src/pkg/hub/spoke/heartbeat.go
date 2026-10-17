@@ -1191,6 +1191,8 @@ const HeartbeatEvidenceCalibrationBuckets = 6
 // spoke's hive state time series (#12339), nil when it has no recent sample.
 // The JSON shape matches hub.HeartbeatEvidence.
 type HeartbeatEvidence struct {
+	// Nil means an older spoke did not report author-kind counts.
+	ByAuthorKind          map[string]HeartbeatEvidenceBucket                           `json:"by_author_kind,omitempty"`
 	Verdicts90d           int                                                          `json:"verdicts_90d"`
 	FalseApprove90d       int                                                          `json:"false_approve_90d"`
 	FalseBlock90d         int                                                          `json:"false_block_90d"`
