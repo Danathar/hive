@@ -1,1 +1,0 @@
-- Add a deterministic background-only Hive-self experiment decision core for registered snapshot windows, metric thresholds, and fast-fail revert requests; runtime adapters remain pending the model, heartbeat gate, and relay integration.
