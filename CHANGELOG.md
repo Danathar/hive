@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.185.0)
+
+### Added
+
+- **Contributor repository scope** ([#12805](https://github.com/hivecommons/hive/issues/12805)). A hive now advertises its contribution-eligible repositories at the public `GET /api/contribute/repositories` (monitored repos minus `hub.disabled_repos`, as `{forge}/{host}/{owner}/{name}` ids) and, behind the new `repo_scope_v1` capability, accepts a versioned `repo_scope` from a relay and answers `repo_scope_ack`. Candidates outside an acknowledged `selected` scope are skipped before any lease or token mint, so a restricted contributor is served its selected work (`no_selected_work` when none remains) while out-of-scope items stay available to others. A malformed scope fails the connection closed, `ready.scope_version` must match the acknowledged version, and a `task_declined` with `out_of_contributor_scope` releases the lease without a failure booking or consuming the hourly/daily allowance. The protocol version is unchanged and relays that never send a scope behave exactly as before.
+- Add `hivectl hives repos` and a Hives TUI repository-exclusion toggle to edit saved contributor selections through the existing profile commit/reload path; show effective scope summaries and reload on Hive addition/removal (runtime scope enforcement requires a compatible Hive and relay).
+- Add optional repository selection and preset review history to contributor profiles, canonical Hive/repository identity helpers, and aligned versioned repository-scope projection for the upcoming scoped contribution protocol (#12804).
+
+### Fixed
+
+- Fleet reports no longer file a `hive-code-defect` for a single harness stall nudge. The agent-status evidence treated any cumulative `StallNudges > 0` as an "agent stall" with a 24h window the counter never honoured; a lone nudge is the designed self-recovery working. A stall is now reported only while the agent's status currently reads "stalled" or after at least 3 nudges, matching the runtime error tracker's recurrence bar, and the bogus window is dropped ([#12802](https://github.com/hivecommons/hive/issues/12802)).
+
 ## 2026-10-17 (v5.184.0)
 
 ### Added
