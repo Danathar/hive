@@ -4131,7 +4131,7 @@ type StageLabelsConfig struct {
 	// "1h"). Unset slugs keep the built-in table default; "0" means never.
 	Dwell map[string]string `yaml:"dwell,omitempty"`
 	// ContributorNudge configures the comment + relay interrupt the hive
-	// sends a contributor whose PR entered stage/072-needs-author
+	// sends a contributor whose PR entered stage/072-returned-to-contributor
 	// (hivecommons/hive#12436).
 	ContributorNudge ContributorNudgeConfig `yaml:"contributor_nudge"`
 	// PresenceWindow is how recent a relay heartbeat must be for the
@@ -4161,7 +4161,7 @@ type StageLabelsConfig struct {
 // StageDCOConfig is governor.labels.stage.dco.
 type StageDCOConfig struct {
 	// Required says, per repo, whether a missing Signed-off-by sends the PR
-	// to stage/072 (070 self-authored) at once. Keys are "owner/repo", a
+	// to stage/071 (human) / 072 (clanker), 070 when self-authored, at once. Keys are "owner/repo", a
 	// bare repo name, or "*"; values true/false override detection. A repo
 	// not listed is required only when the hive DETECTS a DCO gate on it: a
 	// `dco`/`DCO` context in the branch's required checks or reported on the

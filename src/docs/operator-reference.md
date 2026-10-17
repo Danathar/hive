@@ -487,9 +487,9 @@ transition history (the `stage/regressed` label is retired, #12534). Default
 on; `governor.labels.stage.enabled: false` stops the reconciler,
 `governor.labels.stage.dwell.<slug>` re-times a stage's stalled threshold,
 `governor.labels.stage.stalled.require_quiet: false` measures the dwell from
-stage entry instead of last activity (Settings → Labels). When a contributor
+stage entry instead of last activity (Settings → Labels). When a clanker
 PR enters
-`stage/072-needs-author` the hive posts one nudge comment per head
+`stage/072-returned-to-contributor` the hive posts one nudge comment per head
 (re-nudged once after `governor.labels.stage.contributor_nudge.renudge_interval`,
 default = the 24h dwell; cap 2) and, for a contributor whose relay heartbeat is
 within `governor.labels.stage.presence_window` (default 15m), pushes a `fix-pr`
