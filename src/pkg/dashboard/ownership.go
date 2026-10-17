@@ -334,7 +334,9 @@ func ownershipParkingFor(h config.HardSuppressLabelsConfig) []ownershipParking {
 	return []ownershipParking{
 		{bucket: config.DefaultNeedsHumanLabel, labels: h.EffectiveNeedsHuman()},
 		{bucket: config.DefaultNeedsDirectionLabel, labels: h.EffectiveNeedsDirection()},
-		{bucket: config.DefaultNeedsDecisionLabel, labels: h.EffectiveNeedsDecision()},
+		// The retired `needs-decision` spelling stays a decision-bucket park
+		// until the issue stage reconciler has migrated it (hivecommons/hive#12683).
+		{bucket: config.DefaultNeedsDecisionLabel, labels: append(h.EffectiveNeedsDecision(), config.LegacyNeedsDecisionLabel)},
 		{bucket: config.DefaultNeedsSpecLabel, labels: h.EffectiveNeedsSpec()},
 	}
 }
@@ -352,7 +354,15 @@ func isParkingBucket(bucket string) bool {
 // repoWorkIssueParkingBucket returns the parking bucket enumeration recorded
 // on a non-actionable issue, or "" when it is not parked.
 func repoWorkIssueParkingBucket(item github.RepoWorkIssue) string {
-	if item.Bucket == repoWorkBucketFiltered && isParkingBucket(item.Reason) {
+	if item.Bucket != repoWorkBucketFiltered {
+		return ""
+	}
+	// Enumerations recorded before hivecommons/hive#12683 name the decision
+	// bucket by its retired spelling.
+	if item.Reason == config.LegacyNeedsDecisionLabel {
+		return config.DefaultNeedsDecisionLabel
+	}
+	if isParkingBucket(item.Reason) {
 		return item.Reason
 	}
 	return ""

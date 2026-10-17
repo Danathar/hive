@@ -219,6 +219,15 @@ unit of work keyed by its stable session/spec id:
   earlier revisions. No second campaign is created and `revision_of` stays
   empty. Revising a Spektacular run updates the archive keyed by the slugified
   run id, or creates one at revision 1 without history.
+- **🗑 Delete** (icon button at the end of each row) calls
+  `DELETE /api/campaigns/{id}` after an in-app confirmation. It removes only
+  the campaign record: the saved Inception state and the archived wiki
+  snapshot under `inception/campaigns/<id>/`. Knowledge-base facts, Jam
+  threads, scaffolded repo files and the other revisions in the chain are
+  kept. Deleting the campaign that is also the live L1 session clears that
+  session. Run-backed Spektacular campaigns return `409 Conflict`; their rows
+  come and go with the run. The deletion is audit-logged as
+  `campaign_delete`.
 
 ## Configuring the brainstorm agent
 

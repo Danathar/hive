@@ -39,11 +39,15 @@ func (s *coveredByPRLabelState) mark(key string) {
 var legacyCoveredByPRLabels = []string{stagelabels.LegacyCoveredByPR, stagelabels.LegacyCoveredByPRASCII}
 
 // HasCoveredByPRLabel reports whether labels say an open PR covers the
-// issue: the `stage/040-covered-by-pr` label, any mirrored PR stage past it
-// (the issue carries its covering PR's stage, hivecommons/hive#12436), or
-// one of the retired spellings still awaiting migration.
+// issue: the `stage/040-covered-by-pr` label, a PR stage past it that an
+// older build mirrored onto the issue (hivecommons/hive#12451; the
+// reconciler clamps it back to 040), or one of the retired spellings still
+// awaiting migration. stage/085 never means covered: on an issue it is the
+// park signal itself (hivecommons/hive#12683) — an agent, the relay, a
+// person or the reconciler put it there to say a human ruling is owed, with
+// or without a PR.
 func HasCoveredByPRLabel(labels []string) bool {
-	if stagelabels.CarriesStageAtLeast(labels, stagelabels.CoveredByPR) {
+	if cur := stagelabels.Current(labels); cur != stagelabels.None && !cur.Before(stagelabels.CoveredByPR) && cur != stagelabels.NeedsDecision {
 		return true
 	}
 	for _, legacy := range legacyCoveredByPRLabels {

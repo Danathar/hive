@@ -111,7 +111,7 @@ func TestIssueRequestWatcher_NeedsDecisionDefaultsLabel(t *testing.T) {
 		Repo: "o/r", Title: "[architect] Pick A or B", Body: "the maintainer picks A or B",
 		Agent: "architect", NeedsDecision: true,
 	})
-	if !hasLabelFold(labels, issueNeedsDecisionLabel) {
+	if !hasLabelFold(labels, NeedsDecisionStageLabel) {
 		t.Errorf("default needs-decision label not applied; create labels = %v", labels)
 	}
 }
@@ -249,7 +249,7 @@ func TestIssueRequestWatcher_CommentNeedsDecisionDefaultsAndIsOptIn(t *testing.T
 	writes, _ := runNeedsDecisionComment(t, nil, IssueRequest{
 		Kind: "comment", Repo: "o/r", Number: 5, Agent: "scanner", Body: "owner step", NeedsDecision: true,
 	})
-	if got := strings.Join(writes, ","); got != "label:"+issueNeedsDecisionLabel+",comment" {
+	if got := strings.Join(writes, ","); got != "label:"+NeedsDecisionStageLabel+",comment" {
 		t.Fatalf("writes = %q, want the default needs-decision label then the comment", got)
 	}
 	writes, _ = runNeedsDecisionComment(t, nil, IssueRequest{
@@ -293,7 +293,7 @@ func TestIssueRequestWatcher_CommentNeedsDecisionAllowedWithLabelOp(t *testing.T
 	}, false, func(c *Client) {
 		c.SetWriteAllowlistFunc(allowOnly("scanner", WriteOpComment, WriteOpLabel))
 	})
-	if got := strings.Join(writes, ","); got != "label:"+issueNeedsDecisionLabel+",comment" || !resp.OK {
+	if got := strings.Join(writes, ","); got != "label:"+NeedsDecisionStageLabel+",comment" || !resp.OK {
 		t.Fatalf("writes = %q ok=%v, want park then comment", got, resp.OK)
 	}
 }

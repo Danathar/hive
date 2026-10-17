@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,25 +23,39 @@ import (
 
 func TestClaimHooksRemoveLabelAfterSecondClaimExpires(t *testing.T) {
 	var mu sync.Mutex
-	present, adds, removes := false, 0, 0
+	// A small label store: the hooks also write the hive/claimed-by-<who>
+	// modifier and swap stage labels through ApplyStageLabel, so only the
+	// stage/020-claimed add/remove is counted here.
+	labels := map[string]bool{}
+	adds, removes := 0, 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodGet:
-			labels := []map[string]string{}
-			if present {
-				labels = append(labels, map[string]string{"name": claims.LabelClaimed})
+			out := []map[string]string{}
+			for name := range labels {
+				out = append(out, map[string]string{"name": name})
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"number": 63, "labels": labels})
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 63, "labels": out})
 		case http.MethodPost:
-			adds++
-			present = true
-			_, _ = w.Write([]byte(`[{"name":"` + claims.LabelClaimed + `"}]`))
+			var body []string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, name := range body {
+				if name == claims.LabelClaimed {
+					adds++
+				}
+				labels[name] = true
+			}
+			_, _ = w.Write([]byte(`[]`))
 		case http.MethodDelete:
-			removes++
-			present = false
+			_, name, _ := strings.Cut(r.URL.Path, "/labels/")
+			name, _ = url.PathUnescape(name)
+			if name == claims.LabelClaimed {
+				removes++
+			}
+			delete(labels, name)
 			_, _ = w.Write([]byte(`[]`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -74,15 +90,21 @@ func TestClaimHooksRemoveLabelAfterSecondClaimExpires(t *testing.T) {
 		testutil.Eventually(t, 5*time.Second, func() bool {
 			mu.Lock()
 			a, r := adds, removes
+			claimedBy := labels[claims.ClaimedByPrefix+"alice"]
 			mu.Unlock()
 			if a != wantAdds || r != wantRemoves {
+				return false
+			}
+			// The hooks also write (and later clear) the claimed-by modifier
+			// through the same mutation key; wait for that write too.
+			if claimedBy != (wantAdds > wantRemoves) {
 				return false
 			}
 			// Wait until the boundary has durably acknowledged the HTTP response
 			// and released the writer before starting the next hook.
 			entry, ok := ml.Get(key)
 			return ok && entry.State == mutation.StateReleased
-		}, "hooks did not complete: want adds=%d removes=%d", wantAdds, wantRemoves)
+		}, "hooks did not complete: want adds=%d removes=%d (adds=%d removes=%d labels=%v)", wantAdds, wantRemoves, adds, removes, labels)
 	}
 	for cycle := 1; cycle <= 2; cycle++ {
 		if _, err := l.Claim(claims.Request{Repo: "o/r", Issue: 63, Holder: "alice", Kind: claims.KindHuman, TTL: time.Minute}); err != nil {
@@ -97,7 +119,7 @@ func TestClaimHooksRemoveLabelAfterSecondClaimExpires(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if present {
+	if labels[claims.LabelClaimed] {
 		t.Fatal("claimed label remains after second expiry")
 	}
 }

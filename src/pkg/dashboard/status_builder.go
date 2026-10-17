@@ -107,10 +107,28 @@ func getAgentAuthFn() func(agentName string) (bool, bool) {
 	return agentAuthFn
 }
 
+// SetAgentRefreshableProvider registers the per-agent "is this credential
+// refreshable without a human login?" probe (agent.Manager's
+// AgentCredentialRefreshable, ADR-0024). known=false leaves
+// backendAuthRefreshable absent.
+func SetAgentRefreshableProvider(fn func(agentName string) (bool, bool)) {
+	backendAuthMu.Lock()
+	defer backendAuthMu.Unlock()
+	agentRefreshableFn = fn
+}
+
+func getAgentRefreshableFn() func(agentName string) (bool, bool) {
+	backendAuthMu.RLock()
+	defer backendAuthMu.RUnlock()
+	return agentRefreshableFn
+}
+
 var (
 	backendAuthMu sync.RWMutex
 	backendAuthFn func(backend string) (bool, bool)
 	agentAuthFn   func(agentName string) (bool, bool)
+
+	agentRefreshableFn func(agentName string) (bool, bool)
 
 	cachedHealth   map[string]any
 	cachedHealthMu sync.RWMutex
@@ -435,9 +453,39 @@ func BuildFrontendStatus(
 		Platform:              buildPlatform(cfg),
 		Security:              buildSecurity(cfg),
 		ReleaseLineLag:        buildReleaseLineLag(),
+		Providers:             buildProviderStatus(agents, cfg),
 	}
 
 	return payload
+}
+
+// buildProviderStatus is the ADR-0024 per-provider auth/availability roll-up
+// for /api/status — the same agent.RollUpProviderStatus the hub heartbeat
+// carries, keyed by each agent's effective backend. nil when disabled.
+func buildProviderStatus(agents []FrontendAgent, cfg *config.Config) []agent.ProviderStatus {
+	if cfg == nil || !cfg.Providers.StatusEnabled() {
+		return nil
+	}
+	evidence := make([]agent.ProviderAgentEvidence, 0, len(agents))
+	for _, a := range agents {
+		ac, ok := cfg.Agents[a.Name]
+		if !ok && a.ReplicaBase != "" {
+			ac, ok = cfg.Agents[a.ReplicaBase]
+		}
+		e := agent.ProviderAgentEvidence{
+			Agent:       a.Name,
+			Provider:    a.GovBackend,
+			Enabled:     ok && ac.Enabled,
+			NeedsLogin:  a.NeedsLogin,
+			AuthStatus:  a.BackendAuthStatus,
+			Refreshable: a.BackendAuthRefreshable,
+		}
+		if t, err := time.Parse(time.RFC3339, a.BackendAuthSince); err == nil {
+			e.AuthSince = t
+		}
+		evidence = append(evidence, e)
+	}
+	return agent.RollUpProviderStatus(evidence)
 }
 
 func overviewKPIIncomplete(cfg *config.Config, actionable *github.ActionableResult) bool {
@@ -1093,6 +1141,7 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			PausedReason:    redactTokens(proc.PausedReason),
 			PausedTrigger:   proc.PausedTrigger,
 			PausedBy:        proc.PausedBy,
+			OperatorStopped: proc.OperatorStopped,
 			OffByCadence:    offByCadence,
 			NoCadence:       noCadence,
 			CLI:             cli,
@@ -1114,6 +1163,8 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 				ContinuousModes:   continuousModes,
 				ContinuousKicks:   continuousState.Kicks,
 				ContinuousTokens:  continuousState.TokensConsumed,
+				LastKickEnd:       formatOptionalTime(continuousState.LastKickEnd),
+				IdleSince:         formatOptionalTime(continuousIdleSince(continuousNow, busy, continuousState.LastKickEnd, continuousState.NextKick)),
 			},
 			KicksUndeliverable:     proc.KicksUndeliverable,
 			BusySince:              formatOptionalTime(proc.BusySince),
@@ -1172,6 +1223,11 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			a.BackendAuthLastError = proc.BackendAuth.LastError
 			if hasInferenceLastErr {
 				a.BackendAuthLastError = preferFullInferenceError(a.BackendAuthLastError, inferenceLastErr)
+			}
+		}
+		if refreshableFn := getAgentRefreshableFn(); refreshableFn != nil {
+			if refreshable, known := refreshableFn(name); known {
+				a.BackendAuthRefreshable = &refreshable
 			}
 		}
 		if proc.ProviderErrorClass != "" && time.Now().Before(proc.ProviderErrorBackoffUntil) {
@@ -2236,6 +2292,7 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 	heldIssuesByRepo := make(map[string][]any)
 	heldPrsByRepo := make(map[string][]any)
 	nonActionableIssuesByRepo := make(map[string][]any)
+	nonActionablePrsByRepo := make(map[string][]any)
 
 	if actionable != nil {
 		for _, issue := range actionable.Issues.Items {
@@ -2269,6 +2326,9 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 			key := repoRowKey(repoRows, repo)
 			for _, issue := range details.Issues {
 				nonActionableIssuesByRepo[key] = append(nonActionableIssuesByRepo[key], issue)
+			}
+			for _, pr := range details.PRs {
+				nonActionablePrsByRepo[key] = append(nonActionablePrsByRepo[key], pr)
 			}
 		}
 	}
@@ -2313,6 +2373,7 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 			HeldIssues:          heldIssuesByRepo[repoName],
 			HeldPrs:             heldPrsByRepo[repoName],
 			NonActionableIssues: nonActionableIssuesByRepo[repoName],
+			NonActionablePrs:    nonActionablePrsByRepo[repoName],
 			AutoMerge:           cfg.RepoAutoMergeEnabled(repoName),
 			MergeStrategy:       cfg.RepoMergeStrategy(repoName),
 		}
@@ -2364,6 +2425,9 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 		}
 		if r.NonActionableIssues == nil {
 			r.NonActionableIssues = []any{}
+		}
+		if r.NonActionablePrs == nil {
+			r.NonActionablePrs = []any{}
 		}
 		repos = append(repos, r)
 	}

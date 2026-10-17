@@ -19,16 +19,28 @@ const (
 	goodFirstIssueLabel = "good first issue"
 )
 
+// needsDecisionLabel is the park signal (hivecommons/hive#12683): the stage
+// label itself. The retired `needs-decision` spelling stays recognised in
+// the band and signal checks until the reconciler has migrated it.
+const needsDecisionLabel = github.NeedsDecisionStageLabel
+
+// labelsNeedDecision reports whether a lower-cased label set says a human
+// decision is owed.
+func labelsNeedDecision(labels map[string]bool) bool {
+	return labels[needsDecisionLabel] || labels["needs-decision"] || labels["2-discussing"]
+}
+
 var (
-	// defaultIssueWaitingLabels are the four default parking labels plus
-	// `blocked`: the waiting band holds parked issues only
+	// defaultIssueWaitingLabels are the default parking labels (the
+	// stage/085 park signal, its retired spellings, needs-human, needs-spec)
+	// plus `blocked`: the waiting band holds parked issues only
 	// (hivecommons/hive#11507), and `blocked` is a gate only a person lifts,
 	// which the un-park sweep answers like the needs-* labels
 	// (hivecommons/hive#12376). static/index.html keeps a copy
 	// (REPO_ISSUE_BAND_DEFAULTS.waitingLabels).
-	defaultIssueWaitingLabels = []string{"needs-human", "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
+	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
 	defaultIssueDoneLabels    = []string{"hive/already-done", "hive/covered-by-pr", "hive/likely-done"}
-	prHumanGateLabels         = []string{"needs-human", "needs-decision", "2-discussing"}
+	prHumanGateLabels         = []string{"needs-human", needsDecisionLabel, "needs-decision", "2-discussing"}
 	issueBandOrder            = []string{"ready", "in-progress", "agent-filed", "waiting", "done"}
 	prBandOrder               = []string{"waiting", "eligible", "blocked", "in-review", "open", "draft"}
 	holdLabelSpellings        = []string{"hold", "on-hold", "hold/review"}
@@ -41,7 +53,7 @@ var (
 var issueLabelChips = []struct{ label, chip string }{
 	{"needs-human", "human"},
 	{"needs-direction", "direction"},
-	{"needs-decision", "decision"},
+	{needsDecisionLabel, "decision"},
 	{"needs-spec", "spec"},
 	{"needs-reporter-confirmation", "reporter"},
 	{"blocked", "blocked"},
@@ -160,7 +172,7 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 	} else if labels["blocked"] {
 		signals = append(signals, Signal{Glyph: "⛔", Label: "labelled blocked — the label records no reason; see the issue"})
 	}
-	if labels["needs-decision"] || labels["2-discussing"] {
+	if labelsNeedDecision(labels) {
 		signals = append(signals, Signal{Glyph: "❓", Label: "needs decision"})
 	}
 	if labels["needs-human"] {
@@ -211,7 +223,7 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 // frontend falls back to the band's short label.
 func issueLabelChip(labels map[string]bool) string {
 	for _, entry := range issueLabelChips {
-		if labels[entry.label] {
+		if labels[entry.label] || (entry.label == needsDecisionLabel && labels["needs-decision"]) {
 			return entry.chip
 		}
 	}
@@ -274,7 +286,7 @@ func prBand(pr github.PullRequest, verdict *github.MergeVerdict, held bool, cfg 
 		}
 		signals = append(signals, Signal{Glyph: "⚠", Label: reason})
 	}
-	if labels["needs-decision"] || labels["2-discussing"] {
+	if labelsNeedDecision(labels) {
 		signals = append(signals, Signal{Glyph: "❓", Label: "needs decision"})
 	}
 	if held || len(holdLabels(pr.Labels, hiveID)) > 0 {
@@ -538,8 +550,9 @@ func stageNumber(label string) int {
 }
 
 // issueStageCovered reports whether the issue carries stage/040-covered-by-pr
-// or a mirrored PR stage past it — the stage successor of the retired
-// covered-by-PR labels, so the issue files under "done" the same way.
+// (or, until the reconciler's next pass, a PR stage an older build mirrored
+// past it) — the stage successor of the retired covered-by-PR labels, so the
+// issue files under "done" the same way.
 func issueStageCovered(labels []string) bool {
 	for _, label := range labels {
 		if stageNumber(label) >= stageNumberCoveredByPR {

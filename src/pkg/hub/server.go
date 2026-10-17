@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/auth"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/delegation"
@@ -227,6 +228,11 @@ type RegistryEntry struct {
 	AuthHealth       string    `json:"authHealth,omitempty"`
 	AuthHealthReason string    `json:"authHealthReason,omitempty"`
 	AuthHealthSince  time.Time `json:"authHealthSince,omitempty"`
+	// Providers is the spoke-reported per-provider roll-up of agent auth and
+	// provider availability (ADR-0024, #12611) — two separate dimensions, so
+	// "not authenticated" never reads as "provider unavailable" or vice
+	// versa. Nil = old spoke or provider status disabled (no signal).
+	Providers []agent.ProviderStatus `json:"providers,omitempty"`
 	// ProviderLimitReason is the spoke-reported provider spending/quota refusal
 	// banner. It is separate from BudgetExhausted, which is hive-local governor
 	// budget; this means the upstream provider is refusing token purchases.
@@ -982,6 +988,7 @@ type HeartbeatHealthEntry struct {
 }
 
 type HubServer struct {
+	selfExperimentFlags  sync.Map // hive ID -> nous.SelfFlagAssignment; restart fails closed
 	mux                  *http.ServeMux
 	registry             Registry
 	mu                   sync.RWMutex
@@ -1964,6 +1971,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		ProviderLimitRebuffs:  clampInt(payload.ProviderLimitRebuffs, 0, 1_000_000),
 		ProviderLimitHiveWide: payload.ProviderLimitHiveWide,
 		ProviderLimitAgents:   sanitizeAgentNameList(payload.ProviderLimitAgents),
+		Providers:             sanitizeProviderStatuses(payload.Providers),
 		DashboardURL:          payload.DashboardURL,
 		PublicURLSelfCheck:    sanitizePublicURLSelfCheck(payload.PublicURLSelfCheck),
 		RouteExists:           sanitizeRouteExistenceCheck(payload.RouteExists),
@@ -2062,6 +2070,8 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				payload.Agents[i].BackendAuthStatus = sanitizeHeartbeatField(payload.Agents[i].BackendAuthStatus)
 				payload.Agents[i].BackendAuthSince = sanitizeHeartbeatTime(payload.Agents[i].BackendAuthSince)
 				payload.Agents[i].BackendAuthLastError = sanitizeProseField(payload.Agents[i].BackendAuthLastError)
+				// BackendAuthRefreshable (ADR-0024) is a *bool: no injectable
+				// surface, passes through unchanged.
 			}
 			const maxAgents = 50
 			if len(payload.Agents) > maxAgents {
@@ -2357,6 +2367,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				entry.ProviderLimitRebuffs = h.ProviderLimitRebuffs
 				entry.ProviderLimitHiveWide = h.ProviderLimitHiveWide
 				entry.ProviderLimitAgents = h.ProviderLimitAgents
+				entry.Providers = h.Providers
 				entry.AgentErrorStreaks = h.AgentErrorStreaks
 				entry.ConsentWedged = h.ConsentWedged
 				entry.NoCadenceAgents = h.NoCadenceAgents
@@ -2762,6 +2773,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		HubGitHash: s.hubGitHash,
 		LatestSHA:  latestSHA,
 	}
+	resp.SelfExperimentFlag = s.selfExperimentFlagForHeartbeat(payload.HiveID, payload.SelfExperimentsOptIn)
 
 	if entry.IsPublic != payload.IsPublic {
 		resp.IsPublic = &entry.IsPublic

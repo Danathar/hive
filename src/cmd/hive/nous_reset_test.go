@@ -34,7 +34,7 @@ func TestWireNousKnowledgeResetStoreRoundTrip(t *testing.T) {
 	writeAt(filepath.Join(layout.SnapshotDir(), "2.json"), `{}`)
 	writeAt(layout.GatePendingPath(), `{"id":"g1","question":"q"}`)
 
-	state := newNousState(layout.SnapshotDir())
+	state := newNousState(layout.GovernorDir(), layout.SnapshotDir())
 	wireNousKnowledgeWith(state, layout, "", restoreTestLogger(), func() time.Time { return t0 })
 	if state.ResetStore == nil || len(state.Ledger) != 2 {
 		t.Fatalf("wired: store=%v ledger=%d", state.ResetStore, len(state.Ledger))

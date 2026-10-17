@@ -28,6 +28,10 @@ const (
 	maxEvidenceWriteTiers  = 16
 	maxEvidenceTierRunes   = 32
 
+	// maxEvidenceTimeToMergeSeconds bounds a reported median time-to-merge
+	// (ten years); anything larger is clamped.
+	maxEvidenceTimeToMergeSeconds = 10 * 365 * 24 * 3600
+
 	// EvidenceCalibrationBuckets is the number of confidence buckets (0–5).
 	EvidenceCalibrationBuckets = 6
 )
@@ -43,6 +47,9 @@ type EvidenceBucket struct {
 // the beat carried none (old spoke) and the stored summary is kept. HiveState
 // is the spoke's 24 h / 7 d hive state trends (#12339).
 type HeartbeatEvidence struct {
+	// ByAuthorKind counts merged PRs (N) and linked reverts (Bad), not follow-ups.
+	// Nil means the spoke predates this dataset.
+	ByAuthorKind          map[string]EvidenceBucket                  `json:"by_author_kind,omitempty"`
 	Verdicts90d           int                                        `json:"verdicts_90d"`
 	FalseApprove90d       int                                        `json:"false_approve_90d"`
 	FalseBlock90d         int                                        `json:"false_block_90d"`
@@ -59,6 +66,12 @@ type HeartbeatEvidence struct {
 	OutcomesByAuthorKind map[string]EvidenceOutcome    `json:"outcomes_by_author_kind,omitempty"`
 	WriteCounters        map[string]EvidenceWriteCount `json:"write_counters,omitempty"`
 	ShadowGate           *EvidenceShadow               `json:"shadow_gate,omitempty"`
+
+	// TimeToMerge is the hive's median time-to-merge over the merged PRs that
+	// recorded merge.opened_at (#12464), matching
+	// spoke.HeartbeatEvidence.TimeToMerge. nil on old spokes and when no
+	// merged PR recorded an open time: "not reported", never a zero median.
+	TimeToMerge *EvidenceTimeToMerge `json:"time_to_merge,omitempty"`
 
 	// Windows holds the same counts over trailing 24h / 7d / 30d windows
 	// (keys of evidenceWindowHours), matching spoke.HeartbeatEvidence.Windows.
@@ -90,6 +103,62 @@ type EvidenceOutcome struct {
 
 func (o EvidenceOutcome) add(x EvidenceOutcome) EvidenceOutcome {
 	return EvidenceOutcome{N: o.N + x.N, Merged: o.Merged + x.Merged, Reverted: o.Reverted + x.Reverted}
+}
+
+// EvidenceTimeToMerge is one hive's median time-to-merge in whole seconds
+// over N merged PRs with a recorded open time.
+type EvidenceTimeToMerge struct {
+	MedianSeconds int64 `json:"median_s"`
+	N             int   `json:"n"`
+}
+
+// sanitizeEvidenceTimeToMerge bounds a reported median: the sample is a
+// subset of the window's merged PRs, and an empty sample is "not reported".
+func sanitizeEvidenceTimeToMerge(in *EvidenceTimeToMerge, merged int) *EvidenceTimeToMerge {
+	if in == nil {
+		return nil
+	}
+	n := clampInt(in.N, 0, merged)
+	if n == 0 {
+		return nil
+	}
+	return &EvidenceTimeToMerge{MedianSeconds: clampInt64(in.MedianSeconds, 0, maxEvidenceTimeToMergeSeconds), N: n}
+}
+
+// EvidenceLevelTimeToMerge is the time-to-merge of one ACMM level. Medians
+// cannot be averaged or summed, and the heartbeat carries one median per
+// hive rather than a distribution, so the level reports the median of the
+// per-hive medians (MedianOfHiveMediansSeconds; with an even number of hives
+// the mean of the two middle ones, rounded down to the second). Every
+// reporting hive weighs the same however many PRs it merged; N is the total
+// merged PRs with an open time behind those medians, Hives how many hives
+// reported one.
+type EvidenceLevelTimeToMerge struct {
+	Hives                      int   `json:"hives"`
+	N                          int   `json:"n"`
+	MedianOfHiveMediansSeconds int64 `json:"median_of_hive_medians_s"`
+}
+
+// newEvidenceLevelTimeToMerge pools per-hive medians; nil when no hive
+// reported one.
+func newEvidenceLevelTimeToMerge(hives []EvidenceTimeToMerge) *EvidenceLevelTimeToMerge {
+	if len(hives) == 0 {
+		return nil
+	}
+	medians := make([]int64, 0, len(hives))
+	out := &EvidenceLevelTimeToMerge{Hives: len(hives)}
+	for _, h := range hives {
+		medians = append(medians, h.MedianSeconds)
+		out.N += h.N
+	}
+	sort.Slice(medians, func(i, j int) bool { return medians[i] < medians[j] })
+	mid := len(medians) / 2
+	if len(medians)%2 == 1 {
+		out.MedianOfHiveMediansSeconds = medians[mid]
+	} else {
+		out.MedianOfHiveMediansSeconds = medians[mid-1] + (medians[mid]-medians[mid-1])/2
+	}
+	return out
 }
 
 // EvidenceWriteCount is one intent tier's attempted and proxy-blocked agent
@@ -217,6 +286,17 @@ func sanitizeEvidence(in *HeartbeatEvidence) *HeartbeatEvidence {
 		ReviewerFamilies:      sanitizeEvidenceFamilies(in.ReviewerFamilies),
 		AuthorFamilies:        sanitizeEvidenceFamilies(in.AuthorFamilies),
 	}
+	if in.ByAuthorKind != nil {
+		out.ByAuthorKind = map[string]EvidenceBucket{}
+		remaining := out.Merged90d
+		for _, kind := range []string{"human", "agent", "bot"} {
+			if b, ok := in.ByAuthorKind[kind]; ok {
+				n := clampInt(b.N, 0, remaining)
+				out.ByAuthorKind[kind] = EvidenceBucket{N: n, Bad: clampInt(b.Bad, 0, n)}
+				remaining -= n
+			}
+		}
+	}
 	// A subset can never exceed its total.
 	out.FalseApprove90d = clampInt(in.FalseApprove90d, 0, out.Verdicts90d)
 	out.FalseBlock90d = clampInt(in.FalseBlock90d, 0, out.Verdicts90d)
@@ -228,6 +308,7 @@ func sanitizeEvidence(in *HeartbeatEvidence) *HeartbeatEvidence {
 	out.OutcomesByAuthorKind = sanitizeEvidenceOutcomes(in.OutcomesByAuthorKind)
 	out.WriteCounters = sanitizeEvidenceWriteCounters(in.WriteCounters)
 	out.ShadowGate = sanitizeEvidenceShadow(in.ShadowGate)
+	out.TimeToMerge = sanitizeEvidenceTimeToMerge(in.TimeToMerge, out.Merged90d)
 	for key := range evidenceWindowHours {
 		w := in.Windows[key]
 		if w == nil {
@@ -273,6 +354,7 @@ func sanitizeHiveStateWindow(w hivestate.Window, hours float64) hivestate.Window
 		QueuePRs:         q(w.QueuePRs),
 		QueueHold:        q(w.QueueHold),
 		SLAViolationRate: clampEvidenceFloat(w.SLAViolationRate, 1),
+		AgentSamples:     c(w.AgentSamples),
 		AgentIdleRatio:   clampEvidenceFloat(w.AgentIdleRatio, 1),
 		KicksPerDay:      clampEvidenceFloat(w.KicksPerDay, maxHiveStatePerDay),
 		TokensPerDay:     clampEvidenceFloat(w.TokensPerDay, maxHiveStatePerDay),
@@ -405,6 +487,7 @@ type EvidenceHiveCounts struct {
 	OutcomesByAuthorKind map[string]EvidenceOutcome    `json:"outcomes_by_author_kind,omitempty"`
 	WriteCounters        map[string]EvidenceWriteCount `json:"write_counters,omitempty"`
 	ShadowGate           *EvidenceShadow               `json:"shadow_gate,omitempty"`
+	TimeToMerge          *EvidenceTimeToMerge          `json:"time_to_merge,omitempty"`
 }
 
 // EvidenceAuthorKindOutcome is the pooled outcome of one author kind: Hives
@@ -584,10 +667,15 @@ type EvidenceACMMLevel struct {
 	OutcomesByAuthorKind []EvidenceAuthorKindOutcome `json:"outcomes_by_author_kind,omitempty"`
 	WriteCounters        []EvidenceWriteTier         `json:"write_counters,omitempty"`
 	ShadowGate           *EvidenceShadowView         `json:"shadow_gate,omitempty"`
+	// TimeToMerge is the median of the level's per-hive median
+	// time-to-merge (see EvidenceLevelTimeToMerge); omitted when no hive at
+	// the level reports one.
+	TimeToMerge *EvidenceLevelTimeToMerge `json:"time_to_merge,omitempty"`
 }
 
 // EvidenceView is the GET /api/hub/evidence body.
 type EvidenceView struct {
+	RevertRateByAuthorKind map[string]EvidenceRate `json:"revert_rate_by_author_kind"`
 	// Window is the trailing window the counts cover (RFC #12062).
 	Window    EvidenceWindow `json:"window"`
 	Spokes    int            `json:"spokes"`
@@ -721,12 +809,14 @@ func buildEvidenceView(hives []RegistryEntry) EvidenceView {
 func buildEvidenceViewWindow(hives []RegistryEntry, win EvidenceWindow) EvidenceView {
 	out := EvidenceView{Window: win, Hives: []EvidenceHive{}}
 	var pooled [EvidenceCalibrationBuckets]EvidenceBucket
+	authorKinds := map[string]EvidenceBucket{}
 	family := map[string]*EvidenceBucket{
 		evidenceFamilySame: {}, evidenceFamilyCross: {}, evidenceFamilyMixed: {},
 	}
 	type acmmPool struct {
 		hives, merged, reverted int
 		panels                  *evidencePool
+		timeToMerge             []EvidenceTimeToMerge
 	}
 	acmm := map[int]*acmmPool{}
 	fleet := newEvidencePool()
@@ -744,11 +834,19 @@ func buildEvidenceViewWindow(hives []RegistryEntry, win EvidenceWindow) Evidence
 		}
 		if e != nil {
 			out.Reporting++
+			for _, kind := range []string{"human", "agent", "bot"} {
+				if b, ok := e.ByAuthorKind[kind]; ok {
+					p := authorKinds[kind]
+					p.N += b.N
+					p.Bad += b.Bad
+					authorKinds[kind] = p
+				}
+			}
 			row.Reported = true
 			counts := &EvidenceHiveCounts{Verdicts90d: e.Verdicts90d, FalseApprove90d: e.FalseApprove90d,
 				FalseBlock90d: e.FalseBlock90d, Merged90d: e.Merged90d, Reverted14d90d: e.Reverted14d90d,
 				Calibration: e.Calibration[:], OutcomesByAuthorKind: e.OutcomesByAuthorKind,
-				WriteCounters: e.WriteCounters, ShadowGate: e.ShadowGate}
+				WriteCounters: e.WriteCounters, ShadowGate: e.ShadowGate, TimeToMerge: e.TimeToMerge}
 			row.Counts = counts
 			if h.PRsMerged90d != nil && win.Coverage {
 				// Both counts are 90-day merged PRs; the record count comes from
@@ -773,6 +871,9 @@ func buildEvidenceViewWindow(hives []RegistryEntry, win EvidenceWindow) Evidence
 			a.merged += e.Merged90d
 			a.reverted += e.Reverted14d90d
 			a.panels.add(e)
+			if e.TimeToMerge != nil && e.TimeToMerge.N > 0 {
+				a.timeToMerge = append(a.timeToMerge, *e.TimeToMerge)
+			}
 			fleet.add(e)
 			row.Verdicts90d, row.Merged90d = e.Verdicts90d, e.Merged90d
 			row.FalseApproveRate = newEvidenceRate(e.FalseApprove90d, e.Verdicts90d)
@@ -797,7 +898,7 @@ func buildEvidenceViewWindow(hives []RegistryEntry, win EvidenceWindow) Evidence
 		out.ByACMMLevel = append(out.ByACMMLevel, EvidenceACMMLevel{Level: level, Hives: a.hives,
 			Merged90d: a.merged, RevertRate: newEvidenceRate(a.reverted, a.merged),
 			OutcomesByAuthorKind: a.panels.outcomesView(), WriteCounters: a.panels.writesView(),
-			ShadowGate: a.panels.shadowView()})
+			ShadowGate: a.panels.shadowView(), TimeToMerge: newEvidenceLevelTimeToMerge(a.timeToMerge)})
 	}
 	out.OutcomesByAuthorKind = fleet.outcomesView()
 	out.WriteCounters = fleet.writesView()
@@ -807,6 +908,10 @@ func buildEvidenceViewWindow(hives []RegistryEntry, win EvidenceWindow) Evidence
 		Same:  newEvidenceRate(family[evidenceFamilySame].Bad, family[evidenceFamilySame].N),
 		Cross: newEvidenceRate(family[evidenceFamilyCross].Bad, family[evidenceFamilyCross].N),
 		Mixed: newEvidenceRate(family[evidenceFamilyMixed].Bad, family[evidenceFamilyMixed].N),
+	}
+	out.RevertRateByAuthorKind = map[string]EvidenceRate{}
+	for kind, b := range authorKinds {
+		out.RevertRateByAuthorKind[kind] = newEvidenceRate(b.Bad, b.N)
 	}
 	out.RecordCoverage = newEvidenceRate(covered, mergedTotal)
 	sort.Slice(out.Hives, func(i, j int) bool { return out.Hives[i].ID < out.Hives[j].ID })

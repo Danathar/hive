@@ -151,7 +151,7 @@ func TestIssueRequestReleaseStepCreate(t *testing.T) {
 		Repo: "o/r", Title: "Release needed", Body: "Remaining step: cut the release.",
 		Agent: "scanner", NeedsDecision: true, OwnerStep: step,
 	})
-	if !hasLabelFold(got.Labels, issueNeedsDecisionLabel) || !reflect.DeepEqual(parseIssueOwnerStep(got.Body), step) {
+	if !hasLabelFold(got.Labels, NeedsDecisionStageLabel) || !reflect.DeepEqual(parseIssueOwnerStep(got.Body), step) {
 		t.Fatalf("release proposal must be parked with round-trippable metadata: %+v", got)
 	}
 }

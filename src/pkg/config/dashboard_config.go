@@ -1,12 +1,16 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	dashboardtheme "github.com/hivecommons/hive/pkg/dashboard/theme"
 )
@@ -95,6 +99,9 @@ type DashboardConfig struct {
 	// queue policy decides what agents may work; these labels only decide which
 	// visual band and badges an operator sees on the dashboard.
 	IssueBands DashboardIssueBandsConfig `yaml:"issue_bands,omitempty" json:"issue_bands,omitempty"`
+	// StageTracker tunes the Hive activity monitor's server-side payload cache
+	// (hivecommons/hive#12682).
+	StageTracker DashboardStageTrackerConfig `yaml:"stage_tracker,omitempty" json:"stage_tracker,omitempty"`
 }
 
 type DashboardIssueBandsConfig struct {
@@ -320,25 +327,57 @@ func splitAuthorizedEntry(entry string) (name, role string) {
 // trailing slash trimmed when the path is otherwise root/empty. Query,
 // fragment and credentials are not allowed. Empty is valid and means "unset".
 func ValidateSnapshotURL(raw string) (string, error) {
+	return validateSnapshotURL(raw, false)
+}
+
+// legacySnapshotURLWarned records raw legacy URLs already warned about, so
+// repeated Validate calls (dashboard saves, reloads) do not re-log the warning.
+var (
+	legacySnapshotURLWarnedMu sync.Mutex
+	legacySnapshotURLWarned   = map[string]struct{}{}
+)
+
+// Loading tolerates legacy query/fragment values accepted by hub registration,
+// while dashboard writes continue to enforce the stricter URL shape.
+func validateSnapshotURL(raw string, allowLegacyQueryFragment bool) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
 		return "", nil
 	}
+	// Errors echo a redacted form only: query strings and userinfo may carry secrets.
+	shown := redactSnapshotURL(v)
 	u, err := url.Parse(v)
 	if err != nil {
-		return "", fmt.Errorf("hub.snapshot_url %q: %w", raw, err)
+		// *url.Error.Error() embeds the raw URL, so unwrap to the bare cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return "", fmt.Errorf("hub.snapshot_url %q: %w", shown, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("hub.snapshot_url %q: must be an absolute http:// or https:// URL", raw)
+		return "", fmt.Errorf("hub.snapshot_url %q: must be an absolute http:// or https:// URL", shown)
 	}
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("hub.snapshot_url %q: missing host", raw)
+		return "", fmt.Errorf("hub.snapshot_url %q: missing host", shown)
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("hub.snapshot_url %q: credentials are not allowed", raw)
+		return "", fmt.Errorf("hub.snapshot_url %q: credentials are not allowed", shown)
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
-		return "", fmt.Errorf("hub.snapshot_url %q: query and fragment are not allowed", raw)
+		if !allowLegacyQueryFragment {
+			return "", fmt.Errorf("hub.snapshot_url %q: query and fragment are not allowed", shown)
+		}
+		// Do not log the URL: legacy query strings may contain credentials.
+		legacySnapshotURLWarnedMu.Lock()
+		_, seen := legacySnapshotURLWarned[v]
+		legacySnapshotURLWarned[v] = struct{}{}
+		legacySnapshotURLWarnedMu.Unlock()
+		if !seen {
+			log.Printf("[config] warning: hub.snapshot_url contains a legacy query or fragment; remove it before updating this field through the dashboard")
+		}
+		// Preserve path and suffix semantics rather than normalizing a legacy URL.
+		return u.String(), nil
 	}
 	if u.Path == "" || u.Path == "/" {
 		return u.Scheme + "://" + u.Host, nil
@@ -346,4 +385,69 @@ func ValidateSnapshotURL(raw string) (string, error) {
 	// Rebuild from parsed parts so a bare trailing "#" (which url.Parse
 	// reports as an empty fragment) and an uppercase scheme do not survive.
 	return u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// redactSnapshotURL returns raw with any query/fragment suffix and any
+// userinfo masked, so validation errors can name the value without echoing
+// secrets. It works on the raw text so it is safe to use even when parsing
+// failed.
+func redactSnapshotURL(raw string) string {
+	v := raw
+	if i := strings.IndexAny(v, "?#"); i >= 0 {
+		v = v[:i+1] + "[redacted]"
+	}
+	start := 0
+	if s := strings.Index(v, "://"); s >= 0 {
+		start = s + len("://")
+	}
+	authEnd := len(v)
+	if slash := strings.Index(v[start:], "/"); slash >= 0 {
+		authEnd = start + slash
+	}
+	if at := strings.LastIndex(v[start:authEnd], "@"); at >= 0 {
+		v = v[:start] + "[redacted]@" + v[start+at+1:]
+	}
+	return v
+}
+
+// DashboardStageTrackerConfig is dashboard.stage_tracker.
+type DashboardStageTrackerConfig struct {
+	// CacheTTLS is how long, in seconds, GET /api/stage-tracker serves the
+	// payload it last built from the status snapshot before rebuilding. The
+	// endpoint never calls GitHub either way; the TTL only bounds how often
+	// the in-memory snapshot is re-read. 0 means governor.eval_interval_s.
+	CacheTTLS int `yaml:"cache_ttl_s,omitempty" json:"cache_ttl_s,omitempty"`
+}
+
+// StageTrackerCacheTTL is the effective dashboard.stage_tracker.cache_ttl_s:
+// the configured value, else the governor eval interval, else its default.
+func (c *Config) StageTrackerCacheTTL() time.Duration {
+	if c != nil && c.Dashboard.StageTracker.CacheTTLS > 0 {
+		return time.Duration(c.Dashboard.StageTracker.CacheTTLS) * time.Second
+	}
+	if c != nil && c.Governor.EvalIntervalS > 0 {
+		return time.Duration(c.Governor.EvalIntervalS) * time.Second
+	}
+	return time.Duration(defaultEvalIntervalS) * time.Second
+}
+
+// OwnerLogins returns the AuthorizedUsers entries that hold the owner role
+// (the first entry without an explicit role, plus any ":owner" entry), in
+// their raw identity form ("alice", "github:alice"); non-GitHub identities
+// are included as-is and filtered by the caller.
+func (d DashboardConfig) OwnerLogins() []string {
+	var out []string
+	for i, entry := range d.AuthorizedUsers {
+		name, role := splitAuthorizedEntry(entry)
+		if name == "" {
+			continue
+		}
+		if role == "" && i == 0 {
+			role = RoleOwner
+		}
+		if role == RoleOwner {
+			out = append(out, name)
+		}
+	}
+	return out
 }

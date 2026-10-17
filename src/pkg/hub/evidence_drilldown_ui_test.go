@@ -106,6 +106,9 @@ func evidenceHarness(t *testing.T) string {
 		jsFunc(t, "evidenceFilterHives"),
 		jsFunc(t, "evidenceOutcomeAdd"),
 		jsFunc(t, "evidenceOutcomeZero"),
+		jsFunc(t, "evidenceLevelTimeToMerge"),
+		jsFunc(t, "evidenceDuration"),
+		jsFunc(t, "evidenceTimeToMergeCell"),
 		jsFunc(t, "evidenceRepool"),
 		jsFunc(t, "evidenceChip"),
 		jsFunc(t, "evidenceChipsHTML"),
@@ -252,6 +255,7 @@ func TestFleetQuadrantFallbackLinkWhenNothingScored(t *testing.T) {
 
 const evidenceFixtureJS = `{
   spokes: 3, reporting: 2,
+  revert_rate_by_author_kind: {human: {n: 0, rate: null}, agent: {n: 20, rate: 0.05, lo: 0.0089, hi: 0.236}, bot: {n: 2, rate: null}},
   calibration: [
     {bucket: 0, n: 40, rate: 0.1, lo: 0.04, hi: 0.23},
     {bucket: 1, n: 4, rate: null},
@@ -301,7 +305,10 @@ func TestEvidencePanelRendersEveryTable(t *testing.T) {
 		// Sections #12117 lists that spokes do not report yet are collapsed
 		// into one "Waiting on hives" list at the bottom, with no issue numbers.
 		"Waiting on hives",
-		"<li>Median time-to-merge per autonomy level — not reported by any hive build yet.</li>",
+		"<li>Median time-to-merge per autonomy level — no selected hive reports it yet (it needs a build that records when each merged PR was opened).</li>",
+		// The autonomy table carries the column; a level without it says so, never 0.
+		"<th title=\"Median of the per-hive median times from PR opened to merged. Not a pooled median: each hive counts once however many PRs it merged.\">Median time-to-merge (median of hive medians)</th>",
+		`<span class="evidence-rate-main">10.0% of 30</span><span class="evidence-rate-margin" title="Margin (95%): the true value is very likely inside this range. Fewer cases, wider range.">margin 3.5% – 25.6%</span></td><td class="evidence-empty">not reported</td></tr>`,
 		"<li>Revert rate by author kind per hive — not reported by any hive build yet.</li>",
 		"<li>Per-axis criteria table — not reported by any hive build yet.</li>",
 		"Evidence coverage", "Reviewer confidence", "Autonomy level × outcome",
@@ -315,6 +322,9 @@ func TestEvidencePanelRendersEveryTable(t *testing.T) {
 		`<tr><td>Not confident (0.0–0.5)</td><td>44</td><td class="evidence-rate"><span class="evidence-rate-main">9.1% of 44</span>`,
 		// All-selected-hives coverage row.
 		`<tr><td>All selected hives</td><td>50</td><td class="evidence-rate"><span class="evidence-rate-main">80.0% of 50</span>`,
+		"Revert rate by author kind",
+		`<tr><td>agent</td><td class="evidence-rate"><span class="evidence-rate-main">5.0% of 20</span>`,
+		`<tr><td>bot</td><td class="evidence-rate"><span class="evidence-rate-main">— (2, below the minimum of 10)</span>`,
 		// A below-minimum sample shows its n but a dash, never 0%.
 		`<span class="evidence-rate-main">— (3, below the minimum of 10)</span>`,
 		`<tr><td>different families</td><td>3</td><td class="evidence-rate"><span class="evidence-rate-main">— (3, below the minimum of 10)</span></td></tr>`,
@@ -341,7 +351,7 @@ func TestEvidencePanelRendersEveryTable(t *testing.T) {
 		"<li>Outcome by author kind — hives report this once upgraded to the Oct 16 build or later. <button",
 		"<li>Boundary enforcement (agent writes the guardrail proxy blocked) — hives report this once upgraded to the Oct 16 build or later. <button",
 		"<li>Shadow gates — shadow mode is off on every selected hive, or none has reported it yet (hives report this once upgraded to the Oct 16 build or later). <button",
-		"<li>Claim-vs-verdict totals — not reported by any hive build yet.</li>",
+		"<li>CI gate (claim vs verdict) totals — not reported by any hive build yet.</li>",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("evidence panel is missing %q", want)

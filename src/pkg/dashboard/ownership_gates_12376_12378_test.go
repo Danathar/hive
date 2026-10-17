@@ -156,12 +156,13 @@ func TestPRReviewDecisionAgreesWithMergeClassifier12378(t *testing.T) {
 func TestPRGateLabelsAreYourTurn12378(t *testing.T) {
 	cfg := config.DashboardIssueBandsConfig{WaitingLabels: append(append([]string{}, defaultIssueWaitingLabels...), "waiting-on-legal")}
 	verbs := map[string]want11565{
-		"needs-decision":   {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
-		"2-discussing":     {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
-		"needs-direction":  {OwnershipVerbSteer, OwnershipReasonParkedNeedsDirection},
-		"needs-spec":       {OwnershipVerbSpec, OwnershipReasonParkedNeedsSpec},
-		"blocked":          {OwnershipVerbReview, OwnershipReasonPRGateLabel},
-		"waiting-on-legal": {OwnershipVerbReview, OwnershipReasonPRGateLabel},
+		"needs-decision":                 {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
+		config.DefaultNeedsDecisionLabel: {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
+		"2-discussing":                   {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
+		"needs-direction":                {OwnershipVerbSteer, OwnershipReasonParkedNeedsDirection},
+		"needs-spec":                     {OwnershipVerbSpec, OwnershipReasonParkedNeedsSpec},
+		"blocked":                        {OwnershipVerbReview, OwnershipReasonPRGateLabel},
+		"waiting-on-legal":               {OwnershipVerbReview, OwnershipReasonPRGateLabel},
 	}
 	seen := map[string]bool{}
 	for _, label := range prGateLabels(normalizeIssueBandsConfig(cfg)) {

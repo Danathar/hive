@@ -22,10 +22,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/hivestate"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
+	"github.com/hivecommons/hive/pkg/nous"
 	spokesig "github.com/hivecommons/hive/pkg/spoke"
 	"github.com/hivecommons/hive/pkg/tracing"
 )
@@ -410,6 +412,16 @@ type AgentSummary struct {
 	// last fields explain the newest restart. The hub may add ResetAt/ResetBy
 	// when rendering fleet rows after an operator reset.
 	Restarts AgentRestartTelemetry `json:"restarts,omitempty"`
+	// BackendAuth* is the agent's backend-auth canary (#6558), the same fields
+	// /api/status shows per agent; empty status means ok. The hub's
+	// auth_health roll-up reads them. BackendAuthRefreshable is
+	// claude.HasUsableToken over the agent's own credential (ADR-0024): nil
+	// for backends with no verified refresh semantics, so absent never reads
+	// as "needs login".
+	BackendAuthStatus      string `json:"backendAuthStatus,omitempty"`
+	BackendAuthSince       string `json:"backendAuthSince,omitempty"`
+	BackendAuthLastError   string `json:"backendAuthLastError,omitempty"`
+	BackendAuthRefreshable *bool  `json:"backendAuthRefreshable,omitempty"`
 }
 
 type AgentRestartTelemetry struct {
@@ -455,6 +467,11 @@ type AgentActivity struct {
 	StartFailureExitCode *int
 	StartFailureSignal   string
 	Restarts             AgentRestartTelemetry
+	// BackendAuth* — see the matching AgentSummary fields.
+	BackendAuthStatus      string
+	BackendAuthSince       time.Time
+	BackendAuthLastError   string
+	BackendAuthRefreshable *bool
 }
 
 // NewAgentSummary builds one AgentSummary from an agent's name, state, mode and
@@ -486,6 +503,13 @@ func NewAgentSummary(name, state, mode string, act AgentActivity) AgentSummary {
 		StartBlocked:         act.StartBlocked,
 		StartFailureExitCode: act.StartFailureExitCode,
 		StartFailureSignal:   act.StartFailureSignal,
+
+		BackendAuthStatus:      act.BackendAuthStatus,
+		BackendAuthLastError:   act.BackendAuthLastError,
+		BackendAuthRefreshable: act.BackendAuthRefreshable,
+	}
+	if !act.BackendAuthSince.IsZero() {
+		as.BackendAuthSince = act.BackendAuthSince.UTC().Format(time.RFC3339)
 	}
 	if !act.PausedAt.IsZero() {
 		as.PausedAt = act.PausedAt.UTC().Format(time.RFC3339)
@@ -768,6 +792,11 @@ type HeartbeatPayload struct {
 	ProviderLimitAgents   []string       `json:"provider_limit_agents,omitempty"`
 	Health                map[string]any `json:"health"`
 	DashboardURL          string         `json:"dashboard_url"`
+	// Providers is the per-provider auth/availability roll-up of Agents
+	// (ADR-0024, #12611): redacted, no credential material. Omitted when the
+	// spoke disables provider status or has no enabled agent naming a
+	// backend; an old hub ignores it.
+	Providers []agent.ProviderStatus `json:"providers,omitempty"`
 	// Output-freshness telemetry is optional and backward compatible: older
 	// spokes omit it, and the hub keeps the pre-existing no-write verdict.
 	LastWriteCapableKickAt string `json:"last_write_capable_kick_at,omitempty"`
@@ -1112,6 +1141,8 @@ type HeartbeatPayload struct {
 	// That lets the hub keep liveness/staleness visible without overwriting
 	// agents and health with an old cached copy.
 	FreshAgentStats bool `json:"fresh_agent_stats,omitempty"`
+	// SelfExperimentsOptIn is local consent; absent or false means opted out.
+	SelfExperimentsOptIn bool `json:"self_experiments_opt_in,omitempty"`
 }
 
 const (
@@ -1177,6 +1208,8 @@ const HeartbeatEvidenceCalibrationBuckets = 6
 // spoke's hive state time series (#12339), nil when it has no recent sample.
 // The JSON shape matches hub.HeartbeatEvidence.
 type HeartbeatEvidence struct {
+	// Nil means an older spoke did not report author-kind counts.
+	ByAuthorKind          map[string]HeartbeatEvidenceBucket                           `json:"by_author_kind,omitempty"`
 	Verdicts90d           int                                                          `json:"verdicts_90d"`
 	FalseApprove90d       int                                                          `json:"false_approve_90d"`
 	FalseBlock90d         int                                                          `json:"false_block_90d"`
@@ -1196,6 +1229,13 @@ type HeartbeatEvidence struct {
 	OutcomesByAuthorKind map[string]HeartbeatEvidenceOutcome    `json:"outcomes_by_author_kind,omitempty"`
 	WriteCounters        map[string]HeartbeatEvidenceWriteCount `json:"write_counters,omitempty"`
 	ShadowGate           *HeartbeatEvidenceShadow               `json:"shadow_gate,omitempty"`
+
+	// TimeToMerge is the median time-to-merge (merge.at minus
+	// merge.opened_at) of the merged PRs in the window that recorded an open
+	// time, with that sample size. nil when none did, including every bundle
+	// written before opened_at was captured: the hub shows "not reported",
+	// never a zero median.
+	TimeToMerge *HeartbeatEvidenceTimeToMerge `json:"time_to_merge,omitempty"`
 
 	// Windows carries the same counts over shorter trailing windows, keyed by
 	// HeartbeatEvidenceWindowKeys ("24h", "7d", "30d"), so the hub can offer
@@ -1226,6 +1266,13 @@ type HeartbeatEvidenceOutcome struct {
 	N        int `json:"n"`
 	Merged   int `json:"merged"`
 	Reverted int `json:"reverted"`
+}
+
+// HeartbeatEvidenceTimeToMerge is one window's median time-to-merge in
+// whole seconds over N merged PRs with a recorded open time.
+type HeartbeatEvidenceTimeToMerge struct {
+	MedianSeconds int64 `json:"median_s"`
+	N             int   `json:"n"`
 }
 
 // HeartbeatEvidenceWriteCount is one tier's attempted and proxy-blocked
@@ -1341,6 +1388,9 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 		if resp == nil {
 			return
 		}
+		// Missing assignments are authoritative withdrawal, including old hubs.
+		// Only verified, decoded heartbeat responses reach this dispatch.
+		nous.SelfExperiments.Apply(selfExperimentsOptedIn(), resp.SelfExperimentFlag)
 		if resp.SwitchToTag != "" && onSwitchBranch != nil {
 			// Branch switch takes precedence over a plain SHA upgrade — it
 			// changes the image tag, which a same-tag re-pull can't do.
@@ -1613,6 +1663,7 @@ func overlayFreshStatsAfterCollectTimeout(ctx context.Context, payload *Heartbea
 	payload.ProviderLimitRebuffs = fresh.ProviderLimitRebuffs
 	payload.ProviderLimitHiveWide = fresh.ProviderLimitHiveWide
 	payload.ProviderLimitAgents = fresh.ProviderLimitAgents
+	payload.Providers = fresh.Providers
 	payload.LastWriteCapableKickAt = fresh.LastWriteCapableKickAt
 	payload.LastKickDisposition = fresh.LastKickDisposition
 	payload.LastKickSkipReason = fresh.LastKickSkipReason
@@ -1658,7 +1709,9 @@ func collectFreshStatsWithTimeout(ctx context.Context, collect FreshStatusCollec
 }
 
 // postHeartbeat marshals and POSTs a beat to the hub, records success on
-// acceptance, and decodes the hub's response.
+// acceptance, and decodes the hub's response. It also overlays current local
+// experiment consent and revokes assignments on opt-out before any network I/O;
+// verified response assignments are applied separately by processHeartbeatResponse.
 //
 // Named ...ToHub to avoid colliding with the pkg-local test helper postHeartbeat.
 // Extracted from sendHeartbeat so the MINIMAL liveness beat (no cached payload,
@@ -1667,7 +1720,16 @@ func collectFreshStatsWithTimeout(ctx context.Context, collect FreshStatusCollec
 // handling — including hub-instructed upgrades. A separate ad-hoc POST would
 // drift from this one over time and silently lose those behaviours.
 func postHeartbeatToHub(ctx context.Context, hubURL string, payload *HeartbeatPayload, logger *slog.Logger) *HeartbeatResponse {
-	payload = redactHeartbeat(payload)
+	// Collector/cache ownership stays with the caller. Overlay consent on a
+	// private copy, including when no redaction classes are configured.
+	owned := *payload
+	payload = redactHeartbeat(&owned)
+	// Read local consent even for cached/minimal/upgrading heartbeats; never
+	// trust an old collector's value. This does not modify governor config.
+	payload.SelfExperimentsOptIn = selfExperimentsOptedIn()
+	if !payload.SelfExperimentsOptIn {
+		nous.SelfExperiments.Apply(false, nil)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		logger.Warn("hub heartbeat marshal failed", "error", err)
@@ -2664,6 +2726,8 @@ type HeartbeatResponse struct {
 	SigSeq      int64  `json:"sig_seq,omitempty"`
 	SigSignedAt int64  `json:"sig_ts,omitempty"`
 	SigVersion  int    `json:"sig_v,omitempty"`
+	// SelfExperimentFlag is authoritative: nil/absent withdraws any prior assignment.
+	SelfExperimentFlag *nous.SelfFlagAssignment `json:"self_experiment_flag,omitempty"`
 }
 
 // HubBanner is a message from the hub admin displayed on spoke dashboards.
