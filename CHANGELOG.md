@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.181.0)
+
+### Added
+
+- Nous observations now use the hub self-report relay to create parked, fingerprint-deduplicated issues in `hivecommons/hive` without exposing watched project files ([#12653](https://github.com/hivecommons/hive/issues/12653)).
+
 ## 2026-10-17 (v5.180.0)
 
 ### Added
