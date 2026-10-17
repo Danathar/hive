@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.184.0)
+
+### Added
+
+- The hub evidence drill-down now keeps "Revert rate by author kind" when a hive or ACMM-level filter is active: each hive row carries its `by_author_kind` counts and the selection re-pools them instead of showing dashes, and the waiting item for it only appears while no selected hive reports it.
+- **Hub evidence drill-down: per-axis criteria table** ([#12463](https://github.com/hivecommons/hive/issues/12463)). `GET /api/hub/evidence` now carries `hives[].criteria[]`, which lists each hive's Trust / Productivity / Satisfaction / Efficiency criteria as met, unmet or not reported. The hub derives it from the quadrant criteria it already scores, so spokes send nothing new. The Fleet evidence modal renders it as a **Per-axis criteria** table below the plain-language findings and the evidence tables. Offline hives, hives without an evidence summary, unscored hives and criteria with no data show as not reported, never as unmet. Read-only; nothing reads it to decide a merge.
+
+### Fixed
+
+- **Trusted-author lane no longer logs `untrusted-author-role` for the App's own PRs** — the lane now records the contributor lane's `app-authored` hand-off reason, matching the contributor lane's `role/trusted` vouching so a tick's logs are self-consistent; merge behaviour is unchanged ([#12795](https://github.com/hivecommons/hive/issues/12795)).
+
 ## 2026-10-17 (v5.183.1)
 
 ### Fixed
