@@ -415,6 +415,9 @@ func ciReasonInconclusive(reason string) bool {
 	return false
 }
 
+// stageReasonVerdictRequiresHuman is stageVerdictReason for requires_human.
+const stageReasonVerdictRequiresHuman = "reviewer-verdict:requires_human"
+
 // stageVerdictReason is the recorded reason when the reviewer verdict, not
 // the lane's skip reason, decided the stage.
 func stageVerdictReason(d stageDetail) string {
@@ -428,6 +431,18 @@ func verdictBlocks(d stageDetail) bool {
 	}
 	v := strings.ToLower(strings.TrimSpace(d.Verdict.Verdict))
 	return v == "changes_requested" || v == "reject" || v == "rejected" || v == "request_changes"
+}
+
+// verdictNeedsHuman reports whether a known reviewer verdict defers the PR to
+// a human rather than approving or asking for changes. Only requires_human
+// qualifies: it is the one such verdict hive-review can emit
+// (approve / changes_requested / requires_human / reject), and the 085 reason
+// documented for operators is reviewer-verdict:requires_human.
+func verdictNeedsHuman(d stageDetail) bool {
+	if !d.VerdictKnown || d.Verdict.Approved {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(d.Verdict.Verdict)) == "requires_human"
 }
 
 // stageHandoffReasons are reasons that mean "not this lane's PR".
@@ -557,6 +572,15 @@ func classifyStage(o stageObservation) stageVerdict {
 		return stageVerdict{Stage: stagelabels.MergeQueue, Rank: stageRankOwned}
 	}
 	if reason == contributorLaneReasonNoVerdict {
+		if verdictNeedsHuman(o.Detail) {
+			// The reviewer DID answer — requires_human — but the lane folds
+			// every non-approve verdict into "no-verdict", so the PR sat at
+			// 050-review-pending for hours (hive #12417/#12438) while the
+			// reviewer skipped it as already reviewed. Hand it to a person:
+			// Human routes it through routeHuman so the 085 entry comment
+			// is posted like every other needs-decision arrival.
+			return stageVerdict{Stage: stagelabels.NeedsDecision, Rank: stageRankOwned, Human: true, Reason: stageVerdictReason(o.Detail)}
+		}
 		return stageVerdict{Stage: stagelabels.ReviewPending, Rank: stageRankOwned}
 	}
 	if classifyCIReason(reason) == ciReasonPending {
