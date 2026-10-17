@@ -53,6 +53,12 @@ type EvidenceSummary struct {
 	// WriteCounters is the proxy's attempted-vs-blocked agent write totals per
 	// intent tier (#12069); omitted when the counter file is absent or unreadable.
 	WriteCounters map[string]EvidenceWriteCount `json:"write_counters,omitempty"`
+	// ACMMChanges is the month each policy.acmm_level was first observed per
+	// repo (#12369), computed over all stored bundles for the repo rather than
+	// the latest bundle per PR, the author kind or the window (policy maturity
+	// is a repo property; see evidenceACMMChanges). Omitted when no bundle
+	// carries a valid level. Report-only; it never feeds back into eligibility.
+	ACMMChanges []EvidenceACMMChange `json:"acmm_changes,omitempty"`
 	// WriteActivity is every agent GitHub write observed in the window —
 	// direct writes through the proxy (from the durable counter file's weekly
 	// buckets) plus hive-mediated writes from the audit log — with the
@@ -682,6 +688,7 @@ func buildEvidenceSummaryWindow(bundles []*evidence.Bundle, win evidenceWindow, 
 	hours := win.Hours
 	resp := EvidenceSummary{
 		Hours: hours, AllTime: hours == 0 && !win.Custom, Repo: repo, AuthorKind: kind,
+		ACMMChanges:     evidenceACMMChanges(bundles, repo),
 		Outcomes:        map[string]EvidenceOutcomes{},
 		Calibration:     []EvidencePerspectiveCalib{},
 		ReviewerModels:  []EvidenceModelAccuracy{},
