@@ -328,3 +328,5 @@ up a parked-then-released issue whose newest Hive reply records it, re-check
 the owner's step and, if the fix holds, say so on the issue and close it
 (`hive-open-issue close --repo <owner/repo> <number>`) instead of re-parking
 or re-filing it.
+
+When a change mirrors one made in another repository, link that repository's issue or PR only in the issue or PR body. Committed files cite this repository's own issues and PRs, or state the reasoning in place.

@@ -57,13 +57,13 @@ type fakeNousFiler struct {
 	err    error
 }
 
-func (f *fakeNousFiler) CreateIssue(_ context.Context, repo, title, body string, labels []string) (ghpkg.CreateIssueResult, error) {
+func (f *fakeNousFiler) CreateIssue(_ context.Context, req ghpkg.CreateIssueRequest) (ghpkg.CreateIssueResult, error) {
 	f.calls++
-	f.repo, f.title, f.body, f.labels = repo, title, body, labels
+	f.repo, f.title, f.body, f.labels = req.Repo, req.Title, req.Body, req.Labels
 	if f.err != nil {
 		return ghpkg.CreateIssueResult{}, f.err
 	}
-	return ghpkg.CreateIssueResult{Number: 77, URL: "https://github.com/" + repo + "/issues/77"}, nil
+	return ghpkg.CreateIssueResult{Number: 77, URL: "https://github.com/" + req.Repo + "/issues/77"}, nil
 }
 
 func sampleVerdict() NousVerdict {

@@ -306,7 +306,7 @@ renderClankers([{github_username: 'bob', trust_tier: 'contributor', parallel_cap
     {task_id: 'f2', kind: 'rework', task_kind: 'fix-pr', repo: 'org/r', number: 8, url: 'https://x/8', stage: 'stage/072-returned-to-contributor', mode: 'spawn'}
   ], fix_queue_depth: 0, pending_rework: 0}]);
 let html = fleet.html;
-assert.match(html, /clanker-capacity[^>]*>capacity 3 &middot; spawn</, 'capacity line');
+assert.match(html, /clanker-capacity[^>]*>max parallel 3 &middot; spawn</, 'capacity line');
 assert.equal((html.match(/class="clanker-sub clanker-inflight"/g) || []).length, 3, 'one line per in-flight item');
 assert.equal((html.match(/class="work-kind new"/g) || []).length, 1, 'one NEW badge');
 assert.equal((html.match(/class="work-kind rework"/g) || []).length, 2, 'two REWORK badges');
@@ -321,7 +321,7 @@ renderClankers([{github_username: 'alice', parallel_capacity: 0, fix_mode: 'pree
   fix_queue_depth: 1, pending_rework: 2,
   pending_rework_prs: [{repo: 'org/r', number: 2, cause: 'build', url: 'https://x/2'}, {repo: 'org/r', number: 3, stage: 'stage/072-returned-to-contributor'}]}]);
 html = fleet.html;
-assert.match(html, /clanker-capacity[^>]*>capacity: not advertised</, 'not advertised');
+assert.match(html, /clanker-capacity[^>]*>max parallel: not advertised</, 'not advertised');
 assert.match(html, /class="clanker-sub clanker-idle-rework">idle &middot; 2 PRs awaiting rework</, 'idle line names the rework');
 assert.doesNotMatch(html, /idle: no matching work/, 'idle reason replaced while rework waits');
 assert.match(html, /class="clanker-sub clanker-rework-pending" title="org\/r#2 \(build\), org\/r#3">2 PRs awaiting rework \(not yet dispatched\) &middot; fix queue 1: <a class="cc-issue-link work-ref" href="https:\/\/x\/2">org\/r#2<\/a>, <a class="cc-issue-link work-ref" href="https:\/\/github.com\/org\/r\/issues\/3">org\/r#3<\/a></, 'awaiting-rework line');
@@ -340,5 +340,79 @@ assert.match(fleet.html, /class="clanker-sub">on org\/r#5</, 'legacy current_tas
 	out, err := exec.Command("node", "-e", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clanker row render: %v\n%s", err, out)
+	}
+}
+
+// hivecommons/hive#12527: a stale relay with an unanswered nudge shows its
+// 072 PRs as "adopting (contributor offline)"; once stage 074 took a PR over
+// it is listed as "adopted by hive". A live relay shows no state.
+func TestFleetReworkAdoptionState(t *testing.T) {
+	hub, _, store := reworkHub(t)
+	now := time.Now()
+	c := fixConn(hub, "alice", fixCaps(capFixPRInterrupt), now)
+	store.Observe(stagelabels.Key("org/r", 1), stagelabels.ReturnedToContributor, "check-failing:build")
+	store.NoteAuthor(stagelabels.Key("org/r", 1), "alice")
+	store.MarkNudged(stagelabels.Key("org/r", 1), "aaa", 1, true, now)
+	store.Observe(stagelabels.Key("org/r", 2), stagelabels.ReturnedToContributor, "check-failing:build")
+	store.NoteAuthor(stagelabels.Key("org/r", 2), "alice")
+	store.Observe(stagelabels.Key("org/r", 3), stagelabels.AdoptedByHive, "check-failing:build")
+	store.NoteAuthor(stagelabels.Key("org/r", 3), "alice")
+
+	fc := snapshotFor(t, hub, "alice")
+	if fc.Stale || len(fc.PendingReworkPRs) != 3 {
+		t.Fatalf("live: %+v", fc.FleetRework)
+	}
+	byNumber := map[int]FleetReworkPR{}
+	for _, pr := range fc.PendingReworkPRs {
+		byNumber[pr.Number] = pr
+	}
+	if byNumber[1].State != "" || byNumber[2].State != "" || byNumber[3].State != FleetReworkStateAdopted || byNumber[3].Stage != stagelabels.AdoptedByHive.Label() {
+		t.Fatalf("live states: %+v", fc.PendingReworkPRs)
+	}
+
+	c.mu.Lock()
+	c.lastPong = now.Add(-2 * wsHeartbeatTimeout)
+	c.mu.Unlock()
+	fc = snapshotFor(t, hub, "alice")
+	if !fc.Stale {
+		t.Fatalf("stale: %+v", fc.FleetRework)
+	}
+	byNumber = map[int]FleetReworkPR{}
+	for _, pr := range fc.PendingReworkPRs {
+		byNumber[pr.Number] = pr
+	}
+	// Nudged and unanswered → adopting; never nudged → plain 072; 074 → adopted.
+	if byNumber[1].State != FleetReworkStateAdopting || byNumber[2].State != "" || byNumber[3].State != FleetReworkStateAdopted {
+		t.Fatalf("stale states: %+v", fc.PendingReworkPRs)
+	}
+	raw, _ := json.Marshal(fc.PendingReworkPRs)
+	if !strings.Contains(string(raw), `"state":"adopting (contributor offline)"`) {
+		t.Fatalf("json: %s", raw)
+	}
+}
+
+// Presence feeds the stage engine's offline-adoption rule: registered iff a
+// profile or connection exists, online iff a heartbeat is within the window,
+// last_seen = freshest heartbeat.
+func TestContributeHubPresence(t *testing.T) {
+	hub, _, _ := reworkHub(t)
+	now := time.Now()
+	if p := hub.Presence(context.Background(), "nobody"); p.Registered || p.Online || !p.LastSeen.IsZero() {
+		t.Fatalf("unknown user: %+v", p)
+	}
+	c := fixConn(hub, "alice", fixCaps(capFixPRInterrupt), now)
+	p := hub.Presence(context.Background(), "alice")
+	if !p.Registered || !p.Online || p.LastSeen.IsZero() {
+		t.Fatalf("live relay: %+v", p)
+	}
+	// Online follows the stage presence window (15m default), not the
+	// 4s-tick WS heartbeat: a relay silent past the window is offline.
+	gone := now.Add(-hub.presenceWindow() - time.Minute)
+	c.mu.Lock()
+	c.lastPong = gone
+	c.mu.Unlock()
+	p = hub.Presence(context.Background(), "alice")
+	if !p.Registered || p.Online || !p.LastSeen.Equal(gone) {
+		t.Fatalf("offline relay: %+v", p)
 	}
 }

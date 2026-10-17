@@ -339,7 +339,12 @@ func mqIssueLabels(t *testing.T, captured map[string]interface{}) []string {
 	}
 	out := make([]string, 0, len(raw))
 	for _, l := range raw {
-		out = append(out, l.(string))
+		// CreateIssue stamps the origin/<source> provenance label on every
+		// issue it files (hivecommons/hive#12688); these tests pin the ACMM
+		// labels only.
+		if name := l.(string); !strings.HasPrefix(name, "origin/") {
+			out = append(out, name)
+		}
 	}
 	return out
 }

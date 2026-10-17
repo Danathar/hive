@@ -57,6 +57,9 @@ type Options struct {
 	// IntentGate is the intent-tier policy trySweepSelfAuthoredPR enforces
 	// (#6258). nil installs no policy; see IntentGate for the semantics.
 	IntentGate *IntentGate
+	// ReviewGate is the swarm-review policy trySweepSelfAuthoredPR evaluates
+	// on the App's own PRs (#12592). nil installs no policy; see ReviewGate.
+	ReviewGate *ReviewGate
 	// HumanMergePaths returns the live auto_merge.human_merge_paths patterns
 	// for an owner/repo. Every sweep lane refuses a PR touching one (#11038).
 	// nil means no repo has any.
@@ -128,6 +131,9 @@ type Options struct {
 	// ContributorNudge receives stage-072 nudges (hivecommons/hive#12436);
 	// nil posts the GitHub comment only.
 	ContributorNudge ContributorNudgeSink
+	// CheckSummary reads a head's check digest for human-stage routing
+	// (hivecommons/hive#12528); nil uses the GitHub client.
+	CheckSummary CheckSummarizer
 }
 
 // Engine owns the automerge sweep policy state.
@@ -148,6 +154,8 @@ type Engine struct {
 
 	intentGateMu sync.RWMutex
 	intentGate   *IntentGate
+	reviewGateMu sync.RWMutex
+	reviewGate   *ReviewGate
 
 	humanMergePathsMu sync.RWMutex
 	humanMergePaths   func(repo string) []string
@@ -186,6 +194,7 @@ type Engine struct {
 	stageTracker     *StageTracker
 	stageStore       *stagelabels.Store
 	contributorNudge ContributorNudgeSink
+	checkSummary     CheckSummarizer
 }
 
 // New returns an automerge sweep engine over a GitHub transport client.
@@ -204,6 +213,7 @@ func New(transport Transport, opts Options) *Engine {
 		approvalDesk:                      opts.ApprovalDesk,
 		mutation:                          opts.MutationBoundary,
 		intentGate:                        opts.IntentGate,
+		reviewGate:                        opts.ReviewGate,
 		humanMergePaths:                   opts.HumanMergePaths,
 		reviewVerdictHold:                 opts.ReviewVerdictHold,
 		selfAuthorizationHoldEnabled:      opts.SelfAuthorizationHoldEnabled,
@@ -226,6 +236,7 @@ func New(transport Transport, opts Options) *Engine {
 		stageTracker:                      opts.StageTracker,
 		stageStore:                        opts.StageStore,
 		contributorNudge:                  opts.ContributorNudge,
+		checkSummary:                      opts.CheckSummary,
 		evaluatedHeads:                    make(map[string]string),
 		requiredChecksFallbackWarned:      make(map[string]bool),
 	}
@@ -971,7 +982,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				"updated_branches", result.UpdatedBranches,
 				"skipped", repoSkipped,
 			}
-			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", "conflicting", "not-mergeable"}
+			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", "not-mergeable"}
 			if sentinelLabel := c.sentinelLabelName(); sentinelLabel != "" {
 				skipReasonOrder = append([]string{sentinelLabel}, skipReasonOrder...)
 			}
@@ -1317,6 +1328,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		}
 		return AutoMergeSweepEvent{}, "fetch-pr", err
 	}
+	c.noteStagePR(owner, repo, number, pr)
 	if !strings.EqualFold(pr.GetState(), "open") {
 		return AutoMergeSweepEvent{}, "closed", nil
 	}
@@ -1358,7 +1370,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	if evaluatedHeadSHA == "" {
 		return AutoMergeSweepEvent{}, "missing-head-sha", nil
 	}
-	c.noteStageAuthor(owner, repo, number, stagelabels.AuthorTrusted)
+	c.noteStageRole(owner, repo, number, stagelabels.RoleTrusted)
 	c.noteStageVerdict(owner, repo, number, c.contributorLaneVerdictFor(owner+"/"+repo, number, evaluatedHeadSHA))
 	method := mergeMethodFor(pr)
 	mergeClaim := effects.Claim{
@@ -1375,7 +1387,9 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	mergeableState := strings.ToLower(strings.TrimSpace(pr.GetMergeableState()))
 	if strings.EqualFold(pr.GetMergeableState(), "behind") && !serialized {
 		if !branchUpdateAllowed {
-			return AutoMergeSweepEvent{}, "check-pending", nil
+			// Keep the cause: still behind, retried next tick, not CI
+			// state and not author work (hivecommons/hive#12607).
+			return AutoMergeSweepEvent{}, autoMergeReasonBehindBudgetExhausted, nil
 		}
 		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "behind")
 	}
@@ -1386,7 +1400,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	if pr.GetBase() != nil {
 		baseBranch = pr.GetBase().GetRef()
 	}
-	headPushedAt := c.headPushedAt(owner, repo, number, evaluatedHeadSHA, pr)
+	headPushedAt := c.headPushedAt(ctx, owner, repo, number, evaluatedHeadSHA, pr)
 	green, reason, err := c.commitGreenForPR(ctx, owner, repo, baseBranch, evaluatedHeadSHA, number, headPushedAt, expectedCheckCacheFromContext(ctx))
 	if err != nil {
 		return AutoMergeSweepEvent{}, reason, err
@@ -1473,6 +1487,12 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	}
 	if currentHeadSHA == "" || currentHeadSHA != evaluatedHeadSHA {
 		return AutoMergeSweepEvent{}, "head-changed-since-eval", nil
+	}
+	// Review gate (#12592), on the re-verified head immediately before the
+	// merge call: the swarm verdict for exactly the SHA about to merge.
+	// Shadow (the default) records and merges; enforce holds.
+	if reviewReason := c.selfMergeReviewGate(displayRepo, owner, repo, lane, number, current, evaluatedHeadSHA); reviewReason != "" {
+		return AutoMergeSweepEvent{}, reviewReason, nil
 	}
 
 	if serialized {
@@ -1852,6 +1872,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 		}
 		return AutoMergeSweepEvent{}, "fetch-pr", err
 	}
+	c.noteStagePR(owner, repo, number, pr)
 	if reason := c.prefilterTrustedAuthorPR(pr, policy); reason != "" {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
@@ -1860,7 +1881,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	if !decision.Allowed {
 		return AutoMergeSweepEvent{}, "untrusted-author-role", nil
 	}
-	c.noteStageAuthor(owner, repo, number, stagelabels.AuthorTrusted)
+	c.noteStageRole(owner, repo, number, stagelabels.RoleTrusted)
 	c.noteStageVerdict(owner, repo, number, c.contributorLaneVerdictFor(owner+"/"+repo, number, pr.GetHead().GetSHA()))
 	permission := trustedAuthorPermission{Allowed: true, Level: "not-required"}
 	if policy.RequireGitHubPermission {
@@ -1922,7 +1943,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	if pr.GetBase() != nil {
 		baseBranch = pr.GetBase().GetRef()
 	}
-	headPushedAt := c.headPushedAt(owner, repo, number, headSHA, pr)
+	headPushedAt := c.headPushedAt(ctx, owner, repo, number, headSHA, pr)
 	green, reason, err := c.commitGreenForPR(ctx, owner, repo, baseBranch, headSHA, number, headPushedAt, expectedCheckCacheFromContext(ctx))
 	if err != nil {
 		return AutoMergeSweepEvent{}, reason, err
@@ -2063,11 +2084,13 @@ func (c *Engine) executeUpdateBranchEffect(ctx context.Context, owner, repo stri
 func (c *Engine) hasOutstandingChangesRequested(ctx context.Context, owner, repo string, number int) (bool, error) {
 	opts := &gh.ListOptions{PerPage: 100}
 	latest := map[string]string{}
+	var seen []*gh.PullRequestReview
 	for {
 		reviews, resp, err := c.gh.PullRequests.ListReviews(ctx, owner, repo, number, opts)
 		if err != nil {
 			return false, err
 		}
+		seen = append(seen, reviews...)
 		for _, review := range reviews {
 			login := strings.ToLower(strings.TrimSpace(hgithub.SafeGetLogin(review.GetUser())))
 			if login == "" {
@@ -2083,6 +2106,7 @@ func (c *Engine) hasOutstandingChangesRequested(ctx context.Context, owner, repo
 		}
 		opts.Page = resp.NextPage
 	}
+	c.noteStageReviews(owner, repo, number, seen)
 	for _, state := range latest {
 		if state == "CHANGES_REQUESTED" {
 			return true, nil
@@ -2105,6 +2129,7 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 		}
 		return AutoMergeSweepEvent{}, "fetch-pr", err
 	}
+	c.noteStagePR(owner, repo, number, pr)
 	if !strings.EqualFold(pr.GetState(), "open") {
 		return AutoMergeSweepEvent{}, "closed", nil
 	}
@@ -2203,7 +2228,7 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 	if pr.GetBase() != nil {
 		baseBranch = pr.GetBase().GetRef()
 	}
-	headPushedAt := c.headPushedAt(owner, repo, number, headSHA, pr)
+	headPushedAt := c.headPushedAt(ctx, owner, repo, number, headSHA, pr)
 	greenFn := c.commitGreenForPR
 	if serialized {
 		greenFn = c.commitGreenForQueuedPR
@@ -2295,11 +2320,13 @@ func (c *Engine) latestHiveQueueApproval(ctx context.Context, owner, repo string
 	opts := &gh.ListOptions{PerPage: 100}
 	latest := hiveQueueApproval{}
 	untrusted := false
+	var seen []*gh.PullRequestReview
 	for {
 		reviews, resp, err := c.gh.PullRequests.ListReviews(ctx, owner, repo, number, opts)
 		if err != nil {
 			return hiveQueueApproval{}, false, "", err
 		}
+		seen = append(seen, reviews...)
 		for _, review := range reviews {
 			if !strings.EqualFold(review.GetState(), "APPROVED") {
 				continue
@@ -2320,6 +2347,7 @@ func (c *Engine) latestHiveQueueApproval(ctx context.Context, owner, repo string
 		}
 		opts.Page = resp.NextPage
 	}
+	c.noteStageReviews(owner, repo, number, seen)
 	if latest.QueuedBy != "" {
 		return latest, true, "", nil
 	}
@@ -2343,6 +2371,7 @@ func (c *Engine) invalidateQueuedAutoMerge(ctx context.Context, owner, repo stri
 	if _, _, err := c.gh.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
 		return fmt.Errorf("commenting on stale auto-merge approval: %w", err)
 	}
+	c.noteOwnStageComment(owner, repo, number)
 	return nil
 }
 
@@ -2452,6 +2481,10 @@ func (c *Engine) commitGreenForPRWith(ctx context.Context, owner, repo, branch, 
 	}
 	if prNumber > 0 && len(st.IgnoredMetaContexts) > 0 {
 		c.info("automerge ignoring meta contexts on unprotected base", "pr", prNumber, "contexts", st.IgnoredMetaContexts)
+	}
+	if prNumber > 0 {
+		c.noteStageRedChecks(owner, repo, prNumber, sha, st.FailingNonRequired)
+		c.noteStageDCOGate(owner, repo, prNumber, sha, required, st.Observed)
 	}
 	if configKnown && actualKnown {
 		c.warnRequiredChecksMismatch(owner, repo, configRequired, actualRequired, st.Observed)

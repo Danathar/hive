@@ -154,7 +154,7 @@ const (
 // nousIssueFiler is the slice of *github.Client the issue target uses. A
 // seam so tests need no forge.
 type nousIssueFiler interface {
-	CreateIssue(ctx context.Context, repo, title, body string, labels []string) (ghpkg.CreateIssueResult, error)
+	CreateIssue(ctx context.Context, req ghpkg.CreateIssueRequest) (ghpkg.CreateIssueResult, error)
 }
 
 // nousIssueFilerFor returns the filer to use, or nil when this hive has no
@@ -456,7 +456,7 @@ func (s *Server) promoteNousVerdict(ctx context.Context, req nousPromoteRequest,
 		}
 		ctx, cancel := context.WithTimeout(ctx, nousIssueTimeout)
 		defer cancel()
-		created, err := filer.CreateIssue(ctx, repo, title, body, labels)
+		created, err := filer.CreateIssue(ctx, ghpkg.CreateIssueRequest{Repo: repo, Title: title, Body: body, Labels: labels, Origin: config.OriginSourceDashboard})
 		if err != nil {
 			return nousPromoteResult{}, &nousPromoteError{status: http.StatusBadGateway, msg: "create issue: " + err.Error()}
 		}

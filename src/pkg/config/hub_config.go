@@ -460,7 +460,8 @@ var defaultContributeSkipLabels = []string{
 	"epic",
 	"discussion",
 	"question",
-	"needs-decision",
+	DefaultNeedsDecisionLabel,
+	LegacyNeedsDecisionLabel,
 	"needs-triage",
 }
 
@@ -511,7 +512,7 @@ func normalizeContributeSkipLabels(labels []string, needsDecisionLabel string) [
 
 const (
 	blockedWorkflowSkipLabel  = "blocked"
-	defaultNeedsDecisionLabel = "needs-decision"
+	defaultNeedsDecisionLabel = DefaultNeedsDecisionLabel
 )
 
 // ContributeNeedsDecisionLabelOrDefault resolves the label relays should apply

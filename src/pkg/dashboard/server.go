@@ -34,6 +34,7 @@ import (
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/planning"
+	"github.com/hivecommons/hive/pkg/stagelabels"
 	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/tokens"
 	"github.com/hivecommons/hive/pkg/watchdog"
@@ -92,15 +93,22 @@ func isOwnerRole(role string) bool {
 var proxyProofRequired = true
 
 type Server struct {
-	port                   int
-	authToken              string
-	statusMu               sync.RWMutex
-	status                 *StatusPayload
-	sseClients             map[chan []byte]struct{}
-	sseMu                  sync.Mutex
-	logger                 *slog.Logger
-	mux                    *http.ServeMux
-	deps                   *Dependencies
+	port       int
+	authToken  string
+	statusMu   sync.RWMutex
+	status     *StatusPayload
+	sseClients map[chan []byte]struct{}
+	sseMu      sync.Mutex
+	logger     *slog.Logger
+	mux        *http.ServeMux
+	deps       *Dependencies
+	// stageStore is the stage-label memory /api/stage-tracker reads; nil
+	// means the process-wide stagelabels.Shared(). Tests inject one.
+	stageStore *stagelabels.Store
+	// stageTrackerCache is the last /api/stage-tracker payload built from
+	// the status snapshot, served until its TTL lapses (stage_tracker.go).
+	stageTrackerCache      stageTrackerCache
+	stageTrackerCacheMu    sync.Mutex
 	sidebar                interface{}
 	sidebarMu              sync.RWMutex
 	actionsJWKSMu          sync.Mutex
@@ -505,6 +513,10 @@ type StatusPayload struct {
 	HiveIDLockReason string           `json:"hiveIdLockReason,omitempty"`
 	Features         FrontendFeatures `json:"features"`
 	Agents           []FrontendAgent  `json:"agents"`
+	// Providers rolls Agents up per provider into two separate dimensions,
+	// auth_state and availability_state (ADR-0024, #12611). Redacted; the
+	// same block the hub heartbeat carries. Omitted when disabled.
+	Providers []agent.ProviderStatus `json:"providers,omitempty"`
 	// HiddenAgents is diagnostic-only (#6581): agent-manager runtime entries
 	// that were left out of Agents (the dashboard cards), each with the stable
 	// reason category it was omitted for. It exists so an operator whose
@@ -759,12 +771,15 @@ type FrontendAgent struct {
 	// the prompt. The SPA renders this as "Waiting on CI" instead of
 	// "Working" so a stalled-on-CI agent no longer looks indistinguishable
 	// from one making progress.
-	AwaitingCI        bool   `json:"awaitingCI,omitempty"`
-	Paused            bool   `json:"paused"`
-	PausedAt          string `json:"pausedAt,omitempty"`
-	PausedReason      string `json:"pausedReason,omitempty"`
-	PausedTrigger     string `json:"pausedTrigger,omitempty"`
-	PausedBy          string `json:"pausedBy,omitempty"`
+	AwaitingCI    bool   `json:"awaitingCI,omitempty"`
+	Paused        bool   `json:"paused"`
+	PausedAt      string `json:"pausedAt,omitempty"`
+	PausedReason  string `json:"pausedReason,omitempty"`
+	PausedTrigger string `json:"pausedTrigger,omitempty"`
+	PausedBy      string `json:"pausedBy,omitempty"`
+	// OperatorStopped is true when the agent was stopped explicitly (not by a
+	// crash), so the governor will not revive it.
+	OperatorStopped   bool   `json:"operatorStopped,omitempty"`
 	OffByCadence      bool   `json:"offByCadence"`
 	NoCadence         bool   `json:"noCadence"`
 	NeedsLogin        bool   `json:"needsLogin"`
@@ -836,6 +851,11 @@ type FrontendAgent struct {
 	BackendAuthStatus    string `json:"backendAuthStatus,omitempty"`
 	BackendAuthSince     string `json:"backendAuthSince,omitempty"`
 	BackendAuthLastError string `json:"backendAuthLastError,omitempty"`
+	// BackendAuthRefreshable is claude.HasUsableToken over this agent's own
+	// credential (ADR-0024): true = a CLI restart heals an expired access
+	// token, false = a human must log in. Absent for backends with no
+	// verified refresh semantics.
+	BackendAuthRefreshable *bool `json:"backendAuthRefreshable,omitempty"`
 	// InferenceLastError is the full text of the most recent inference error
 	// hive's proxy returned to this agent (#11761), shown while Claude Code's
 	// own retry line is still clipped to one pane row. Empty when unknown,
@@ -1067,6 +1087,11 @@ type FrontendRepo struct {
 	// ownershipDataMissing is set when the snapshot was built without
 	// enumeration data, so the rows cannot show that an item left.
 	ownershipDataMissing bool
+	// NonActionablePrs are display-only github.RepoWorkPR records of the open
+	// PRs the enumeration sidelined (drafts, exempt labels) so the Hive
+	// activity monitor can list every open PR (hivecommons/hive#12682).
+	// Like NonActionableIssues they feed no queue.
+	NonActionablePrs []any `json:"nonActionablePrs,omitempty"`
 	// Paused and its provenance (#6203). A paused repo still gets a card —
 	// that is the point of pause over deleting it from project.repos — so the
 	// card has to say so, or a deliberately quiet repo is indistinguishable

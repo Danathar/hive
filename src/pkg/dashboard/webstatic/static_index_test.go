@@ -415,7 +415,7 @@ func TestStaticDashboardDefaultLayoutOrder(t *testing.T) {
 	}
 	html := rec.Body.String()
 
-	defaultOrder := "'overview-section','governor','runs-section','pr-throughput-section','repos-section','knowledge-section','review-queue-section','contributors-section','advisory-section','token-panel','cost-panel','inception-section','acmm-eval-section','debug-section','audit-section','approvals-section','nous-section','logs-section','agents-section','agent-activity-section','faq-section'"
+	defaultOrder := "'overview-section','governor','runs-section','pr-throughput-section','repos-section','activity-monitor-section','knowledge-section','review-queue-section','contributors-section','advisory-section','token-panel','cost-panel','inception-section','acmm-eval-section','debug-section','audit-section','approvals-section','nous-section','logs-section','agents-section','agent-activity-section','faq-section'"
 	if !strings.Contains(html, defaultOrder) {
 		t.Fatalf("dashboard default layout/reset order no longer matches sidebar nav; missing %q", defaultOrder)
 	}
@@ -473,11 +473,10 @@ func TestStaticNoStrategyLabCopy(t *testing.T) {
 
 // TestStaticExperimentLabHeaderShowsResearchQuestionNotModePill pins #12089:
 // the Experiment Lab header no longer renders the "OBSERVING · GOVERNOR"
-// mode×scope pill left over from the first Nous integration (#330/#338). In
-// its place the header carries the research question for the active scope
-// (status.researchQuestion), escaped via textContent, wrapping to the header
-// width instead of clipping (#12498), and renders nothing at all when none is
-// set.
+// mode×scope pill left over from the first Nous integration (#330/#338).
+// Since the v5 Experiment Lab rewrite (#12543) the research question lives
+// on each experiment card rather than in the section header, so the header
+// is the bare section title.
 func TestStaticExperimentLabHeaderShowsResearchQuestionNotModePill(t *testing.T) {
 	body, err := os.ReadFile("../static/index.html")
 	if err != nil {
@@ -489,33 +488,19 @@ func TestStaticExperimentLabHeaderShowsResearchQuestionNotModePill(t *testing.T)
 		"${modeLabels[mode] || mode} · ${scope}",
 		"observe: 'Observing'",
 		`badge.textContent = 'not configured'`,
+		`id="nous-research-question"`,
 	} {
 		if strings.Contains(src, stale) {
-			t.Fatalf("static dashboard still renders the retired Experiment Lab mode×scope pill: %q", stale)
+			t.Fatalf("static dashboard still renders the retired Experiment Lab header pill: %q", stale)
 		}
 	}
 	for _, want := range []string{
-		`🧪 Experiment Lab (nous) <span id="nous-research-question" class="nous-research-question" hidden></span></h2>`,
-		`querySelectorAll('#nous-research-question')`,
+		`<span class="section-chevron">▼</span> 🧪 Experiment Lab</h2>`,
 		`function nousResearchQuestionText(raw)`,
-		`const rq = nousResearchQuestionText(s.researchQuestion);`,
-		`const rqEl = document.getElementById('nous-research-question');`,
-		`rqEl.title = text;`,
-		`rqEl.hidden = !text;`,
-		`.nous-research-question[hidden] { display: none; }`,
+		`nousResearchQuestionText(c.question) || '(no research question)'`,
 	} {
 		if !strings.Contains(src, want) {
-			t.Fatalf("static dashboard missing Experiment Lab research-question header wiring %q", want)
-		}
-	}
-	// The gear dialog must prefill the repo goal from where PUT /api/nous/config/goals
-	// stores it (the lab is repo-only, #12207).
-	for _, want := range []string{
-		`const goals = cfg.goals || {};`,
-		`goals.repoGoal || goals.repo || repoCamp.research_question`,
-	} {
-		if !strings.Contains(src, want) {
-			t.Fatalf("Experiment Lab config dialog does not read saved goals: %q", want)
+			t.Fatalf("static dashboard missing Experiment Lab research-question card wiring %q", want)
 		}
 	}
 }

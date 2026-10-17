@@ -103,6 +103,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/campaigns/{id}/resume", s.handleCampaignResume)
 	s.mux.HandleFunc("POST /api/campaigns/{id}/release", s.handleCampaignRelease)
 	s.mux.HandleFunc("POST /api/campaigns/{id}/revise", s.handleCampaignRevise)
+	s.mux.HandleFunc("DELETE /api/campaigns/{id}", s.handleCampaignDelete)
 	s.mux.HandleFunc("POST /api/campaigns/{id}/recheck", s.handleCampaignRecheck)
 	s.mux.HandleFunc("GET /api/campaigns/{id}/jam", s.handleCampaignJamGet)
 	s.mux.HandleFunc("POST /api/campaigns/{id}/jam", s.handleCampaignJamPost)
@@ -188,6 +189,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.registerClaudeAuthRoutes()
 	s.registerCopilotAuthRoutes()
 	s.mux.HandleFunc("GET /api/summaries", s.handleSummaries)
+	s.mux.HandleFunc("GET /api/stage-tracker", s.handleStageTracker)
 	s.mux.HandleFunc("POST /api/prs/{owner}/{repo}/{number}/queue-automerge", s.handleQueuePRAutoMerge)
 
 	s.mux.HandleFunc("GET /api/config/agent/{name}", s.handleAgentConfigGet)
@@ -479,6 +481,9 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/nous/artifacts/sync", s.handleNousArtifactSync)
 	s.mux.HandleFunc("POST /api/nous/reset", s.handleNousReset)
 	s.mux.HandleFunc("POST /api/nous/campaign/start", s.handleNousCampaignStart)
+	s.mux.HandleFunc("GET /api/nous/campaigns", s.handleNousCampaignsList)
+	s.mux.HandleFunc("POST /api/nous/campaigns", s.handleNousCampaignsCreate)
+	s.mux.HandleFunc("PATCH /api/nous/campaigns/{id}", s.handleNousCampaignPatch)
 
 	s.mux.HandleFunc("GET /api/beads", s.handleBeadsList)
 	s.mux.HandleFunc("GET /api/beads/{agent}", s.handleBeadsList)
