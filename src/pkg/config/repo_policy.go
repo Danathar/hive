@@ -15,6 +15,9 @@ type RepoPolicy struct {
 	AutoMerge             *bool  `yaml:"auto_merge,omitempty" json:"auto_merge,omitempty"`
 	LabelDriven           bool   `yaml:"label_driven,omitempty" json:"label_driven,omitempty"`
 	ReleaseOnApprove      bool   `yaml:"release_on_approve,omitempty" json:"release_on_approve,omitempty"`
+	// ReleaseVersionSource is an optional repository-relative text file whose
+	// trimmed value must match the approved tag (with an optional leading v).
+	ReleaseVersionSource string `yaml:"release_version_source,omitempty" json:"release_version_source,omitempty"`
 	// LabelDrivenApprovalLabels overrides project.label_driven_approval_labels
 	// for this repo (hivecommons/hive#11313). Only read when LabelDriven is set.
 	LabelDrivenApprovalLabels []string             `yaml:"label_driven_approval_labels,omitempty" json:"label_driven_approval_labels,omitempty"`
@@ -88,10 +91,23 @@ func (c *Config) RepoLabelDriven(repo string) bool {
 
 // RepoReleaseOnApprove reports whether repo opted in to release-on-approve
 // (hivecommons/hive#12631). It is only the opt-in switch; unset means false and
-// a kind=release owner step behaves as it does today.
+// a kind=release owner step behaves as it does today. A label-driven repo
+// never executes a release: its sweep answers `/hive approve` with the
+// triage-label pointer before reaching the release executor, so the dashboard
+// action and the command share the same refusal (hivecommons/hive#12635).
 func (c *Config) RepoReleaseOnApprove(repo string) bool {
 	rp, ok := c.RepoPolicyFor(repo)
-	return ok && rp.ReleaseOnApprove
+	return ok && rp.ReleaseOnApprove && !rp.LabelDriven
+}
+
+// RepoReleaseVersionSource returns the optional repository-relative version
+// file checked before a release-on-approve write.
+func (c *Config) RepoReleaseVersionSource(repo string) string {
+	rp, ok := c.RepoPolicyFor(repo)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(rp.ReleaseVersionSource)
 }
 
 // DefaultLabelDrivenApprovalLabel is the acceptance label Prow-style
@@ -345,7 +361,7 @@ func (c *Config) SetSelfAuthorizationHoldForRepoAndSave(repo string, enabled *bo
 }
 
 func repoPolicyHasNoOverrides(rp RepoPolicy) bool {
-	return rp.SelfAuthorizationHold == nil && rp.ReporterTrustHold == nil && rp.AutoMerge == nil && rp.ACMMLevel == nil && !rp.ACMMPinned && rp.ACMMLastAutomatic == nil && !rp.LabelDriven && rp.MergeStrategy == "" && len(rp.LabelDrivenApprovalLabels) == 0 && !rp.ReleaseOnApprove
+	return rp.SelfAuthorizationHold == nil && rp.ReporterTrustHold == nil && rp.AutoMerge == nil && rp.ACMMLevel == nil && !rp.ACMMPinned && rp.ACMMLastAutomatic == nil && !rp.LabelDriven && !rp.ReleaseOnApprove && rp.ReleaseVersionSource == "" && rp.MergeStrategy == "" && len(rp.LabelDrivenApprovalLabels) == 0
 }
 
 // ValidateRepoMergeStrategy accepts "" (unset, meaning direct), "direct" and
