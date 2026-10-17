@@ -1,1 +1,0 @@
-- Hardened in-place adoption head attribution so fixer commits link to the App bot and forgeable commit identities hand PRs back once hive-push evidence exists.

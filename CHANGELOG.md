@@ -11,6 +11,38 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.183.0)
+
+### Added
+
+- Add default-off Hive-self experiment flags delivered per hive over heartbeat, with explicit local opt-in (`HIVE_SELF_EXPERIMENTS_OPT_IN=true`) and revocation on the next verified heartbeat (local opt-out clears on the next attempt; hub outages retain the last assignment until then or restart), separate from repo experiments and governor settings.
+- The hub evidence drill-down now shows pooled revert rates by human, agent, and bot author, with sample sizes and Wilson intervals; older spokes remain unknown and follow-up fixes are excluded from revert counts.
+- Add the Evidence maintainability trend panel with monthly per-repo Go complexity, over-threshold functions, tool warnings, and first-observed ACMM level markers; reporting only, with no merge-policy changes.
+- Add a Nous scheduler adapter that maps persisted Hive-self experiments to scheduler registrations, builds samples from treatment-cohort snapshot series (unavailable metrics stay missing evidence), and enforces absolute guardrail bounds as fast-fail without changing the delta-based `MaxIncrease` semantics.
+- Add a Nous scheduler executor that durably latches Hive-self fast-fail results in the experiment ledger before reverting, disables reverted flag experiments locally via a per-experiment deny-list that survives heartbeat assignments, reverts channel experiments through an injectable hook, and records improved/regressed/inconclusive judgements.
+
+### Fixed
+
+- Preserve agent-observation counts in hive-state windows and hub sanitization; do not score an unobserved zero idle ratio as perfect efficiency. Older spokes with positive idle ratios remain measurable.
+- Bound the evidence issue backfill scan with the issues API `since=` filter and stop paging once issues predate the window, instead of walking the whole repository history (#12633).
+- Populate historical evidence work-balance weeks from the backfilled GitHub issue series, preserving collector authority and per-repository audit fallback when coverage is incomplete (#12670).
+- Clarify the Hive-self operator guide's planned local opt-in, pending feature-flag delivery, and separation from image-channel switching ([#12672](https://github.com/hivecommons/hive/issues/12672)).
+- Hardened in-place adoption head attribution so fixer commits link to the App bot and forgeable commit identities hand PRs back once hive-push evidence exists.
+- Treat legacy origin lane labels as agent lane labels when reading provenance.
+- Isolate the active-campaign deletion regression test from completed runs left in the lifecycle timeline by earlier tests, preventing shuffled CI failures.
+- Classify missing files in the runner's versioned Go module cache as infrastructure failures so CI can use its existing bounded rerun and infrastructure reporting.
+- Guard the Experiment Lab ledger and status listings so Hive-self experiments and self-flag assignments can never appear in Lab API responses.
+- Make Git source URL validation unit tests independent of external DNS, preventing transient resolver failures from causing CI flakes (#12732).
+- Keep needs-human issues human-held during un-park, re-park, and stage label flows.
+- Stop agent-filed issues from carrying redundant bare lane or origin lane labels alongside canonical agent/<lane> provenance.
+- PR-capable policies now keep cross-repository porting issue and PR references in issue or PR bodies, rather than committed files; committed explanations use local references or state the reasoning in place.
+- Refresh the scale-envelope documentation citation for actionable issue ordering.
+
+### Security
+
+- The hub's self-report relay now honours a spoke's `recover` action only when the fingerprinted issue it finds carries the `hive-observation` label the hub itself applied at filing. Every hive-filed fleet issue (runtime errors, ACMM criteria, defects) carries the same `hive-fleet-fingerprint` marker, and those fingerprints are deterministic and fleet-wide, so a single registered spoke could previously comment on and close as completed an issue other hives were joined to; the relay now answers `{reason:"not_observation"}` and leaves the issue untouched ([#12754](https://github.com/hivecommons/hive/issues/12754)).
+- Bind observation recovery to the matched issue's hive identity so a spoke cannot comment on or close another hive's observation; missing or ambiguous ownership is a no-op ([#12772](https://github.com/hivecommons/hive/issues/12772)).
+
 ## 2026-10-17 (v5.182.0)
 
 ### Added

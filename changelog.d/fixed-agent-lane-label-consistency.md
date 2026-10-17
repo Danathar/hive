@@ -1,1 +1,0 @@
-- Treat legacy origin lane labels as agent lane labels when reading provenance.

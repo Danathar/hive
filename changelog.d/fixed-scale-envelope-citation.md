@@ -1,1 +1,0 @@
-- Refresh the scale-envelope documentation citation for actionable issue ordering.
