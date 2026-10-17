@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.181.1)
+
+### Fixed
+
+- `hive-open-pr` no longer rejects pull requests whose `base...head` comparison lists 300 or more files, such as the v5 → v6 forward-merge ([#12662](https://github.com/hivecommons/hive/issues/12662)). The content-metadata scan now pages through the compare API's files list (up to 3000 files) instead of failing with a scan-limit error that could never succeed on retry; beyond that ceiling the scan is skipped with a logged warning.
+
 ## 2026-10-17 (v5.181.0)
 
 ### Added
