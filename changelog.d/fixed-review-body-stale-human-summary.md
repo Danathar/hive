@@ -1,1 +1,0 @@
-- Re-arm review after PR body/title edits invalidate a non-approve verdict and surface requires_human reviewer summaries in the needs-decision handoff.

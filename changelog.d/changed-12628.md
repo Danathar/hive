@@ -1,1 +1,0 @@
-- claims: document the single-live-claim-per-issue ledger invariant (#12628)

@@ -1,1 +1,0 @@
-- Add an owner-only "Publish to repository" block to Settings → Knowledge → Knowledge pipeline for choosing where bead-synth facts are published (repository, path, base branch, mode, cadence); direct commit is offered only where policy allows.

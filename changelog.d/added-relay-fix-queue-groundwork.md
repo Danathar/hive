@@ -1,1 +1,0 @@
-- Add the capacity-aware contributor PR-fix scheduling primitive and optional `parallel_sessions` capability declaration as groundwork for priority relay feedback; live dispatch and stage integration remain tracked in #12436.
