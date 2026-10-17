@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.180.0)
+
+### Added
+
+- Add a deterministic background-only Hive-self experiment decision core for registered snapshot windows, metric thresholds, and fast-fail revert requests; runtime adapters remain pending the model, heartbeat gate, and relay integration.
+
+### Changed
+
+- images: bump goose 1.54.0 -> 1.55.0 (#12645)
+
 ## 2026-10-17 (v5.179.0)
 
 ### Added
