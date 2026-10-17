@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-17 (v5.183.1)
+
+### Fixed
+
+- Trusted human GitHub approval reviews on the exact PR head now clear L6 self-authored requires_human review holds without weakening changes-requested verdicts ([#12791](https://github.com/hivecommons/hive/issues/12791)).
+- App-authored pull requests no longer flap between `role/trusted` and `role/untrusted` when automerge lanes observe them in different sweep ticks.
+
 ## 2026-10-17 (v5.183.0)
 
 ### Added
