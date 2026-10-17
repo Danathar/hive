@@ -1,1 +1,0 @@
-- Guard the Experiment Lab ledger and status listings so Hive-self experiments and self-flag assignments can never appear in Lab API responses.
