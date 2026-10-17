@@ -3,7 +3,7 @@ package automerge
 // Stage labels (hivecommons/hive#12429). Each automerge lane already computes
 // a per-PR reason every cycle; this file maps that reason (plus the review
 // verdict, CI state and the author's admission tier the lane used) onto the
-// hive-owned `stage/NN-*`, `author/*` and `stage/stalled|regressed` label
+// hive-owned `stage/NN-*`, `role/*`, `author/*` and `stage/stalled|regressed` label
 // families in pkg/stagelabels, and reconciles them against the labels the PR
 // list payload already carries — no per-PR GET, writes only on change.
 //
@@ -26,6 +26,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/authorkind"
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
@@ -35,6 +36,13 @@ type StageLabelPolicy struct {
 	Enabled bool
 	// Dwell overrides the stage table's expected dwell per stage slug.
 	Dwell map[string]time.Duration
+	// StalledRequireQuiet (governor.labels.stage.stalled.require_quiet,
+	// default true) measures the dwell from the last outside activity
+	// (head push, comment, review, CI change, label change) rather than
+	// from entering the stage, so stage/stalled means "nobody is working
+	// this" (hivecommons/hive#12534). Either way it is never applied while
+	// the item waits on the hive (checks running, verdict pending).
+	StalledRequireQuiet bool
 	// ContributorNudge turns the stage-072 nudge comment + relay interrupt
 	// on (governor.labels.stage.contributor_nudge.enabled, default true).
 	ContributorNudge bool
@@ -51,9 +59,29 @@ type StageLabelPolicy struct {
 	// relay was online at the nudge (defaults 2h / 1h).
 	GraceOnline  time.Duration
 	GraceOffline time.Duration
+	// AdoptAfterOffline is how long the author's relay must have been
+	// offline after the nudge before a clanker PR is adopted (default 30m);
+	// AdoptAfterUnregistered is the wait for a clanker author with no
+	// contributor profile on this hive (default 2h). Both need a presence
+	// source (ContributorPresenceSource); without one the graces above apply.
+	AdoptAfterOffline      time.Duration
+	AdoptAfterUnregistered time.Duration
+	// AdoptInPlace allows adoption by pushing to the PR's own branch when
+	// GitHub permits (same-repo head or maintainer_can_modify) instead of a
+	// superseding App PR (governor.labels.stage.adoption.in_place, default on).
+	AdoptInPlace bool
 	// HiveID is this hive's id; hive/<HiveID> on a PR the App did not author
-	// is a stray the reconciler removes (hivecommons/hive#12545).
+	// is a stray the reconciler removes (hivecommons/hive#12545), and the
+	// `<!-- hive:origin hive=<id> -->` marker naming it marks a PR as
+	// author/hive (hivecommons/hive#12581).
 	HiveID string
+	// AuthorKindLabels are the configured `author/<kind>` names
+	// (governor.labels.author); zero = defaults.
+	AuthorKindLabels authorkind.Names
+	// RelayKnown reports whether login has a contributor profile on this
+	// hive (runs a relay that targets it) — authorkind's weakest signal for
+	// author/clanker. nil = unknown.
+	RelayKnown func(login string) bool
 }
 
 // ownershipRoutingPrefix is the lane routing label family. `agent/<lane>`
@@ -128,7 +156,7 @@ var stageLanePrecedence = map[string]int{stageLaneSelf: 3, stageLaneTrusted: 2, 
 type stageDetail struct {
 	Verdict      ContributorLaneVerdict
 	VerdictKnown bool
-	Author       stagelabels.Author
+	Role         stagelabels.Role
 	// RedChecks names the completed-red, non-required checks the CI gate
 	// walked past on RedChecksHead (sorted). The lane ignores them by
 	// design; the stage engine must not call the PR merge-queued or
@@ -136,6 +164,18 @@ type stageDetail struct {
 	// (hivecommons/hive#12538, seen on #12457).
 	RedChecks     []string
 	RedChecksHead string
+	// Comments is the PR's issue + review comment count from the deep
+	// fetch (the list payload has none); CommentsKnown says it was seen.
+	// OwnComments counts the comments this engine posted after that fetch
+	// (creditOwnComment); a later fetch resets it.
+	Comments      int
+	CommentsKnown bool
+	OwnComments   int
+	// Reviews is the number of review submissions by people (the hive
+	// app's excluded) from a lane's ListReviews walk; ReviewsKnown says it
+	// was seen this cycle.
+	Reviews      int
+	ReviewsKnown bool
 }
 
 // redCheck returns the first red non-required check on head, or "".
@@ -164,10 +204,14 @@ type stageObservation struct {
 	Err     bool
 	Detail  stageDetail
 	// Author, Title, URL and OpenedAt feed the stage-072 contributor nudge.
-	Author   string
-	Title    string
-	URL      string
-	OpenedAt time.Time
+	Author string
+	// AuthorKind is who wrote the PR (authorkind.Detect), set on the
+	// resolved observation by ApplyStageLabels before the nudge/adoption
+	// hooks run: only an author/clanker PR has a hive to interrupt.
+	AuthorKind authorkind.Kind
+	Title      string
+	URL        string
+	OpenedAt   time.Time
 	// BaseRef and Body feed the stage-074 adoption (superseding PR target
 	// and the Closes lines to carry over); both come from the list payload.
 	BaseRef string
@@ -210,6 +254,23 @@ func (t *StageTracker) note(key string, fn func(*stageDetail)) {
 	t.details[key] = d
 }
 
+// creditOwnComment records one hive comment posted after the comment count
+// a lane fetched for key this cycle, and reports whether there was such a
+// fetch. The fetch preceded the comment, so without the credit
+// ApplyStageLabels would store the pre-comment count and the next cycle's
+// fetch would read the hive's own comment as a person acting.
+func (t *StageTracker) creditOwnComment(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	d, ok := t.details[key]
+	if !ok || !d.CommentsKnown {
+		return false
+	}
+	d.OwnComments++
+	t.details[key] = d
+	return true
+}
+
 func (t *StageTracker) record(obs stageObservation) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -242,11 +303,17 @@ func (t *StageTracker) drain() [][]stageObservation {
 			if detail.VerdictKnown {
 				o.Detail.Verdict, o.Detail.VerdictKnown = detail.Verdict, true
 			}
-			if detail.Author != stagelabels.AuthorNone {
-				o.Detail.Author = detail.Author
+			if detail.Role != stagelabels.RoleNone {
+				o.Detail.Role = detail.Role
 			}
 			if detail.RedChecksHead == "" || o.HeadSHA == "" || detail.RedChecksHead == o.HeadSHA {
 				o.Detail.RedChecks, o.Detail.RedChecksHead = detail.RedChecks, detail.RedChecksHead
+			}
+			if detail.CommentsKnown {
+				o.Detail.Comments, o.Detail.CommentsKnown, o.Detail.OwnComments = detail.Comments, true, detail.OwnComments
+			}
+			if detail.ReviewsKnown {
+				o.Detail.Reviews, o.Detail.ReviewsKnown = detail.Reviews, true
 			}
 			list = append(list, o)
 		}
@@ -326,15 +393,15 @@ func (c *Engine) noteStageVerdict(owner, repo string, number int, v ContributorL
 	})
 }
 
-// noteStageAuthor records the author's admission tier as the lane computed
+// noteStageRole records the author's admission tier as the lane computed
 // it. Lanes disagree by design (the contributor lane reports "untrusted"
 // for a maintainer with no registry profile), so tiers merge by precedence
 // rather than last-writer-wins (#12490).
-func (c *Engine) noteStageAuthor(owner, repo string, number int, a stagelabels.Author) {
-	if !c.stagePolicy().Enabled || a == stagelabels.AuthorNone {
+func (c *Engine) noteStageRole(owner, repo string, number int, r stagelabels.Role) {
+	if !c.stagePolicy().Enabled || r == stagelabels.RoleNone {
 		return
 	}
-	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) { d.Author = d.Author.Merge(a) })
+	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) { d.Role = d.Role.Merge(r) })
 }
 
 // noteStageRedChecks records the red non-required checks the CI gate
@@ -347,6 +414,90 @@ func (c *Engine) noteStageRedChecks(owner, repo string, number int, head string,
 	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) {
 		d.RedChecks, d.RedChecksHead = append([]string(nil), names...), head
 	})
+}
+
+// noteStagePR records what a lane's deep PullRequests.Get learned that the
+// list payload lacks: the comment count, which feeds the quiet clock behind
+// stage/stalled. Neither payload carries a commit or comment timestamp, so
+// activity is dated by the cycle that first observes it (Activity.At zero).
+func (c *Engine) noteStagePR(owner, repo string, number int, pr *gh.PullRequest) {
+	if !c.stagePolicy().Enabled || pr == nil {
+		return
+	}
+	comments := pr.GetComments() + pr.GetReviewComments()
+	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) {
+		// A fresh fetch already includes any comment credited before it.
+		d.Comments, d.CommentsKnown, d.OwnComments = comments, true, 0
+	})
+}
+
+// noteStageReviews records the review submissions a lane's ListReviews walk
+// saw on the PR, minus the hive app's own (queue approvals, reviewer
+// verdicts). A body-only Approve or Request-changes from a maintainer adds
+// nothing to the comment counts, so this is how it reaches the quiet clock.
+func (c *Engine) noteStageReviews(owner, repo string, number int, reviews []*gh.PullRequestReview) {
+	if !c.stagePolicy().Enabled {
+		return
+	}
+	n := 0
+	for _, r := range reviews {
+		if r != nil && !c.isHiveAppReviewAuthor(r) {
+			n++
+		}
+	}
+	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) {
+		d.Reviews, d.ReviewsKnown = n, true
+	})
+}
+
+// noteOwnStageComment records that this engine posted a comment on the PR
+// outside ApplyStageLabels (takeover notice, rebase request, stale-approval
+// or hold-release note), so the next observed comment count does not read
+// as outside activity and restart the quiet clock. When a lane already
+// fetched the PR this cycle the credit goes on that observation (the fetch
+// preceded the comment, and ApplyStageLabels stores the observed count as
+// is); otherwise it goes on the store's last count. Comments from other
+// hive processes (the reviewer swarm's review comments) are not visible
+// here and still count as activity: the stall is then later, never earlier.
+func (c *Engine) noteOwnStageComment(owner, repo string, number int) {
+	if !c.stagePolicy().Enabled {
+		return
+	}
+	key := stageKey(owner, repo, number)
+	if c.stageTrackerOrShared().creditOwnComment(key) {
+		return
+	}
+	c.stageStoreOrShared().CountOwnComments(key, 1)
+}
+
+// stageActivity derives this cycle's outside-activity view of a PR.
+func stageActivity(obs stageObservation, stage stagelabels.Stage) stagelabels.Activity {
+	a := stagelabels.Activity{Head: obs.HeadSHA, Comments: -1, Reviews: -1}
+	if obs.Detail.CommentsKnown {
+		a.Comments, a.OwnComments = obs.Detail.Comments, obs.Detail.OwnComments
+	}
+	if obs.Detail.ReviewsKnown {
+		a.Reviews = obs.Detail.Reviews
+	}
+	verdict := "verdict:?"
+	if obs.Detail.VerdictKnown {
+		verdict = "verdict:" + obs.Detail.Verdict.Verdict
+	}
+	ci := classifyCIReason(obs.Reason)
+	labels := make([]string, 0, len(obs.Labels))
+	for _, l := range obs.Labels {
+		if stagelabels.Owned(l) || strings.HasPrefix(strings.ToLower(l), "hive/") || strings.HasPrefix(strings.ToLower(l), hgithub.ReviewPriorityLabelPrefix) {
+			continue
+		}
+		labels = append(labels, strings.ToLower(l))
+	}
+	sort.Strings(labels)
+	a.Digest = verdict + "|ci:" + ci.String() + "|" + strings.Join(labels, ",")
+	// Checks still running, or a review-pending head with no reviewer
+	// verdict yet, is waiting on the hive, not on a person.
+	a.WaitingOnHive = ci == ciReasonPending ||
+		(stage == stagelabels.ReviewPending && !(obs.Detail.VerdictKnown && obs.Detail.Verdict.Verdict != ""))
+	return a
 }
 
 // stageVerdict is a lane's opinion about a PR's stage.
@@ -388,6 +539,20 @@ const (
 	ciReasonPending
 	ciReasonRed
 )
+
+// String is the stable name persisted in Record.ActivityDigest
+// (/data/stage-labels.json); it must not follow the iota, or an upgrade
+// that renumbers the enum would read every PR as active and reset its
+// quiet clock.
+func (k ciReasonKind) String() string {
+	switch k {
+	case ciReasonPending:
+		return "pending"
+	case ciReasonRed:
+		return "red"
+	}
+	return "none"
+}
 
 func classifyCIReason(reason string) ciReasonKind {
 	switch {
@@ -621,26 +786,26 @@ func hasLabelFold(labels []string, want string) bool {
 }
 
 // resolveStage picks the owning opinion among a PR's lane observations
-// (already sorted by lane precedence) and the author tier to show.
-func resolveStage(list []stageObservation) (stageVerdict, stagelabels.Author, stageObservation) {
+// (already sorted by lane precedence) and the role tier to show.
+func resolveStage(list []stageObservation) (stageVerdict, stagelabels.Role, stageObservation) {
 	var best stageVerdict
 	var bestObs stageObservation
-	author := stagelabels.AuthorNone
+	role := stagelabels.RoleNone
 	for _, o := range list {
 		v := classifyStage(o)
 		if v.Rank > best.Rank {
 			best, bestObs = v, o
 		}
-		// The most specific author tier wins: the contributor lane knows
+		// The most specific tier wins: the contributor lane knows
 		// registry/claim tiers the trusted-author lane cannot see, so a
 		// trusted-author "trusted" is kept but its absence is refined.
-		author = author.Merge(o.Detail.Author)
+		role = role.Merge(o.Detail.Role)
 	}
 	if best.Rank < stageRankOwned {
 		switch {
-		case author == stagelabels.AuthorNone:
-			author = stagelabels.AuthorUntrusted
-		case best.Stage == stagelabels.ReadyForHumanMerge && author == stagelabels.AuthorTrusted:
+		case role == stagelabels.RoleNone:
+			role = stagelabels.RoleUntrusted
+		case best.Stage == stagelabels.ReadyForHumanMerge && role == stagelabels.RoleTrusted:
 			// Some lane admits this author; a lane that cannot vouch for
 			// them has nothing to say about the stage. Leave it as is.
 			best = stageVerdict{}
@@ -649,7 +814,40 @@ func resolveStage(list []stageObservation) (stageVerdict, stagelabels.Author, st
 	if best.Rank == stageRankNone {
 		bestObs = list[0]
 	}
-	return best, author, bestObs
+	return best, role, bestObs
+}
+
+// stageAuthorKind decides who wrote the PR from the observation and the
+// engine's own identity. Labels the same pass is about to strip as strays
+// (agent/<lane> on a PR the App did not author, #12545) are excluded first,
+// so a mis-stamped human PR is never read as author/hive for a cycle.
+//
+// relayKnown is extra evidence the caller already holds (a live presence
+// source saying the author runs a registered relay here); it ORs with the
+// policy's RelayKnown hook.
+func (c *Engine) stageAuthorKind(obs stageObservation, policy StageLabelPolicy, relayKnown bool) authorkind.Kind {
+	appLogin := c.transport.AppBotLogin()
+	stray := strayOwnershipLabels(obs.Labels, obs.Author, appLogin, policy.HiveID)
+	labels := obs.Labels
+	if len(stray) > 0 {
+		isStray := map[string]bool{}
+		for _, l := range stray {
+			isStray[l] = true
+		}
+		labels = make([]string, 0, len(obs.Labels))
+		for _, l := range obs.Labels {
+			if !isStray[strings.TrimSpace(l)] {
+				labels = append(labels, l)
+			}
+		}
+	}
+	in := authorkind.Input{Author: obs.Author, AppLogin: appLogin, HiveID: policy.HiveID, Labels: labels, Body: obs.Body, RelayKnown: relayKnown}
+	if !in.RelayKnown && policy.RelayKnown != nil && obs.Author != "" {
+		in.RelayKnown = policy.RelayKnown(obs.Author)
+	}
+	kind, rule := authorkind.Explain(in)
+	c.debug("stage labels: author kind", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "kind", kind.String(), "rule", rule)
+	return kind
 }
 
 // missingStageLanes names the lanes that evaluate every PR of displayRepo
@@ -665,7 +863,7 @@ func resolveStage(list []stageObservation) (stageVerdict, stagelabels.Author, st
 // are split across two drains, and the second drain holds only the
 // contributor lane's `no-claim` for a maintainer the trusted-author lane
 // admitted a minute earlier: the PR was written to 090 and flipped back
-// (with `stage/regressed`) on the next pass. Seen on the hive spoke for
+// on the next pass. Seen on the hive spoke for
 // every maintainer PR; the fix is to treat an incomplete drain as no
 // opinion rather than to trust the weak one.
 func (c *Engine) missingStageLanes(displayRepo string, list []stageObservation) []string {
@@ -694,9 +892,15 @@ type StageLabelResult struct {
 	Skipped  int
 	// Healed counts PRs found carrying more than one stage label.
 	Healed int
+	// HiveHeld counts PRs past their stage's dwell while waiting on the
+	// hive (checks running, reviewer verdict pending). They never get
+	// stage/stalled — the author is not the holder — so the signal is this
+	// count and a warn log per PR, for the reviewer lane to act on
+	// (hivecommons/hive#12534, specimen #12417).
+	HiveHeld int
 }
 
-// ApplyStageLabels reconciles the stage/author/health labels for every PR
+// ApplyStageLabels reconciles the stage/role/author/health labels for every PR
 // observed since the last pass and persists stage timing. It is the single
 // write point for the families; lanes only record.
 func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error) {
@@ -719,7 +923,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			continue
 		}
 		result.Items++
-		verdict, author, obs := resolveStage(list)
+		verdict, role, obs := resolveStage(list)
 		key := stageKey(obs.Owner, obs.Repo, obs.Number)
 		if verdict.Rank == stageRankNone {
 			result.Skipped++
@@ -732,6 +936,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 				continue
 			}
 		}
+		obs.AuthorKind = c.stageAuthorKind(obs, policy, false)
 		if verdict.Reason != "" {
 			obs.Reason = verdict.Reason
 		}
@@ -751,7 +956,17 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			store.Forget(key)
 			c.resolveNudge(ctx, prevRec, hadPrev, obs)
 		} else {
-			if verdict.Stage == stagelabels.ReturnedToContributor && hadPrev && prevRec.Adopted(obs.HeadSHA) {
+			if verdict.Stage == stagelabels.ReturnedToContributor && hadPrev && prevRec.AdoptedInPlace() {
+				// In-place adoption: a head the hive pushed keeps the
+				// adoption; a head the contributor pushed yields it.
+				n, err := c.settleInPlaceAdoption(ctx, store, key, obs, prevRec)
+				result.Comments += n
+				if err != nil && firstErr == nil {
+					firstErr = err
+				}
+				prevRec, _ = store.Get(key)
+			}
+			if verdict.Stage == stagelabels.ReturnedToContributor && hadPrev && (prevRec.Adopted(obs.HeadSHA) || prevRec.AdoptedInPlace()) {
 				// Adopted at this head: the lane still sees a red
 				// contributor PR, but the hive owns it now.
 				verdict.Stage = stagelabels.AdoptedByHive
@@ -763,12 +978,21 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			if verdict.Stage != stagelabels.ReturnedToContributor {
 				c.resolveNudge(ctx, prevRec, hadPrev, obs)
 			}
+			store.NoteActivity(key, stageActivity(obs, verdict.Stage))
 			rec, _ := store.Get(key)
 			want = stagelabels.Desired{
-				Stage:     verdict.Stage,
-				Author:    author,
-				Stalled:   stagelabels.Stalled(rec, policy.Dwell, now),
-				Regressed: rec.Regressed(),
+				Stage:      verdict.Stage,
+				Role:       role,
+				Kind:       obs.AuthorKind,
+				KindLabels: policy.AuthorKindLabels,
+				Stalled:    stagelabels.StalledWith(rec, policy.Dwell, now, policy.StalledRequireQuiet),
+			}
+			if stagelabels.HiveHeld(rec, policy.Dwell, now) {
+				result.HiveHeld++
+				if !rec.HiveHeldWarned {
+					c.warn("stage labels: PR waits on the hive past the stage dwell — reviewer lane needs attention", "repo", obs.Display, "pr", obs.Number, "stage", verdict.Stage.String(), "quiet_for", rec.QuietFor(now).Truncate(time.Minute).String(), "reason", obs.Reason, "lane", obs.Lane)
+					store.MarkHiveHeldWarned(key)
+				}
 			}
 		}
 		if !verdict.Terminal {
@@ -778,9 +1002,10 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 				firstErr = err
 			}
 		}
+		commentsBefore := result.Comments
 		add, remove := stagelabels.Plan(obs.Labels, want)
 		if len(add)+len(remove) > 0 {
-			if err := c.ensureStageLabels(ctx, obs.Owner, obs.Repo, tracker); err != nil {
+			if err := c.ensureStageLabels(ctx, obs.Owner, obs.Repo, tracker, policy.AuthorKindLabels); err != nil {
 				c.warn("stage labels: provisioning failed", "repo", obs.Display, "error", err)
 				if firstErr == nil {
 					firstErr = err
@@ -793,7 +1018,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			// Enforce re-reads the PR so a stage another writer placed since
 			// the lane's snapshot is replaced, never joined (hivecommons/hive#12512).
 			var err error
-			out, err = stagelabels.Enforce(ctx, engineStageLabeler{c.gh}, obs.Owner, obs.Repo, obs.Number, obs.Labels, want)
+			out, err = stagelabels.Enforce(ctx, engineStageLabeler{c.gh}, stagelabels.PRItem, obs.Owner, obs.Repo, obs.Number, obs.Labels, want)
 			if err != nil {
 				c.warn("stage labels: write failed", "repo", obs.Display, "pr", obs.Number, "stage", want.Stage.String(), "error", err)
 				if firstErr == nil {
@@ -809,7 +1034,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			}
 		}
 		if out.Changed() {
-			c.info("stage labels reconciled", "repo", obs.Display, "pr", obs.Number, "stage", want.Stage.String(), "author", author.String(), "added", out.Added, "removed", out.Removed, "healed", out.Healed, "reason", obs.Reason, "lane", obs.Lane)
+			c.info("stage labels reconciled", "repo", obs.Display, "pr", obs.Number, "stage", out.Stage.String(), "role", role.String(), "author_kind", obs.AuthorKind.String(), "added", out.Added, "removed", out.Removed, "healed", out.Healed, "clamped", out.Clamped, "wanted", out.Wanted.String(), "reason", obs.Reason, "lane", obs.Lane)
 		}
 		if want.Stalled && want.Stage.StallNote() {
 			if rec, ok := store.Get(key); ok && !rec.StallCommented {
@@ -826,24 +1051,41 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			}
 		}
 		if obs.Route != nil && (want.Stage == stagelabels.ReadyForHumanMerge || want.Stage == stagelabels.NeedsDecision) {
-			n, err := c.postHumanEntry(ctx, store, key, obs, author, *obs.Route)
+			n, err := c.postHumanEntry(ctx, store, key, obs, role, *obs.Route)
 			result.Comments += n
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
-		if want.Stage == stagelabels.ReturnedToContributor && policy.ContributorNudge {
-			n, err := c.nudgeContributor(ctx, store, key, obs, policy, now)
-			result.Comments += n
-			if err != nil && firstErr == nil {
-				firstErr = err
+		if want.Stage == stagelabels.ReturnedToContributor && (policy.ContributorNudge || policy.Adoption) {
+			// The 072 interrupt machinery (nudge + adoption) is for
+			// author/clanker only: there is a hive on the other end to
+			// interrupt or stand in for. Human and hive-authored PRs
+			// simply wait at 072 (docs: "Stage 072 by author kind").
+			presence, hasPresence := c.contributorPresence(ctx, obs.Author)
+			kind := obs.AuthorKind
+			if kind != authorkind.Clanker && hasPresence && presence.Registered {
+				// Live presence is registry evidence the label pass did
+				// not have: a registered relay author is a clanker.
+				kind = c.stageAuthorKind(obs, policy, true)
 			}
-		}
-		if want.Stage == stagelabels.ReturnedToContributor && policy.Adoption {
-			n, err := c.adoptContributorPR(ctx, store, key, obs, policy, now)
-			result.Comments += n
-			if err != nil && firstErr == nil {
-				firstErr = err
+			if kind == authorkind.Clanker {
+				if policy.ContributorNudge {
+					n, err := c.nudgeContributor(ctx, store, key, obs, policy, now)
+					result.Comments += n
+					if err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+				if policy.Adoption {
+					n, err := c.adoptContributorPR(ctx, store, key, obs, policy, presence, hasPresence, now)
+					result.Comments += n
+					if err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+			} else if rec, ok := store.Get(key); ok && rec.NudgeHead != obs.HeadSHA {
+				c.info("stage labels: 072 without interrupt (author kind)", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "kind", string(kind))
 			}
 		}
 		if want.Stage == stagelabels.AdoptedByHive {
@@ -869,6 +1111,8 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 				}
 			}
 		}
+		// The hive's own comments are not outside activity.
+		store.CountOwnComments(key, result.Comments-commentsBefore)
 	}
 	store.Prune(stageStorePruneAge)
 	if err := store.Save(); err != nil {
@@ -883,7 +1127,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 // ensureStageLabels provisions (or recolours) the family's labels in a repo
 // once per process: one list call, then a create or patch per label that is
 // missing or whose colour drifted from the table.
-func (c *Engine) ensureStageLabels(ctx context.Context, owner, repo string, tracker *StageTracker) error {
+func (c *Engine) ensureStageLabels(ctx context.Context, owner, repo string, tracker *StageTracker, kinds authorkind.Names) error {
 	full := strings.ToLower(owner + "/" + repo)
 	tracker.mu.Lock()
 	done := tracker.ensured[full]
@@ -925,7 +1169,7 @@ func (c *Engine) ensureStageLabels(ctx context.Context, owner, repo string, trac
 		}
 		existing[strings.ToLower(stage.Label())] = renamed
 	}
-	for _, def := range stagelabels.AllLabelDefs() {
+	for _, def := range stagelabels.LabelDefsFor(kinds) {
 		cur, ok := existing[strings.ToLower(def.Name)]
 		switch {
 		case !ok:

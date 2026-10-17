@@ -34,23 +34,34 @@ type Outcome struct {
 	Healed bool
 	// Reread is set when the item was re-read before writing.
 	Reread bool
+	// Clamped is set when the stage asked for does not apply to the item's
+	// kind (a PR stage on an issue, an issue stage on a PR) and was replaced
+	// by Stage.For before planning (hivecommons/hive#12451). Wanted is the
+	// stage the caller asked for; Stage is what was enforced.
+	Clamped bool
+	Wanted  Stage
+	Stage   Stage
 }
 
 // Changed reports whether any label was written.
 func (o Outcome) Changed() bool { return len(o.Added)+len(o.Removed) > 0 }
 
-// Enforce makes the item carry exactly want. hint is the label set the
-// caller's cycle already has (the list payload); when it implies no change
-// nothing is read or written, so an unchanged item stays free. When it
-// implies a write — including when it already carries two stage labels —
+// Enforce makes the item of kind k carry exactly want. hint is the label
+// set the caller's cycle already has (the list payload); when it implies no
+// change nothing is read or written, so an unchanged item stays free. When
+// it implies a write — including when it already carries two stage labels —
 // the item is re-read and the plan recomputed from truth. Removes happen
 // before adds so a transient state never shows two stages. A failed remove
 // does not stop the others; the first error is returned after the adds.
-func Enforce(ctx context.Context, l Labeler, owner, repo string, number int, hint []string, want Desired) (Outcome, error) {
+// want.Stage is clamped to the stages the Table allows on k (Stage.For), so
+// a PR-only stage never lands on an issue and vice versa; Outcome.Clamped
+// reports when that happened.
+func Enforce(ctx context.Context, l Labeler, k Item, owner, repo string, number int, hint []string, want Desired) (Outcome, error) {
 	var out Outcome
 	if l == nil {
 		return out, errors.New("stagelabels: nil labeler")
 	}
+	want.Stage, out = clampFor(k, want.Stage, out)
 	add, remove := Plan(hint, want)
 	if len(add)+len(remove) == 0 {
 		return out, nil
@@ -65,34 +76,67 @@ func Enforce(ctx context.Context, l Labeler, owner, repo string, number int, hin
 	return applyPlan(ctx, l, owner, repo, number, add, remove, out)
 }
 
-// EnforceStage sets the pipeline stage on an item whose other hive-owned
-// labels (author tier, health) the caller has no opinion about: the
-// claim-ledger hooks, which know a claim began but not what the lanes think.
-// It always re-reads, keeps the author and health labels it finds, and
-// leaves exactly stage among `stage/NNN-*` (None clears them all). Retired
-// labels (`claimed`, `hive/in-progress`, `🐝 covered by PR`) come off too.
-func EnforceStage(ctx context.Context, l Labeler, owner, repo string, number int, stage Stage) (Outcome, error) {
+// EnforceStage sets the pipeline stage on an item of kind k whose other
+// hive-owned labels (role, author kind, health) the caller has no opinion
+// about: the claim-ledger hooks, which know a claim began but not what the
+// lanes think. It always re-reads, keeps the role, author-kind and health
+// labels it finds, and leaves exactly stage among `stage/NNN-*` (None clears
+// them all). Retired labels (`claimed`, `hive/in-progress`, `🐝 covered by
+// PR`, the `author/<tier>` role spellings — re-written as `role/<tier>`)
+// come off too.
+func EnforceStage(ctx context.Context, l Labeler, k Item, owner, repo string, number int, stage Stage) (Outcome, error) {
+	return EnforceStageAdding(ctx, l, k, owner, repo, number, stage)
+}
+
+// EnforceStageAdding is EnforceStage that also puts extra (non-stage labels
+// the caller owns, such as a claim's `hive/claimed-by-<agent>`) on the item
+// in the same add call when they are missing, so a claim is one read and at
+// most one add. Stage labels in extra are ignored; stage decides those.
+func EnforceStageAdding(ctx context.Context, l Labeler, k Item, owner, repo string, number int, stage Stage, extra ...string) (Outcome, error) {
 	var out Outcome
 	if l == nil {
 		return out, errors.New("stagelabels: nil labeler")
 	}
+	stage, out = clampFor(k, stage, out)
 	fresh, err := l.Labels(ctx, owner, repo, number)
 	if err != nil {
 		return out, err
 	}
 	out.Reread = true
 	out.Healed = len(StageLabels(fresh)) > 1
-	want := Desired{Stage: stage, Author: AuthorOf(fresh)}
+	want := Desired{Stage: stage, Role: RoleOf(fresh)}
 	for _, lab := range fresh {
-		switch lab {
-		case RegressedLabel:
-			want.Regressed = true
-		case StalledLabel:
+		if lab == StalledLabel {
 			want.Stalled = true
 		}
 	}
 	add, remove := Plan(fresh, want)
+	for _, lab := range extra {
+		lab = strings.TrimSpace(lab)
+		if lab == "" || IsStageLabel(lab) || Owned(lab) || contains(fresh, lab) || contains(add, lab) {
+			continue
+		}
+		add = append(add, lab)
+	}
 	return applyPlan(ctx, l, owner, repo, number, add, remove, out)
+}
+
+// clampFor records the asked-for stage in out and returns the stage that
+// may be written to an item of kind k.
+func clampFor(k Item, want Stage, out Outcome) (Stage, Outcome) {
+	out.Wanted = want
+	out.Stage = want.For(k)
+	out.Clamped = out.Stage != want
+	return out.Stage, out
+}
+
+func contains(labels []string, label string) bool {
+	for _, l := range labels {
+		if strings.TrimSpace(l) == label {
+			return true
+		}
+	}
+	return false
 }
 
 func applyPlan(ctx context.Context, l Labeler, owner, repo string, number int, add, remove []string, out Outcome) (Outcome, error) {
@@ -146,14 +190,22 @@ func StageLabels(labels []string) []string {
 	return out
 }
 
-// AuthorOf returns the author tier a label set carries, or AuthorNone.
-func AuthorOf(labels []string) Author {
+// RoleOf returns the admission tier a label set carries, or RoleNone. The
+// current `role/<tier>` spelling wins; the retired `author/<tier>` spelling
+// is honoured when no current one is present, so a hook that re-writes an
+// item mid-migration carries the tier over instead of dropping it.
+func RoleOf(labels []string) Role {
+	legacy := RoleNone
 	for _, l := range labels {
-		for a, d := range authorDefs {
+		l = strings.TrimSpace(l)
+		for r, d := range roleDefs {
 			if l == d.Name {
-				return a
+				return r
+			}
+			if legacy == RoleNone && l == r.LegacyLabel() {
+				legacy = r
 			}
 		}
 	}
-	return AuthorNone
+	return legacy
 }

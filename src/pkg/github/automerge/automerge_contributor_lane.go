@@ -653,6 +653,7 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 		}
 		return AutoMergeSweepEvent{}, "fetch-pr", err
 	}
+	c.noteStagePR(owner, repo, number, pr)
 	if reason := c.prefilterContributorLanePR(pr, policy); reason != "" {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
@@ -662,7 +663,7 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	if err != nil {
 		return AutoMergeSweepEvent{}, claim.Reason, err
 	}
-	c.noteStageAuthor(owner, repo, number, stagelabels.AuthorFromTier(claim.ObservedTier, policy.RequireTiers))
+	c.noteStageRole(owner, repo, number, stagelabels.RoleFromTier(claim.ObservedTier, policy.RequireTiers))
 	c.noteStageVerdict(owner, repo, number, c.contributorLaneVerdictFor(owner+"/"+repo, number, headSHA))
 	if claim.Reason != "" {
 		// Neither this hive's registry nor an App-authored marker vouches

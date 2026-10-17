@@ -475,12 +475,20 @@ keeps one `<!-- hive:pr-supersession-sweep -->` notice per PR, edited in place.
 ## Stage labels (`governor.labels.stage`)
 
 The hive owns one ordered `stage/NNN-*` label per open issue/PR
-(`010-actionable` … `100-merge-queue`), an `author/*` admission-tier label on
-PRs, and red `stage/stalled` / `stage/regressed` markers when progress is
-disrupted; `label:stage/stalled` or `label:stage/regressed` across repos is
-everything off the happy path. Default on; `governor.labels.stage.enabled:
-false` stops the reconciler, `governor.labels.stage.dwell.<slug>` re-times a
-stage's stalled threshold (Settings → Labels). When a contributor PR enters
+(`010-actionable` … `100-merge-queue`), a `role/*` admission-tier label and
+an `author/*` authorship label (`human` / `clanker` / `hive`; names under
+`governor.labels.author`) on PRs, and a red `stage/stalled` marker when nobody
+but the hive has touched an item for the stage's dwell — never while checks
+run or the reviewer verdict is pending, those are waits on the hive and
+surface as a `hive_held` count on the review queue instead;
+`label:stage/stalled` across repos is everything a person has walked away
+from. Backward stage moves are a one-line comment and the review queue's
+transition history (the `stage/regressed` label is retired, #12534). Default
+on; `governor.labels.stage.enabled: false` stops the reconciler,
+`governor.labels.stage.dwell.<slug>` re-times a stage's stalled threshold,
+`governor.labels.stage.stalled.require_quiet: false` measures the dwell from
+stage entry instead of last activity (Settings → Labels). When a contributor
+PR enters
 `stage/072-returned-to-contributor` the hive posts one nudge comment per head
 (re-nudged once after `governor.labels.stage.contributor_nudge.renudge_interval`,
 default = the 24h dwell; cap 2) and, for a contributor whose relay heartbeat is
@@ -488,13 +496,22 @@ within `governor.labels.stage.presence_window` (default 15m), pushes a `fix-pr`
 interrupt to their relay session, bounded by the per-contributor fix budget
 (`contribute.max_parallel_fixes` / `contribute.min_focus_window`).
 `governor.labels.stage.contributor_nudge.enabled: false` turns the nudge and
-the relay task off. A PR still red `governor.labels.stage.contributor_grace_online`
-(default 2h; `contributor_grace_offline`, default 1h, after a comment-only nudge)
-after the first nudge is adopted (`governor.labels.stage.adoption.enabled`,
-default on): the hive pushes `hive/adopt-<n>` at the contributor head, opens a
-superseding App PR that preserves the author's commits, moves the original to
-`stage/074-adopted-by-hive` and closes it once the superseder merges; the
-scanner's red-PR fix-first kick finishes the superseder. Whether that rework reaches each agent is visible per row
+the relay task off. The nudge and the adoption below apply to `author/clanker`
+PRs only; human- and hive-authored PRs just wait at 072. A red PR whose author
+is unavailable is adopted (`governor.labels.stage.adoption.enabled`, default
+on) — judged against live hub presence each sweep: relay offline for
+`governor.labels.stage.adoption.after_offline` (default 30m) since its last
+heartbeat, no contributor profile here for `adoption.after_unregistered`
+(default 2h) since the first nudge, or online but silent for
+`contributor_grace_online` (default 2h; `contributor_grace_offline`, 1h, when
+the hub reports no presence). `hold`/`do-not-merge` blocks adoption. When the
+PR allows maintainer edits (`adoption.in_place`, default on) the hive adopts
+it in place: `stage/074-adopted-by-hive`, the PR's own branch filed in
+`ci-failing.json` as the hive's (`adopted: true`) for the scanner's red-PR
+fix-first kick, handed back if the contributor pushes. Otherwise the hive
+pushes `hive/adopt-<n>` at the contributor head, opens a superseding App PR
+that preserves the author's commits, moves the original to 074 and closes it
+once the superseder merges. Whether that rework reaches each agent is visible per row
 on Operations → Connected contributor agents: the relay's parallel capacity
 (`capacity N · spawn|preempt`, or *not advertised*), one line per in-flight
 item tagged **NEW** / **REWORK** with its stage label, and a red *N PRs

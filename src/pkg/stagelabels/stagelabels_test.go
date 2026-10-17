@@ -1,6 +1,7 @@
 package stagelabels
 
 import (
+	"github.com/hivecommons/hive/pkg/authorkind"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,7 +57,7 @@ func TestTableIsOrderedSparseAndUnique(t *testing.T) {
 	if ReadyForHumanMerge.Dwell() != 0 || NeedsDecision.Dwell() != 0 {
 		t.Fatal("human stages are open-ended")
 	}
-	if got := StallComment(AwaitingMergeAdmission, 30*time.Minute, "review-state-check"); got != StallCommentMarker+"\nstage 080-awaiting-merge-admission stalled after 30m0s: review-state-check" {
+	if got := StallComment(AwaitingMergeAdmission, 30*time.Minute, "review-state-check"); got != StallCommentMarker+"\nstage 080-awaiting-merge-admission: no activity for 30m0s: review-state-check" {
 		t.Fatalf("StallComment = %q", got)
 	}
 }
@@ -73,16 +74,26 @@ func TestAllLabelDefsColours(t *testing.T) {
 				t.Errorf("stalled colour %s", d.Color)
 			}
 		case d.Name == RegressedLabel:
-			if d.Color != RegressedColor {
-				t.Errorf("regressed colour %s", d.Color)
+			t.Errorf("%s is retired and must not be provisioned (hivecommons/hive#12534)", d.Name)
+		case d.Name == RoleTrusted.Label():
+			if d.Color != RoleTrustedColor {
+				t.Errorf("role/trusted colour %s", d.Color)
 			}
-		case d.Name == AuthorTrusted.Label():
-			if d.Color != AuthorTrustedColor {
-				t.Errorf("author/trusted colour %s", d.Color)
-			}
-		case strings.HasPrefix(d.Name, AuthorPrefix):
-			if d.Color != AuthorColor {
+		case strings.HasPrefix(d.Name, RolePrefix):
+			if d.Color != RoleColor {
 				t.Errorf("%s colour %s", d.Name, d.Color)
+			}
+		case d.Name == authorkind.Human.Label():
+			if d.Color != AuthorHumanColor {
+				t.Errorf("author/human colour %s", d.Color)
+			}
+		case d.Name == authorkind.Clanker.Label():
+			if d.Color != AuthorClankerColor {
+				t.Errorf("author/clanker colour %s", d.Color)
+			}
+		case d.Name == authorkind.Hive.Label():
+			if d.Color != AuthorHiveColor {
+				t.Errorf("author/hive colour %s", d.Color)
 			}
 		default:
 			t.Errorf("unexpected def %s", d.Name)
@@ -92,28 +103,28 @@ func TestAllLabelDefsColours(t *testing.T) {
 
 func TestAuthorFromTier(t *testing.T) {
 	req := map[string]bool{"trusted": true, "merger": true}
-	cases := map[string]Author{"trusted": AuthorTrusted, "Merger": AuthorTrusted, "contributor": AuthorContributor, "newcomer": AuthorNewcomer, "revoked": AuthorUntrusted, "": AuthorUntrusted}
+	cases := map[string]Role{"trusted": RoleTrusted, "Merger": RoleTrusted, "contributor": RoleContributor, "newcomer": RoleNewcomer, "revoked": RoleUntrusted, "": RoleUntrusted}
 	for tier, want := range cases {
-		if got := AuthorFromTier(tier, req); got != want {
+		if got := RoleFromTier(tier, req); got != want {
 			t.Errorf("tier %q → %v want %v", tier, got, want)
 		}
 	}
 }
 
 func TestAuthorMergePrecedence(t *testing.T) {
-	cases := []struct{ cur, next, want Author }{
-		{AuthorNone, AuthorUntrusted, AuthorUntrusted},
-		{AuthorNone, AuthorTrusted, AuthorTrusted},
+	cases := []struct{ cur, next, want Role }{
+		{RoleNone, RoleUntrusted, RoleUntrusted},
+		{RoleNone, RoleTrusted, RoleTrusted},
 		// #12490: the trusted-author lane's verdict survives the contributor
 		// lane's "no registry profile" in either order.
-		{AuthorTrusted, AuthorUntrusted, AuthorTrusted},
-		{AuthorUntrusted, AuthorTrusted, AuthorTrusted},
-		{AuthorUntrusted, AuthorContributor, AuthorContributor},
-		{AuthorContributor, AuthorUntrusted, AuthorContributor},
-		{AuthorContributor, AuthorTrusted, AuthorTrusted},
-		{AuthorContributor, AuthorNewcomer, AuthorContributor},
-		{AuthorNewcomer, AuthorNone, AuthorNewcomer},
-		{AuthorNone, AuthorNone, AuthorNone},
+		{RoleTrusted, RoleUntrusted, RoleTrusted},
+		{RoleUntrusted, RoleTrusted, RoleTrusted},
+		{RoleUntrusted, RoleContributor, RoleContributor},
+		{RoleContributor, RoleUntrusted, RoleContributor},
+		{RoleContributor, RoleTrusted, RoleTrusted},
+		{RoleContributor, RoleNewcomer, RoleContributor},
+		{RoleNewcomer, RoleNone, RoleNewcomer},
+		{RoleNone, RoleNone, RoleNone},
 	}
 	for _, tc := range cases {
 		if got := tc.cur.Merge(tc.next); got != tc.want {
@@ -123,25 +134,25 @@ func TestAuthorMergePrecedence(t *testing.T) {
 }
 
 func TestPlanIdempotentExclusiveAndStaleRemoval(t *testing.T) {
-	want := Desired{Stage: ReviewPending, Author: AuthorContributor}
-	add, remove := Plan([]string{"bug", "stage/050-review-pending", "author/contributor"}, want)
+	want := Desired{Stage: ReviewPending, Role: RoleContributor}
+	add, remove := Plan([]string{"bug", "stage/050-review-pending", "role/contributor"}, want)
 	if len(add)+len(remove) != 0 {
 		t.Fatalf("unchanged state planned writes add=%v remove=%v", add, remove)
 	}
-	add, remove = Plan([]string{"bug", "stage/070-fixing", "stage/99-old", "author/untrusted", "🐝 covered by PR", "claimed", "hive/in-progress", "hive/claimed-by-bob"}, want)
-	if !reflect.DeepEqual(add, []string{"author/contributor", "stage/050-review-pending"}) {
+	add, remove = Plan([]string{"bug", "stage/070-fixing", "stage/99-old", "role/untrusted", "🐝 covered by PR", "claimed", "hive/in-progress", "hive/claimed-by-bob"}, want)
+	if !reflect.DeepEqual(add, []string{"role/contributor", "stage/050-review-pending"}) {
 		t.Fatalf("add = %v", add)
 	}
-	if !reflect.DeepEqual(remove, []string{"author/untrusted", "claimed", "hive/in-progress", "stage/070-fixing", "stage/99-old", "🐝 covered by PR"}) {
+	if !reflect.DeepEqual(remove, []string{"claimed", "hive/in-progress", "role/untrusted", "stage/070-fixing", "stage/99-old", "🐝 covered by PR"}) {
 		t.Fatalf("remove = %v (human labels and hive/claimed-by-* must survive)", remove)
 	}
-	add, remove = Plan([]string{"stage/100-merge-queue", "stage/stalled", "author/trusted"}, Desired{})
-	if len(add) != 0 || !reflect.DeepEqual(remove, []string{"author/trusted", "stage/100-merge-queue", "stage/stalled"}) {
+	add, remove = Plan([]string{"stage/100-merge-queue", "stage/stalled", "role/trusted", "author/clanker"}, Desired{Kind: authorkind.Human})
+	if len(add) != 1 || add[0] != "author/human" || !reflect.DeepEqual(remove, []string{"author/clanker", "role/trusted", "stage/100-merge-queue", "stage/stalled"}) {
 		t.Fatalf("terminal plan add=%v remove=%v", add, remove)
 	}
-	add, _ = Plan(nil, Desired{Stage: Fixing, Stalled: true, Regressed: true})
-	if !reflect.DeepEqual(add, []string{"stage/070-fixing", "stage/regressed"}) {
-		t.Fatalf("regressed must beat stalled: %v", add)
+	add, remove = Plan([]string{"stage/070-fixing", "stage/regressed"}, Desired{Stage: Fixing, Stalled: true})
+	if !reflect.DeepEqual(add, []string{"stage/stalled"}) || !reflect.DeepEqual(remove, []string{"stage/regressed"}) {
+		t.Fatalf("retired stage/regressed must be stripped by the sweep: add=%v remove=%v", add, remove)
 	}
 }
 
@@ -258,8 +269,8 @@ func TestLookupsAndAuthorStrings(t *testing.T) {
 	if Current([]string{"bug", "stage/stalled", "stage/999-old", MergeQueue.Label()}) != MergeQueue || Current([]string{"stage/999-old"}) != None {
 		t.Fatal("Current() wrong")
 	}
-	if AuthorTrusted.String() != "trusted" || AuthorTrusted.Label() != "author/trusted" || AuthorNone.String() != "" || AuthorNone.Label() != "" {
-		t.Fatalf("author strings: %q %q %q %q", AuthorTrusted.String(), AuthorTrusted.Label(), AuthorNone.String(), AuthorNone.Label())
+	if RoleTrusted.String() != "trusted" || RoleTrusted.Label() != "role/trusted" || RoleNone.String() != "" || RoleNone.Label() != "" {
+		t.Fatalf("author strings: %q %q %q %q", RoleTrusted.String(), RoleTrusted.Label(), RoleNone.String(), RoleNone.Label())
 	}
 	if got := RegressionComment(MergeQueue, Fixing, "  "); !strings.HasSuffix(got, ": state changed") {
 		t.Fatalf("empty reason default: %q", got)
@@ -498,6 +509,113 @@ func TestStoreNoteAuthorAndByAuthor(t *testing.T) {
 	}
 }
 
+// hivecommons/hive#12534: stage/stalled means "nobody is working this".
+// hivecommons/hive#12417 is the specimen: review-pending with no reviewer
+// verdict for the head is waiting on the hive and must never stall.
+func TestStoreStalledRequiresQuiet(t *testing.T) {
+	now := time.Date(2026, 10, 16, 13, 33, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	st := NewStore(filepath.Join(t.TempDir(), "s.json"), clock)
+	key := Key("hivecommons/hive", 12417)
+	st.Observe(key, ReviewPending, "contributor-lane:no-verdict")
+	st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 0, Digest: "verdict:?|ci:0|", WaitingOnHive: true})
+	rec, _ := st.Get(key)
+	if rec.LastActivityAt.IsZero() || !rec.WaitingOnHive {
+		t.Fatalf("activity not recorded: %+v", rec)
+	}
+	for _, quiet := range []bool{true, false} {
+		if StalledWith(rec, nil, now.Add(6*time.Hour), quiet) {
+			t.Fatalf("050 with no verdict stalled after 6h (require_quiet=%v): the wait is on the reviewer, not a person", quiet)
+		}
+	}
+	// Checks running is likewise waiting on the hive.
+	now = now.Add(2 * time.Hour)
+	st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 0, Digest: "verdict:approve|ci:2|", WaitingOnHive: true})
+	rec, _ = st.Get(key)
+	if StalledWith(rec, nil, now.Add(3*time.Hour), true) {
+		t.Fatal("stalled while checks pending")
+	}
+	// Verdict landed, checks green, and then nothing happens for the dwell.
+	now = now.Add(time.Minute)
+	if !st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 0, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("digest change must count as activity")
+	}
+	rec, _ = st.Get(key)
+	if !rec.QuietSince().Equal(now) {
+		t.Fatalf("quiet since %v want %v", rec.QuietSince(), now)
+	}
+	if StalledWith(rec, nil, now.Add(59*time.Minute), true) {
+		t.Fatal("stalled before the dwell elapsed quietly")
+	}
+	if !StalledWith(rec, nil, now.Add(time.Hour), true) {
+		t.Fatal("not stalled after a quiet dwell with the verdict in hand")
+	}
+	if rec.QuietFor(now.Add(90*time.Minute)) != 90*time.Minute {
+		t.Fatalf("QuietFor = %v", rec.QuietFor(now.Add(90*time.Minute)))
+	}
+	// Any outside activity clears it: a comment …
+	now = now.Add(2 * time.Hour)
+	if !st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 1, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("new comment must count as activity")
+	}
+	rec, _ = st.Get(key)
+	if StalledWith(rec, nil, now.Add(30*time.Minute), true) || !StalledWith(rec, nil, now.Add(time.Hour), true) {
+		t.Fatal("comment did not restart the quiet clock")
+	}
+	// … but not the hive's own comment …
+	st.CountOwnComments(key, 1)
+	if st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 2, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("hive's own comment counted as outside activity")
+	}
+	// … a body-only review submission counts (Reviews -1 = not listed) …
+	if st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 2, Reviews: -1, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("unknown review count must not read as activity")
+	}
+	if !st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 2, Reviews: 1, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("new review submission must count as activity")
+	}
+	if st.NoteActivity(key, Activity{Head: "d2f1572", Comments: 2, Reviews: 1, Digest: "verdict:approve|ci:1|"}) {
+		t.Fatal("re-observed review counted again")
+	}
+	// … and a head push, dated by the commit, not by observation.
+	pushed := now.Add(45 * time.Minute)
+	now = now.Add(time.Hour)
+	if !st.NoteActivity(key, Activity{Head: "e000001", Comments: 2, Digest: "verdict:?|ci:0|", At: pushed, WaitingOnHive: true}) {
+		t.Fatal("head push must count as activity")
+	}
+	rec, _ = st.Get(key)
+	if !rec.LastActivityAt.Equal(pushed) {
+		t.Fatalf("activity at %v want commit date %v", rec.LastActivityAt, pushed)
+	}
+	// Without require_quiet the dwell is measured from entering the stage.
+	rec.WaitingOnHive = false
+	if !StalledWith(rec, nil, now, false) || StalledWith(rec, nil, now, true) {
+		t.Fatal("require_quiet=false must fall back to the entered-at clock")
+	}
+}
+
+func TestStoreHistoryRecordsTransitions(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	st := NewStore(filepath.Join(t.TempDir(), "s.json"), func() time.Time { return now })
+	key := Key("o/r", 1)
+	for _, s := range []Stage{ReviewPending, Reviewed, MergeQueue, Reviewed} {
+		now = now.Add(time.Hour)
+		st.Observe(key, s, "r")
+	}
+	rec, _ := st.Get(key)
+	if len(rec.History) != 4 || rec.History[3].From != MergeQueue || rec.History[3].Stage != Reviewed || !rec.History[3].Regressed {
+		t.Fatalf("history = %+v", rec.History)
+	}
+	for i := 0; i < HistoryLimit+3; i++ {
+		now = now.Add(time.Hour)
+		st.Observe(key, []Stage{ReviewPending, Reviewed}[i%2], "r")
+	}
+	rec, _ = st.Get(key)
+	if len(rec.History) != HistoryLimit {
+		t.Fatalf("history not capped: %d", len(rec.History))
+	}
+}
+
 // hivecommons/hive#12557: a gate flapping 100 → 060 → 100 → 060 on one head
 // used to re-arm the regression comment on every recover. The comment is
 // due once per head SHA; a new head re-arms it.
@@ -583,5 +701,98 @@ func TestStoreHistoryTrail(t *testing.T) {
 	rec2, _ := st2.Get(key)
 	if len(rec2.History) != HistoryLimit || rec2.History[0].Stage != Fixing {
 		t.Fatalf("history not persisted: %+v", rec2.History)
+	}
+}
+
+// hivecommons/hive#12581: the trust axis moved from author/<tier> to
+// role/<tier>. Plan migrates the old spelling in the same write, and with
+// no author-kind opinion leaves an existing author/<kind> label alone.
+func TestPlanMigratesLegacyRoleAndKeepsKindWhenUnknown(t *testing.T) {
+	add, remove := Plan([]string{"stage/050-review-pending", "author/trusted", "author/clanker"}, Desired{Stage: ReviewPending, Role: RoleTrusted})
+	if !reflect.DeepEqual(add, []string{"role/trusted"}) || !reflect.DeepEqual(remove, []string{"author/trusted"}) {
+		t.Fatalf("migration add=%v remove=%v", add, remove)
+	}
+	// With a kind opinion the stale kind is swapped and the legacy tier still goes.
+	add, remove = Plan([]string{"stage/050-review-pending", "author/contributor", "author/clanker"}, Desired{Stage: ReviewPending, Role: RoleContributor, Kind: authorkind.Hive})
+	if !reflect.DeepEqual(add, []string{"author/hive", "role/contributor"}) || !reflect.DeepEqual(remove, []string{"author/clanker", "author/contributor"}) {
+		t.Fatalf("kind swap add=%v remove=%v", add, remove)
+	}
+	// Configured names are honoured, and the defaults they replace are stale.
+	names := authorkind.Names{Clanker: "author/relay"}
+	add, remove = Plan([]string{"author/clanker"}, Desired{Stage: ReviewPending, Kind: authorkind.Clanker, KindLabels: names})
+	if !reflect.DeepEqual(add, []string{"author/relay", "stage/050-review-pending"}) || !reflect.DeepEqual(remove, []string{"author/clanker"}) {
+		t.Fatalf("configured names add=%v remove=%v", add, remove)
+	}
+	for _, l := range LegacyRoleLabels() {
+		if !IsLegacyRole(l) || !Owned(l) {
+			t.Errorf("%s not recognised as a retired role spelling", l)
+		}
+	}
+	if IsLegacyRole("author/human") || IsLegacyRole("role/trusted") {
+		t.Error("kind/current labels misread as legacy role")
+	}
+	if RoleTrusted.LegacyLabel() != "author/trusted" || RoleNone.LegacyLabel() != "" {
+		t.Errorf("LegacyLabel: %q %q", RoleTrusted.LegacyLabel(), RoleNone.LegacyLabel())
+	}
+}
+
+func TestLabelDefsForUsesConfiguredKindNames(t *testing.T) {
+	defs := LabelDefsFor(authorkind.Names{Hive: "author/bot-hive"})
+	seen := map[string]string{}
+	for _, d := range defs {
+		seen[d.Name] = d.Color
+	}
+	if seen["author/bot-hive"] != AuthorHiveColor || seen["author/human"] != AuthorHumanColor || seen["author/clanker"] != AuthorClankerColor {
+		t.Fatalf("defs = %v", seen)
+	}
+	if _, ok := seen["author/hive"]; ok {
+		t.Fatal("default hive name provisioned despite override")
+	}
+	if _, ok := seen["author/trusted"]; ok {
+		t.Fatal("legacy role spelling provisioned")
+	}
+}
+
+// Stage-074 in-place adoption bookkeeping: MarkAdoptedInPlace / MarkAdoptedHead
+// keep the hive's ownership across its own pushes; MarkYielded releases it and
+// remembers the contributor's head so the yield note is posted once.
+func TestStoreAdoptInPlaceAndYield(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	s := NewStore("", func() time.Time { return now })
+	key := Key("acme/widget", 7)
+	s.MarkAdoptedInPlace("missing", "a", "contributor-offline", now)
+	if _, ok := s.Get("missing"); ok {
+		t.Fatal("MarkAdoptedInPlace created a record")
+	}
+	s.Observe(key, ReturnedToContributor, "check-failing:unit")
+	r, _ := s.Get(key)
+	if r.AdoptedInPlace() || r.Adopted("a") {
+		t.Fatalf("fresh record adopted: %+v", r)
+	}
+	s.MarkAdoptedInPlace(key, "a", "contributor-offline", now)
+	r, _ = s.Get(key)
+	if !r.AdoptedInPlace() || r.AdoptMode != AdoptModeInPlace || r.AdoptReason != "contributor-offline" || r.AdoptedHead != "a" || !r.AdoptedAt.Equal(now) || r.AdoptedBy != 0 {
+		t.Fatalf("in place: %+v", r)
+	}
+	s.MarkAdoptedHead(key, "b")
+	r, _ = s.Get(key)
+	if !r.AdoptedInPlace() || r.AdoptedHead != "b" {
+		t.Fatalf("head moved: %+v", r)
+	}
+	s.MarkYielded(key, "c")
+	r, _ = s.Get(key)
+	if r.AdoptedInPlace() || r.AdoptedHead != "" || r.AdoptMode != "" || r.AdoptReason != "" || r.YieldedHead != "c" {
+		t.Fatalf("yielded: %+v", r)
+	}
+	// Supersede path tags its mode too; ClearAdoption wipes everything.
+	s.MarkAdopted(key, "c", 90, now)
+	r, _ = s.Get(key)
+	if r.AdoptMode != AdoptModeSupersede || !r.Adopted("c") || r.AdoptedInPlace() {
+		t.Fatalf("supersede: %+v", r)
+	}
+	s.ClearAdoption(key)
+	r, _ = s.Get(key)
+	if r.AdoptMode != "" || r.AdoptReason != "" || r.AdoptedHead != "" {
+		t.Fatalf("cleared: %+v", r)
 	}
 }
