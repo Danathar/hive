@@ -63,8 +63,10 @@ primary repo is shown, repeat for each of the others.
 ```bash
 # dry run
 hivectl evidence backfill --repo ublue-os/bluefin --since 2025-01-01 --root "$EVIDENCE_ROOT" --dry-run
+hivectl evidence backfill-issues --repo ublue-os/bluefin --since 2025-01-01 --root "$EVIDENCE_ROOT" --dry-run
 # write
 hivectl evidence backfill --repo ublue-os/bluefin --since 2025-01-01 --root "$EVIDENCE_ROOT"
+hivectl evidence backfill-issues --repo ublue-os/bluefin --since 2025-01-01 --root "$EVIDENCE_ROOT"
 ```
 
 Expected flags: none (Bluefin is the primary case and has far more than 10

@@ -302,6 +302,16 @@ output. Record-only: nothing here reads into or alters merge eligibility. See
 [Review evidence bundle, Backfilled bundles](review-evidence.md#backfilled-bundles) and the run plan in
 [`research/backfill.md`](research/backfill.md).
 
+`hivectl evidence backfill-issues --repo <owner/repo> --since <date> [--until <date>] [--root <dir>] [--agent-login <login>] [--dry-run]`
+records GitHub issues opened and closed in the range as ISO-week files at
+`<root>/<owner>/<repo>/issues/<year>-W<week>.json`. GitHub's issues endpoint also
+contains pull requests; these are excluded. The command scans older issues too,
+so a close in the range is counted even if the issue opened earlier. Each file
+includes zero-count weeks, event times for exact custom summary windows, and
+coverage bounds. Re-run it to refresh recent weeks. The files are reporting data
+for operators and downstream readers; the dashboard work-balance card now uses
+its collector-maintained rollup, and neither path affects merge eligibility.
+
 ### observe — read-only metrics
 
 ```bash
