@@ -1,1 +1,0 @@
-- Trusted human GitHub approval reviews on the exact PR head now clear L6 self-authored requires_human review holds without weakening changes-requested verdicts ([#12791](https://github.com/hivecommons/hive/issues/12791)).
