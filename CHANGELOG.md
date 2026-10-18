@@ -11,6 +11,63 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-18 (v5.186.0)
+
+### Added
+
+- Add single-click global cadence setting templates (New Level testing, Weekly sprint, Biweekly sprint, and Daily cadence) in the dashboard Governor matrix and via `POST /api/config/governor/cadence-templates` to allow operators to quickly configure governor cadences across all agents without excessive manual clicks (#12300).
+- Add `hivectl hives preset adopt` and `hivectl hives preset refresh` to review a contribution preset against your saved repository selection, record the accepted membership with preset provenance, keep personal exclusions and saved repositories unless removal is confirmed, preserve state on discovery outages, and opt in per Hive to following new repositories with `--follow-new-repos` ([#12570](https://github.com/hivecommons/hive/issues/12570)).
+- Contributor relays enforce per-Hive repository selections before accepting assignments, negotiate versioned scopes, visibly skip unsupported Hives, and idle on empty selections.
+- Auto-promote contributor-lane trust after a clean merged-PR history so reviewed green contributor PRs can merge at L6.
+- Show held open issues and PRs as held directly in the dashboard pipeline Open segment.
+- `hivectl` can now parse and validate a **contribution preset**: a versioned, credential-free YAML document a project publishes at an HTTPS URL or ships as a file to recommend Hives and repository selections (`all-current` or an explicit `owner/name` list per Hive, plus optional hubs). Loading is strict and read-only: unknown `version` majors, unknown fields, and any field carrying tokens, credentials, shell commands, local execution settings or permission changes are refused with the field named; only `https://` (and loopback `http://`) or local paths are accepted, redirects may not leave HTTPS, and documents are capped at 256 KiB. See "Contribution presets" in `src/docs/hivectl.md` ([#12803](https://github.com/hivecommons/hive/issues/12803), part of [#12570](https://github.com/hivecommons/hive/issues/12570)).
+- Wire the background-only Hive-self experiment scheduler into `hive` behind a new default-off `self_experiments.scheduler` block (`enabled`, `mode: background`, `interval_s`). When enabled in background mode, each tick judges every unresolved experiment in the local Hive-self ledger and hands the decision to the executor, which latches fast-fails and reverts treatments durably; reverts are restored at startup before the first heartbeat. Experiments are registered by the hub/relay, which is not yet wired, so the ledger (`/data/nous/self-experiments.json`) stays empty until then. With the default config nothing is loaded and no goroutine starts, and governor configuration is never touched ([#12397](https://github.com/hivecommons/hive/issues/12397), [#12768](https://github.com/hivecommons/hive/issues/12768)).
+
+### Changed
+
+- docs: document HIVE_REPO_SCOPE in the env-var references (#12867)
+- Let Hive-authored issues resolve non-risk engineering decision questions without self-parking at stage/085.
+- Issues parked on a person now wear the new issue-side stage `stage/045-needs-decision`; `stage/085-needs-decision` is PR-only. `needs-human` on an issue implies 045, `/hive approve` / `/hive decision` still un-park to `approved-direction` and keep `needs-human`, the good-first-issue scorer and the dashboard "Needs human" bucket recognise 045, and open issues still carrying 085 are re-staged to 045 by the issue stage reconciler and a one-shot startup sweep (`/data/issue-needs-decision-stage-v1.done`).
+- Document `HIVE_REPO_SCOPE` and `HIVE_REPO_SCOPE_VERSION` in the env-var reference and the contributor-relay variable table (relay/hivectl, #12804).
+- Let Hive-authored review decisions resolve low-risk sequencing, naming and config-shape questions by default while preserving risk escalations.
+
+### Fixed
+
+- Document the supported in-place adoption and offline/unregistered wait settings in `hive.yaml.example` (#12777).
+- Correct the offline contributor grace example to match its 15-minute default (#12821).
+- contributor-relay: strip the matching shell quotes `hivectl` writes around values in `contributor.env`, so `HIVE_REPO_SCOPE` reads back as written (#12826)
+- hub: the zero-spend `token-burn` fleet alert now fires only when token spend is expected (queued work or unpaused expected-active agents) and nothing stronger already explains it — all-paused or quiet-by-design hives, fresh advisory output, stale heartbeat stats, a pending App install, a precondition-red health verdict (App broken, login stuck, budget, agents down), or an inference-auth, GitHub-App-required or agents-inactive alert no longer also raise it ([#12844](https://github.com/hivecommons/hive/issues/12844))
+- hub: unclaimed `available` pool slots no longer raise `health-check-failing` for `project_org`, which fails by design on their seeded placeholder org/repo until the slot is claimed ([#12843](https://github.com/hivecommons/hive/issues/12843))
+- hub: the `advisory-stale` fleet alert is no longer raised from a heartbeat carrying cached or minimal stats (`statsStale`), whose `advisoryLastPostedAt` is the last-good value rather than proof the digest stopped posting ([#12842](https://github.com/hivecommons/hive/issues/12842))
+- Contributor-PR adoption now falls back to a superseding App PR when the base branch has moved past a `.github/workflows/` change since the PR's merge-base: the App token cannot push such a base-sync to the contributor branch (no `workflows` permission), so the in-place mode promised by the adoption comment was a dead end that left the PR dirty forever (#12865, #6985).
+- The spoke heartbeat now reports each reviewer-lane agent's own actionable queue depth (`laneQueuedWork`), computed with the same lane routing and gates the governor uses to skip an idle lane, so the hub's idle-with-work alert can narrow from the hive-wide backlog to the agent's lane; agents outside the reviewer lane omit the field and keep the hive-wide fallback ([#12876](https://github.com/hivecommons/hive/issues/12876), follow-up to [#12875](https://github.com/hivecommons/hive/pull/12875)).
+- Stage-label 085/090 entry comments are now posted once per (stage, head), so a same-head flap through `050-review-pending` no longer reposts a byte-identical comment ([#12878](https://github.com/hivecommons/hive/issues/12878)). A new head or a different human stage still explains itself once.
+- review: a partly answered revisit now re-asks only the perspectives that timed out instead of re-kicking the full set (#12883)
+- Make the automerge review gate's human-approval read-failure log lane-neutral (#12891).
+- List PR reviews once per self-authored sweep instead of twice for requires-human heads (#12892).
+- Re-home adopted contributor PRs when unsigned commits cannot be DCO-repaired in place, with fixer instructions for DCO-clean superseding branches.
+- Treat conflicting contributor PRs like red CI so offline clanker authors are nudged and adopted after grace.
+- Keep conflicting contributor PRs in the author-rework stage instead of ready-for-human-merge while mergeability is known to be conflicting.
+- **DCO post-merge monitor: waive `a9200f3d` per maintainer disposition.** The #12707 squash on `v5` kept the scanner `Signed-off-by` instead of the author's, so the monitor kept failing. A SHA-scoped `DCO_WAIVED_COMMITS` entry records the maintainer-accepted disposition without rewriting history or widening any identity allowlist ([#12727](https://github.com/hivecommons/hive/issues/12727)).
+- The issue stage sweep now closes a decomposed parent issue as completed once every tracked child (GitHub sub-issue linked by the relay) is closed, with one comment listing each child and its closing PR, and never marks a parent with open children `stage/stalled` (an existing marker comes off). The relay also writes a `<!-- hive:parent N -->` marker into each child it links (#12857).
+- Require signed hive-authored fix-pr commits before push (merge commits exempt, as DCO checkers skip them) and choose in-place DCO repair versus re-home for adopted PRs on whether the unsigned commits are GitHub-linked to the hive App bot — never on forgeable git emails — and whether the branch is still pushable; the ownership split is cached with the commit check and a re-home is attempted once per head.
+- Prevented reviewer/fixer follow-up commits from being pushed to non-App-authored PR branches, and keep hive-caused squash sign-off failures in the hive-owned fixing lane instead of returning them to contributors.
+- `hivectl` Hive lookup by origin no longer fails for every onboarding target when a legacy profile uses a hub host the canonical identity form rejects (such as compose or Kubernetes service names with `_`); such profiles are skipped. The `HIVE_REPO_SCOPE` documentation now shows the format `hivectl` actually writes (`,` between hubs, `;` between repositories). (#12804)
+- Treat trusted human APPROVED reviews on the current head as resolving `requires_human` reviewer verdicts across automerge lanes.
+- Route Hive-authored non-risk incomplete-fix reviewer findings to the fixer lane instead of parking them for human decisions.
+- `kick_failed_repeatedly` self-reports are now filed only after the busy-no-activity stall restart has been attempted and the session is still undeliverable (or the restart itself errored). Previously the fleet issue was filed at 1× `busy_no_activity_threshold` (30m), before the 2× restart bar, so it reported stalls that then self-recovered. The 30m condition stays visible as the dashboard busy condition and a warning log line; the report message now states when the restart ran and how many times (#12787).
+- Apply normalized review verdicts consistently to stage labels and fixer dispatch.
+- Shared CI failures now require an independent human-authored control and no green counterexample, so related agent PRs cannot hide the same PR-local defect from the escalation circuit breaker.
+- Fix review dispatch so held review-pending pull requests stay in the reviewer queue and are served in review-rank order.
+- List held review-pending satellite pull requests in reviewer kicks so the prompt matches the dispatched review queue.
+- Derive stage role labels from author identity so non-owning lanes cannot flip trusted App-authored PRs to untrusted.
+- Add regression coverage that resolved Hive-authored design questions leave the needs-decision stage label.
+- Derive review-driven stage labels from one normalized verdict source to prevent 070/085 flapping.
+
+### Security
+
+- The contributor-lane auto-promotion ratchet no longer re-trusts a contributor whose registry tier is `revoked`, and counts a merged PR that a later merged revert undid as revert evidence ([#12874](https://github.com/hivecommons/hive/issues/12874)).
+
 ## 2026-10-17 (v5.185.0)
 
 ### Added

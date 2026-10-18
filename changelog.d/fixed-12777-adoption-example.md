@@ -1,1 +1,0 @@
-- Document the supported in-place adoption and offline/unregistered wait settings in `hive.yaml.example` (#12777).

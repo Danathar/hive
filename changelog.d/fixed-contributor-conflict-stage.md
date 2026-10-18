@@ -1,1 +1,0 @@
-- Keep conflicting contributor PRs in the author-rework stage instead of ready-for-human-merge while mergeability is known to be conflicting.
