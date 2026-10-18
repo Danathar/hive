@@ -11,6 +11,7 @@ import (
 	"github.com/hivecommons/hive/pkg/hivestate"
 	"github.com/hivecommons/hive/pkg/nous"
 	nousscheduler "github.com/hivecommons/hive/pkg/nous/scheduler"
+	"github.com/hivecommons/hive/pkg/nousstore"
 )
 
 // Background-only Hive-self scheduler tick (hivecommons/hive#12397, #12768).
@@ -21,12 +22,13 @@ import (
 // (enabled + mode: background), default off; when off nothing is loaded and
 // no goroutine is started. It never reads or writes governor configuration.
 
-// nousSelfLedgerFile is the Hive-self experiment ledger next to the snapshot
-// directory, separate from the Experiment Lab's campaigns.json.
+// nousSelfLedgerFile is the Hive-self experiment ledger at the root of the
+// durable nous layout, next to the snapshot directory and separate from the
+// Experiment Lab's campaigns.json.
 const nousSelfLedgerFile = "self-experiments.json"
 
-func nousSelfLedgerPath() string {
-	return filepath.Join(filepath.Dir(nousSnapshotDir), nousSelfLedgerFile)
+func nousSelfLedgerPath(layout nousstore.Layout) string {
+	return filepath.Join(layout.Root, nousSelfLedgerFile)
 }
 
 // nousSelfMissingReason explains a measurement with no snapshot evidence.
@@ -191,11 +193,11 @@ func newNousSelfTick(cfg *config.Config, executor *nousscheduler.Executor, store
 // tick. It returns without loading anything or starting a goroutine unless
 // self_experiments.scheduler is enabled in background mode. Call it before the
 // hub heartbeat starts so restored reverts precede the first flag assignment.
-func startNousSelfScheduler(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+func startNousSelfScheduler(ctx context.Context, cfg *config.Config, layout nousstore.Layout, logger *slog.Logger) {
 	if cfg == nil || !cfg.SelfExperiments.Scheduler.Active() {
 		return
 	}
-	store := nous.NewExperimentStore(nousSelfLedgerPath())
+	store := nous.NewExperimentStore(nousSelfLedgerPath(layout))
 	// No release-channel revert hook exists yet, so RevertChannel stays nil.
 	// A channel subject's result is recorded before its revert is attempted and
 	// run() skips resolved experiments, so the failed revert (ErrNoChannelRevert)
@@ -205,7 +207,7 @@ func startNousSelfScheduler(ctx context.Context, cfg *config.Config, logger *slo
 	if err := executor.Restore(); err != nil {
 		logger.Warn("nous self scheduler: restore reverts failed", "error", err)
 	}
-	tick := newNousSelfTick(cfg, executor, store, nousSnapshotDir, logger)
+	tick := newNousSelfTick(cfg, executor, store, layout.SnapshotDir(), logger)
 	interval := cfg.SelfExperiments.Scheduler.Interval()
 	logger.Info("nous self scheduler started", "mode", cfg.SelfExperiments.Scheduler.Mode, "interval", interval)
 	go runNousSelfScheduler(ctx, tick, interval)

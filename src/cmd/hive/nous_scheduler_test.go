@@ -11,6 +11,7 @@ import (
 	"github.com/hivecommons/hive/pkg/hivestate"
 	"github.com/hivecommons/hive/pkg/nous"
 	nousscheduler "github.com/hivecommons/hive/pkg/nous/scheduler"
+	"github.com/hivecommons/hive/pkg/nousstore"
 )
 
 var nousSelfCreated = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -100,8 +101,8 @@ func TestNousSelfSchedulerConfigDefaultOff(t *testing.T) {
 		t.Fatalf("default interval = %v", got)
 	}
 	// Off: returns before touching the ledger, the gate or a logger.
-	startNousSelfScheduler(t.Context(), &config.Config{}, nil)
-	startNousSelfScheduler(t.Context(), nil, nil)
+	startNousSelfScheduler(t.Context(), &config.Config{}, nousstore.Layout{}, nil)
+	startNousSelfScheduler(t.Context(), nil, nousstore.Layout{}, nil)
 }
 
 func TestNousSelfTickEvaluatesAndExecutesUnresolved(t *testing.T) {

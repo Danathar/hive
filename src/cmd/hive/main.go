@@ -4932,7 +4932,7 @@ func (b *boot) bootHeartbeat() { b.bootHeartbeatWith(defaultBootHeartbeatDeps())
 func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 	// Hive-self scheduler (#12397): default off; restores durable reverts
 	// before the first heartbeat can apply a self-experiment flag.
-	startNousSelfScheduler(b.ctx, b.cfg, b.logger)
+	startNousSelfScheduler(b.ctx, b.cfg, nousstore.Resolve(b.cfg.Data.NousDir, os.Getenv), b.logger)
 	// Start hub heartbeat push if configured (env var or config)
 	hubTgt := resolveHubTarget(b.cfg.Hub, os.Getenv("HIVE_HUB_URL"), os.Getenv("HIVE_CLUSTER_ID"))
 	b.hubURL = hubTgt.url
