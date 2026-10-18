@@ -729,7 +729,7 @@ are capped by `runs.spektacular.recheck.max_delta_tasks` (default `50`).
 
 When a completed `implement` campaign is due, or an owner posts
 `POST /api/campaigns/{id}/recheck`, Hive rewinds the campaign's existing run
-to a new generation in place (ADR 0025, v6 addendum): the same campaign ID and
+to a new generation in place (ADR 0100, v6 addendum): the same campaign ID and
 run key get `revision` N+1, `current_stage` resets to `spec`, and the spec
 stage is admitted on the run's own lease key (`<repo>!<run key>:spec`) with a
 higher `gen` than any earlier generation, so prior receipts stay intact. No
