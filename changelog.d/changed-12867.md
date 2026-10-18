@@ -1,1 +1,0 @@
-- docs: document HIVE_REPO_SCOPE in the env-var references (#12867)

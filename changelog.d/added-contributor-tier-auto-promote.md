@@ -1,1 +1,0 @@
-- Auto-promote contributor-lane trust after a clean merged-PR history so reviewed green contributor PRs can merge at L6.

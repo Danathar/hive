@@ -1,1 +1,0 @@
-- Derive stage role labels from author identity so non-owning lanes cannot flip trusted App-authored PRs to untrusted.
