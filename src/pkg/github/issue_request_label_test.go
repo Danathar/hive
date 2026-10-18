@@ -612,7 +612,7 @@ func TestIssueRequestWatcher_LabelRefusesReparkOnRecordedDecision(t *testing.T) 
 func TestReparkDecisionRefusalRecognizesRetiredDecisionLabels(t *testing.T) {
 	const decision = "Agents stand down; owner/Console owners handle this"
 	reply := unparkWireComment{
-		ID: 902, Body: fmt.Sprintf("%s%d -->\n%s", unparkReplyMarkerPrefix, 31, renderUnparkAcceptedReply("owner", decision, true)),
+		ID: 902, Body: fmt.Sprintf("%s%d -->\n%s", unparkReplyMarkerPrefix, 31, renderUnparkAcceptedReplyKeeping("owner", decision, []string{issueNeedsDecisionLabel}, true)),
 		User: wireUser{Login: "hive[bot]"}, CreatedAt: unparkOld(), UpdatedAt: unparkOld(),
 	}
 	for _, label := range []string{NeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel} {
