@@ -235,3 +235,21 @@ func TestIssueRequestInvalidReleaseStepMakesNoAPICalls(t *testing.T) {
 		})
 	}
 }
+
+func TestIssueOwnerStepNeverDowngradedByDecisionPolicy(t *testing.T) {
+	c := menuTestClient()
+	c.SetAgentIssueDecisionPolicy("resolve")
+	step := testReleaseStep()
+	req := IssueRequest{Repo: "o/r", Title: "Release needed", Body: "Cut the release.", Agent: "scanner", NeedsDecision: true, OwnerStep: step}
+	if d := c.issueDecisionDowngradeForCreate(req, req.Body); d.Active {
+		t.Fatalf("create with owner step must park under resolve: %+v", d)
+	}
+	req.Kind, req.Number = "comment", 5
+	if d := c.issueDecisionDowngradeForComment(req, req.Body); d.Active {
+		t.Fatalf("comment with owner step must park under resolve: %+v", d)
+	}
+	req.OwnerStep = nil
+	if d := c.issueDecisionDowngradeForComment(req, req.Body); !d.Active {
+		t.Fatal("plain engineering question must still be downgraded under resolve")
+	}
+}

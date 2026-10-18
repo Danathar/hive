@@ -803,8 +803,11 @@ type issueDecisionDowngrade struct {
 	Note     string
 }
 
+// A typed owner step (e.g. a release) proposes an action only a person
+// with owner credentials can take, so it is owner-only by construction and
+// never downgraded to a hive-taken decision, whatever the policy.
 func (c *Client) issueDecisionDowngradeForCreate(req IssueRequest, body string) issueDecisionDowngrade {
-	if !req.NeedsDecision || !hiveIssueRequestActor(req.Agent, req.Labels) {
+	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
 		return issueDecisionDowngrade{}
 	}
 	return c.issueDecisionDowngrade(req.Title, body)
@@ -814,7 +817,7 @@ func (c *Client) issueDecisionDowngradeForCreate(req IssueRequest, body string) 
 // park on an existing issue. A comment always carries its own text, so the
 // classification reads the comment body rather than the issue.
 func (c *Client) issueDecisionDowngradeForComment(req IssueRequest, body string) issueDecisionDowngrade {
-	if !req.NeedsDecision || !hiveIssueRequestActor(req.Agent, req.Labels) {
+	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
 		return issueDecisionDowngrade{}
 	}
 	return c.issueDecisionDowngrade("", body)
