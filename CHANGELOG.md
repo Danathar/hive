@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-18 (v5.186.1)
+
+### Fixed
+
+- Route Hive-authored non-risk reviewer findings with concrete remediation through the normalized changes-requested fixer path across aggregation, stage labels, and fixer dispatch.
+
 ## 2026-10-18 (v5.186.0)
 
 ### Added
