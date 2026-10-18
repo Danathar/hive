@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-18 (v5.186.2)
+
+### Fixed
+
+- Hub-side plumbing for a spoke-reported lane-scoped queue depth: the hub's agents-inactive idle rule now prefers `laneQueuedWork` over the hive-wide backlog when a spoke reports it, preventing an intentionally idle lane from being flagged when other lanes have work. Spokes do not yet report it (follow-up [#12876](https://github.com/hivecommons/hive/issues/12876)), so the alert only narrows once the producer lands ([#12866](https://github.com/hivecommons/hive/issues/12866)).
+- Preserve a settled `requires_human` verdict while a replacement review of the same head and PR body is incomplete, preventing partial report refreshes from reopening the decision as review-pending ([#12878](https://github.com/hivecommons/hive/issues/12878)).
+- Completes the #12899 follow-through for contributor PRs ([#12897](https://github.com/hivecommons/hive/issues/12897)): the `review_fix_withheld` audit entry now records the actual `review.fix_human_prs` value instead of a hard-coded `false`, and the review-thread kick no longer tells the agent to check out, commit to, or push a human-opened PR's branch with that setting on — it replies with a suggestion instead. The propose-only review prompt, operator docs, dashboard help text and config comments are reworded to match.
+
 ## 2026-10-18 (v5.186.1)
 
 ### Fixed
