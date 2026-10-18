@@ -555,10 +555,21 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 				c.denyIssueRequest(path, req, fmt.Sprintf("needs_decision parks issues only: %s#%d is a pull request", req.Repo, req.Number), nowFn)
 				return
 			}
-			err = c.AddLabels(ctx, req.Repo, req.Number, []string{c.needsDecisionLabel()})
+			// Same policy gate as the issue and label paths: under
+			// `resolve` a non-risk Hive engineering question is not parked,
+			// the comment records the decision and the owner-step marker is
+			// withheld so the unpark menu does not offer `/hive done`.
+			issueDecisionDowngrade = c.issueDecisionDowngradeForComment(req, body)
+			if !issueDecisionDowngrade.Active {
+				err = c.AddLabels(ctx, req.Repo, req.Number, []string{c.needsDecisionLabel()})
+			}
 		}
 		if err == nil {
-			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, issueOwnerStepBody(body, req.NeedsDecision, req.OwnerStep))
+			commentBody := issueOwnerStepBody(body, req.NeedsDecision && !issueDecisionDowngrade.Active, req.OwnerStep)
+			if issueDecisionDowngrade.Active {
+				commentBody = appendHiveDecisionTaken(commentBody, issueDecisionDowngrade.Question)
+			}
+			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, commentBody)
 			if errors.Is(err, ErrIssueCommentBudget) {
 				c.denyIssueRequest(path, req, "comment refused: "+err.Error()+"; this issue already received its daily quota of hive comments, nothing more is needed on it today", nowFn)
 				return
@@ -750,7 +761,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		"consolidated", strconv.FormatBool(resp.Consolidated),
 		"override_reason", req.OverrideReason,
 	}
-	if kind == "comment" && req.NeedsDecision {
+	if kind == "comment" && req.NeedsDecision && !issueDecisionDowngrade.Active {
 		extra = append(extra, "parked", c.needsDecisionLabel())
 	}
 	if kind == "label" {
@@ -797,6 +808,16 @@ func (c *Client) issueDecisionDowngradeForCreate(req IssueRequest, body string) 
 		return issueDecisionDowngrade{}
 	}
 	return c.issueDecisionDowngrade(req.Title, body)
+}
+
+// issueDecisionDowngradeForComment classifies a `comment --needs-decision`
+// park on an existing issue. A comment always carries its own text, so the
+// classification reads the comment body rather than the issue.
+func (c *Client) issueDecisionDowngradeForComment(req IssueRequest, body string) issueDecisionDowngrade {
+	if !req.NeedsDecision || !hiveIssueRequestActor(req.Agent, req.Labels) {
+		return issueDecisionDowngrade{}
+	}
+	return c.issueDecisionDowngrade("", body)
 }
 
 func (c *Client) issueDecisionDowngradeForLabel(ctx context.Context, req IssueRequest, addLabels []string) (issueDecisionDowngrade, error) {

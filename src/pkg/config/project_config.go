@@ -28,7 +28,7 @@ type ProjectConfig struct {
 	// AgentIssueDecisionPolicy is "resolve" (default) or "escalate". Resolve
 	// keeps Hive-authored issues actionable when the only parking reason is a
 	// non-risk engineering choice (sequencing, naming, numbering, config shape,
-	// or approach A vs B). Risk questions still park at stage/085.
+	// or approach A vs B). Risk questions still park at stage/045.
 	AgentIssueDecisionPolicy string `yaml:"agent_issue_decision_policy,omitempty" json:"agent_issue_decision_policy,omitempty"`
 	// CheckoutsDir is a host-local directory holding one checkout per monitored
 	// repo, as "<CheckoutsDir>/<repo name>" — the bare name from Repos, without

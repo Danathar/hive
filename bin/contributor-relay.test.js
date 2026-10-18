@@ -3708,6 +3708,19 @@ test('scope declines unknown, unselected and interrupt offers before any task si
   } finally { teardown(relay); }
 });
 
+test('standby relay with a repository selection stays passive after repo_scope_ack', () => {
+  const relay = loadRelay({ env: { ...SCOPE_ENV, HIVE_STANDBY: '1' } });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+    relay.setCliReady(true);
+    scopeAuth(relay, hubs[0]); scopeAuth(relay, hubs[1]);
+    assert.ok(sentB.some(m => m.type === 'repo_scope'), 'standby still negotiates its repository selection');
+    scopeAck(relay, hubs[1]);
+    assert.ok(![...sentA, ...sentB].some(m => m.type === 'ready'),
+      'standby must not request ordinary work after the scope is acknowledged');
+  } finally { teardown(relay); }
+});
+
 test('one session accepts legacy Hive A and both selected repositories on Hive B', () => {
   const relay = loadRelay({ env: SCOPE_ENV });
   try {

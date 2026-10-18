@@ -2355,6 +2355,10 @@ function stopHub(hub, reason) {
 }
 
 function maybeAskActiveHubForWork() {
+  // Standby stays connected (and negotiates its repository selection) but
+  // never asks for ordinary work — mirror the auth_ok guard here so the
+  // repo_scope_ack and profile-reload paths cannot leak a ready.
+  if (STANDBY_MODE) return;
   const hub = hubs[activeHubIndex];
   if (!hub || currentTask || !hub.authenticated || hub.readyOutstanding) return;
   if (cliReadyFailed) {
