@@ -140,7 +140,7 @@ func stageTrackerFixture(t *testing.T, now time.Time) (*Server, *stagelabels.Sto
 		Name: "console", Full: "acme/console",
 		ActionableIssues: []any{
 			github.Issue{Number: 7, Title: "Login redirect loops", Author: "karibhou", AuthorIsHuman: true, Labels: []string{"stage/100-merge-queue"}},
-			github.Issue{Number: 8, Title: "Flaky test", Author: "hive-app[bot]", Labels: []string{"stage/010-actionable", "agent/scanner", "origin/scanner"}},
+			github.Issue{Number: 8, Title: "Flaky test", Author: "hive-app[bot]", Labels: []string{"stage/010-actionable", "agent/scanner"}},
 			// GitHub's issues feed returns pull requests too. These are copies
 			// of PRs 101 (also in OpenPrs) and 106 (URL says /pull/, not in the
 			// PR set); neither may become an issue row.
@@ -155,7 +155,7 @@ func stageTrackerFixture(t *testing.T, now time.Time) (*Server, *stagelabels.Sto
 			FrontendPR{PullRequest: github.PullRequest{Number: 104, Title: "Hand-made", Author: "pat", Labels: []string{"stage/085-needs-decision", "needs-decision"}}},
 		},
 		HeldPrs: []any{
-			FrontendPR{PullRequest: github.PullRequest{Number: 105, Title: "Parked", Author: "pat", Labels: []string{"hold"}, Draft: true}},
+			FrontendPR{PullRequest: github.PullRequest{Number: 105, Title: "Parked", Author: "pat", Labels: []string{"do-not-merge/blocked-paths"}, Draft: true}},
 		},
 	}}
 	s.UpdateStatus(status)
@@ -233,8 +233,8 @@ func TestStageTrackerEndpoint(t *testing.T) {
 			}
 		}
 	}
-	// The origin/<source> provenance label is surfaced as-is for hive-filed
-	// issues; a human-filed issue carries none.
+	// The provenance source is surfaced for hive-filed issues from the
+	// canonical agent/<lane> label; a human-filed issue carries none.
 	if got := trackerItem(t, resp, "issue", 8).Origin; got != "scanner" {
 		t.Fatalf("issue 8 origin = %q, want scanner", got)
 	}
@@ -280,7 +280,7 @@ func TestStageTrackerEndpoint(t *testing.T) {
 	}
 
 	pr105 := trackerItem(t, resp, "pr", 105)
-	if pr105.Stage != 0 || !hasMod(pr105, modHold) || !hasMod(pr105, modDraft) || pr105.Caption != "No stage recorded yet" {
+	if pr105.Stage != 0 || !hasMod(pr105, modHold) || !hasMod(pr105, modDraft) || pr105.Caption != "No stage recorded yet" || !slices.Contains(pr105.Labels, "do-not-merge/blocked-paths") {
 		t.Fatalf("held pr105 = %+v", pr105)
 	}
 

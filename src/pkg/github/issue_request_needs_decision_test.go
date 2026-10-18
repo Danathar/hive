@@ -98,7 +98,7 @@ func TestIssueRequestWatcher_NeedsDecisionAppliesConfiguredLabel(t *testing.T) {
 		t.Errorf("configured needs-decision label not applied; create labels = %v", labels)
 	}
 	if !hasLabelFold(labels, "agent/architect") {
-		t.Errorf("agent's own labels dropped; create labels = %v", labels)
+		t.Errorf("agent author-kind label dropped; create labels = %v", labels)
 	}
 	if hasLabelFold(labels, issueNeedsDecisionLabel) {
 		t.Errorf("default label applied although a different one is configured; create labels = %v", labels)

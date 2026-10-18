@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/outputschema"
 	"github.com/hivecommons/hive/pkg/review"
 )
@@ -20,7 +21,7 @@ import (
 const (
 	DefaultReviewBacklogIssueCap = 3
 	reviewBacklogFile            = "review-backlog-issues.json"
-	reviewBacklogLabel           = OriginReviewerLabel
+	reviewBacklogLabel           = config.DefaultReviewBacklogLabel
 	reviewBacklogSummaryMarker   = "<!-- hive:review-backlog-summary v1 -->"
 	reviewBacklogLinkMarker      = "<!-- hive:review-backlog-link "
 )
@@ -341,7 +342,7 @@ func (c *Client) acceptedReviewBacklogReports(req ReviewRequest, reports []revie
 		if !strings.EqualFold(strings.TrimSpace(report.Repo), strings.TrimSpace(req.Repo)) || report.Number != req.Number {
 			continue
 		}
-		ok, _, _, _ := c.verdictDispatchAuthorized(report, req)
+		ok, _, _, _, _ := c.verdictDispatchAuthorized(report, req)
 		if !ok {
 			continue
 		}

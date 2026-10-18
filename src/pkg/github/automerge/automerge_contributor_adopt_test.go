@@ -23,11 +23,16 @@ type adoptAPI struct {
 	nextPR      int
 	superseders map[int]map[string]any // number → GET payload
 	prEdits     []string
-	commits     map[string]string // sha → GitHub login of author/committer
+	commits     map[string]adoptCommit
+}
+
+type adoptCommit struct {
+	login    string // GitHub login of author/committer, or git:<name> for an unlinked identity
+	verified bool
 }
 
 func newAdoptAPI() *adoptAPI {
-	return &adoptAPI{refs: map[string]string{}, nextPR: 90, superseders: map[int]map[string]any{}, commits: map[string]string{}}
+	return &adoptAPI{refs: map[string]string{}, nextPR: 90, superseders: map[int]map[string]any{}, commits: map[string]adoptCommit{}}
 }
 
 func (a *adoptAPI) handle(w http.ResponseWriter, r *http.Request) bool {
@@ -82,17 +87,18 @@ func (a *adoptAPI) handle(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/commits/"):
 		sha := strings.TrimPrefix(path, "/repos/acme/widget/commits/")
-		login, ok := a.commits[sha]
+		commit, ok := a.commits[sha]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
-		if name, ok := strings.CutPrefix(login, "git:"); ok {
+		verification := map[string]any{"verified": commit.verified}
+		if name, ok := strings.CutPrefix(commit.login, "git:"); ok {
 			// Unlinked identity: bare git author/committer name, no GitHub user.
-			_ = json.NewEncoder(w).Encode(map[string]any{"sha": sha, "author": nil, "committer": nil, "commit": map[string]any{"author": map[string]any{"name": name}, "committer": map[string]any{"name": name}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": sha, "author": nil, "committer": nil, "commit": map[string]any{"author": map[string]any{"name": name}, "committer": map[string]any{"name": name}, "verification": verification}})
 			return true
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"sha": sha, "author": map[string]any{"login": login}, "committer": map[string]any{"login": login}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": sha, "author": map[string]any{"login": commit.login}, "committer": map[string]any{"login": commit.login}, "commit": map[string]any{"verification": verification}})
 		return true
 	case r.Method == http.MethodPatch && strings.HasPrefix(path, "/repos/acme/widget/pulls/"):
 		var body map[string]any
@@ -126,7 +132,13 @@ func (a *adoptAPI) allowMaintainerEdits(n int, allow bool) {
 func (a *adoptAPI) setCommitAuthor(sha, login string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.commits[sha] = login
+	a.commits[sha] = adoptCommit{login: login}
+}
+
+func (a *adoptAPI) setVerifiedCommitAuthor(sha, login string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.commits[sha] = adoptCommit{login: login, verified: true}
 }
 
 func (a *adoptAPI) setSuperseder(n int, state string, merged bool) {
@@ -199,7 +211,7 @@ func (h *adoptHarness) addedLabels() []string {
 }
 
 func adoptPolicy() StageLabelPolicy {
-	return StageLabelPolicy{Enabled: true, ContributorNudge: true, Adoption: true, GraceOnline: 2 * time.Hour, GraceOffline: time.Hour, HiveID: "acme-hive"}
+	return StageLabelPolicy{Enabled: true, ContributorNudge: true, Adoption: true, AdoptionStrictAttribution: true, GraceOnline: 2 * time.Hour, GraceOffline: time.Hour, HiveID: "acme-hive"}
 }
 
 func TestAdoptionGraceSelection(t *testing.T) {
@@ -278,8 +290,46 @@ func TestAdoptionGraceSelection(t *testing.T) {
 	if due, _ := adoptionDue(rec, "ccc", p, now.Add(3*time.Hour), none, false); due {
 		t.Fatal("due while adopted in place")
 	}
-	if got := adoptionCloses("Closes #12\nfixes acme/other#3\nnot closes #9 here\n"); len(got) != 2 || got[0] != "Closes #12" || got[1] != "fixes acme/other#3" {
+	if got := adoptionCloses("Closes #12\nfixes acme/other#3\nnot closes #9 here\n\nHive-Run: acme/widget#44\n"); len(got) != 3 || got[0] != "Closes #12" || got[1] != "fixes acme/other#3" || got[2] != "Fixes #44" {
 		t.Fatalf("closes lines %q", got)
+	}
+}
+
+func TestAdoptionDCORehomeDecisionAndRendering(t *testing.T) {
+	obs := stageObservation{
+		Number:  7,
+		Author:  "mallory",
+		Title:   "✨ feature: add widgets",
+		BaseRef: "v5",
+		Body:    "Implements widgets.\n\nHive-Run: acme/widget#44\n",
+		Detail:  stageDetail{DCO: stagelabels.DCONo, DCOTotal: 3, DCOUnsigned: 2},
+	}
+	if !adoptionNeedsDCORehome(obs, false) {
+		t.Fatal("unsigned commits without branch push permission must re-home")
+	}
+	if adoptionNeedsDCORehome(obs, true) {
+		t.Fatal("branch push permission allows in-place DCO repair")
+	}
+	obs.Detail.DCOUnsigned = 0
+	if adoptionNeedsDCORehome(obs, false) {
+		t.Fatal("signed head does not need DCO re-home")
+	}
+	obs.Detail.DCOUnsigned = 2
+	body := AdoptionPRBody(obs, stagelabels.Record{Reason: "check-failing:dco"}, true)
+	for _, want := range []string{
+		"**DCO repair required:**",
+		"cherry-pick each original commit with `git cherry-pick -s`",
+		"git commit --author",
+		"same title",
+		"close #7",
+		"✨ feature: add widgets",
+		"Supersedes #7 (adopted; re-pushed with DCO sign-off, original authorship preserved).",
+		"Fixes #44",
+		"Credit: original work by @mallory.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
 	}
 }
 
@@ -616,9 +666,10 @@ func TestAdoptionInPlaceWhenMaintainerCanModify(t *testing.T) {
 		t.Fatalf("adoption did not follow the hive's head: %+v", rec)
 	}
 
-	// A fixer agent pushes with a bare git identity (no GitHub login): that
-	// is the hive's work too, not the contributor returning.
+	// A fixer agent pushes with a bare git identity (no GitHub login): the
+	// hive keeps ownership only when it recorded this exact pushed head.
 	h.adopt.setCommitAuthor("bb2", "git:scanner")
+	h.e.stageStoreOrShared().MarkHivePushedHead(stageKey("acme", "widget", 7), "bb2")
 	h.api.reset()
 	h.clock.advance(time.Minute)
 	h.observe(adoptPR(7, "bb2", adopted...), "check-failing:unit")
@@ -655,6 +706,151 @@ func TestAdoptionInPlaceWhenMaintainerCanModify(t *testing.T) {
 	h.observe(adoptPR(7, "ccc", labels...), "check-failing:unit")
 	if len(h.api.comments) != 0 {
 		t.Fatalf("yield repeated: %v", h.api.comments)
+	}
+}
+
+func TestAdoptionInPlaceForConflictingOfflineContributor(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	h.observe(adoptPR(7, "aaa"), "conflicting")
+	if got := nudgeComments(h.api); len(got) != 1 || !strings.Contains(got[0], "needs a rebase") {
+		t.Fatalf("conflict nudge: %v", h.api.comments)
+	}
+	labels := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
+	h.api.reset()
+	h.clock.advance(30 * time.Minute)
+	h.observe(adoptPR(7, "aaa", labels...), "conflicting")
+	comments := adoptionComments(h.api)
+	if len(comments) != 1 ||
+		!strings.Contains(comments[0], "reason=contributor-offline mode=in-place head=aaa") ||
+		!strings.Contains(comments[0], "your hive has been offline since the nudge") {
+		t.Fatalf("conflicting offline adoption: %v", h.api.comments)
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", 7))
+	if !rec.AdoptedInPlace() || rec.AdoptReason != AdoptReasonOffline {
+		t.Fatalf("record: %+v", rec)
+	}
+}
+
+func TestAdoptionYieldsOnForgeableCommitIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity string
+	}{
+		{name: "forged scanner author name", identity: "git:scanner"},
+		{name: "forged app login in git name", identity: "git:" + testHiveAppBotLogin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := adoptPolicy()
+			p.AdoptInPlace = true
+			h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+			defer done()
+			h.adopt.allowMaintainerEdits(7, true)
+			h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+			h.clock.advance(30 * time.Minute)
+			h.observe(adoptPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
+			h.e.stageStoreOrShared().MarkHivePushedHead(stageKey("acme", "widget", 7), "prior-hive-head")
+			h.adopt.setCommitAuthor("bbb", tc.identity)
+
+			h.api.reset()
+			h.clock.advance(time.Minute)
+			res := h.observe(adoptPR(7, "bbb", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")
+			if rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", 7)); rec.AdoptedInPlace() || rec.YieldedHead != "bbb" {
+				t.Fatalf("forgeable identity kept adoption: %+v", rec)
+			}
+			var yields int
+			for _, c := range h.api.comments {
+				if strings.HasPrefix(c, AdoptionYieldMarker) {
+					yields++
+				}
+			}
+			if yields != 1 || res.Comments == 0 {
+				t.Fatalf("yield comments=%d res=%+v comments=%v", yields, res, h.api.comments)
+			}
+		})
+	}
+}
+
+func TestAdoptionKeepsOnAppLinkedOrRecordedHead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*adoptHarness, string)
+	}{
+		{name: "app committer login", setup: func(h *adoptHarness, head string) {
+			h.adopt.setVerifiedCommitAuthor(head, testHiveAppBotLogin)
+		}},
+		{name: "recorded hive-pushed head", setup: func(h *adoptHarness, head string) {
+			h.adopt.setCommitAuthor(head, "git:scanner")
+			h.e.stageStoreOrShared().MarkHivePushedHead(stageKey("acme", "widget", 7), head)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := adoptPolicy()
+			p.AdoptInPlace = true
+			h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+			defer done()
+			h.adopt.allowMaintainerEdits(7, true)
+			h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+			h.clock.advance(30 * time.Minute)
+			h.observe(adoptPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
+			tc.setup(h, "bbb")
+
+			h.api.reset()
+			h.clock.advance(time.Minute)
+			h.observe(adoptPR(7, "bbb", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")
+			if h.api.writes() != 0 {
+				t.Fatalf("churn after hive-evidenced push: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
+			}
+			if rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", 7)); !rec.AdoptedInPlace() || rec.AdoptedHead != "bbb" {
+				t.Fatalf("adoption did not follow hive-evidenced head: %+v", rec)
+			}
+		})
+	}
+}
+
+func TestAdoptionKeepsWhenHeadCommitLookupFails(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+	h.clock.advance(30 * time.Minute)
+	h.observe(adoptPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
+
+	h.api.reset()
+	h.clock.advance(time.Minute)
+	h.observe(adoptPR(7, "missing", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")
+	if h.api.writes() != 0 {
+		t.Fatalf("churn after unknown pusher: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
+	}
+	if rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", 7)); !rec.AdoptedInPlace() || rec.AdoptedHead != "missing" {
+		t.Fatalf("adoption did not stay on unknown pusher: %+v", rec)
+	}
+}
+
+func TestAdoptionStrictAttributionSafetyValveBeforeRepoEvidence(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+	h.clock.advance(30 * time.Minute)
+	h.observe(adoptPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
+	h.adopt.setCommitAuthor("bbb", "git:scanner")
+
+	h.api.reset()
+	h.clock.advance(time.Minute)
+	h.observe(adoptPR(7, "bbb", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")
+	if h.api.writes() != 0 {
+		t.Fatalf("safety valve churned: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
+	}
+	if rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", 7)); !rec.AdoptedInPlace() || rec.AdoptedHead != "bbb" {
+		t.Fatalf("safety valve did not keep adoption before repo evidence: %+v", rec)
 	}
 }
 

@@ -1382,6 +1382,8 @@
     .ham-seg.blank { visibility: hidden; }
     .ham-sub { display: grid; gap: var(--sp-2); margin-top: var(--sp-3); }
     .ham-seg.active { background: var(--amber); color: var(--surface-0); animation: ham-pulse 1.6s ease-in-out infinite; }
+    .ham-seg.active.ham-open-hold { background: var(--yellow); color: var(--surface-0); }
+    .ham-seg.active.ham-open-hold .ham-seg-t::before { content: '⏸'; margin-right: var(--sp-1); }
     .ham-detour { overflow: hidden; text-overflow: ellipsis; }
     @keyframes ham-pulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
     .ham-empty { color: var(--muted); font-size: var(--fs-sm); padding: var(--sp-4) 0; }
@@ -2574,7 +2576,10 @@
          ellipsis; the wrapper scrolls horizontally to reach method/model. */
       .gov-matrix { min-width: 680px; }
     }
-    .gov-matrix { margin-top: 14px; width: 100%; border-collapse: collapse; font-size: 0.72rem; table-layout: fixed; }
+    .gov-matrix-templates-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-top: var(--sp-3); flex-wrap: wrap; }
+    .gov-matrix-templates-label { font-size: var(--fs-xs); color: var(--muted); font-weight: 600; }
+    .gov-matrix-templates-buttons { display: inline-flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .gov-matrix { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 0.72rem; table-layout: fixed; }
     .gov-matrix th { color: var(--muted); font-weight: 600; padding: 3px 8px; text-align: center; border-bottom: 1px solid var(--border); }
     .gov-matrix th.mode-active { border-radius: 4px 4px 0 0; padding: 4px 10px; font-weight: 700; }
     .gov-matrix th.mode-idle  { color: var(--green); }
@@ -6955,7 +6960,7 @@
 
         <details class="faq-q" id="faq-evidence-card">
           <summary>What is the Evidence card, and what do its charts prove?</summary>
-          <p>The Evidence card in the Throughput section summarises <em>review evidence bundles</em>: one JSON record per PR head commit of what Hive reviewed, what CI said, who acted and how it merged. Its panels (outcome by author kind, reviewer calibration, reviewer accuracy × model family, boundary enforcement, claim vs verdict, work balance, and shadow gates) follow the 24h / 7d / 30d / custom window pills, and each panel's ⓘ button opens a plain-language explainer ending in a grade of Strong, Fair, Weak or Not enough data. The charts show what was recorded; they do not prove a merge was correct ("merged" is not "correct", an open PR counts as not merged, and evidence only exists since the feature shipped), and nothing in them is read by anything that decides a merge. See <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/review-evidence.md#how-to-read-the-evidence-card" target="_blank" rel="noopener noreferrer">How to read the Evidence card</a>.</p>
+          <p>The Evidence card in the Throughput section summarises <em>review evidence bundles</em>: one JSON record per PR head commit of what Hive reviewed, what CI said, who acted and how it merged. Its panels (outcome by author kind, reviewer calibration, reviewer accuracy × model family, maintainability trend, boundary enforcement, claim vs verdict, work balance, and shadow gates) follow the 24h / 7d / 30d / custom window pills, and each panel's ⓘ button opens a plain-language explainer ending in a grade of Strong, Fair, Weak or Not enough data — except Maintainability trend, which is report-only and ends in a "Not graded" badge instead. The charts show what was recorded; they do not prove a merge was correct ("merged" is not "correct", an open PR counts as not merged, and evidence only exists since the feature shipped), and nothing in them is read by anything that decides a merge. See <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/review-evidence.md#how-to-read-the-evidence-card" target="_blank" rel="noopener noreferrer">How to read the Evidence card</a>.</p>
         </details>
 
         <details class="faq-q" id="faq-behind">
@@ -12902,7 +12907,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_ATTENTION_STAGES = [71, 72, 85, 90];
     // Label families a chip row is built from, in display order; other
     // labels follow when at least two items carry them.
-    const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/'];
+    const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/', 'hold', 'on-hold', 'do-not-merge', 'hive-pause/'];
     const STAGE_TRACKER_SORTS = ['furthest', 'waiting', 'newest', 'number'];
     function stageTrackerDefaultFilter() {
       return { kind: 'all', repo: '', q: '', labels: [], age: 'any', author: 'any', attention: false, sort: 'furthest', dir: 'desc', size: STAGE_TRACKER_DEFAULT_PAGE_SIZE, page: 1 };
@@ -12912,8 +12917,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerHeadline(item) {
       const n = Number(item.stage) || 0;
       const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      const holdLabels = stageTrackerHoldLabels(item);
       if (mods.indexOf('stalled') >= 0) return 'Stalled';
       if (mods.indexOf('regressed') >= 0) return 'Sent back';
+      if (n === 0 && mods.indexOf('hold') >= 0) return 'Open · on hold' + (holdLabels.length ? ' (' + holdLabels.join(', ') + ')' : '');
       // An issue on 085 of its own (no covering PR) is parked on a person
       // itself, so no "(its PR)" suffix.
       const viaPR = item.kind === 'issue' && n >= 50 && (n !== 85 || item.via_pr) ? ' (its PR)' : '';
@@ -12936,6 +12943,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 110: return 'Merged';
         default: return item.stage_label || 'Tracking';
       }
+    }
+
+    function stageTrackerHoldLabels(item) {
+      const labels = Array.isArray(item.labels) ? item.labels : [];
+      return labels.filter(label => {
+        const l = String(label || '').trim().toLowerCase();
+        return l === 'do-not-merge' || l.startsWith('do-not-merge/') || l.startsWith('hive-pause/') ||
+          l.indexOf('hold') >= 0 || l.indexOf('on-hold') >= 0 || l.indexOf('hold/review') >= 0;
+      });
     }
 
     // Which strip segment a stage lights: main stages light themselves,
@@ -12974,8 +12990,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         else if (n === anchor) state = 'active';
         // The lit column's tooltip names the real stage (030 vs 040, 060 vs 080).
         const tipStage = (state === 'active' && !detour && curStage.label) ? curStage : st;
-        const word = state === 'active' && STAGE_TRACKER_ACTIVE_WORD[cur] ? STAGE_TRACKER_ACTIVE_WORD[cur] : (st.short || st.label || String(n));
-        return { number: n, code: n ? String(n).padStart(3, '0') : '', short: word, label: tipStage.label || st.label || String(n), description: tipStage.description || st.description || '', state, terminal: false, detour: n === anchor ? detour : null };
+        let word = state === 'active' && STAGE_TRACKER_ACTIVE_WORD[cur] ? STAGE_TRACKER_ACTIVE_WORD[cur] : (st.short || st.label || String(n));
+        const openHold = n === 0 && state === 'active' && (Array.isArray(item.modifiers) ? item.modifiers : []).indexOf('hold') >= 0;
+        if (openHold) word = 'Open · hold';
+        return { number: n, code: n ? String(n).padStart(3, '0') : '', short: word, label: tipStage.label || st.label || String(n), description: tipStage.description || st.description || '', state, terminal: false, detour: n === anchor ? detour : null, hold: openHold };
       });
       segs.push({ number: STAGE_TRACKER_TERMINAL, code: '', short: 'Merged', label: 'Merged', description: 'Merged — the pipeline is complete', state: terminal ? 'active' : 'todo', terminal, cap: true, detour: null });
       return segs;
@@ -13059,7 +13077,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const actorIco = actorKind ? stageTrackerIcon(actorKind, 'ham-ico ham-actor-ico', 'Next move: ' + actorKind) : '';
       return segs.map(sg => {
         if (sg.number < from || sg.number > to) return `<li class="ham-seg blank${sg.cap ? ' cap' : ''}" aria-hidden="true"></li>`;
-        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : ''].filter(Boolean).join(' ');
+        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : '', sg.hold ? 'ham-open-hold' : ''].filter(Boolean).join(' ');
         let tip = sg.label + (sg.description ? ' — ' + sg.description : '');
         // The shared Merge gate word hides 080 vs 100; the chevron tooltip carries it.
         if (sg.state === 'active' && !sg.detour && (curStage === 60 || curStage === 80)) tip = sg.label + ' — not yet admitted' + (item.caption || item.reason ? ' — ' + (item.caption || item.reason) : '');
@@ -13079,7 +13097,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const sinceMs = Date.parse(item.stage_since || '');
       const trail = Array.isArray(item.history) && item.history.length > 1
         ? item.history.slice(-STAGE_TRACKER_TRAIL_HOPS).map(h => String(h.stage).padStart(3, '0')).join(' → ') : '';
-      const lines = [stageTrackerHeadline(item), item.caption || item.reason || '', item.repo || ''];
+      const openHeld = (Number(item.stage) || 0) === 0 && mods.indexOf('hold') >= 0;
+      const lines = openHeld
+        ? [stageTrackerHeadline(item) + (item.caption || item.reason ? ' · ' + (item.caption || item.reason) : '') + (item.repo ? ' · ' + item.repo : '')]
+        : [stageTrackerHeadline(item), item.caption || item.reason || '', item.repo || ''];
       if (item.author || ak) lines.push('Author: ' + (item.author ? '@' + item.author : '') + (ak ? ' (author/' + ak + (item.author_kind_source === 'inferred' ? ', inferred' : '') + ')' : '') + (item.tier ? ' · ' + item.tier : ''));
       if (item.origin) lines.push('Origin: origin/' + item.origin);
       if (item.kind === 'issue' && Array.isArray(item.linked_prs) && item.linked_prs.length) lines.push('Covering PR: ' + item.linked_prs.map(lp => Number(lp.number) || 0).sort((x, y) => x - y).map(n => '#' + n).join(', '));
@@ -16305,7 +16326,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const cls = `mode-${m}${isActive ? ' mode-active' : ''}`;
         return `<th class="${cls}">${m}${isActive ? ' ◀' : ''}</th>`;
       }).join('');
-      return `<div class="gov-matrix-wrap"><table class="gov-matrix">
+      const templateBar = `<div class="gov-matrix-templates-bar">
+        <span class="gov-matrix-templates-label">Cadence templates:</span>
+        <div class="gov-matrix-templates-buttons">
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="testing" title="New Level testing: sets conservative cadence (surge: pause, busy: 2h, quiet: 4h, idle: 8h) for all agents to reduce risk of token over-consumption">New Level testing</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="weekly" title="Weekly sprint: sets moderate cadence (surge: 1h, busy: 2h, quiet: 4h, idle: 8h) for all agents">Weekly sprint</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="biweekly" title="Biweekly sprint: sets relaxed cadence (surge: 2h, busy: 4h, quiet: 8h, idle: 16h) for all agents">Biweekly sprint</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="daily" title="Daily cadence: sets active daily cadence (surge: 30m, busy: 1h, quiet: 2h, idle: 4h) for all agents">Daily cadence</button>
+        </div>
+      </div>`;
+      return `${templateBar}<div class="gov-matrix-wrap"><table class="gov-matrix">
         <thead><tr><th class="power-col" title="Agent power: 1 enabled, 0 disabled">Power</th><th></th>${headers}<th>method</th><th>model</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`;
@@ -24815,7 +24845,9 @@ function burnAreaChart() {
     const EV_CALIB_MIN_BUCKET_N = 5;        // calibration buckets with fewer known-outcome verdicts are drawn hollow and not joined
     const EV_DATA_SINCE = '2026-10-08';     // first live evidence bundles were written
     const EV_REVERTS_SINCE = '2026-10-15';  // reverted_by links recorded from this date
-    const EV_GRADES = { excellent: 'Excellent', good: 'Good', strong: 'Strong', fair: 'Fair', weak: 'Weak', none: 'Not enough data' };
+    // `ungraded` is for report-only panels that have no threshold to hold
+    // them to; unlike `none`, more data would not produce a grade.
+    const EV_GRADES = { excellent: 'Excellent', good: 'Good', strong: 'Strong', fair: 'Fair', weak: 'Weak', none: 'Not enough data', ungraded: 'Not graded' };
     // Rank for "card grade = the lower of the two" comparisons.
     const EV_GRADE_RANK = { none: -1, weak: 0, fair: 1, good: 2, strong: 3, excellent: 4 };
     function evLowerGrade(a, b) { return EV_GRADE_RANK[a] <= EV_GRADE_RANK[b] ? a : b; }
@@ -24880,7 +24912,8 @@ function burnAreaChart() {
       return `Merged is not the same as correct. A PR whose outcome is not recorded (reviewed here, but merged by someone else, closed by hand, or still open — the bundle cannot tell) is reported as unknown and left out of every rate, never counted as "not merged". Live evidence (verdicts, CI, sentinel) has only been recorded since ${EV_DATA_SINCE} and reverts only since ${EV_REVERTS_SINCE}; backfilled records reach further back but carry only author, outcome and dates.${short}`;
     }
     function evGradeLine(grade, why) {
-      return `<span class="ev-grade ${grade}">Rated: ${EV_GRADES[grade]}</span>${why ? ` <span class="ev-grade-why">${escapeHtml(why)}</span>` : ''}`;
+      const label = grade === 'ungraded' ? EV_GRADES.ungraded : `Rated: ${EV_GRADES[grade]}`;
+      return `<span class="ev-grade ${grade}">${label}</span>${why ? ` <span class="ev-grade-why">${escapeHtml(why)}</span>` : ''}`;
     }
 
     // Each explainer returns the four sections plus a grade. Text is written
@@ -24966,6 +24999,19 @@ function burnAreaChart() {
           grade, reason: grade === 'none' ? `needs at least ${EV_GRADE_MIN_N} known-outcome verdicts${evWindowHint(dto)}` : `worse rate ${evPct(worst)}`,
         };
       },
+      maintainability: (dto) => {
+        const rows = evMaintainabilityRows(dto);
+        const latest = rows.map((r) => r.months[r.months.length - 1]).filter(Boolean);
+        const over = latest.reduce((sum, m) => sum + (Number(m.functions_over_threshold) || 0), 0);
+        return {
+          matters: 'Complexity that rises over time adds review and maintenance cost; this is an observation, not a causal claim about agents.',
+          measured: 'Monthly Go cyclomatic complexity snapshots per repo: median, functions over threshold, and warnings by tool. ACMM markers show when each level was first observed.',
+          how: 'Snapshots within the window include boundary months. Missing months and tool measurements stay gaps. n counts repos with at least two snapshots; single snapshots remain visible as points.',
+          good: 'A flat or falling median and fewer functions over threshold. Complexity alone does not say whether a change was good.',
+          ours: `${rows.length} repo(s) with snapshots; ${over} function(s) over threshold in their latest months. Snapshots are monthly, so a short window can hold one month or none. ACMM markers come from evidence bundles, which have only been recorded since ${EV_DATA_SINCE}.`,
+          grade: 'ungraded', reason: 'report-only; no threshold to grade against',
+        };
+      },
       'shadow-gates': (dto) => {
         const sg = dto.shadow_gate || {};
         let heldN = 0, heldReverted = 0, heldMerged = 0, passedN = 0, passedReverted = 0, shadowUnknown = 0;
@@ -25035,7 +25081,7 @@ function burnAreaChart() {
         const depth = last.queue_issues != null || last.queue_prs != null ? `Queue at the end of ${last.week}: ${last.queue_issues != null ? last.queue_issues : '—'} open issues · ${last.queue_prs != null ? last.queue_prs : '—'} open PRs.` : 'No week-end queue depth sample in this window.';
         const hrs = evWindowHours();
         const short = hrs <= EV_SHORT_WINDOW_HOURS ? ` Only ${hrs}h of data is in this window, so treat the grade as an early read.` : '';
-        const auditNote = src.issues_github_since ? `Issue opens and closes come from GitHub (all authors, including humans and third-party bots) from ${src.issues_github_since}; ${src.audit_only_weeks ? `${src.audit_only_weeks} earlier week(s) fall back to the hive audit log, which only sees hive-mediated issue writes.` : 'every week in this window is GitHub-sourced.'}` : 'GitHub issue history has not been fetched yet on this hive, so issue opens and closes come from the hive audit log only: issues humans or other bots open directly on GitHub are not observed.';
+        const auditNote = src.issue_series_weeks ? `${src.issue_series_weeks} historical repository-week(s) come from backfilled GitHub issue history; ${src.audit_only_weeks || 0} week(s) include audit fallback. The collector remains authoritative within its coverage.` : src.issues_github_since ? `Issue opens and closes come from GitHub (all authors, including humans and third-party bots) from ${src.issues_github_since}; ${src.audit_only_weeks ? `${src.audit_only_weeks} earlier week(s) fall back to the hive audit log, which only sees hive-mediated issue writes.` : 'every week in this window is GitHub-sourced.'}` : 'GitHub issue history has not been fetched yet on this hive, so issue opens and closes come from the hive audit log only: issues humans or other bots open directly on GitHub are not observed.';
         return {
           matters: 'The question is whether the queue keeps up: are issues and PRs being closed and merged about as fast as they are opened, and is the pile of open work at the end of each week shrinking, flat or growing? Raw volume is not the point — a hive that opens 400 issues a week and closes 400 is fine.',
           measured: 'Each ISO week: issues opened (stacked by human / agent / bot) against issues closed; PRs opened (same split) against PRs merged and PRs closed without merge; and the number of actionable open issues and open PRs at the end of the week — the same queue the dashboard’s queue section shows.',
@@ -25265,6 +25311,79 @@ function burnAreaChart() {
         return `<g><text class="ev-lbl" x="0" y="${y0 + 11}">${escapeHtml(row.gate)}<title>${tip}</title></text><text class="ev-sub" x="0" y="${y0 + 21}">${escapeHtml(row.side)}</text>${seg('sm', row.merged)}${seg('sr', row.reverted)}${seg('so', row.open)}${seg('su', row.unknown)}<text class="ev-val" x="${w - 2}" y="${y0 + 16}" text-anchor="end">${row.n}</text></g>`;
       }).join('');
       return `<svg class="ev-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="Shadow gates: PRs the review gate or intent verification would have stopped or passed, by actual outcome">${body}</svg><div class="ev-legend"><span><i class="sm"></i>merged</span><span><i class="sr"></i>merged, later reverted</span><span><i class="so"></i>open (backfilled)</span><span><i class="su"></i>outcome unknown</span></div>`;
+    }
+
+    // Panel 7 (#12369). Monthly observations are report-only and independent
+    // of PR author kind. Missing tool measurements stay gaps, never zeroes.
+    function evMaintainabilityRows(dto) {
+      // Custom ranges carry from/to (to is exclusive) and hours is only the
+      // rounded span, so the month window must come from from/to when present.
+      const month = (ms) => new Date(ms).toISOString().slice(0, 7);
+      const fromMs = Date.parse(dto.from || ''), toMs = Date.parse(dto.to || '');
+      const custom = Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs;
+      const end = custom ? month(toMs - 1) : month(Date.now());
+      const start = custom ? month(fromMs) : Number(dto.hours) > 0 ? month(Date.now() - Number(dto.hours) * 3600000) : '';
+      return (Array.isArray(dto.complexity_by_repo) ? dto.complexity_by_repo : [])
+        .filter((r) => r && (!dto.repo || String(r.repo).toLowerCase() === String(dto.repo).toLowerCase()))
+        .map((r) => ({ repo: String(r.repo), months: (Array.isArray(r.months) ? r.months : [])
+          .filter((m) => m && /^\d{4}-\d{2}$/.test(m.month) && m.month >= start && m.month <= end)
+          .slice().sort((a, b) => a.month.localeCompare(b.month)) }))
+        .filter((r) => r.months.length).sort((a, b) => a.repo.localeCompare(b.repo));
+    }
+
+    function evMaintainabilitySvg(rows, changes) {
+      if (!rows.length) return '<div class="ev-empty">— no monthly complexity snapshots in this window</div>';
+      const months = [...new Set(rows.flatMap((r) => r.months.map((m) => m.month)))].sort();
+      const ordinal = (m) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7)) - 1;
+      const first = ordinal(months[0]), last = ordinal(months[months.length - 1]);
+      const w = EV_SVG_W, left = 38, right = 10, laneH = 110;
+      const x = (month) => left + (last > first ? (ordinal(month) - first) / (last - first) : 0.5) * (w - left - right);
+      const tools = [...new Set(rows.flatMap((r) => r.months.flatMap((m) => Object.keys(m.static_warnings_by_tool || {}))))].sort();
+      const metrics = [
+        { label: 'Median cyclomatic (Go)', keys: ['median_cyclomatic'], value: (m, k) => m[k], tipSuffix: () => '' },
+        { label: 'Functions over threshold', keys: ['functions_over_threshold'], value: (m, k) => m[k], tipSuffix: (m) => ' (threshold ' + m.threshold + ')' },
+        { label: 'Warnings by tool', keys: tools, value: (m, k) => (m.static_warnings_by_tool || {})[k], dashed: true, labelByKey: true, tipSuffix: () => '' }
+      ];
+      const valid = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+      const body = metrics.map((metric, mi) => {
+        const top = mi * laneH + 22, bottom = top + 64;
+        const values = rows.flatMap((r) => r.months.flatMap((m) => metric.keys.map((k) => metric.value(m, k)))).filter(valid);
+        const max = Math.max(1, ...values);
+        const y = (v) => bottom - v / max * 64;
+        let svg = `<text x="${left}" y="${top - 9}">${escapeHtml(metric.label)}</text><line class="ev-axis" x1="${left}" x2="${w - right}" y1="${bottom}" y2="${bottom}"/><text x="${left - 4}" y="${top + 4}" text-anchor="end">${max}</text><text x="${left - 4}" y="${bottom}" text-anchor="end">0</text>`;
+        if (!values.length) svg += `<text x="${left}" y="${top + 30}">No tool measurements</text>`;
+        rows.forEach((row, ri) => {
+          const byMonth = new Map(row.months.map((m) => [m.month, m]));
+          metric.keys.forEach((key, ki) => {
+            let points = [], marks = '';
+            const flush = () => {
+              if (points.length > 1) marks += `<polyline class="ev-line" stroke-dasharray="${metric.dashed ? (ki + 1) * 3 + ' 3' : 'none'}" points="${points.join(' ')}"/>`;
+              points = [];
+            };
+            // Include missing calendar months so lines do not imply measurements.
+            for (let month = first; month <= last; month++) {
+              const name = `${Math.floor(month / 12)}-${String(month % 12 + 1).padStart(2, '0')}`;
+              const m = byMonth.get(name), v = m && metric.value(m, key);
+              if (!valid(v)) { flush(); continue; }
+              const xx = x(name).toFixed(1), yy = y(v).toFixed(1);
+              points.push(`${xx},${yy}`);
+              const tip = `${row.repo} · ${name} · ${metric.labelByKey ? key : metric.label}: ${v}${metric.tipSuffix(m)}`;
+              marks += `<circle class="ev-pt" cx="${xx}" cy="${yy}" r="2.5"><title>${escapeHtml(tip)}</title></circle>`;
+            }
+            flush();
+            svg += `<g class="ev-c${ri % EV_PALETTE_SIZE}">${marks}</g>`;
+          });
+          (Array.isArray(changes) ? changes : []).filter((c) => String(c.repo).toLowerCase() === row.repo.toLowerCase() && c.month >= months[0] && c.month <= months[months.length - 1]).forEach((c) => {
+            const xx = x(c.month).toFixed(1);
+            svg += `<g class="ev-c${ri % EV_PALETTE_SIZE}"><line class="ev-line" stroke-dasharray="2 3" x1="${xx}" x2="${xx}" y1="${top}" y2="${bottom}"><title>${escapeHtml(`${row.repo} · ${c.month}: ACMM L${c.level} first observed`)}</title></line></g>`;
+          });
+        });
+        return svg;
+      }).join('');
+      const h = laneH * metrics.length + 12;
+      const labels = months.filter((m, i) => i === 0 || i === months.length - 1 || (months.length <= 4)).map((m) => `<text x="${x(m).toFixed(1)}" y="${h - 4}" text-anchor="${m === months[0] ? 'start' : m === months[months.length - 1] ? 'end' : 'middle'}">${m}</text>`).join('');
+      const legend = rows.map((r, i) => `<span class="ev-c${i % EV_PALETTE_SIZE}"><i class="dot"></i>${escapeHtml(r.repo)} (${r.months.length} months)</span>`).join('');
+      return `<svg class="ev-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="Maintainability trend: median cyclomatic, over-threshold functions and warnings by tool; vertical ACMM first-observed markers">${body}${labels}</svg><div class="ev-legend">${legend}<span>Dashed: ${escapeHtml(tools.join(', ') || 'no warning tools')} · vertical dotted: ACMM level first observed</span></div>`;
     }
 
     // Panel 4 (#12368): boundary enforcement — the N behind "nothing bad
@@ -25518,7 +25637,7 @@ function burnAreaChart() {
       const src = sources && typeof sources === 'object' ? sources : {};
       const sum = (key, sub) => rows.reduce((acc, r) => acc + (sub ? Object.values(r[key] || {}).reduce((a, v) => a + (Number(v) || 0), 0) : (Number(r[key]) || 0)), 0);
       const issuesOpened = sum('opened', true), issuesClosed = sum('closed'), prsOpened = sum('prs_opened', true), prsMerged = sum('prs_merged'), prsClosed = sum('prs_closed');
-      const headline = `<div class="ev-headline"><b>Queue at end of ${escapeHtml(String(last.week || ''))}: ${last.queue_issues != null ? last.queue_issues : '—'} open issues · ${last.queue_prs != null ? last.queue_prs : '—'} open PRs</b> <span class="ev-sub">· issues ${formatNumber(issuesOpened)} opened / ${formatNumber(issuesClosed)} closed (${evPct(evRate(issuesClosed, issuesOpened))}) · PRs ${formatNumber(prsOpened)} opened / ${formatNumber(prsMerged)} merged / ${formatNumber(prsClosed)} closed unmerged (${evPct(evRate(prsMerged, prsOpened))})${src.issues_github_since ? ` · issues from GitHub since ${escapeHtml(src.issues_github_since)}${src.audit_only_weeks ? `, ${src.audit_only_weeks} earlier week(s) audit-log only` : ''}` : ' · issues from the hive audit log only'}</span></div>`;
+      const headline = `<div class="ev-headline"><b>Queue at end of ${escapeHtml(String(last.week || ''))}: ${last.queue_issues != null ? last.queue_issues : '—'} open issues · ${last.queue_prs != null ? last.queue_prs : '—'} open PRs</b> <span class="ev-sub">· issues ${formatNumber(issuesOpened)} opened / ${formatNumber(issuesClosed)} closed (${evPct(evRate(issuesClosed, issuesOpened))}) · PRs ${formatNumber(prsOpened)} opened / ${formatNumber(prsMerged)} merged / ${formatNumber(prsClosed)} closed unmerged (${evPct(evRate(prsMerged, prsOpened))})${src.issue_series_weeks ? ` · ${src.issue_series_weeks} historical repository-week(s) from GitHub backfill, ${src.audit_only_weeks || 0} week(s) include audit fallback` : src.issues_github_since ? ` · issues from GitHub since ${escapeHtml(src.issues_github_since)}${src.audit_only_weeks ? `, ${src.audit_only_weeks} earlier week(s) audit-log only` : ''}` : ' · issues from the hive audit log only'}</span></div>`;
       const issues = evFlowSvg(rows, { noun: 'issues', opened: 'opened', done: 'closed', doneLabel: 'closed', queue: 'queue_issues', source: 'issue_source', aria: 'Work balance: issues opened per week by human, agent and bot, against issues closed and open issues at week end' });
       const prs = evFlowSvg(rows, { noun: 'PRs', opened: 'prs_opened', done: 'prs_merged', doneLabel: 'merged', closed: 'prs_closed', queue: 'queue_prs', aria: 'Work balance: PRs opened per week by human, agent and bot, against PRs merged and open PRs at week end' });
       return `${headline}<div class="ev-flow"><div><h5>Issues</h5>${issues}</div><div><h5>Pull requests</h5>${prs}</div></div>`;
@@ -25535,6 +25654,8 @@ function burnAreaChart() {
       const modelN = models.reduce((sum, m) => sum + (Number(m && m.n) || 0), 0);
       const unknown = Number((dto.missing || {}).verdicts_model_unknown) || 0;
       const shadow = dto.shadow_gate || {};
+      const complexity = evMaintainabilityRows(dto);
+      const complexityN = complexity.filter((r) => r.months.length >= 2).length;
       const activity = dto.write_activity && typeof dto.write_activity === 'object' ? dto.write_activity : null;
       const writesN = activity ? Number(activity.total_writes) || 0 : 0;
       const directCoverage = activity && activity.direct ? (activity.direct.recorded === false ? ' Direct-write counters have not been recorded on this hive yet, so the total holds hive-mediated writes only.' : activity.direct.partial_coverage ? ` Direct-write counters have only been recorded since ${activity.direct.since}; earlier weeks hold hive-mediated writes only.` : '') : '';
@@ -25550,7 +25671,7 @@ function burnAreaChart() {
       const balanceN = balance.reduce((sum, w) => sum + (Number(w && w.n) || 0), 0);
       const balanceSrc = dto.work_balance_sources && typeof dto.work_balance_sources === 'object' ? dto.work_balance_sources : {};
       const throttleNote = (dto.missing || {}).throttle_windows_unavailable === false ? 'Shaded weeks are governor issue-creation throttle windows.' : 'Throttle windows not reported by this hive, so no weeks are shaded.';
-      const issueSourceNote = balanceSrc.issues_github_since ? `Issue opens and closes are GitHub-truth (all authors) from ${balanceSrc.issues_github_since}${balanceSrc.audit_only_weeks ? `; the ${balanceSrc.audit_only_weeks} earlier week(s) are audit-log only, where issues humans or third-party bots open directly on GitHub are not observed` : ''}.` : 'GitHub issue history has not been fetched yet, so issue opens and closes are audit-log only: issues humans or third-party bots open directly on GitHub are not observed and the human column is a floor.';
+      const issueSourceNote = balanceSrc.issue_series_weeks ? `${balanceSrc.issue_series_weeks} historical repository-week(s) use backfilled GitHub issue history; ${balanceSrc.audit_only_weeks || 0} week(s) include audit fallback, where human and third-party bot opens may be missing. Collector-covered weeks keep the collector data.` : balanceSrc.issues_github_since ? `Issue opens and closes are GitHub-truth (all authors) from ${balanceSrc.issues_github_since}${balanceSrc.audit_only_weeks ? `; the ${balanceSrc.audit_only_weeks} earlier week(s) are audit-log only, where issues humans or third-party bots open directly on GitHub are not observed` : ''}.` : 'GitHub issue history has not been fetched yet, so issue opens and closes are audit-log only: issues humans or third-party bots open directly on GitHub are not observed and the human column is a floor.';
       const rec = dto.ci_recovery && typeof dto.ci_recovery === 'object' ? dto.ci_recovery : {};
       const recGate = rec.gate || {}, recConv = rec.convergence || {};
       const scope = evWindowLabel() + (dto.repo ? ` · ${dto.repo}` : '');
@@ -25563,6 +25684,8 @@ function burnAreaChart() {
           `Bad outcomes such as reverts are not recorded in evidence bundles yet, so only merge and block rates are plotted. The merged rate counts only verdicts on PRs with a recorded outcome; verdicts on PRs with no recorded outcome are shown as unknown, not as unmerged. Buckets with fewer than ${EV_CALIB_MIN_BUCKET_N} known-outcome verdicts are dashed and not joined. Merged is not the same as correct.`)
         + evPanel('accuracy-by-model', 'Reviewer accuracy × model family', modelN, evAccuracySvg(models),
           `Outcome is recorded merge vs recorded close, not ground truth: an enforced block that was later fixed and merged counts as a false block (an advisory block is dissent before merge, never a false block), and an approval counts as a false approve only when the PR's record says it closed without merging. Verdicts on PRs with no recorded outcome (reviewed here, merged elsewhere or by hand, or still open) are excluded from both rates and reported as unknown.${unknown ? ` ${unknown} verdict(s) had no recorded reviewer model and are grouped as unknown.` : ''}`)
+        + evPanel('maintainability', 'Maintainability trend', complexityN, evMaintainabilitySvg(complexity, dto.acmm_changes),
+          'Report-only; Go-only cyclomatic complexity. No causal claim: complexity may rise. n = repos with at least 2 monthly snapshots in the selected window (boundary months included). Monthly repo measurements ignore author kind. Tool measurements can be unavailable; gaps are not zero. ACMM markers show the first month each level is seen in stored bundles, not the exact configuration change; returns to an earlier level are not shown.')
         + evPanel('boundary-enforcement', 'Boundary enforcement', writesN, evWriteActivitySvg(activity) + evSentinelSparkline(sentinel),
           `The denominator is every agent GitHub write the hive can see in the window: hive-mediated writes from the audit log plus direct writes through the proxy (weekly counters kept under /data). Blocked is what the proxy refused; would-block counts from intent verification are shown separately in the explainer and never counted as blocked.${directCoverage} Writes that bypass both the hive and the proxy are invisible here. Sentinel hits come from evidence bundles in the window. Blocked is not the same as harmful.`)
         + evPanel('claim-vs-verdict', 'CI gate — integrity + convergence', claimN, evCIGateHtml(rec) + evConvergenceSvg(rec.convergence) + evCIRecoveryHtml(rec) + evClaimVsVerdictSvg(claims),
@@ -33903,6 +34026,7 @@ function burnAreaChart() {
         case 'ocRemoveSidebarGroup': ocRemoveSidebarGroup(el.dataset.group); break;
         case 'ocToggleSidebarGroup': ocToggleSidebarGroup(el); break;
         case 'switchConfigTab': switchConfigTab(el.dataset.tab || el.dataset.arg0); break;
+        case 'applyCadenceTemplate': applyCadenceTemplate(el.dataset.arg0 || el.dataset.template); break;
         case 'nousSetMode': nousSetMode(el.dataset.mode || el.dataset.arg0); break;
         case 'nousOpenNewExperiment': nousOpenNewExperiment(); break;
         case 'nousEditExperiment': nousEditExperiment(el.dataset.arg0); break;
@@ -38076,7 +38200,7 @@ function burnAreaChart() {
       { tab: 'Labels', section: 'Labels', label: 'Stalled requires quiet', key: 'governor.labels.stage.stalled.require_quiet', text: 'stalled no activity quiet dwell head push comment review ci label governor.labels.stage.stalled.require_quiet governor.labels.stage.dwell' },
       { tab: 'Labels', section: 'Labels', label: 'Stage dwell overrides', key: 'governor.labels.stage.dwell', text: 'stage dwell stalled threshold governor.labels.stage.dwell' },
       { tab: 'Labels', section: 'Labels', label: 'Contributor nudge', key: 'governor.labels.stage.contributor_nudge.enabled', text: 'contributor nudge returned-to-contributor red ci fix-pr relay interrupt renudge presence window governor.labels.stage.contributor_nudge.enabled governor.labels.stage.contributor_nudge.renudge_interval governor.labels.stage.presence_window' },
-      { tab: 'Labels', section: 'Labels', label: 'Adopt red contributor PRs', key: 'governor.labels.stage.adoption.enabled', text: 'adoption adopted-by-hive stage 074 red contributor pr grace online offline supersede takeover in place after offline unregistered heartbeat governor.labels.stage.adoption.enabled governor.labels.stage.contributor_grace_online governor.labels.stage.contributor_grace_offline governor.labels.stage.adoption.after_offline governor.labels.stage.adoption.after_unregistered governor.labels.stage.adoption.in_place' },
+      { tab: 'Labels', section: 'Labels', label: 'Adopt red contributor PRs', key: 'governor.labels.stage.adoption.enabled', text: 'adoption adopted-by-hive stage 074 red contributor pr grace online offline supersede takeover in place after offline unregistered heartbeat governor.labels.stage.adoption.enabled governor.labels.stage.contributor_grace_online governor.labels.stage.contributor_grace_offline governor.labels.stage.adoption.after_offline governor.labels.stage.adoption.after_unregistered governor.labels.stage.adoption.in_place governor.labels.stage.adoption.strict_attribution strict attribution' },
       { tab: 'Hub', section: 'Contributor Relay', label: 'Fix budget', key: 'contribute.max_parallel_fixes', text: 'fix budget parallel fixes focus window red pr fix-pr preempt spawn contribute.max_parallel_fixes contribute.min_focus_window' },
       { tab: 'Logging', section: 'Logging', label: 'Governor logging', key: 'governor.logging.max_size_mb', text: 'governor logging directory level compression max size age backups governor.logging.compress governor.logging.dir governor.logging.level governor.logging.max_age_days governor.logging.max_backups governor.logging.max_size_mb' },
       { tab: 'Advisory', section: 'Advisory', label: 'Advisory digest', key: 'governor.advisory.max_findings', text: 'advisory digest max findings show all staleness pr autoclose target linear issue retry backoff' },
@@ -38099,7 +38223,7 @@ function burnAreaChart() {
       { tab: 'Features', section: 'Agents & tooling', label: 'Re-entrant turns and PR follow-up windows', key: 'turn.reentrant.enabled', text: 'reentrant re-entrant turn envelope background fleet pr follow-up resume window retention turn.reentrant.enabled turn.reentrant.background_fleet_enabled turn.pr_follow_up.max_age turn.pr_follow_up.resume_id_max_age turn.pr_follow_up.retention' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Data directories and session retention', key: 'data.metrics_dir', text: 'data directories metrics logs agent configs claude copilot bob sessions retention prune janitor data.agents_dir data.bob_sessions_dir data.claude_sessions_dir data.copilot_sessions_dir data.logs_dir data.metrics_dir data.session_retention_days' },
       { tab: 'Features', section: 'Integrations & observability', label: 'Standalone deployment upgrades', key: 'deployment.podman_mode', text: 'deployment podman quadlet rootless rootful docker compose upgrade helper request dir deployment.podman_mode deployment.upgrade_helper deployment.upgrade_request_dir' },
-      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
+      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label self authored decision policy reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.self_authored_decision_policy review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
       { tab: 'Features', section: 'Review gate', label: 'Review evidence bundles', key: 'evidence.enabled', text: 'review evidence bundles audit signing key ed25519 evidence.enabled evidence.signing_key_file' },
       { tab: 'Features', section: 'Integrations & observability', label: 'GitLab and Gitea forges', key: 'gitlab.gitlab_url', text: 'gitlab gitea forgejo codeberg forge instance url token env gitlab.gitlab_url gitlab.token_env gitea.gitea_url gitea.token_env' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Token mint key and TTL', key: 'mint.max_ttl_seconds', text: 'token mint signing key path max ttl lifetime jwt mint.key_path mint.max_ttl_seconds' },
@@ -43268,6 +43392,33 @@ function burnAreaChart() {
       markDirty('cadences', mode, value);
       renderConfigTab(_configState.tab);
     }
+    async function applyCadenceTemplate(templateKey) {
+      const templateDescriptions = {
+        'testing': 'New Level testing (surge: pause, busy: 2h, quiet: 4h, idle: 8h)',
+        'weekly': 'Weekly sprint (surge: 1h, busy: 2h, quiet: 4h, idle: 8h)',
+        'biweekly': 'Biweekly sprint (surge: 2h, busy: 4h, quiet: 8h, idle: 16h)',
+        'daily': 'Daily cadence (surge: 30m, busy: 1h, quiet: 2h, idle: 4h)'
+      };
+      const desc = templateDescriptions[templateKey] || templateKey;
+      if (!(await hiveConfirm(`Apply global cadence template "${desc}" to all configured agents across all governor modes? This replaces existing interval, schedule and on-demand cadences; continuous cadences are kept.`))) return;
+      try {
+        const res = await fetch('/api/config/governor/cadence-templates', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, _inceptionAuthHeaders()),
+          body: JSON.stringify({ template: templateKey })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(data.error || 'Failed to apply cadence template', 'error');
+          return;
+        }
+        noteStatusMutation(data.minStatusSeq);
+        showToast(`Applied ${desc} to ${data.agentsUpdated || 0} agents`, 'success');
+        if (typeof refreshStatus === 'function') refreshStatus();
+      } catch (err) {
+        showToast('Network error applying cadence template: ' + err.message, 'error');
+      }
+    }
     function switchToPerModeCadences() {
       if (!_configState.data.general) _configState.data.general = {};
       if (!_configState.data.cadences) _configState.data.cadences = {};
@@ -45124,7 +45275,7 @@ function burnAreaChart() {
         <div class="config-field">
           <label for="cfg-stage-grace-offline">Offline contributor grace ${yamlHint('governor.labels.stage.contributor_grace_offline')}</label>
           <input type="text" id="cfg-stage-grace-offline" value="${esc(stageGraceOffline)}" placeholder="1h" data-change-action="markDirty" data-arg0="labels" data-arg1="stage_grace_offline" data-arg-types="s,s,w">
-          <div class="config-help">Go duration after the comment-only nudge before an offline or external author's red PR is adopted. With live hub presence the hive instead waits ${yamlHint('governor.labels.stage.adoption.after_offline')} (default 30m) after a registered relay's last heartbeat, or ${yamlHint('governor.labels.stage.adoption.after_unregistered')} (default 2h) for an author with no profile here, and adopts in place on the PR's own branch when GitHub permits ${yamlHint('governor.labels.stage.adoption.in_place')} (default on) rather than opening a superseding PR.</div>
+          <div class="config-help">Go duration after the comment-only nudge before an offline or external author's red PR is adopted. With live hub presence the hive instead waits ${yamlHint('governor.labels.stage.adoption.after_offline')} (default 30m) after a registered relay's last heartbeat, or ${yamlHint('governor.labels.stage.adoption.after_unregistered')} (default 2h) for an author with no profile here, and adopts in place on the PR's own branch when GitHub permits ${yamlHint('governor.labels.stage.adoption.in_place')} (default on) rather than opening a superseding PR. An in-place adoption keeps a changed head only when GitHub links the commit to the App bot ${yamlHint('governor.labels.stage.adoption.strict_attribution')} (default on); otherwise the hive hands the PR back to the contributor.</div>
         </div>
         ${renderReporterTrustBlock()}
         <h4>Writing guide</h4>
@@ -48021,6 +48172,10 @@ function burnAreaChart() {
           <div class="config-field" style="margin-top:10px">
             <label>Human decision label ${yamlHint('review.human_decision_label')} ${settingHelpMark('review-swarm', 'configuration', 'Human decision label', `An EXISTING repo label applied when the review swarm holds a PR for a human, so those PRs can be filtered from the list. There is no fleet-wide default and no standard name &mdash; use whatever the governed repos already maintain (this fleet's bluefin spoke uses 3-human-queue). The label is never created: if it is blank, misspelled, or absent from a repo, labeling is skipped there and the review comment's in-body marker still carries the signal.`)}</label>
             <input type="text" value="${esc(rv.human_decision_label || '')}" placeholder="(none) — must already exist in the repo" data-change-action="markDirty" data-arg0="review" data-arg1="human_decision_label" data-arg-types="s,s,w">
+          </div>
+          <div class="config-field">
+            <label>Hive-authored decision questions ${yamlHint('review.self_authored_decision_policy')} ${settingHelpMark('review-swarm', 'configuration', 'Hive-authored decision questions', `resolve (default): sequencing, naming, config-shape, scope and land-now-vs-later questions on Hive-authored PRs are treated as advisory and the aggregate can approve. escalate: every decision marker parks the PR for a person. Risk questions (security, data loss, irreversible/public-facing behavior, policy/governance, licensing, spend, unreadable diff) always escalate.`)}</label>
+            <select data-change-action="markDirty" data-arg0="review" data-arg1="self_authored_decision_policy" data-arg-types="s,s,v">${['resolve', 'escalate'].map(v => `<option value="${v}"${((rv.self_authored_decision_policy || 'resolve') === v) ? ' selected' : ''}>${v}</option>`).join('')}</select>
           </div>
           <div class="config-field-row mt-4">
             <div class="config-field"><label>Max reviews per head ${yamlHint('review.max_reviews_per_head')} ${settingHelpMark('review-swarm', 'configuration', 'Max reviews per head', `Caps how many top-level hive reviews one PR head may receive before the relay refuses more (revisions and thread replies excepted). 0 or empty derives the cap: 1 with combined perspectives, one per perspective otherwise. A negative value disables the backstop.`)}</label><input type="number" step="1" value="${esc(String(rv.max_reviews_per_head || ''))}" placeholder="0 — derived" data-change-action="markDirty" data-arg0="review" data-arg1="max_reviews_per_head" data-arg-types="s,s,N"></div>

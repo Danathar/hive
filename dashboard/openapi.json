@@ -4587,6 +4587,53 @@
         }
       }
     },
+    "/api/contribute/repositories": {
+      "get": {
+        "tags": [
+          "Contributors"
+        ],
+        "summary": "Contribution-eligible repositories",
+        "description": "Public, unauthenticated. Lists the repositories a contributor relay can name in repo_scope: the hive's monitored repositories minus hub.disabled_repos. id is the lower-cased {forge}/{host}/{owner}/{name}.",
+        "responses": {
+          "200": {
+            "description": "Eligible repositories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repositories": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "forge": {
+                            "type": "string"
+                          },
+                          "host": {
+                            "type": "string"
+                          },
+                          "full_name": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "generated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/contribute/help-links": {
       "put": {
         "tags": [
@@ -7604,6 +7651,79 @@
           },
           "400": {
             "description": "Validation error on the effective budget values"
+          },
+          "403": {
+            "description": "Requires owner role"
+          }
+        }
+      }
+    },
+    "/api/config/governor/cadence-templates": {
+      "post": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Apply a cadence template to all agents",
+        "description": "Sets the surge/busy/quiet/idle cadences for every configured agent across the matching governor modes. Per-mode continuous cadences are preserved. Requires owner role.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "template"
+                ],
+                "properties": {
+                  "template": {
+                    "type": "string",
+                    "enum": [
+                      "testing",
+                      "new-level-testing",
+                      "weekly",
+                      "weekly-sprint",
+                      "biweekly",
+                      "biweekly-sprint",
+                      "daily",
+                      "daily-cadence"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Template applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "template": {
+                      "type": "string"
+                    },
+                    "agentsUpdated": {
+                      "type": "integer",
+                      "description": "Number of agents whose cadence was actually written (continuous cadences and modes missing from the config are skipped)"
+                    },
+                    "minStatusSeq": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or unknown template"
           },
           "403": {
             "description": "Requires owner role"

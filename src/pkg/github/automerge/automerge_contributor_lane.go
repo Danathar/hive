@@ -449,6 +449,9 @@ func (c *Engine) prefilterContributorLanePR(pr *gh.PullRequest, policy Contribut
 		}
 		return blocked
 	}
+	if hasLabelFold(labels, "needs-rebase") {
+		return "label:needs-rebase"
+	}
 	if excluded := policy.excludedLabel(labels); excluded != "" {
 		return "excluded-label:" + excluded
 	}
@@ -699,6 +702,12 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	}
 	c.noteStagePR(owner, repo, number, pr)
 	if reason := c.prefilterContributorLanePR(pr, policy); reason != "" {
+		if reason == contributorLaneReasonAppAuthored {
+			c.noteStageRole(owner, repo, number, stagelabels.RoleTrusted)
+		}
+		return AutoMergeSweepEvent{}, reason, nil
+	}
+	if reason := contributorLaneConflictReason(pr); reason != "" {
 		return AutoMergeSweepEvent{}, reason, nil
 	}
 	author := hgithub.SafeGetLogin(pr.GetUser())
@@ -838,6 +847,21 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	}
 	c.info("automerge merged", "tier", contributorLaneTier, "repo", displayRepo, "pr", number, "author", author, "issue", claim.Issue, "admitted_by", contributorLaneAdmitPath(claim), "soak", policy.Soak, "merge_sha", event.MergeSHA)
 	return event, "", nil
+}
+
+func contributorLaneConflictReason(pr *gh.PullRequest) string {
+	if pr == nil {
+		return ""
+	}
+	if hasLabelFold(labelNames(pr.Labels), "needs-rebase") {
+		return "label:needs-rebase"
+	}
+	switch strings.ToLower(strings.TrimSpace(pr.GetMergeableState())) {
+	case "dirty", "conflicting":
+		return "conflicting"
+	default:
+		return ""
+	}
 }
 
 // contributorLaneAdmitPath names the path that admitted the author for the

@@ -521,6 +521,16 @@ type ProjectContext struct {
 	// handed over without a token; the hub then refuses the agent's calls
 	// rather than falling back to a wider credential.
 	TaskMCPLaunchToken func(scope taskmcp.LaunchScope) string
+	// AppBotLogin and AppBotUserID identify the installed GitHub App's bot
+	// account. When AppAuthoredPRs is on, push-capable agents use this bot's
+	// noreply address ("<user id>+<login>@users.noreply.github.com") for git
+	// author/committer email so GitHub links their fixer commits to the App
+	// while the commit name and sign-off still name the lane. AppBotUserID
+	// resolves the bot's GitHub USER id (not the App id, which GitHub never
+	// links) and is called at each launch so a failed lookup (0) only costs
+	// that launch the linkage; nil means unknown.
+	AppBotLogin  string
+	AppBotUserID func() int64
 	// BobSessionPrefix mirrors governor.bob.session_prefix. Empty is
 	// default-off; bob launch commands remain byte-identical unless it or a
 	// per-agent bob.session_label is configured.

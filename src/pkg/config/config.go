@@ -178,6 +178,9 @@ type Config struct {
 	// Nous tunes the experimentation agent integration (RFC #11585). Every
 	// field has a default; an absent key changes nothing.
 	Nous NousConfig `yaml:"nous,omitempty" json:"nous,omitempty"`
+	// SelfExperiments gates the background-only Hive-self experiment
+	// scheduler (hivecommons/hive#12397). Default off → no tick runs.
+	SelfExperiments SelfExperimentsConfig `yaml:"self_experiments,omitempty" json:"self_experiments,omitempty"`
 	// Classification mirrors the Go-consumed subset of hive-project.yaml's
 	// `classification:` block (currently review_bots, hivecommons/hive#7360).
 	// Default empty → the review-thread reconciler is off.

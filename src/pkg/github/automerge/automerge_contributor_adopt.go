@@ -54,6 +54,8 @@ const (
 // superseding PR closes the same issues.
 var adoptClosesPattern = regexp.MustCompile(`(?im)^\s*(?:fixes|closes|resolves)\s+(?:[\w.-]+/[\w.-]+)?#\d+\s*$`)
 
+var adoptHiveRunPattern = regexp.MustCompile(`(?im)^\s*Hive-Run\s*:\s*(?:[\w.-]+/[\w.-]+)?#(\d+)\s*$`)
+
 // adoptionGrace returns the grace that applies to the record's first nudge.
 func adoptionGrace(rec stagelabels.Record, policy StageLabelPolicy) time.Duration {
 	if rec.NudgeOnline {
@@ -177,18 +179,50 @@ func adoptionBlocked(labels []string) string {
 func adoptionCloses(body string) []string {
 	var out []string
 	seen := map[string]bool{}
+	add := func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[strings.ToLower(line)] {
+			return
+		}
+		seen[strings.ToLower(line)] = true
+		out = append(out, line)
+	}
 	for _, m := range adoptClosesPattern.FindAllString(body, -1) {
-		line := strings.TrimSpace(m)
-		if !seen[strings.ToLower(line)] {
-			seen[strings.ToLower(line)] = true
-			out = append(out, line)
+		add(m)
+	}
+	for _, m := range adoptHiveRunPattern.FindAllStringSubmatch(body, -1) {
+		if len(m) == 2 {
+			add("Fixes #" + m[1])
 		}
 	}
 	return out
 }
 
+func adoptionNeedsDCORehome(obs stageObservation, canPushInPlace bool) bool {
+	return obs.Detail.DCO == stagelabels.DCONo && obs.Detail.DCOUnsigned > 0 && !canPushInPlace
+}
+
+func adoptionRehomeCommitMessage(obs stageObservation) string {
+	title := strings.TrimSpace(obs.Title)
+	if title == "" {
+		title = fmt.Sprintf("Adopt #%d", obs.Number)
+	}
+	var b strings.Builder
+	b.WriteString(title)
+	fmt.Fprintf(&b, "\n\nSupersedes #%d (adopted; re-pushed with DCO sign-off, original authorship preserved).\n", obs.Number)
+	for _, c := range adoptionCloses(obs.Body) {
+		b.WriteString(c)
+		b.WriteString("\n")
+	}
+	author := strings.TrimSpace(obs.Author)
+	if author != "" {
+		fmt.Fprintf(&b, "\nCredit: original work by @%s.\n", author)
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // AdoptionPRBody is the superseding App PR's body.
-func AdoptionPRBody(obs stageObservation, rec stagelabels.Record) string {
+func AdoptionPRBody(obs stageObservation, rec stagelabels.Record, dcoRehome bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Supersedes #%d (adopted after CI went red and the contributor was unavailable; original commits by @%s preserved).\n\n", obs.Number, obs.Author)
 	for _, c := range adoptionCloses(obs.Body) {
@@ -208,6 +242,15 @@ func AdoptionPRBody(obs stageObservation, rec stagelabels.Record) string {
 	b.WriteString("**Hive fix agent:** rebase this branch on `")
 	b.WriteString(nonEmpty(obs.BaseRef, "the base branch"))
 	b.WriteString("`, fix the failing checks / review asks, and push to THIS branch. Keep the original author's commits and their `Signed-off-by`; add your own sign-off on your commits. Do not open another PR.\n")
+	if dcoRehome {
+		b.WriteString("\n**DCO repair required:** this adoption has unsigned non-merge commits and the hive cannot repair them by amending the contributor branch. Re-home the work onto a hive-owned branch from `")
+		b.WriteString(nonEmpty(obs.BaseRef, "the base branch"))
+		b.WriteString("`: cherry-pick each original commit with `git cherry-pick -s` (or squash with `git commit --author` preserving the original author), ensure every replacement commit has `Signed-off-by`, push the DCO-clean branch, open/keep one superseding PR with the same title, then comment on and close #")
+		b.WriteString(strconv.Itoa(obs.Number))
+		b.WriteString(". Suggested replacement commit message:\n\n```text\n")
+		b.WriteString(adoptionRehomeCommitMessage(obs))
+		b.WriteString("\n```\n")
+	}
 	return b.String()
 }
 
@@ -235,7 +278,7 @@ const AdoptionYieldMarker = "<!-- hive:adoption-yield"
 
 // AdoptionYieldComment is that note.
 func AdoptionYieldComment(obs stageObservation) string {
-	return fmt.Sprintf("%s head=%s -->\n@%s you pushed a new head, so the hive has handed this PR back to you (`%s` → `%s`). It will nudge again if CI stays red.",
+	return fmt.Sprintf("%s head=%s -->\n@%s this PR has a new head without confirmed hive push evidence, so the hive has handed this PR back to you (`%s` → `%s`). It will nudge again if CI stays red.",
 		AdoptionYieldMarker, obs.HeadSHA, obs.Author, stagelabels.AdoptedByHive.Label(), stagelabels.ReturnedToContributor.Label())
 }
 
@@ -282,7 +325,12 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	}
 	c.info("stage labels: adopting contributor PR", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head", obs.HeadSHA, "reason", reason, "registered", presence.Registered, "online", presence.Online, "lane_reason", obs.Reason)
 
-	if policy.AdoptInPlace && c.canPushToPRBranch(ctx, obs) {
+	canPushInPlace := false
+	if policy.AdoptInPlace {
+		canPushInPlace = c.canPushToPRBranch(ctx, obs)
+	}
+	dcoRehome := adoptionNeedsDCORehome(obs, canPushInPlace)
+	if policy.AdoptInPlace && canPushInPlace && !dcoRehome {
 		store.MarkAdoptedInPlace(key, obs.HeadSHA, reason, now)
 		body := AdoptionInPlaceComment(obs, policy.HiveID, reason, grace, rec.NudgeOnline)
 		if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
@@ -331,7 +379,7 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 			Title: gh.Ptr(nonEmpty(strings.TrimSpace(obs.Title), fmt.Sprintf("Adopt #%d", number))),
 			Head:  gh.Ptr(branch),
 			Base:  gh.Ptr(obs.BaseRef),
-			Body:  gh.Ptr(AdoptionPRBody(obs, rec)),
+			Body:  gh.Ptr(AdoptionPRBody(obs, rec, dcoRehome)),
 		})
 		if apiErr != nil {
 			return effects.Result{}, effects.NotApplied(apiErr)
@@ -406,21 +454,31 @@ func (c *Engine) canPushToPRBranch(ctx context.Context, obs stageObservation) bo
 	return pr.GetMaintainerCanModify()
 }
 
-// settleInPlaceAdoption handles a head change on an in-place-adopted PR:
-// a push by the contributor means they are back, so the hive yields — one
-// note, adoption forgotten, the ordinary 072 flow re-arms. Any other push
-// keeps the adoption and moves it to the new head: the App's own commits,
-// and the fixer agents' commits, which carry a bare git identity (e.g.
-// "scanner") with no GitHub login and so cannot be matched to the App.
+// settleInPlaceAdoption handles a head change on an in-place-adopted PR with a
+// fail-closed attribution rule. The hive keeps ownership only when the new
+// commit carries GitHub-controlled evidence linking it to the App bot; the
+// stage store remembers heads that already passed that check so a re-observed
+// SHA is not re-fetched, but it is not a separate evidence source. Forgeable
+// git author/committer names and emails never count. If the commit lookup
+// fails, the pusher is unknown and the hive keeps adoption to avoid bounce
+// loops. The first deploy after this rule also keeps adoption until this repo
+// has recorded any App-linked head; after that, missing hive evidence means
+// the contributor is back, so the hive yields once and the ordinary 072 flow
+// re-arms.
 // Returns the number of comments posted.
-func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, prev stagelabels.Record) (int, error) {
+func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, prev stagelabels.Record, policy StageLabelPolicy) (int, error) {
 	if !prev.AdoptedInPlace() || obs.HeadSHA == "" || obs.HeadSHA == prev.AdoptedHead {
 		return 0, nil
 	}
 	if prev.YieldedHead == obs.HeadSHA {
 		return 0, nil
 	}
-	app := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.transport.AppBotLogin()), "[bot]"))
+	if prev.HivePushedHead(obs.HeadSHA) {
+		store.MarkAdoptedHead(key, obs.HeadSHA)
+		c.info("stage labels: adopted PR advanced by recorded hive push", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA)
+		return 0, nil
+	}
+	app := c.transport.AppBotLogin()
 	commit, _, err := c.gh.Repositories.GetCommit(ctx, obs.Owner, obs.Repo, obs.HeadSHA, nil)
 	if err != nil {
 		// Unknown pusher: keep the adoption rather than bounce the PR.
@@ -428,13 +486,24 @@ func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.S
 		store.MarkAdoptedHead(key, obs.HeadSHA)
 		return 0, nil
 	}
-	if commitByLogin(commit, app) || !commitByContributor(commit, obs.Author) {
+	if commitByApp(commit, app) {
+		store.MarkHivePushedHead(key, obs.HeadSHA)
 		store.MarkAdoptedHead(key, obs.HeadSHA)
 		c.info("stage labels: adopted PR advanced by the hive", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "pusher", commitIdentity(commit))
 		return 0, nil
 	}
+	if !policy.AdoptionStrictAttribution {
+		store.MarkAdoptedHead(key, obs.HeadSHA)
+		c.warn("stage labels: adopted head changed without hive evidence; strict attribution disabled, keeping adoption", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "pusher", commitIdentity(commit))
+		return 0, nil
+	}
+	if !store.HasHivePushEvidence(obs.Owner + "/" + obs.Repo) {
+		store.MarkAdoptedHead(key, obs.HeadSHA)
+		c.warn("stage labels: adopted head changed without hive evidence; no repo evidence recorded yet, keeping adoption", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "pusher", commitIdentity(commit))
+		return 0, nil
+	}
 	store.MarkYielded(key, obs.HeadSHA)
-	c.info("stage labels: contributor pushed over in-place adoption; yielding", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head", obs.HeadSHA)
+	c.info("stage labels: head changed without hive push evidence; yielding", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head", obs.HeadSHA, "pusher", commitIdentity(commit))
 	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(AdoptionYieldComment(obs))}); err != nil {
 		c.warn("stage labels: adoption yield note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
 		return 0, err
@@ -442,29 +511,8 @@ func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.S
 	return 1, nil
 }
 
-// commitByContributor reports whether the commit is attributable to the PR
-// author: a matching GitHub login, or — for an unlinked identity — a git
-// author/committer name equal to the login.
-func commitByContributor(commit *gh.RepositoryCommit, author string) bool {
-	author = strings.ToLower(strings.TrimSpace(author))
-	if commit == nil || author == "" {
-		return false
-	}
-	if commitByLogin(commit, author) {
-		return true
-	}
-	if c := commit.GetCommit(); c != nil {
-		for _, u := range []*gh.CommitAuthor{c.GetAuthor(), c.GetCommitter()} {
-			if strings.EqualFold(strings.TrimSpace(u.GetName()), author) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // commitIdentity renders the commit's pusher for logs: the GitHub login when
-// linked, else the git author name.
+// linked, else the git author name/email.
 func commitIdentity(commit *gh.RepositoryCommit) string {
 	if commit == nil {
 		return ""
@@ -475,17 +523,48 @@ func commitIdentity(commit *gh.RepositoryCommit) string {
 	if l := commit.GetCommitter().GetLogin(); l != "" {
 		return l
 	}
-	return commit.GetCommit().GetAuthor().GetName()
+	if c := commit.GetCommit(); c != nil {
+		if a := c.GetAuthor(); a != nil {
+			if name := strings.TrimSpace(a.GetName()); name != "" {
+				return name
+			}
+			return strings.TrimSpace(a.GetEmail())
+		}
+	}
+	return ""
+}
+
+// commitByApp reports whether GitHub linked the commit to the App's bot login.
+// A verified signature is useful only with that GitHub-controlled linkage; git
+// names/emails and unsigned linked contributor commits never establish hive
+// ownership.
+func commitByApp(commit *gh.RepositoryCommit, login string) bool {
+	if commit == nil || login == "" {
+		return false
+	}
+	if commitByLogin(commit, login) {
+		return true
+	}
+	if v := commit.GetCommit().GetVerification(); v != nil && v.GetVerified() {
+		return commitByLogin(commit, login)
+	}
+	return false
 }
 
 // commitByLogin reports whether the commit's GitHub author or committer is
 // login ([bot] suffix tolerated).
 func commitByLogin(commit *gh.RepositoryCommit, login string) bool {
-	if commit == nil || login == "" {
+	if commit == nil {
 		return false
 	}
-	norm := func(u *gh.User) string {
-		return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(u.GetLogin()), "[bot]"))
+	want := normalizeBotLogin(login)
+	if want == "" {
+		return false
 	}
-	return norm(commit.GetAuthor()) == login || norm(commit.GetCommitter()) == login
+	return normalizeBotLogin(commit.GetAuthor().GetLogin()) == want || normalizeBotLogin(commit.GetCommitter().GetLogin()) == want
+}
+
+func normalizeBotLogin(login string) string {
+	login = strings.ToLower(strings.TrimSpace(login))
+	return strings.TrimSuffix(login, "[bot]")
 }

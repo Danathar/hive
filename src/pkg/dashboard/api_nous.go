@@ -32,7 +32,7 @@ func (s *Server) handleNousStatus(w http.ResponseWriter, r *http.Request) {
 	for k, v := range s.deps.Nous.Config {
 		config[k] = v
 	}
-	ledger := append([]map[string]interface{}(nil), s.deps.Nous.Ledger...)
+	ledger := nousRepoOnlyLedger(s.deps.Nous.Ledger)
 	principles := append([]NousPrinciple(nil), s.deps.Nous.Principles...)
 	// Mode is the live trust-ladder knob (PUT /api/nous/mode); the Status
 	// map only carries the boot-time value, so without this the lab kept
@@ -44,6 +44,7 @@ func (s *Server) handleNousStatus(w http.ResponseWriter, r *http.Request) {
 	// The Experiment Lab is repo-only: the reported scope is always "repo"
 	// and any governor phase block published by the experiment loop is
 	// dropped so the lab never surfaces governor data.
+	nousDropSelfStatus(status)
 	status["scope"] = NousScopeRepo
 	status["phases"] = nousRepoOnlyPhases(status["phases"])
 	if question == "" {
@@ -110,12 +111,8 @@ func (s *Server) handleNousLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	s.syncNousKnowledge()
 	s.deps.Nous.Mu.Lock()
-	ledger := s.deps.Nous.Ledger
+	ledger := nousRepoOnlyLedger(s.deps.Nous.Ledger)
 	s.deps.Nous.Mu.Unlock()
-	if ledger == nil {
-		jsonResponse(w, []interface{}{})
-		return
-	}
 	jsonResponse(w, ledger)
 }
 
