@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-10-18 (v5.186.3)
+
+### Fixed
+
+- Review aggregation: a partial (incomplete) re-review no longer displaces a prior `changes_requested` or `reject` aggregate for the same repo/number/head/body-digest, extending the `requires_human` retention from #12909. PRs mid fix-cycle stay on the fix path instead of being sent back to re-ask missing perspectives, and the original `RecordedAt` is preserved. Fixes #12911.
+
 ## 2026-10-18 (v5.186.2)
 
 ### Fixed
