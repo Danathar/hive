@@ -104,7 +104,13 @@ body regardless
 ([#9435](https://github.com/hivecommons/hive/issues/9435)). A failed link
 (parent missing, GitHub's sub-issue cap reached, a transient API error, …)
 never stops the child issue from being created; the failure is logged and
-recorded on the request's result file (`parent_link_error`) instead.
+recorded on the request's result file (`parent_link_error`) instead. The
+watcher also appends a `<!-- hive:parent n -->` marker to the child body, so
+the relation survives a failed link. Once every child of `n` is closed the
+issue stage sweep closes `n` as completed, and while any child is open `n`
+is never marked `stage/stalled`
+([#12857](https://github.com/hivecommons/hive/issues/12857); see
+[labels-and-control-signals.md](labels-and-control-signals.md#decomposed-parents--closed-by-their-children-never-stalled)).
 
 `--blocked-by <n[,n]>` records that the new issue must wait for issue(s) `n`
 in the same repo, as GitHub "blocked by" dependencies
@@ -125,16 +131,14 @@ drops that pair with a warning and offers both.
 
 #### Parking an issue that needs a decision
 
-`--needs-decision` is the way an agent parks an issue it files. Use it when
-the body asks the maintainer to choose between options, or to approve before
-work can start. The script sends `"needs_decision": true` on the request, and
+`--needs-decision` is the way an agent parks an issue it files. Hive-authored issues must not use it for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions: with `project.agent_issue_decision_policy: resolve` (default), the relay records `Decision taken by hive: …`, keeps the issue actionable, and audits the downgrade. Use it only when the body asks the maintainer to decide a risk category, and include `Risk: <category>` for security posture, data loss, irreversible or public-facing behaviour, governance/policy/licensing, spend, owner-only credentials/secrets/infra, or uninferable human intent. The script sends `"needs_decision": true` on the request, and
 the watcher adds the hive's configured needs-decision label
 (`project.issue_filter.hard_suppress_labels.needs_decision`, first entry;
-`stage/085-needs-decision` by default — the retired `needs-decision` spelling
-is upgraded, [#12683](https://github.com/hivecommons/hive/issues/12683)) to the
+`stage/045-needs-decision` by default — the retired `needs-decision` spelling
+and the PR-only `stage/085-needs-decision` are upgraded, [#12683](https://github.com/hivecommons/hive/issues/12683)) to the
 create itself, whatever labels the agent named
 ([#11215](https://github.com/hivecommons/hive/issues/11215)). The issue is then
-parked like any other `stage/085-needs-decision` issue: it stays out of the
+parked like any other `stage/045-needs-decision` issue: it stays out of the
 actionable queue, the un-park sweep posts the "What to reply" notice, and the
 maintainer answers with `/hive approve` or `/hive decision` (see
 [maintainer-commands.md](maintainer-commands.md)). Every lane policy that files
@@ -277,8 +281,9 @@ Hive-controlled labels are refused in both directions: the merge-queue label
 `hive/` namespace, and the labels that record a human decision
 (`approved-direction`, `design-approved`, `needs-human`, `blocked`, the
 retired `needs-decision` / `needs-direction`, and every `stage/*` label
-except `stage/085-needs-decision`, which an agent may *add* to park an item on
-a maintainer ruling — never remove, [#12683](https://github.com/hivecommons/hive/issues/12683)). They are inputs to hive automation or records of someone's
+except the parks — `stage/045-needs-decision` on an issue,
+`stage/085-needs-decision` on a PR — which an agent may *add* to park an item on
+a maintainer ruling — never remove, [#12683](https://github.com/hivecommons/hive/issues/12683)). With the default issue decision policy, Hive-authored non-risk engineering parks are rewritten to `stage/010-actionable` with a note instead; risk parks should include `Risk: <category>`. They are inputs to hive automation or records of someone's
 verdict, so an agent may not set them through this operation; one reserved
 label refuses the whole request. Use `hive-open-issue claim` to record
 ownership. This refusal applies only to the `label` operation on an existing

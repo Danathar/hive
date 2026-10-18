@@ -95,15 +95,17 @@ func contributorLanePolicyFunc(cfg *config.Config) func() automerge.ContributorL
 			return automerge.ContributorLanePolicy{}
 		}
 		p := cfg.AutoMerge.ContributorLane
+		tier := cfg.AutoMerge.ContributorTier
 		return automerge.ContributorLanePolicy{
-			Enabled:                 p.IsEnabled(),
-			HiveID:                  cfg.HiveID,
-			Soak:                    time.Duration(p.EffectiveSoakMinutes()) * time.Minute,
-			RequireReviewerVerdict:  p.EffectiveRequireReviewerVerdict(),
-			Repos:                   p.RepoSet(),
-			ExcludeLabels:           p.ExcludeLabelSet(),
-			RequireTiers:            p.RequireTierSet(),
-			RegistryTiersSufficient: p.EffectiveRegistryTiersSufficient(),
+			Enabled:                  p.IsEnabled(),
+			HiveID:                   cfg.HiveID,
+			Soak:                     time.Duration(p.EffectiveSoakMinutes()) * time.Minute,
+			RequireReviewerVerdict:   p.EffectiveRequireReviewerVerdict(),
+			Repos:                    p.RepoSet(),
+			ExcludeLabels:            p.ExcludeLabelSet(),
+			RequireTiers:             p.RequireTierSet(),
+			RegistryTiersSufficient:  p.EffectiveRegistryTiersSufficient(),
+			AutoPromoteAfterMergedPR: tier.EffectiveAutoPromoteAfterMerged(),
 		}
 	}
 }
@@ -229,6 +231,7 @@ func contributorLaneVerdictFromArtifact(artifact review.Artifact, repo string, n
 	var match review.Aggregate
 	var ok bool
 	for _, item := range artifact.Items {
+		item = item.Normalize()
 		if item.Number == number && strings.EqualFold(strings.TrimSpace(item.Repo), strings.TrimSpace(repo)) && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(headSHA) {
 			if !ok || item.RecordedAt.After(match.RecordedAt) {
 				match = item
@@ -238,12 +241,15 @@ func contributorLaneVerdictFromArtifact(artifact review.Artifact, repo string, n
 	}
 	if ok {
 		return automerge.ContributorLaneVerdict{
-			Configured:        true,
-			Approved:          approved && match.MergeEligible && match.Verdict == review.VerdictApprove,
-			Verdict:           string(match.Verdict),
-			DecisionRequested: match.DecisionRequested,
-			DecisionQuestion:  match.DecisionQuestion,
-			HumanSummaries:    append([]string(nil), match.HumanSummaries...),
+			Configured:         true,
+			Approved:           approved && match.MergeEligible && match.Verdict == review.VerdictApprove,
+			Verdict:            string(match.Verdict),
+			DecisionRequested:  match.DecisionRequested,
+			DecisionQuestion:   match.DecisionQuestion,
+			HumanSummaries:     append([]string(nil), match.HumanSummaries...),
+			HiveAuthoredKnown:  match.HiveAuthoredKnown,
+			HiveAuthored:       match.HiveAuthored,
+			FixCycleCapReached: review.FixCycleCapReached(match),
 		}
 	}
 	return automerge.ContributorLaneVerdict{Configured: true, Approved: approved}

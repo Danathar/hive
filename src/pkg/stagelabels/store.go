@@ -76,16 +76,29 @@ type Record struct {
 	AdoptCheckedAt time.Time `json:"adopt_checked_at,omitempty"`
 	// DCOHead, DCOTotal and DCOUnsigned cache the commit check for one head
 	// (hivecommons/hive#12542): how many non-merge commits the PR carried
-	// and how many lacked a Signed-off-by trailer. One commits GET per head,
-	// never per cycle.
-	DCOHead     string `json:"dco_head,omitempty"`
-	DCOTotal    int    `json:"dco_total,omitempty"`
-	DCOUnsigned int    `json:"dco_unsigned,omitempty"`
+	// and how many lacked a Signed-off-by trailer. DCOUnsignedHive /
+	// DCOUnsignedOther split the unsigned ones into those GitHub links to
+	// the App bot (the hive's own to rewrite with sign-off) and the rest
+	// (re-home); records cached before the split existed have neither (see
+	// Record.DCOSplitKnown). One commits GET per head, never per cycle.
+	DCOHead              string `json:"dco_head,omitempty"`
+	DCOTotal             int    `json:"dco_total,omitempty"`
+	DCOUnsigned          int    `json:"dco_unsigned,omitempty"`
+	DCOUnsignedHive      int    `json:"dco_unsigned_hive,omitempty"`
+	DCOUnsignedOther     int    `json:"dco_unsigned_other,omitempty"`
+	DCOSquashUnsafeHive  int    `json:"dco_squash_unsafe_hive,omitempty"`
+	DCOSquashUnsafeKnown bool   `json:"dco_squash_unsafe_known,omitempty"`
 	// EntryCommented records that the stage's entry comment (085 "needs a
 	// decision", 090 "ready for a human merge") was posted for the current
 	// stage visit; reset on every stage change so each transition explains
 	// itself exactly once (hivecommons/hive#12528).
 	EntryCommented bool `json:"entry_commented,omitempty"`
+	// EntryCommentedHead / EntryCommentedStage are the head and stage of the
+	// last entry comment posted. Unlike EntryCommented they survive stage
+	// changes, so a same-head flap back into the same stage does not repost a
+	// byte-identical comment (hivecommons/hive#12878).
+	EntryCommentedHead  string `json:"entry_commented_head,omitempty"`
+	EntryCommentedStage Stage  `json:"entry_commented_stage,omitempty"`
 	// History is the item's recent stage transitions, oldest first, capped
 	// at HistoryLimit: each entry is the stage entered, when, and the reason
 	// at entry. The dashboard's Hive activity monitor renders it as the
@@ -224,6 +237,14 @@ func (r Record) DCOFor(head string) (total, unsigned int, ok bool) {
 		return 0, 0, false
 	}
 	return r.DCOTotal, r.DCOUnsigned, true
+}
+
+// DCOSplitKnown reports whether the cached commit check for head carries
+// the hive/other ownership split of its unsigned commits (false for a
+// signed head, a different head, or a record cached before the split).
+func (r Record) DCOSplitKnown(head string) bool {
+	_, unsigned, ok := r.DCOFor(head)
+	return ok && unsigned > 0 && r.DCOUnsignedHive+r.DCOUnsignedOther == unsigned
 }
 
 // DCO is the cached verdict for head (DCOUnknown when not cached).
@@ -510,7 +531,7 @@ func (s *Store) CountOwnComments(key string, n int) {
 // worth flagging. A lower number is backward, except leaving a repair stage
 // (fixing, needs-author, returned-to-contributor, adopted-by-hive) for review of the new
 // head, which is the repair route itself, not a second regression, and
-// leaving the two human stages: 085 and 090 are parking stages ("the hive
+// leaving the human stages: 045, 085 and 090 are parking stages ("the hive
 // cannot act"), not progress, so moving out of them means the picture
 // changed, whatever the destination — 090 → 072 is the hive learning the
 // head is red, not the author losing ground (hivecommons/hive#12403 carried
@@ -530,7 +551,7 @@ func IsRegression(from, to Stage) bool {
 		return to != ReviewPending && to != Reviewed
 	case Fixing, NeedsAuthor, ReturnedToContributor:
 		return to != ReviewPending && to != Reviewed
-	case ReadyForHumanMerge, NeedsDecision:
+	case ReadyForHumanMerge, NeedsDecision, IssueNeedsDecision:
 		return false
 	}
 	return true
@@ -565,15 +586,17 @@ func (s *Store) MarkRegressionCommentedForHead(key, head string) {
 }
 
 // MarkEntryCommented records that the entry comment for the current stage
-// visit was posted.
-func (s *Store) MarkEntryCommented(key string) {
+// visit was posted for the given head.
+func (s *Store) MarkEntryCommented(key, head string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.items[key]
-	if !ok || r.EntryCommented {
+	if !ok || (r.EntryCommented && r.EntryCommentedHead == head && r.EntryCommentedStage == r.Stage) {
 		return
 	}
 	r.EntryCommented = true
+	r.EntryCommentedHead = head
+	r.EntryCommentedStage = r.Stage
 	s.items[key] = r
 	s.dirty = true
 }
@@ -778,6 +801,20 @@ func (s *Store) MarkAdopted(key, head string, by int, now time.Time) {
 	s.dirty = true
 }
 
+// NoteAdoptReason records why the current adoption happened (the marker's
+// reason=<r>) on an existing record.
+func (s *Store) NoteAdoptReason(key, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || r.AdoptReason == reason {
+		return
+	}
+	r.AdoptReason = reason
+	s.items[key] = r
+	s.dirty = true
+}
+
 // MarkAdoptChecked records that the superseding PR was polled at now.
 func (s *Store) MarkAdoptChecked(key string, now time.Time) {
 	s.mu.Lock()
@@ -865,18 +902,24 @@ func (s *Store) NoteAuthor(key, login string) {
 	s.dirty = true
 }
 
-// NoteDCO caches the commit check for head on an existing record.
-func (s *Store) NoteDCO(key, head string, total, unsigned int) {
+// NoteDCO caches the commit check for head on an existing record:
+// unsignedHive is the App-linked share of the unsigned commits, the rest
+// is recorded as other.
+func (s *Store) NoteDCO(key, head string, total, unsigned, unsignedHive, squashUnsafeHive int) {
 	if head == "" {
 		return
 	}
+	unsignedHive = max(0, min(unsignedHive, unsigned))
+	squashUnsafeHive = max(0, squashUnsafeHive)
+	other := unsigned - unsignedHive
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.items[key]
-	if !ok || (r.DCOHead == head && r.DCOTotal == total && r.DCOUnsigned == unsigned) {
+	if !ok || (r.DCOHead == head && r.DCOTotal == total && r.DCOUnsigned == unsigned && r.DCOUnsignedHive == unsignedHive && r.DCOUnsignedOther == other && r.DCOSquashUnsafeHive == squashUnsafeHive && r.DCOSquashUnsafeKnown) {
 		return
 	}
-	r.DCOHead, r.DCOTotal, r.DCOUnsigned = head, total, unsigned
+	r.DCOHead, r.DCOTotal, r.DCOUnsigned, r.DCOUnsignedHive, r.DCOUnsignedOther, r.DCOSquashUnsafeHive = head, total, unsigned, unsignedHive, other, squashUnsafeHive
+	r.DCOSquashUnsafeKnown = true
 	s.items[key] = r
 	s.dirty = true
 }

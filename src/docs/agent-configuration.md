@@ -258,7 +258,9 @@ spec omits `launch_cmd`, Hive still builds the backend command normally.
     busy_no_activity_threshold: 30m
                                  # surface Working/no-transcript activity after repeated
                                  #   undeliverable kicks; default 30m. At twice
-                                 #   this silence the session is restarted
+                                 #   this silence the session is restarted; a
+                                 #   kick_failed_repeatedly self-report is filed
+                                 #   only if kicks still fail after that restart
     max_turn_duration: 0s        # optional visibility-only Working ceiling; 0 disables
     restart_strategy: immediate  # how to bring a dead session back
     beads_dir: /data/beads/scanner   # work-record (bead) storage; default per-agent
@@ -915,6 +917,18 @@ project:
 Why a setting and not `AGENTS.md` ([#7667](https://github.com/hivecommons/hive/issues/7667)): a style rule in a repo's `AGENTS.md` reaches the agent as background knowledge, lower in the prompt than the policy's own body template, and when the two disagree the agent follows the template. The variable puts the owner's rule *next to* the template, which is the only position that changed anything when tried. The alternative — editing each template in the prompt editor — saves a full copy of that policy to `/data/policies/` that then shadows every upstream update to it, per agent, for a style preference.
 
 Where you will see it: the agent's Prompt Template tab renders the guide where the kick will place it, so you can confirm the setting took. Prompts built in Go take the rendered guide as a parameter rather than expanding `${WRITING_GUIDE}` themselves. That includes the **contributor relay's task prompt**, since [#8124](https://github.com/hivecommons/hive/issues/8124), immediately before the instruction that tells the agent to open the PR. The guide travels with the *assigning* hive, so a relay subscribed to two hives gets each hive's guide on that hive's tasks; see [`contributor-relay.md`](contributor-relay.md#the-assigning-hives-writing-guide-travels-with-the-task). The **review swarm** also carries it in review prompts, so posted review comments use the same editorial voice as issue and PR bodies.
+
+
+### Hive-authored issue decision policy (`project.agent_issue_decision_policy`)
+
+`project.agent_issue_decision_policy` controls what happens when Hive's own agents try to park an issue with `hive-open-issue --needs-decision` or `label … stage/045-needs-decision`. The default is `resolve`: Hive-authored issues do **not** park for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions. The agent should pick the simplest additive, backward-compatible option and record the choice in the issue body as `Decision taken by hive: …`; the relay downgrades non-risk parks to `stage/010-actionable` and writes an audit entry. Set `escalate` to preserve the older behavior where every Hive-authored decision request parks.
+
+Parking remains for risk categories: security posture, data loss, irreversible or public-facing behaviour, governance/policy/licensing, spend, credentials/secrets/infra the hive cannot access (owner-only), or a question about a human's intent that cannot be inferred. Parked issue bodies should include `Risk: <category>` so the maintainer can see why a person is needed. Human-origin issue filings are unaffected.
+
+```yaml
+project:
+  agent_issue_decision_policy: resolve  # resolve (default) or escalate
+```
 
 ## Label policy: which issues agents may work
 

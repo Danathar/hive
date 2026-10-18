@@ -64,6 +64,7 @@ func (c *Engine) headChecks(ctx context.Context, tracker *StageTracker, key stri
 
 // humanVerdict maps the reviewer verdict for the head to a VerdictState.
 func humanVerdict(v ContributorLaneVerdict) stagelabels.VerdictState {
+	v = normalizeContributorLaneVerdict(v)
 	switch {
 	case !v.Configured:
 		return stagelabels.VerdictUnavailable
@@ -83,7 +84,7 @@ var humanConflictReasons = map[string]bool{"conflicting": true, "not-mergeable":
 
 // humanEvidence gathers the Evidence for one human-routed observation.
 func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key string, obs stageObservation, cause stagelabels.HumanCause, now time.Time) stagelabels.Evidence {
-	contributorVerdict := c.contributorLaneVerdictFor(obs.Owner+"/"+obs.Repo, obs.Number, obs.HeadSHA)
+	contributorVerdict := normalizeContributorLaneVerdict(c.contributorLaneVerdictFor(obs.Owner+"/"+obs.Repo, obs.Number, obs.HeadSHA))
 	e := stagelabels.Evidence{
 		Head:             obs.HeadSHA,
 		Verdict:          humanVerdict(contributorVerdict),
@@ -185,6 +186,11 @@ func (c *Engine) postHumanEntry(ctx context.Context, store *stagelabels.Store, k
 	if !ok || rec.EntryCommented || rec.Stage != route.Stage {
 		return 0, nil
 	}
+	if obs.HeadSHA != "" && rec.EntryCommentedStage == route.Stage && rec.EntryCommentedHead == obs.HeadSHA {
+		// Same stage and head already explained on an earlier visit.
+		store.MarkEntryCommented(key, obs.HeadSHA)
+		return 0, nil
+	}
 	var body string
 	switch route.Stage {
 	case stagelabels.ReadyForHumanMerge:
@@ -198,7 +204,7 @@ func (c *Engine) postHumanEntry(ctx context.Context, store *stagelabels.Store, k
 		c.warn("stage labels: entry comment failed", "repo", obs.Display, "pr", obs.Number, "stage", route.Stage.String(), "error", err)
 		return 0, err
 	}
-	store.MarkEntryCommented(key)
+	store.MarkEntryCommented(key, obs.HeadSHA)
 	c.info("stage labels: entry comment posted", "repo", obs.Display, "pr", obs.Number, "stage", route.Stage.String(), "reasons", route.Reasons)
 	return 1, nil
 }

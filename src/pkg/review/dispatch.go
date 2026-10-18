@@ -418,11 +418,15 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 					// A revisit whose reviewer died is stuck the same way an
 					// unreviewed head is: the stale verdict stands and nothing
 					// re-asks. Let the TTL release it.
+					// Only the entries that outlived the TTL were dropped; the
+					// rest are perspectives still owed or already answered, so
+					// they stay and only the missing ones are re-asked.
 					if dropped := plan.expirePending(pr, opts, now); !dropped {
 						continue
 					}
+				} else {
+					plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
 				}
-				plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
 				revisiting = true
 			}
 		} else if plan.redispatchExhausted(pr) {
@@ -695,13 +699,14 @@ func hiveAuthored(pr PullRequest, opts DispatchOptions) bool {
 
 // fixPushAllowed is the authorship check in front of every fix kick. A fix
 // kick tells an agent to push a commit onto the PR branch, so it is only ever
-// dispatched for a PR the hive itself opened — unless the operator turned on
-// review.fix_human_prs, which grants exactly that for everyone else's PRs.
-// AllAuthors is deliberately not consulted: it widens what is REVIEWED, and
-// reviewing a contributor's PR is not a reason to rewrite it
-// (hivecommons/hive#8421).
+// dispatched for a PR the hive itself opened. AllAuthors is deliberately not
+// consulted: it widens what is REVIEWED, and reviewing a contributor's PR is
+// not a reason to rewrite it (hivecommons/hive#8421). review.fix_human_prs is
+// now ignored for branch pushes: a hive-authored follow-up commit on a
+// non-App-authored PR cannot carry a sign-off that survives GitHub's squash
+// attribution without forging the PR author's identity.
 func fixPushAllowed(pr PullRequest, opts DispatchOptions) bool {
-	return opts.FixHumanPRs || hiveAuthored(pr, opts)
+	return hiveAuthored(pr, opts)
 }
 
 // withholdFix records that a changes_requested PR got no fix kick because
@@ -926,6 +931,7 @@ func (a Artifact) AggregateForBody(repo string, number int, headSHA, bodyDigest 
 	var fallback Aggregate
 	var haveFallback bool
 	for _, item := range a.Items {
+		item = item.Normalize()
 		if item.Number != number || strings.TrimSpace(item.Repo) != wantRepo || strings.TrimSpace(item.HeadSHA) != wantSHA {
 			continue
 		}

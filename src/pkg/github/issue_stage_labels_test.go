@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,17 +30,47 @@ type issueStageServer struct {
 	// set it to a different label set to simulate another writer.
 	truth map[int][]string
 	gets  map[int]int
+	// prs marks truth numbers the list-by-label call reports as pull
+	// requests (GitHub's issues feed returns PRs too).
+	prs map[int]bool
 	// deletedDefs records repo label definitions deleted via
 	// DELETE /repos/acme/widgets/labels/<name> (hivecommons/hive#12683).
 	deletedDefs []string
+	// subIssues is what GET /issues/N/sub_issues reports per parent;
+	// closers is the merged PR GraphQL names for a closed child; closed
+	// records PATCH state=closed per issue with its state_reason
+	// (hivecommons/hive#12857).
+	subIssues map[int][]subIssueRef
+	closers   map[int]int
+	closed    map[int]string
+	bodies    map[int]string
+	// commentBodies keeps every comment body posted per issue.
+	commentBodies map[int][]string
 }
 
 func newIssueStageServer(t *testing.T) *issueStageServer {
 	t.Helper()
-	s := &issueStageServer{added: map[int][]string{}, removed: map[int][]string{}, comments: map[int]int{}, truth: map[int][]string{}, gets: map[int]int{}}
+	s := &issueStageServer{added: map[int][]string{}, removed: map[int][]string{}, comments: map[int]int{}, truth: map[int][]string{}, gets: map[int]int{}, prs: map[int]bool{}, subIssues: map[int][]subIssueRef{}, closers: map[int]int{}, closed: map[int]string{}, bodies: map[int]string{}, commentBodies: map[int][]string{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path, _ := url.PathUnescape(r.URL.Path)
+		if r.Method == http.MethodPost && path == "/graphql" {
+			var q struct {
+				Variables struct {
+					Issue int `json:"issue"`
+				} `json:"variables"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&q)
+			s.mu.Lock()
+			pr := s.closers[q.Variables.Issue]
+			s.mu.Unlock()
+			nodes := []map[string]any{}
+			if pr > 0 {
+				nodes = append(nodes, map[string]any{"number": pr, "url": "https://x/pr/" + strconv.Itoa(pr), "merged": true})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{"issue": map[string]any{"closedByPullRequestsReferences": map[string]any{"nodes": nodes}}}}})
+			return
+		}
 		const prefix = "/repos/acme/widgets/"
 		if !strings.HasPrefix(path, prefix) {
 			t.Errorf("unexpected request %s %s", r.Method, path)
@@ -58,7 +89,11 @@ func newIssueStageServer(t *testing.T) *issueStageServer {
 			for n, labels := range s.truth {
 				for _, l := range labels {
 					if strings.ToLower(l) == want {
-						out = append(out, map[string]any{"number": n})
+						item := map[string]any{"number": n}
+						if s.prs[n] {
+							item["pull_request"] = map[string]any{"url": "https://api.example/pulls"}
+						}
+						out = append(out, item)
 						break
 					}
 				}
@@ -82,7 +117,31 @@ func newIssueStageServer(t *testing.T) *issueStageServer {
 			for _, l := range s.truth[n] {
 				labels = append(labels, map[string]string{"name": l})
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"number": n, "labels": labels})
+			state := "open"
+			if _, done := s.closed[n]; done {
+				state = "closed"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": n, "labels": labels, "state": state, "body": s.bodies[n], "user": map[string]any{"login": "hive[bot]", "type": "Bot"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(rest, "/sub_issues"):
+			var n int
+			_, _ = sscanIssue(rest, &n)
+			refs := s.subIssues[n]
+			if refs == nil {
+				refs = []subIssueRef{}
+			}
+			_ = json.NewEncoder(w).Encode(refs)
+		case r.Method == http.MethodPatch && strings.HasPrefix(rest, "issues/"):
+			var n int
+			_, _ = sscanIssue(rest, &n)
+			var body struct {
+				State       string `json:"state"`
+				StateReason string `json:"state_reason"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.State == "closed" {
+				s.closed[n] = body.StateReason
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": n, "state": body.State})
 		case r.Method == http.MethodPost && strings.HasSuffix(rest, "/labels"):
 			var n int
 			_, _ = sscanIssue(rest, &n)
@@ -107,6 +166,11 @@ func newIssueStageServer(t *testing.T) *issueStageServer {
 			var n int
 			_, _ = sscanIssue(rest, &n)
 			s.comments[n]++
+			var cm struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&cm)
+			s.commentBodies[n] = append(s.commentBodies[n], cm.Body)
 			_, _ = w.Write([]byte(`{"id":1}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, path)
@@ -196,11 +260,14 @@ func TestIssueStageFor(t *testing.T) {
 		{"covered, cross-repo PR staged: stays 040", IssueStageInput{Repo: "acme/other", Bucket: workBucketClaimedByPR, Claim: &IssueClaimContext{PRNumber: 99, PRRepo: "acme/widgets"}}, stagelabels.CoveredByPR, true},
 		{"likely-done is no stage", IssueStageInput{Labels: []string{LikelyDoneLabel}}, stagelabels.None, false},
 		{"filtered out", IssueStageInput{Bucket: "filtered"}, stagelabels.None, false},
-		{"needs-human is human-held without stage 085", IssueStageInput{Bucket: "filtered", Reason: "needs-human", Labels: []string{"needs-human", stagelabels.NeedsDecision.Label()}}, stagelabels.None, false},
-		{"parked by needs-direction (#12481)", IssueStageInput{Bucket: "filtered", Reason: "needs-direction", Labels: []string{"help wanted", "needs-direction", stagelabels.PRInProgress.Label()}}, stagelabels.NeedsDecision, false},
-		{"parked by needs-decision", IssueStageInput{Bucket: "filtered", Reason: "needs-decision", Labels: []string{"needs-decision"}}, stagelabels.NeedsDecision, false},
-		{"renamed needs-human bucket is human-held without stage 085", IssueStageInput{Bucket: "filtered", Reason: "needs-human", Labels: []string{"triage/needs-maintainer"}}, stagelabels.None, false},
-		{"parked label still on a claimed issue", IssueStageInput{Bucket: workBucketClaimed, ClaimKind: string(claims.KindAgent), Labels: []string{"needs-spec"}}, stagelabels.NeedsDecision, false},
+		// Owner decision: an issue parked on a person wears 045, never 085
+		// (085 is PR-only); needs-human implies the park.
+		{"needs-human is parked at 045 (stale 085 dropped)", IssueStageInput{Bucket: "filtered", Reason: "needs-human", Labels: []string{"needs-human", stagelabels.NeedsDecision.Label()}}, stagelabels.IssueNeedsDecision, false},
+		{"parked by needs-direction (#12481)", IssueStageInput{Bucket: "filtered", Reason: "needs-direction", Labels: []string{"help wanted", "needs-direction", stagelabels.PRInProgress.Label()}}, stagelabels.IssueNeedsDecision, false},
+		{"parked by needs-decision", IssueStageInput{Bucket: "filtered", Reason: "needs-decision", Labels: []string{"needs-decision"}}, stagelabels.IssueNeedsDecision, false},
+		{"parked by legacy 085 on an issue", IssueStageInput{Bucket: "filtered", Reason: PRNeedsDecisionStageLabel, Labels: []string{PRNeedsDecisionStageLabel}}, stagelabels.IssueNeedsDecision, false},
+		{"renamed needs-human bucket is parked at 045", IssueStageInput{Bucket: "filtered", Reason: "needs-human", Labels: []string{"triage/needs-maintainer"}}, stagelabels.IssueNeedsDecision, false},
+		{"parked label still on a claimed issue", IssueStageInput{Bucket: workBucketClaimed, ClaimKind: string(claims.KindAgent), Labels: []string{"needs-spec"}}, stagelabels.IssueNeedsDecision, false},
 		{"exempt label is not parked", IssueStageInput{Bucket: "filtered", Reason: "Exempt label", Labels: []string{"wontfix"}}, stagelabels.None, false},
 		{"reporter triage", IssueStageInput{Bucket: "reporter_triage"}, stagelabels.None, false},
 	}
@@ -216,10 +283,15 @@ func TestIssueStageFor(t *testing.T) {
 			if got != stagelabels.None && !got.Applies(stagelabels.IssueItem) {
 				t.Fatalf("%s is not an issue stage", got)
 			}
+			if got == stagelabels.NeedsDecision {
+				t.Fatal("issue derivation must never emit the PR-only 085")
+			}
 		})
 	}
 }
 
+// An issue carrying needs-human and the PR-only 085 (pre-045 park) is
+// re-staged in one write: 045 on, 085 off.
 func TestSyncIssueStageLabels_NeedsHumanClearsStaleDecisionStage(t *testing.T) {
 	fake := newIssueStageServer(t)
 	c := issueStageTestClient(t, fake.srv, true)
@@ -236,11 +308,14 @@ func TestSyncIssueStageLabels_NeedsHumanClearsStaleDecisionStage(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.added[6]) != 0 {
-		t.Fatalf("needs-human issue must not be re-staged: added=%v", fake.added[6])
+	if got := strings.Join(fake.added[6], ","); got != stagelabels.IssueNeedsDecision.Label() {
+		t.Fatalf("needs-human issue must park at 045: added=%v", fake.added[6])
 	}
 	if got := strings.Join(fake.removed[6], ","); got != stagelabels.NeedsDecision.Label() {
 		t.Fatalf("removed = %v, want stale %s cleared", fake.removed[6], stagelabels.NeedsDecision.Label())
+	}
+	if res.NeedsDecisionRestaged != 1 {
+		t.Fatalf("NeedsDecisionRestaged = %d, want 1", res.NeedsDecisionRestaged)
 	}
 }
 
@@ -502,8 +577,8 @@ func TestSyncIssueStageLabels_HealsDuplicateStageLabels(t *testing.T) {
 
 func TestIssueStageFor_LegacyNeedsDirectionStillParks(t *testing.T) {
 	in := IssueStageInput{Labels: []string{"needs-direction"}}
-	if got, _, _ := IssueStageFor(in, nil); got != stagelabels.NeedsDecision {
-		t.Fatalf("stage = %s, want 085", got)
+	if got, _, _ := IssueStageFor(in, nil); got != stagelabels.IssueNeedsDecision {
+		t.Fatalf("stage = %s, want 045", got)
 	}
 	if !hasHardSuppressIssueLabel(in.Labels) {
 		t.Fatal("needs-direction must still hard-suppress")

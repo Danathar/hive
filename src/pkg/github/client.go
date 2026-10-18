@@ -92,8 +92,10 @@ type Client struct {
 	// can bypass it. Guarded because config reload / hub heartbeat delivery
 	// re-applies it while the enumeration goroutine reads it. Zero value =
 	// admit everything (pre-existing behavior).
-	issueFilterMu sync.RWMutex
-	issueFilter   IssueAdmitter
+	issueFilterMu              sync.RWMutex
+	issueFilter                IssueAdmitter
+	agentIssueDecisionPolicyMu sync.RWMutex
+	agentIssueDecisionPolicy   string
 	// reporterConfirmationEnabled restores the legacy close gate for all
 	// human-filed bug-family issues when configured. Nil/false means only
 	// per-issue opt-in markers activate the gate.
@@ -652,6 +654,10 @@ type Issue struct {
 	// LinkedPRs carries API-verified PR relationships that are signals for operators
 	// but do not by themselves remove the issue from the actionable set.
 	LinkedPRs []IssueLinkedPR `json:"linked_prs,omitempty"`
+	// Children is set on a decomposed parent: how many tracked child issues
+	// it has and how many are closed (hivecommons/hive#12857). Nil when the
+	// issue has no children.
+	Children *IssueChildren `json:"children,omitempty"`
 	// ClaimedBy / ClaimExpiresAt / ClaimSource carry a LIVE issue claim
 	// (hivecommons/hive#8380) read at enumeration time: a `hive:claim` marker
 	// comment, or an assignee. All three are set together and only while
@@ -782,8 +788,9 @@ type PullRequest struct {
 	HeadRepo string `json:"head_repo,omitempty"`
 	FromFork bool   `json:"from_fork,omitempty"`
 	// MaintainerCanModify mirrors GitHub's "allow edits by maintainers"
-	// switch. It is what lets the update-branch API sync a fork PR without
-	// giving Hive direct push access to the contributor's branch.
+	// switch. It is what lets the hive's App token update a fork PR branch
+	// through the same branch-push surface used by in-place adoption and
+	// check-report repair decisions.
 	MaintainerCanModify bool `json:"maintainer_can_modify,omitempty"`
 	// BaseRef is the branch the PR targets. Display only: the merge-verdict
 	// reason names it ("has merge conflicts with v4 — needs a rebase") so a
@@ -1382,7 +1389,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 	// #9839: the list call keeps GitHub's issue_dependencies_summary so only
 	// issues that report an open "blocked by" count pay for a per-issue
 	// dependency fetch below.
-	allIssues, blockedCounts, err := c.listOpenIssuesWithBlockedCounts(ctx, owner, repoName)
+	allIssues, blockedCounts, subIssueSummaries, err := c.listOpenIssuesWithBlockedCounts(ctx, owner, repoName)
 	if err != nil {
 		return nil, nil, 0, RepoIssueBreakdown{}, nil, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
 	}
@@ -1555,6 +1562,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 		})
 	}
 	dropMutualBlocks(actionable, c.logger)
+	annotateIssueChildren(repo, subIssueSummaries, splitParents, openByNumber, actionable, details)
 
 	// Keep an honest fallback if a future exclusion path is added without a
 	// dedicated category. This is the same enumeration snapshot, not a second
@@ -2700,20 +2708,23 @@ func extractAssignees(users []*gh.User) []string {
 // Reachable actions for a PR in a kick work list (hivecommons/hive#7386):
 // what an agent holding the hive's App token can actually do to it.
 const (
-	// ReachableActionPush: the head branch is in the base repository, so the
-	// agent can check it out, commit, and push a repair.
+	// ReachableActionPush: the head branch is in the base repository, or it
+	// is a fork branch that allows maintainer edits, so the agent can check
+	// it out, commit, and push a repair when policy says the hive owns that
+	// repair.
 	ReachableActionPush = "push"
 	// ReachableActionCommentOnly: the head branch lives in a fork (or a
-	// deleted repository). The agent can review and comment; it cannot push,
-	// and must never push to a branch of the base repo named after the
-	// fork's head ref.
+	// deleted repository) without maintainer edits. The agent can review and
+	// comment; it cannot push, and must never push to a branch of the base
+	// repo named after the fork's head ref.
 	ReachableActionCommentOnly = "comment-only"
 )
 
 // ReachableAction classifies a PR for the repair queue: push-repairable, or
-// comment-only because its head is not in the base repository.
+// comment-only because its head is not in the base repository and the fork
+// did not grant maintainer edits.
 func ReachableAction(pr PullRequest) string {
-	if pr.FromFork {
+	if pr.FromFork && !pr.MaintainerCanModify {
 		return ReachableActionCommentOnly
 	}
 	return ReachableActionPush
@@ -2908,6 +2919,24 @@ func (c *Client) SetIssueFilter(f IssueAdmitter) {
 	c.issueFilter = f
 }
 
+func (c *Client) SetAgentIssueDecisionPolicy(policy string) {
+	if c == nil {
+		return
+	}
+	c.agentIssueDecisionPolicyMu.Lock()
+	defer c.agentIssueDecisionPolicyMu.Unlock()
+	c.agentIssueDecisionPolicy = policy
+}
+
+func (c *Client) getAgentIssueDecisionPolicy() string {
+	if c == nil {
+		return ""
+	}
+	c.agentIssueDecisionPolicyMu.RLock()
+	defer c.agentIssueDecisionPolicyMu.RUnlock()
+	return c.agentIssueDecisionPolicy
+}
+
 func (c *Client) SetReporterConfirmationEnabledFunc(fn func() bool) {
 	if c == nil {
 		return
@@ -2942,12 +2971,13 @@ func (c *Client) getIssueFilter() IssueAdmitter {
 
 // needsDecisionLabel is the label the issue relay applies to park an
 // agent-filed issue on a maintainer decision: the first configured
-// hard_suppress_labels.needs_decision label, else stage/085-needs-decision
-// (hivecommons/hive#12683). A configured legacy spelling is upgraded to the
-// stage label so no hive keeps writing a retired label.
+// hard_suppress_labels.needs_decision label, else stage/045-needs-decision
+// (hivecommons/hive#12683). A configured legacy spelling — including the
+// pre-045 stage/085, which is PR-only now — is upgraded to the issue stage
+// label so no hive keeps writing a retired label on an issue.
 func (c *Client) needsDecisionLabel() string {
 	if labeler, ok := c.getIssueFilter().(NeedsDecisionLabeler); ok {
-		if label := strings.TrimSpace(labeler.NeedsDecisionLabel()); label != "" && !isLegacyDecisionLabel(label) {
+		if label := strings.TrimSpace(labeler.NeedsDecisionLabel()); label != "" && !isLegacyDecisionLabel(label) && !strings.EqualFold(label, legacyIssueNeedsDecisionStageLabel) {
 			return label
 		}
 	}
@@ -3888,6 +3918,8 @@ type RepoWorkIssue struct {
 	// github.Issue fields of the same name, copied as-is.
 	LinkedPRs    []IssueLinkedPR    `json:"linked_prs,omitempty"`
 	ClaimContext *IssueClaimContext `json:"claim_context,omitempty"`
+	// Children is Issue.Children, copied for the issue stage reconciler.
+	Children *IssueChildren `json:"children,omitempty"`
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
@@ -3911,6 +3943,7 @@ func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
 		ClaimedBy:                issue.ClaimedBy,
 		LinkedPRs:                append([]IssueLinkedPR(nil), issue.LinkedPRs...),
 		ClaimContext:             issue.ClaimContext,
+		Children:                 issue.Children,
 	}
 }
 
@@ -3979,8 +4012,9 @@ type RepoIssueBreakdown struct {
 	DependencyDashboard int `json:"dependency_dashboard"`
 	Filtered            int `json:"filtered"`
 	NeedsHuman          int `json:"needs_human,omitempty"`
-	// NeedsDecision counts issues parked on stage/085-needs-decision (and,
-	// until migrated, the retired needs-decision / needs-direction labels).
+	// NeedsDecision counts issues parked on stage/045-needs-decision (and,
+	// until migrated, the pre-045 stage/085 and the retired needs-decision /
+	// needs-direction labels).
 	NeedsDecision        int `json:"needs_decision,omitempty"`
 	NeedsSpec            int `json:"needs_spec,omitempty"`
 	ReporterConfirmation int `json:"reporter_confirmation,omitempty"`
@@ -4001,7 +4035,7 @@ func (b *RepoIssueBreakdown) addHardSuppress(label string) {
 	switch label {
 	case issueNeedsHumanLabel:
 		b.NeedsHuman++
-	case NeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel:
+	case NeedsDecisionStageLabel, legacyIssueNeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel:
 		b.NeedsDecision++
 	case issueNeedsSpecLabel:
 		b.NeedsSpec++

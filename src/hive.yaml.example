@@ -14,6 +14,7 @@ project:
     - repo-two
   ai_author: your-bot-user               # Login agents author as. Leave unset on App-authenticated hives (the App bot is used). Never a maintainer's own login: Hive treats this account as itself and ignores its /hive commands.
   primary_repo: repo-one                 # Main repo for priority routing
+  # agent_issue_decision_policy: resolve # resolve (default) lets Hive-authored issues stay actionable for non-risk engineering choices; escalate parks every --needs-decision request
   # Optional: host-local directory holding one checkout per repo, as
   # <checkouts_dir>/<repo name>. Supplies the repo root Hive reads AGENTS.md
   # from at kick time (src/docs/agents-md.md). Hive agents work over the API and
@@ -585,7 +586,7 @@ governor:
       #   renudge_interval: 24h         # second (and last) nudge; default = the stage dwell
       # presence_window: 15m            # relay heartbeat this fresh = contributor online → relay interrupt, else comment only
       # contributor_grace_online: 2h    # nudge unanswered this long (online author) → stage/074 adoption
-      # contributor_grace_offline: 1h   # same for offline / external authors (comment-only nudge)
+      # contributor_grace_offline: 15m  # same for offline / external authors (comment-only nudge)
       # adoption:                       # stage/074-adopted-by-hive: repair a still-red contributor PR
       #   enabled: true                 # default true; false leaves the PR in stage/072
       #   in_place: true                # default true; push to the original branch when GitHub permits

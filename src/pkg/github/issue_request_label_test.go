@@ -39,6 +39,9 @@ func newLabelMockServer(t *testing.T, added *[]string, removed *[]string) *httpt
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/comments"):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `[]`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":1,"body":"ok"}`)
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/"):
 			// The re-park gate reads the issue before parking it on a
 			// decision; a bare issue carries no approval.
@@ -185,11 +188,45 @@ func TestIssueRequestWatcher_LabelAllowsVerifiedOpenVerdict(t *testing.T) {
 	}
 }
 
-// stage/085-needs-decision is add-only for agents (hivecommons/hive#12683):
+// The decision parks are add-only for agents (hivecommons/hive#12683):
 // parking an item on a maintainer decision is the ADR-0019 escalation move
 // that replaced `needs-direction` / `needs-decision`; every other stage label
-// is refused and the un-park stays with a maintainer.
+// is refused and the un-park stays with a maintainer. Both the issue bay
+// (stage/045) and the PR-only stage/085 pass; the reconcilers clamp the
+// label to the item's kind.
 func TestIssueRequestWatcher_LabelAllowsNeedsDecisionPark(t *testing.T) {
+	for _, park := range []string{"Stage/045-Needs-Decision", "Stage/085-Needs-Decision"} {
+		t.Run(park, func(t *testing.T) {
+			var added, removed []string
+			srv := newLabelMockServer(t, &added, &removed)
+			defer srv.Close()
+			c := issueTestClient(t, srv.URL)
+			c.SetAgentIssueDecisionPolicy("escalate")
+			dir := withIssueDir(t)
+
+			reqPath, err := WriteIssueRequest(dir, IssueRequest{
+				Kind: "label", Repo: "o/r", Number: 12683, Agent: "scanner",
+				Labels: []string{park},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.ProcessIssueRequestsOnce(context.Background())
+
+			if got := strings.Join(added, ","); got != park {
+				t.Fatalf("labels added = %q, want %s", got, park)
+			}
+			if len(removed) != 0 {
+				t.Fatalf("unexpected removed labels: %v", removed)
+			}
+			if resp := readIssueResultFile(t, reqPath); !resp.OK {
+				t.Fatalf("result = %+v, want ok", resp)
+			}
+		})
+	}
+}
+
+func TestIssueRequestWatcher_LabelDowngradesNonRiskHiveDecisionPark(t *testing.T) {
 	var added, removed []string
 	srv := newLabelMockServer(t, &added, &removed)
 	defer srv.Close()
@@ -197,16 +234,45 @@ func TestIssueRequestWatcher_LabelAllowsNeedsDecisionPark(t *testing.T) {
 	dir := withIssueDir(t)
 
 	reqPath, err := WriteIssueRequest(dir, IssueRequest{
-		Kind: "label", Repo: "o/r", Number: 12683, Agent: "scanner",
-		Labels: []string{"Stage/085-Needs-Decision"},
+		Kind: "label", Repo: "o/r", Number: 12816, Agent: "scanner",
+		Body:   "Question: which ADR gets renumbered / use a v6-only ADR block",
+		Labels: []string{NeedsDecisionStageLabel},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.ProcessIssueRequestsOnce(context.Background())
 
-	if got := strings.Join(added, ","); got != "Stage/085-Needs-Decision" {
-		t.Fatalf("labels added = %q, want stage/085-needs-decision", got)
+	if got := strings.Join(added, ","); got != "stage/010-actionable" {
+		t.Fatalf("labels added = %q, want actionable downgrade", got)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("unexpected removed labels: %v", removed)
+	}
+	if resp := readIssueResultFile(t, reqPath); !resp.OK {
+		t.Fatalf("result = %+v, want ok", resp)
+	}
+}
+
+func TestIssueRequestWatcher_LabelResolveStillParksRiskQuestion(t *testing.T) {
+	var added, removed []string
+	srv := newLabelMockServer(t, &added, &removed)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	reqPath, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 12820, Agent: "scanner",
+		Body:   "Risk: credentials/secrets/owner-only infrastructure\nQuestion: needs owner's GitHub secret",
+		Labels: []string{NeedsDecisionStageLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if got := strings.Join(added, ","); got != NeedsDecisionStageLabel {
+		t.Fatalf("labels added = %q, want needs-decision", got)
 	}
 	if len(removed) != 0 {
 		t.Fatalf("unexpected removed labels: %v", removed)
@@ -219,7 +285,7 @@ func TestIssueRequestWatcher_LabelAllowsNeedsDecisionPark(t *testing.T) {
 // A reserved label is refused in the remove direction too: taking `hold` off
 // a PR is exactly the escalation the guard exists for.
 func TestIssueRequestWatcher_LabelRefusesReservedRemoval(t *testing.T) {
-	for _, label := range []string{"hold", VerifiedOpenLabel, NeedsDecisionStageLabel} {
+	for _, label := range []string{"hold", VerifiedOpenLabel, NeedsDecisionStageLabel, PRNeedsDecisionStageLabel} {
 		t.Run(label, func(t *testing.T) {
 			var added, removed []string
 			srv := newLabelMockServer(t, &added, &removed)

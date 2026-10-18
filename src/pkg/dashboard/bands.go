@@ -19,28 +19,34 @@ const (
 	goodFirstIssueLabel = "good first issue"
 )
 
-// needsDecisionLabel is the park signal (hivecommons/hive#12683): the stage
-// label itself. The retired `needs-decision` spelling stays recognised in
+// needsDecisionLabel is the issue park signal (hivecommons/hive#12683): the
+// issue stage label itself, stage/045-needs-decision. prNeedsDecisionLabel
+// is the PR parking stage, stage/085-needs-decision (on an issue, the
+// pre-045 spelling). The retired `needs-decision` word stays recognised in
 // the band and signal checks until the reconciler has migrated it.
-const needsDecisionLabel = github.NeedsDecisionStageLabel
+const (
+	needsDecisionLabel   = github.NeedsDecisionStageLabel
+	prNeedsDecisionLabel = github.PRNeedsDecisionStageLabel
+)
 
 // labelsNeedDecision reports whether a lower-cased label set says a human
 // decision is owed.
 func labelsNeedDecision(labels map[string]bool) bool {
-	return labels[needsDecisionLabel] || labels["needs-decision"] || labels["2-discussing"]
+	return labels[needsDecisionLabel] || labels[prNeedsDecisionLabel] || labels["needs-decision"] || labels["2-discussing"]
 }
 
 var (
 	// defaultIssueWaitingLabels are the default parking labels (the
-	// stage/085 park signal, its retired spellings, needs-human, needs-spec)
-	// plus `blocked`: the waiting band holds parked issues only
+	// stage/045 issue park signal, the pre-045 stage/085 spelling, the
+	// retired needs-direction / needs-decision spellings, needs-human,
+	// needs-spec) plus `blocked`: the waiting band holds parked issues only
 	// (hivecommons/hive#11507), and `blocked` is a gate only a person lifts,
 	// which the un-park sweep answers like the needs-* labels
 	// (hivecommons/hive#12376). static/index.html keeps a copy
 	// (REPO_ISSUE_BAND_DEFAULTS.waitingLabels).
-	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
+	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, prNeedsDecisionLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
 	defaultIssueDoneLabels    = []string{"hive/already-done", "hive/covered-by-pr", "hive/likely-done"}
-	prHumanGateLabels         = []string{"needs-human", needsDecisionLabel, "needs-decision", "2-discussing"}
+	prHumanGateLabels         = []string{"needs-human", prNeedsDecisionLabel, "needs-decision", "2-discussing"}
 	issueBandOrder            = []string{"ready", "in-progress", "agent-filed", "waiting", "done"}
 	prBandOrder               = []string{"waiting", "eligible", "blocked", "in-review", "open", "draft"}
 	holdLabelSpellings        = []string{"hold", "on-hold", "hold/review"}
@@ -223,7 +229,7 @@ func IssueBand(issue github.Issue, held bool, cfg config.DashboardIssueBandsConf
 // frontend falls back to the band's short label.
 func issueLabelChip(labels map[string]bool) string {
 	for _, entry := range issueLabelChips {
-		if labels[entry.label] || (entry.label == needsDecisionLabel && labels["needs-decision"]) {
+		if labels[entry.label] || (entry.label == needsDecisionLabel && (labels[prNeedsDecisionLabel] || labels["needs-decision"])) {
 			return entry.chip
 		}
 	}

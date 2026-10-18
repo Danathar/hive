@@ -74,6 +74,8 @@ func newHivesCommand(env *commandEnv) *cobra.Command {
 		Example: `  hivectl hives list
   hivectl hives add acme --hub wss://acme.hive.hivecommons.dev/contribute
   hivectl hives reissue acme
+  hivectl hives preset adopt https://example.org/preset.yml
+  hivectl hives preset refresh
   hivectl hives use acme
   hivectl hives export acme --out acme.hive-profile
   hivectl hives import acme.hive-profile --name acme-laptop
@@ -83,6 +85,7 @@ func newHivesCommand(env *commandEnv) *cobra.Command {
 	}
 	cmd.AddCommand(newHivesListCommand(env))
 	cmd.AddCommand(newHivesReposCommand(env))
+	cmd.AddCommand(newHivesPresetCommand(env))
 	cmd.AddCommand(newHivesAddCommand(env))
 	cmd.AddCommand(newHivesReissueCommand(env))
 	cmd.AddCommand(newHivesUseCommand(env))
@@ -162,6 +165,7 @@ func commit(deps *hivesDeps, set *hivectl.ProfileSet) error {
 
 type hivesListRow struct {
 	Scope         string `json:"scope" yaml:"scope"`
+	ScopeStatus   string `json:"scope_status,omitempty" yaml:"scope_status,omitempty"`
 	Disabled      bool   `json:"disabled" yaml:"disabled"`
 	Name          string `json:"name" yaml:"name"`
 	Hub           string `json:"hub" yaml:"hub"`
@@ -205,7 +209,7 @@ func (e *commandEnv) runHivesList(cmd *cobra.Command, check bool) error {
 		return err
 	}
 	active := set.ActiveProfile()
-	lastSeen, err := deps.store.LoadHubsSeen()
+	observations, err := deps.store.LoadHubObservations()
 	if err != nil {
 		return err
 	}
@@ -223,8 +227,9 @@ func (e *commandEnv) runHivesList(cmd *cobra.Command, check bool) error {
 		if !p.AddedAt.IsZero() {
 			row.AddedAt = p.AddedAt.UTC().Format(time.RFC3339)
 		}
-		if seen, ok := lastSeen[p.Hub]; ok {
-			row.LastSeen = seen.UTC().Format(time.RFC3339)
+		if seen, ok := observations[p.Hub]; ok {
+			row.LastSeen = seen.LastSeen.UTC().Format(time.RFC3339)
+			row.ScopeStatus = seen.Subscriptions[p.ContributorID]
 		}
 		if check {
 			reachable := probeHub(cmd.Context(), p.Hub, e.options.timeout)
@@ -255,6 +260,9 @@ func printHivesTable(out io.Writer, rows []hivesListRow, check bool) {
 		name := row.Name
 		if row.Disabled {
 			name += " (disabled)"
+		}
+		if row.ScopeStatus != "" {
+			name += " (scope: " + row.ScopeStatus + ")"
 		}
 		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s", marker, name, row.Hub, dashIfEmpty(row.ContributorID), dashIfEmpty(row.Session), dashIfEmpty(row.AddedAt), dashIfEmpty(row.LastSeen)) + "\t" + row.Scope
 		if check {

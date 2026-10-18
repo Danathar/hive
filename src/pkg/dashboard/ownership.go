@@ -336,7 +336,9 @@ func ownershipParkingFor(h config.HardSuppressLabelsConfig) []ownershipParking {
 		{bucket: config.DefaultNeedsDirectionLabel, labels: h.EffectiveNeedsDirection()},
 		// The retired `needs-decision` spelling stays a decision-bucket park
 		// until the issue stage reconciler has migrated it (hivecommons/hive#12683).
-		{bucket: config.DefaultNeedsDecisionLabel, labels: append(h.EffectiveNeedsDecision(), config.LegacyNeedsDecisionLabel)},
+		// stage/085-needs-decision is the PR parking stage and, on an issue, the
+		// pre-045 spelling the migration swaps for stage/045.
+		{bucket: config.DefaultNeedsDecisionLabel, labels: append(h.EffectiveNeedsDecision(), config.LegacyNeedsDecisionLabel, config.PRNeedsDecisionStageLabel)},
 		{bucket: config.DefaultNeedsSpecLabel, labels: h.EffectiveNeedsSpec()},
 	}
 }
