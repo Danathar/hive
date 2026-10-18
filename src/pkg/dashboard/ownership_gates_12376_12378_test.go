@@ -158,6 +158,7 @@ func TestPRGateLabelsAreYourTurn12378(t *testing.T) {
 	verbs := map[string]want11565{
 		"needs-decision":                 {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
 		config.DefaultNeedsDecisionLabel: {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
+		config.PRNeedsDecisionStageLabel: {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
 		"2-discussing":                   {OwnershipVerbDecide, OwnershipReasonParkedNeedsDecision},
 		"needs-direction":                {OwnershipVerbSteer, OwnershipReasonParkedNeedsDirection},
 		"needs-spec":                     {OwnershipVerbSpec, OwnershipReasonParkedNeedsSpec},
