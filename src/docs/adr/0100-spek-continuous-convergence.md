@@ -1,4 +1,4 @@
-# ADR-0025: Spek continuous convergence
+# ADR-0100: Spek continuous convergence
 
 ## Status
 

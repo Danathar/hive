@@ -8,6 +8,9 @@ chosen direction, and consequences for future changes.
 ## Process
 
 1. Copy the template below to `NNNN-short-title.md` using the next number.
+   Numbers below `0100` are allocated on `v5` first; on `v6`, ADRs that exist
+   only on `v6` use the reserved `0100`+ block so forward-merges from `v5`
+   never collide with them (hivecommons/hive#12816).
 2. Write in present tense for new decisions. For historical decisions, mark the
    status as `Accepted (retroactive)` or `Accepted (back-filled)` and cite the existing docs or code.
 3. Keep each ADR focused on one decision. If a later change supersedes it, add a
@@ -60,4 +63,7 @@ What becomes easier, harder, safer, or riskier because of this decision?
 - [ADR-0022: Opt-in redemption of earned Codex resets](0022-opt-in-earned-codex-reset-redemption.md)
 - [ADR-0023: Hive may merge PRs whose author could merge them](0023-trusted-author-automerge.md)
 - [ADR-0024: Provider credential lifecycle](0024-provider-credential-lifecycle.md)
-- [ADR-0025: Spek continuous convergence](0025-spek-continuous-convergence.md) (v6 addendum: run-rewind semantics for recheck)
+
+### v6-only ADRs (`0100`+)
+
+- [ADR-0100: Spek continuous convergence](0100-spek-continuous-convergence.md) (v6 addendum: run-rewind semantics for recheck)
