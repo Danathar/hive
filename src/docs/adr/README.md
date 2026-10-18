@@ -59,5 +59,5 @@ What becomes easier, harder, safer, or riskier because of this decision?
 - [ADR-0021: Named planning-engine boundary for Project Inception runs](0021-planning-engine-boundary.md)
 - [ADR-0022: Opt-in redemption of earned Codex resets](0022-opt-in-earned-codex-reset-redemption.md)
 - [ADR-0023: Hive may merge PRs whose author could merge them](0023-trusted-author-automerge.md)
-- [ADR-0024: Spek continuous convergence](0024-spek-continuous-convergence.md) (v6 addendum: run-rewind semantics for recheck)
 - [ADR-0024: Provider credential lifecycle](0024-provider-credential-lifecycle.md)
+- [ADR-0025: Spek continuous convergence](0025-spek-continuous-convergence.md) (v6 addendum: run-rewind semantics for recheck)
