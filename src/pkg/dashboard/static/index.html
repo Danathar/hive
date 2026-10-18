@@ -1382,6 +1382,8 @@
     .ham-seg.blank { visibility: hidden; }
     .ham-sub { display: grid; gap: var(--sp-2); margin-top: var(--sp-3); }
     .ham-seg.active { background: var(--amber); color: var(--surface-0); animation: ham-pulse 1.6s ease-in-out infinite; }
+    .ham-seg.active.ham-open-hold { background: var(--yellow); color: var(--surface-0); }
+    .ham-seg.active.ham-open-hold .ham-seg-t::before { content: '⏸'; margin-right: var(--sp-1); }
     .ham-detour { overflow: hidden; text-overflow: ellipsis; }
     @keyframes ham-pulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
     .ham-empty { color: var(--muted); font-size: var(--fs-sm); padding: var(--sp-4) 0; }
@@ -2574,7 +2576,10 @@
          ellipsis; the wrapper scrolls horizontally to reach method/model. */
       .gov-matrix { min-width: 680px; }
     }
-    .gov-matrix { margin-top: 14px; width: 100%; border-collapse: collapse; font-size: 0.72rem; table-layout: fixed; }
+    .gov-matrix-templates-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-top: var(--sp-3); flex-wrap: wrap; }
+    .gov-matrix-templates-label { font-size: var(--fs-xs); color: var(--muted); font-weight: 600; }
+    .gov-matrix-templates-buttons { display: inline-flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .gov-matrix { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 0.72rem; table-layout: fixed; }
     .gov-matrix th { color: var(--muted); font-weight: 600; padding: 3px 8px; text-align: center; border-bottom: 1px solid var(--border); }
     .gov-matrix th.mode-active { border-radius: 4px 4px 0 0; padding: 4px 10px; font-weight: 700; }
     .gov-matrix th.mode-idle  { color: var(--green); }
@@ -12902,7 +12907,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_ATTENTION_STAGES = [71, 72, 85, 90];
     // Label families a chip row is built from, in display order; other
     // labels follow when at least two items carry them.
-    const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/'];
+    const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/', 'hold', 'on-hold', 'do-not-merge', 'hive-pause/'];
     const STAGE_TRACKER_SORTS = ['furthest', 'waiting', 'newest', 'number'];
     function stageTrackerDefaultFilter() {
       return { kind: 'all', repo: '', q: '', labels: [], age: 'any', author: 'any', attention: false, sort: 'furthest', dir: 'desc', size: STAGE_TRACKER_DEFAULT_PAGE_SIZE, page: 1 };
@@ -12912,8 +12917,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerHeadline(item) {
       const n = Number(item.stage) || 0;
       const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      const holdLabels = stageTrackerHoldLabels(item);
       if (mods.indexOf('stalled') >= 0) return 'Stalled';
       if (mods.indexOf('regressed') >= 0) return 'Sent back';
+      if (n === 0 && mods.indexOf('hold') >= 0) return 'Open · on hold' + (holdLabels.length ? ' (' + holdLabels.join(', ') + ')' : '');
       // An issue on 085 of its own (no covering PR) is parked on a person
       // itself, so no "(its PR)" suffix.
       const viaPR = item.kind === 'issue' && n >= 50 && (n !== 85 || item.via_pr) ? ' (its PR)' : '';
@@ -12936,6 +12943,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 110: return 'Merged';
         default: return item.stage_label || 'Tracking';
       }
+    }
+
+    function stageTrackerHoldLabels(item) {
+      const labels = Array.isArray(item.labels) ? item.labels : [];
+      return labels.filter(label => {
+        const l = String(label || '').trim().toLowerCase();
+        return l === 'do-not-merge' || l.startsWith('do-not-merge/') || l.startsWith('hive-pause/') ||
+          l.indexOf('hold') >= 0 || l.indexOf('on-hold') >= 0 || l.indexOf('hold/review') >= 0;
+      });
     }
 
     // Which strip segment a stage lights: main stages light themselves,
@@ -12974,8 +12990,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         else if (n === anchor) state = 'active';
         // The lit column's tooltip names the real stage (030 vs 040, 060 vs 080).
         const tipStage = (state === 'active' && !detour && curStage.label) ? curStage : st;
-        const word = state === 'active' && STAGE_TRACKER_ACTIVE_WORD[cur] ? STAGE_TRACKER_ACTIVE_WORD[cur] : (st.short || st.label || String(n));
-        return { number: n, code: n ? String(n).padStart(3, '0') : '', short: word, label: tipStage.label || st.label || String(n), description: tipStage.description || st.description || '', state, terminal: false, detour: n === anchor ? detour : null };
+        let word = state === 'active' && STAGE_TRACKER_ACTIVE_WORD[cur] ? STAGE_TRACKER_ACTIVE_WORD[cur] : (st.short || st.label || String(n));
+        const openHold = n === 0 && state === 'active' && (Array.isArray(item.modifiers) ? item.modifiers : []).indexOf('hold') >= 0;
+        if (openHold) word = 'Open · hold';
+        return { number: n, code: n ? String(n).padStart(3, '0') : '', short: word, label: tipStage.label || st.label || String(n), description: tipStage.description || st.description || '', state, terminal: false, detour: n === anchor ? detour : null, hold: openHold };
       });
       segs.push({ number: STAGE_TRACKER_TERMINAL, code: '', short: 'Merged', label: 'Merged', description: 'Merged — the pipeline is complete', state: terminal ? 'active' : 'todo', terminal, cap: true, detour: null });
       return segs;
@@ -13059,7 +13077,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const actorIco = actorKind ? stageTrackerIcon(actorKind, 'ham-ico ham-actor-ico', 'Next move: ' + actorKind) : '';
       return segs.map(sg => {
         if (sg.number < from || sg.number > to) return `<li class="ham-seg blank${sg.cap ? ' cap' : ''}" aria-hidden="true"></li>`;
-        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : ''].filter(Boolean).join(' ');
+        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : '', sg.hold ? 'ham-open-hold' : ''].filter(Boolean).join(' ');
         let tip = sg.label + (sg.description ? ' — ' + sg.description : '');
         // The shared Merge gate word hides 080 vs 100; the chevron tooltip carries it.
         if (sg.state === 'active' && !sg.detour && (curStage === 60 || curStage === 80)) tip = sg.label + ' — not yet admitted' + (item.caption || item.reason ? ' — ' + (item.caption || item.reason) : '');
@@ -13079,7 +13097,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const sinceMs = Date.parse(item.stage_since || '');
       const trail = Array.isArray(item.history) && item.history.length > 1
         ? item.history.slice(-STAGE_TRACKER_TRAIL_HOPS).map(h => String(h.stage).padStart(3, '0')).join(' → ') : '';
-      const lines = [stageTrackerHeadline(item), item.caption || item.reason || '', item.repo || ''];
+      const openHeld = (Number(item.stage) || 0) === 0 && mods.indexOf('hold') >= 0;
+      const lines = openHeld
+        ? [stageTrackerHeadline(item) + (item.caption || item.reason ? ' · ' + (item.caption || item.reason) : '') + (item.repo ? ' · ' + item.repo : '')]
+        : [stageTrackerHeadline(item), item.caption || item.reason || '', item.repo || ''];
       if (item.author || ak) lines.push('Author: ' + (item.author ? '@' + item.author : '') + (ak ? ' (author/' + ak + (item.author_kind_source === 'inferred' ? ', inferred' : '') + ')' : '') + (item.tier ? ' · ' + item.tier : ''));
       if (item.origin) lines.push('Origin: origin/' + item.origin);
       if (item.kind === 'issue' && Array.isArray(item.linked_prs) && item.linked_prs.length) lines.push('Covering PR: ' + item.linked_prs.map(lp => Number(lp.number) || 0).sort((x, y) => x - y).map(n => '#' + n).join(', '));
@@ -16305,7 +16326,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const cls = `mode-${m}${isActive ? ' mode-active' : ''}`;
         return `<th class="${cls}">${m}${isActive ? ' ◀' : ''}</th>`;
       }).join('');
-      return `<div class="gov-matrix-wrap"><table class="gov-matrix">
+      const templateBar = `<div class="gov-matrix-templates-bar">
+        <span class="gov-matrix-templates-label">Cadence templates:</span>
+        <div class="gov-matrix-templates-buttons">
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="testing" title="New Level testing: sets conservative cadence (surge: pause, busy: 2h, quiet: 4h, idle: 8h) for all agents to reduce risk of token over-consumption">New Level testing</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="weekly" title="Weekly sprint: sets moderate cadence (surge: 1h, busy: 2h, quiet: 4h, idle: 8h) for all agents">Weekly sprint</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="biweekly" title="Biweekly sprint: sets relaxed cadence (surge: 2h, busy: 4h, quiet: 8h, idle: 16h) for all agents">Biweekly sprint</button>
+          <button type="button" class="hv-btn btn-secondary btn-sm" data-action="applyCadenceTemplate" data-arg0="daily" title="Daily cadence: sets active daily cadence (surge: 30m, busy: 1h, quiet: 2h, idle: 4h) for all agents">Daily cadence</button>
+        </div>
+      </div>`;
+      return `${templateBar}<div class="gov-matrix-wrap"><table class="gov-matrix">
         <thead><tr><th class="power-col" title="Agent power: 1 enabled, 0 disabled">Power</th><th></th>${headers}<th>method</th><th>model</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`;
@@ -33996,6 +34026,7 @@ function burnAreaChart() {
         case 'ocRemoveSidebarGroup': ocRemoveSidebarGroup(el.dataset.group); break;
         case 'ocToggleSidebarGroup': ocToggleSidebarGroup(el); break;
         case 'switchConfigTab': switchConfigTab(el.dataset.tab || el.dataset.arg0); break;
+        case 'applyCadenceTemplate': applyCadenceTemplate(el.dataset.arg0 || el.dataset.template); break;
         case 'nousSetMode': nousSetMode(el.dataset.mode || el.dataset.arg0); break;
         case 'nousOpenNewExperiment': nousOpenNewExperiment(); break;
         case 'nousEditExperiment': nousEditExperiment(el.dataset.arg0); break;
@@ -38192,7 +38223,7 @@ function burnAreaChart() {
       { tab: 'Features', section: 'Agents & tooling', label: 'Re-entrant turns and PR follow-up windows', key: 'turn.reentrant.enabled', text: 'reentrant re-entrant turn envelope background fleet pr follow-up resume window retention turn.reentrant.enabled turn.reentrant.background_fleet_enabled turn.pr_follow_up.max_age turn.pr_follow_up.resume_id_max_age turn.pr_follow_up.retention' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Data directories and session retention', key: 'data.metrics_dir', text: 'data directories metrics logs agent configs claude copilot bob sessions retention prune janitor data.agents_dir data.bob_sessions_dir data.claude_sessions_dir data.copilot_sessions_dir data.logs_dir data.metrics_dir data.session_retention_days' },
       { tab: 'Features', section: 'Integrations & observability', label: 'Standalone deployment upgrades', key: 'deployment.podman_mode', text: 'deployment podman quadlet rootless rootful docker compose upgrade helper request dir deployment.podman_mode deployment.upgrade_helper deployment.upgrade_request_dir' },
-      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
+      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label self authored decision policy reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.self_authored_decision_policy review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
       { tab: 'Features', section: 'Review gate', label: 'Review evidence bundles', key: 'evidence.enabled', text: 'review evidence bundles audit signing key ed25519 evidence.enabled evidence.signing_key_file' },
       { tab: 'Features', section: 'Integrations & observability', label: 'GitLab and Gitea forges', key: 'gitlab.gitlab_url', text: 'gitlab gitea forgejo codeberg forge instance url token env gitlab.gitlab_url gitlab.token_env gitea.gitea_url gitea.token_env' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Token mint key and TTL', key: 'mint.max_ttl_seconds', text: 'token mint signing key path max ttl lifetime jwt mint.key_path mint.max_ttl_seconds' },
@@ -43361,6 +43392,33 @@ function burnAreaChart() {
       markDirty('cadences', mode, value);
       renderConfigTab(_configState.tab);
     }
+    async function applyCadenceTemplate(templateKey) {
+      const templateDescriptions = {
+        'testing': 'New Level testing (surge: pause, busy: 2h, quiet: 4h, idle: 8h)',
+        'weekly': 'Weekly sprint (surge: 1h, busy: 2h, quiet: 4h, idle: 8h)',
+        'biweekly': 'Biweekly sprint (surge: 2h, busy: 4h, quiet: 8h, idle: 16h)',
+        'daily': 'Daily cadence (surge: 30m, busy: 1h, quiet: 2h, idle: 4h)'
+      };
+      const desc = templateDescriptions[templateKey] || templateKey;
+      if (!(await hiveConfirm(`Apply global cadence template "${desc}" to all configured agents across all governor modes? This replaces existing interval, schedule and on-demand cadences; continuous cadences are kept.`))) return;
+      try {
+        const res = await fetch('/api/config/governor/cadence-templates', {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, _inceptionAuthHeaders()),
+          body: JSON.stringify({ template: templateKey })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(data.error || 'Failed to apply cadence template', 'error');
+          return;
+        }
+        noteStatusMutation(data.minStatusSeq);
+        showToast(`Applied ${desc} to ${data.agentsUpdated || 0} agents`, 'success');
+        if (typeof refreshStatus === 'function') refreshStatus();
+      } catch (err) {
+        showToast('Network error applying cadence template: ' + err.message, 'error');
+      }
+    }
     function switchToPerModeCadences() {
       if (!_configState.data.general) _configState.data.general = {};
       if (!_configState.data.cadences) _configState.data.cadences = {};
@@ -48114,6 +48172,10 @@ function burnAreaChart() {
           <div class="config-field" style="margin-top:10px">
             <label>Human decision label ${yamlHint('review.human_decision_label')} ${settingHelpMark('review-swarm', 'configuration', 'Human decision label', `An EXISTING repo label applied when the review swarm holds a PR for a human, so those PRs can be filtered from the list. There is no fleet-wide default and no standard name &mdash; use whatever the governed repos already maintain (this fleet's bluefin spoke uses 3-human-queue). The label is never created: if it is blank, misspelled, or absent from a repo, labeling is skipped there and the review comment's in-body marker still carries the signal.`)}</label>
             <input type="text" value="${esc(rv.human_decision_label || '')}" placeholder="(none) — must already exist in the repo" data-change-action="markDirty" data-arg0="review" data-arg1="human_decision_label" data-arg-types="s,s,w">
+          </div>
+          <div class="config-field">
+            <label>Hive-authored decision questions ${yamlHint('review.self_authored_decision_policy')} ${settingHelpMark('review-swarm', 'configuration', 'Hive-authored decision questions', `resolve (default): sequencing, naming, config-shape, scope and land-now-vs-later questions on Hive-authored PRs are treated as advisory and the aggregate can approve. escalate: every decision marker parks the PR for a person. Risk questions (security, data loss, irreversible/public-facing behavior, policy/governance, licensing, spend, unreadable diff) always escalate.`)}</label>
+            <select data-change-action="markDirty" data-arg0="review" data-arg1="self_authored_decision_policy" data-arg-types="s,s,v">${['resolve', 'escalate'].map(v => `<option value="${v}"${((rv.self_authored_decision_policy || 'resolve') === v) ? ' selected' : ''}>${v}</option>`).join('')}</select>
           </div>
           <div class="config-field-row mt-4">
             <div class="config-field"><label>Max reviews per head ${yamlHint('review.max_reviews_per_head')} ${settingHelpMark('review-swarm', 'configuration', 'Max reviews per head', `Caps how many top-level hive reviews one PR head may receive before the relay refuses more (revisions and thread replies excepted). 0 or empty derives the cap: 1 with combined perspectives, one per perspective otherwise. A negative value disables the backstop.`)}</label><input type="number" step="1" value="${esc(String(rv.max_reviews_per_head || ''))}" placeholder="0 — derived" data-change-action="markDirty" data-arg0="review" data-arg1="max_reviews_per_head" data-arg-types="s,s,N"></div>
