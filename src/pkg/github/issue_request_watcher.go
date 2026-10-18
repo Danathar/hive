@@ -923,6 +923,13 @@ func containsConfiguredDecisionParkLabel(labels []string, configured string) boo
 	return false
 }
 
+// issueDecisionParkLabels are the decision-park spellings the resolve
+// decision policy may downgrade to actionable. It is deliberately narrower
+// than issueParkingLabels: needs-human and blocked are owner holds, not
+// decisions Hive may take, so the downgrade must leave them in place for the
+// reserved-label check to see.
+var issueDecisionParkLabels = []string{NeedsDecisionStageLabel, legacyIssueNeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel}
+
 func removeDecisionParkLabels(labels []string, configured string) []string {
 	out := labels[:0]
 	for _, label := range labels {
@@ -934,8 +941,8 @@ func removeDecisionParkLabels(labels []string, configured string) []string {
 			continue
 		}
 		drop := false
-		for _, parking := range issueParkingLabels {
-			if strings.EqualFold(name, parking) && !strings.EqualFold(parking, issueNeedsHumanLabel) {
+		for _, parking := range issueDecisionParkLabels {
+			if strings.EqualFold(name, parking) {
 				drop = true
 				break
 			}

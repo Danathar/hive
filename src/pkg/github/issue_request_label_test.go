@@ -254,6 +254,43 @@ func TestIssueRequestWatcher_LabelDowngradesNonRiskHiveDecisionPark(t *testing.T
 	}
 }
 
+// The resolve-policy downgrade only strips decision-park spellings. `blocked`
+// is an owner hold, not a decision Hive may take, so it must survive the
+// downgrade and still trip the reserved-label check exactly as it does when
+// no decision park is requested alongside it.
+func TestIssueRequestWatcher_LabelDowngradeKeepsBlockedReserved(t *testing.T) {
+	var added, removed []string
+	srv := newLabelMockServer(t, &added, &removed)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	dir := withIssueDir(t)
+
+	reqPath, err := WriteIssueRequest(dir, IssueRequest{
+		Kind: "label", Repo: "o/r", Number: 12903, Agent: "scanner",
+		Body:   "Question: which ADR gets renumbered / use a v6-only ADR block",
+		Labels: []string{NeedsDecisionStageLabel, issueBlockedLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+
+	if len(added) != 0 || len(removed) != 0 {
+		t.Fatalf("reserved label reached GitHub: added=%v removed=%v", added, removed)
+	}
+	if resp := readIssueResultFile(t, reqPath); resp.OK {
+		t.Fatalf("result = %+v, want refusal for reserved label %q", resp, issueBlockedLabel)
+	}
+}
+
+func TestRemoveDecisionParkLabelsKeepsOwnerHolds(t *testing.T) {
+	in := []string{NeedsDecisionStageLabel, legacyIssueNeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel, issueNeedsHumanLabel, issueBlockedLabel, "kind/bug"}
+	got := removeDecisionParkLabels(append([]string(nil), in...), NeedsDecisionStageLabel)
+	if want := strings.Join([]string{issueNeedsHumanLabel, issueBlockedLabel, "kind/bug"}, ","); strings.Join(got, ",") != want {
+		t.Fatalf("removeDecisionParkLabels(%v) = %v, want %q", in, got, want)
+	}
+}
+
 func TestIssueRequestWatcher_LabelResolveStillParksRiskQuestion(t *testing.T) {
 	var added, removed []string
 	srv := newLabelMockServer(t, &added, &removed)
