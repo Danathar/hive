@@ -494,3 +494,46 @@ func TestEvidenceCIVerdict(t *testing.T) {
 		})
 	}
 }
+
+// The CI snapshot is called with the short repo name; it must land at the
+// canonical owner/name path, never under a name-only directory.
+func TestRecordReviewEvidenceCINormalizesShortRepo(t *testing.T) {
+	root := withEvidenceRoot(t)
+	c := newTestClient(t, newEvidenceContextServer(t, &evidenceContextFixture{head: "h1"}), "acme", []string{"acme/exult"})
+	c.SetReviewEvidence(func(string) ReviewEvidenceSettings { return ReviewEvidenceSettings{Enabled: true} })
+
+	pr := &gh.PullRequest{
+		User: &gh.User{Login: gh.Ptr("alice"), Type: gh.Ptr("User")},
+		Base: &gh.PullRequestBranch{SHA: gh.Ptr("base000")},
+	}
+	green := []*gh.CheckRun{evidenceCheckRun(1, "test", "completed", "success")}
+	c.recordReviewEvidenceCI("exult", 192, "h1", "success", pr, green)
+
+	b, err := LoadReviewEvidence(ReviewEvidencePath(root, "acme/exult", 192, "h1"))
+	if err != nil {
+		t.Fatalf("load bundle at canonical path: %v", err)
+	}
+	if b.Repo != "acme/exult" || b.CI.Status != "success" {
+		t.Fatalf("bundle = repo %q ci %+v", b.Repo, b.CI)
+	}
+	if _, err := os.Stat(filepath.Join(root, "exult")); !os.IsNotExist(err) {
+		t.Fatalf("short-name directory created: %v", err)
+	}
+}
+
+func TestRecordReviewEvidenceCISkipsWithoutBaseSHA(t *testing.T) {
+	root := withEvidenceRoot(t)
+	c := newTestClient(t, newEvidenceContextServer(t, &evidenceContextFixture{head: "h1"}), "acme", []string{"acme/exult"})
+	c.SetReviewEvidence(func(string) ReviewEvidenceSettings { return ReviewEvidenceSettings{Enabled: true} })
+
+	pr := &gh.PullRequest{
+		User: &gh.User{Login: gh.Ptr("alice"), Type: gh.Ptr("User")},
+		Base: nil,
+	}
+	green := []*gh.CheckRun{evidenceCheckRun(1, "test", "completed", "success")}
+	c.recordReviewEvidenceCI("exult", 192, "h1", "success", pr, green)
+
+	if _, err := os.Stat(ReviewEvidencePath(root, "acme/exult", 192, "h1")); !os.IsNotExist(err) {
+		t.Fatalf("bundle written without a base sha: %v", err)
+	}
+}
