@@ -4758,9 +4758,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -----------------------------------------------------------------------------
 
 Package:  golang.org/x/sync/errgroup
-Version:  v0.23.0
+Version:  v0.24.0
 License:  BSD-3-Clause
-Source:   https://cs.opensource.google/go/x/sync/+/v0.23.0:LICENSE
+Source:   https://cs.opensource.google/go/x/sync/+/v0.24.0:LICENSE
 
 Copyright 2009 The Go Authors.
 
