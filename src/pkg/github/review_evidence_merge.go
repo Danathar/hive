@@ -199,6 +199,8 @@ func (c *Client) recordReviewEvidenceCI(repo string, number int, head, status st
 	if !ok {
 		return
 	}
+	owner, name := c.splitRepo(strings.TrimSpace(repo))
+	repo = owner + "/" + name
 	ci := evidenceCIFromRuns(runs, time.Now())
 	if status != "" {
 		ci.Status = status
