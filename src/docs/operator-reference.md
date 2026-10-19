@@ -555,7 +555,9 @@ branch update was never evaluated, or the last recorded waiting reason.
 
 A front that GitHub still reports as `blocked` after its head contains the
 current target tip and all required checks pass also leaves immediately. The
-lane records that no remaining lane action can satisfy the block and promotes
+lane re-reads the PR after observing passing checks, so a block in the earlier
+snapshot alone cannot evict the front. If the final live re-check still finds
+the block, the lane records that no remaining lane action can satisfy it and promotes
 the next pull request. Pending, missing or unreadable required checks still
 wait; an eligible pull request that returns joins the back of the lane.
 

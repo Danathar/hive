@@ -26,7 +26,7 @@ func TestBlockedGreenFrontLeavesPromptly(t *testing.T) {
 				p.MergeableState = "blocked"
 			}
 
-			const reason = "blocked despite passing required checks on an up-to-date head"
+			const reason = "final re-check: pull request is blocked despite passing required checks on an up-to-date head"
 			var exitReason string
 			if phase == "front-only" {
 				res := h.frontOnly(1)
@@ -60,6 +60,44 @@ func TestBlockedGreenFrontLeavesPromptly(t *testing.T) {
 			expectGate(t, h.gate(2), ghub.LaneOutcomeMerged, "merged")
 			if len(h.f.merges) != 1 || h.f.merges[0] != "2:h2" {
 				t.Fatalf("merges = %v, want only #2", h.f.merges)
+			}
+		})
+	}
+}
+
+// The initial PR snapshot can still say blocked when the last required check
+// passes during this round. Only the live re-check may interpret that block.
+func TestBlockedFrontRechecksAfterChecksPass(t *testing.T) {
+	for _, state := range []string{"clean", "unknown"} {
+		t.Run(state, func(t *testing.T) {
+			h := newHarness(t)
+			p := h.f.addPR(1, "h1")
+			p.MergeableState = "blocked"
+			h.f.setRun(p.Head, "build", "in_progress", "")
+			h.acquire(1)
+			h.acquire(2)
+			h.f.on("CheckRuns", 1, func() {
+				h.f.pass(p.Head)
+				p.MergeableState = state
+			})
+
+			d := h.advance(1)
+			if state == "unknown" {
+				expectOutcome(t, d, OutcomeWaiting, "final re-check: mergeability is not yet known")
+				if h.frontPR() != 1 || h.record().LastExit != nil || len(h.eventsFor(ActionFrontExit)) != 0 || len(h.f.merges) != 0 {
+					t.Fatalf("recomputing mergeability must retain the front: record=%+v calls=%v", h.record(), h.f.calls)
+				}
+				p.MergeableState = "clean"
+				d = h.advance(1)
+			}
+			expectOutcome(t, d, OutcomeMerged, "merged")
+			if h.frontPR() != 2 || len(h.f.merges) != 1 || h.f.merges[0] != "1:h1" || len(h.f.updates) != 0 {
+				t.Fatalf("newly green front must merge before its waiter: record=%+v calls=%v", h.record(), h.f.calls)
+			}
+			for _, event := range h.eventsFor(ActionFrontExit) {
+				if strings.Contains(event.Reason, "no remaining lane action") {
+					t.Fatalf("stale block recorded as an unresolvable exit: %+v", event)
+				}
 			}
 		})
 	}

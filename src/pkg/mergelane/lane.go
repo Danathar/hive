@@ -616,7 +616,10 @@ func (r *round) run() (Decision, error) {
 		r.front.Stage = StageWaitingChecks
 		return r.hold(p.Head, tip, v.reason)
 	}
-	if reason, leave := mergeability(p); reason != "" {
+	// The PR snapshot predates the check results. A check may have just
+	// passed, so let finalCheck re-read a blocked PR before deciding to
+	// release it; the earlier block may already have cleared.
+	if reason, leave := mergeability(p); reason != "" && p.MergeableState != "blocked" {
 		if leave {
 			return r.leave(p.Head, tip, reason)
 		}
