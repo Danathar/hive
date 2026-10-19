@@ -113,7 +113,7 @@ Scope: no out-of-cycle code names a stage label.
   (`src/cmd/hive/claimswire.go:158-171`, `src/cmd/hive/claimswire.go:196-201`).
 - `src/pkg/github/issue_inprogress.go`: the `claim` request submits
   `InProgress`; the sweep's 040 swap becomes `CoveredBy`
-  (`src/pkg/github/issue_inprogress.go:125-140`, `src/pkg/github/issue_inprogress.go:185`).
+  (`src/pkg/github/issue_inprogress.go:126-141`, `src/pkg/github/issue_inprogress.go:186`).
 - `src/pkg/github/prclaims.go`: 040 add/remove → `CoveredBy`/`Uncovered`
   (`src/pkg/github/prclaims.go:1777`, `src/pkg/github/prclaims.go:2037`).
 - `src/pkg/dashboard/contribute_verdict_settle.go:216` → `CoveredBy`.
@@ -123,10 +123,13 @@ Scope: no out-of-cycle code names a stage label.
 - `src/pkg/github/legacy_decision_labels.go` un-park → `Unparked`.
 - Delete `Client.ApplyStageLabel` and the stage parameter of
   `AddLabelsFresh` (`src/pkg/github/stage_labeler.go:63`, `src/pkg/github/stage_labeler.go:114`).
-- Replace label literals: `src/pkg/claims/comments.go:16,20` become
-  `stagelabels.Claimed.Label()` / `stagelabels.PRInProgress.Label()` (kept as
-  vars for callers), `src/pkg/review/dispatch.go:726` uses
-  `stagelabels.AdoptedByHive.Label()`.
+- Vocabulary cleanup (independent of B/C): `claims.LabelClaimed` and
+  `claims.LabelPRInProgress` render through `stagelabels` (kept as vars for
+  callers); review dispatch uses `stagelabels.AdoptedByHive.Label()`.
+  `stagelabels` owns the retired claim spellings, with aliases in `claims`.
+  Config registers stage slugs from its own side, removing both the direct
+  `stagelabels` → `claims` and indirect `stagelabels` → `config` → `claims`
+  dependencies so claims can import the vocabulary without a cycle.
 - Empty the admission-test allow-list.
 
 Tests: existing claimswire/in-progress/prclaims tests rewritten to assert

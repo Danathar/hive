@@ -12,12 +12,12 @@ The owner's intent: *labels applied from a central facility so that managing
 them via a state machine is easier.* Hive is half-way there.
 
 **What is already central.** `pkg/stagelabels` is the single vocabulary and
-renderer: the ordered `Table` (`src/pkg/stagelabels/stagelabels.go:224`), the
-kind clamp `Stage.For` (`src/pkg/stagelabels/stagelabels.go:209`), the
-idempotent label `Plan` (`src/pkg/stagelabels/stagelabels.go:666`), the
+renderer: the ordered `Table` (`src/pkg/stagelabels/stagelabels.go:220`), the
+kind clamp `Stage.For` (`src/pkg/stagelabels/stagelabels.go:205`), the
+idempotent label `Plan` (`src/pkg/stagelabels/stagelabels.go:662`), the
 re-read-then-write `Enforce` that heals duplicate stage pills
 (`src/pkg/stagelabels/enforce.go:59`), in-place renames (`Renames`,
-`src/pkg/stagelabels/stagelabels.go:764`), and the `Store` whose `Observe`
+`src/pkg/stagelabels/stagelabels.go:762`), and the `Store` whose `Observe`
 records transitions, regressions and history hops
 (`src/pkg/stagelabels/store.go:397`, `IsRegression` at
 `src/pkg/stagelabels/store.go:540`). The dashboard activity tracker and the
@@ -52,7 +52,7 @@ hub read that store and nothing else (`src/pkg/dashboard/stage_tracker.go:584-58
    (`src/pkg/github/stage_labeler.go:63`); the claim relay and ledger hooks
    write `stage/020` / `stage/030` directly as a side effect of a claim
    (`src/cmd/hive/claimswire.go:196-201`, `src/cmd/hive/claimswire.go:158-171`,
-   `src/pkg/github/issue_inprogress.go:125-140`, `src/pkg/github/issue_inprogress.go:185`,
+   `src/pkg/github/issue_inprogress.go:126-141`, `src/pkg/github/issue_inprogress.go:186`,
    `src/pkg/github/stage_labeler.go:114`); the PR-claim sync writes 040
    (`src/pkg/github/prclaims.go:1777`, `src/pkg/github/prclaims.go:2037`) and so
    does a dashboard verdict-settle handler through a plain `AddLabels`
@@ -60,9 +60,9 @@ hub read that store and nothing else (`src/pkg/dashboard/stage_tracker.go:584-58
    parking stages through the label relay (`agentMayAddLabel`,
    `src/pkg/github/issue_request_label.go:75`), so a clanker can set a stage
    label and only the next sweep's self-heal corrects it. The docs admit the
-   arrangement (`src/docs/labels-and-control-signals.md:313-316`). Label
-   strings also leak as literals (`src/pkg/claims/comments.go:16,20`,
-   `src/pkg/review/dispatch.go:726`).
+   arrangement (`src/docs/labels-and-control-signals.md:313-316`). The PR-D
+   vocabulary cleanup makes claim labels and review adoption checks use
+   `stagelabels` directly; their fact-submission migration remains separate.
 3. *No explicit transition model.* `Store.Observe` records that a stage
    changed and whether that counts as a regression, but nothing asserts that
    a from→to pair is one the pipeline expects, so a derivation bug (or a

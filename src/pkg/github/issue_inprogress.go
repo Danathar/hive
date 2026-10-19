@@ -39,12 +39,13 @@ import (
 //     on every hive that enumerates the repo, whether or not that hive has
 //     governor.claims on.
 
+// InProgressLabel marks an issue a hive agent has started a PR for. It is
+// the `stage/030-pr-in-progress` stage label (hivecommons/hive#12436);
+// the `hive/in-progress` label it replaced is claims.LegacyLabelInProgress
+// and is only recognised, never written, during the migration cycle.
+var InProgressLabel = claims.LabelPRInProgress
+
 const (
-	// InProgressLabel marks an issue a hive agent has started a PR for. It is
-	// the `stage/030-pr-in-progress` stage label (hivecommons/hive#12436);
-	// the `hive/in-progress` label it replaced is claims.LegacyLabelInProgress
-	// and is only recognised, never written, during the migration cycle.
-	InProgressLabel = claims.LabelPRInProgress
 	// inProgressLabelDescription seeds the label when a repo does not define
 	// it yet; the colour is the shared stage-family amber.
 	inProgressLabelDescription = "An agent kick is running; no PR yet"

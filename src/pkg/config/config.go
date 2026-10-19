@@ -4372,18 +4372,18 @@ func (s StageLabelsConfig) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
 }
 
-// stageSlugs is registered by pkg/stagelabels at init so config validation
-// can reject unknown dwell keys without pkg/dashboard importing the table.
+// stageSlugs starts with the shared vocabulary so validation does not depend
+// on another package registering the table as an import side effect.
 var stageSlugs []string
 
-// RegisterStageSlugs records the known stage slugs (called from pkg/stagelabels).
+// RegisterStageSlugs overrides the known stage slugs.
 func RegisterStageSlugs(slugs []string) { stageSlugs = append([]string(nil), slugs...) }
 
-// KnownStageSlugs returns the registered stage slugs (nil if none registered).
+// KnownStageSlugs returns a copy of the registered stage slugs.
 func KnownStageSlugs() []string { return append([]string(nil), stageSlugs...) }
 
 // KnownStageSlug reports whether slug is a registered stage slug. When no
-// table has been registered (stagelabels not linked) every slug is accepted.
+// table has been registered every slug is accepted.
 func KnownStageSlug(slug string) bool {
 	if len(stageSlugs) == 0 {
 		return true

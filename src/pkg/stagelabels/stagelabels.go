@@ -46,11 +46,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/authorkind"
-	"github.com/hivecommons/hive/pkg/claims"
-	"github.com/hivecommons/hive/pkg/config"
 )
-
-func init() { config.RegisterStageSlugs(Slugs()) }
 
 // Stage is the pipeline position. The zero value None means "no stage":
 // the item is terminal, out of the pipeline, or the hive has no opinion.
@@ -722,14 +718,16 @@ func Plan(current []string, want Desired) (add, remove []string) {
 // The reconciler removes them from any open item it writes a stage for, so
 // the migration completes one cycle after upgrade. `hive/claimed-by-<who>`
 // is NOT retired: it is the "who" modifier the stage cannot carry.
-var LegacyLabels = []string{LegacyCoveredByPR, LegacyCoveredByPRASCII, claims.LegacyLabelClaimed, claims.LegacyLabelInProgress}
+var LegacyLabels = []string{LegacyCoveredByPR, LegacyCoveredByPRASCII, LegacyClaimed, LegacyInProgress}
 
 // Retired label spellings the stage family replaced (kept as constants so
 // readers that still have to RECOGNISE them for the migration cycle do not
-// re-type the strings). The claim-side pair lives in pkg/claims.
+// re-type the strings). pkg/claims keeps aliases for its callers.
 const (
 	LegacyCoveredByPR      = "🐝 covered by PR"
 	LegacyCoveredByPRASCII = "hive/covered-by-pr"
+	LegacyClaimed          = "claimed"
+	LegacyInProgress       = "hive/in-progress"
 )
 
 // IsLegacy reports whether label is one of the retired labels (case-insensitive).

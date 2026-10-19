@@ -11,6 +11,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/escalation"
 	"github.com/hivecommons/hive/pkg/outputschema"
+	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
 const (
@@ -723,7 +724,7 @@ func (s DispatchState) PendingSince(repo string, number int, headSHA string) tim
 // or the stage reconciler says the hive adopted the contributor PR in place.
 // Anything else was opened by someone the hive does not speak for.
 func hiveAuthored(pr PullRequest, opts DispatchOptions) bool {
-	return isAgentAuthored(pr.Author, opts.AIAuthor) || strings.TrimSpace(pr.AuthorAgent) != "" || pr.HiveAttributed || hasLabelFold(pr.Labels, "stage/074-adopted-by-hive")
+	return isAgentAuthored(pr.Author, opts.AIAuthor) || strings.TrimSpace(pr.AuthorAgent) != "" || pr.HiveAttributed || hasLabelFold(pr.Labels, stagelabels.AdoptedByHive.Label())
 }
 
 // fixPushAllowed is the ownership check in front of every fix kick. A fix kick
@@ -815,7 +816,7 @@ func (p *DispatchPlan) dispatchFix(pr PullRequest, agg Aggregate, opts DispatchO
 }
 
 func adoptedHiveOwnedFix(pr PullRequest, opts DispatchOptions) bool {
-	return hasLabelFold(pr.Labels, "stage/074-adopted-by-hive") && hiveAuthored(pr, opts)
+	return hasLabelFold(pr.Labels, stagelabels.AdoptedByHive.Label()) && hiveAuthored(pr, opts)
 }
 
 func (p *DispatchPlan) recordFixExclusion(pr PullRequest, reason string, attempts int) {

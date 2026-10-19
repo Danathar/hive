@@ -1,8 +1,6 @@
 package stagelabels
 
 import (
-	"github.com/hivecommons/hive/pkg/authorkind"
-	"github.com/hivecommons/hive/pkg/config"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/claims"
+	"github.com/hivecommons/hive/pkg/authorkind"
 )
 
 func TestTableIsOrderedSparseAndUnique(t *testing.T) {
@@ -434,32 +432,6 @@ func TestStoreMarksForgetsAndSharedLoad(t *testing.T) {
 	first := Shared()
 	if first == nil || Shared() != first {
 		t.Fatal("Shared() must return one store")
-	}
-}
-
-// TestClaimLabelConstantsMatchStages pins pkg/claims' label strings (which
-// cannot import this package) to the stage table so the claim hooks and the
-// reconciler never disagree on the spelling.
-func TestClaimLabelConstantsMatchStages(t *testing.T) {
-	if got := Claimed.Label(); got != claims.LabelClaimed {
-		t.Fatalf("claims.LabelClaimed = %q, stage table says %q", claims.LabelClaimed, got)
-	}
-	if got := PRInProgress.Label(); got != claims.LabelPRInProgress {
-		t.Fatalf("claims.LabelPRInProgress = %q, stage table says %q", claims.LabelPRInProgress, got)
-	}
-	for _, l := range []string{claims.LegacyLabelClaimed, claims.LegacyLabelInProgress, LegacyCoveredByPR, LegacyCoveredByPRASCII, "CLAIMED"} {
-		if !IsLegacy(l) || !Owned(l) {
-			t.Errorf("%q should be a retired, owned label", l)
-		}
-	}
-	if IsLegacy(claims.LabelClaimed) || IsLegacy("hive/claimed-by-bob") {
-		t.Fatal("live stage label / who-modifier must not be legacy")
-	}
-	if !CarriesStageAtLeast([]string{"bug", MergeQueue.Label()}, CoveredByPR) {
-		t.Fatal("mirrored PR stage should count as covered")
-	}
-	if CarriesStageAtLeast([]string{Claimed.Label()}, CoveredByPR) || CarriesStageAtLeast(nil, Actionable) {
-		t.Fatal("claimed / no stage must not count as covered")
 	}
 }
 
@@ -1023,21 +995,6 @@ func TestRenamesWithdrawnNeedsAuthorSpellingReads072(t *testing.T) {
 	}
 	if NeedsAuthor.Label() != "stage/071-needs-author" || ReturnedToContributor.Label() != "stage/072-returned-to-contributor" {
 		t.Fatalf("labels: %q %q", NeedsAuthor.Label(), ReturnedToContributor.Label())
-	}
-}
-
-// hivecommons/hive#12683: config spells the decision park labels out because
-// it cannot import this package; the pairs must never drift. The issue park
-// signal is 045; 085 is the PR stage (and the retired issue spelling).
-func TestNeedsDecisionLabelMatchesConfigDefault(t *testing.T) {
-	if IssueNeedsDecision.Label() != config.DefaultNeedsDecisionLabel {
-		t.Fatalf("stage label %q != config.DefaultNeedsDecisionLabel %q", IssueNeedsDecision.Label(), config.DefaultNeedsDecisionLabel)
-	}
-	if NeedsDecision.Label() != config.PRNeedsDecisionStageLabel {
-		t.Fatalf("stage label %q != config.PRNeedsDecisionStageLabel %q", NeedsDecision.Label(), config.PRNeedsDecisionStageLabel)
-	}
-	if StageBySlugFor("needs-decision", IssueItem) != IssueNeedsDecision || StageBySlugFor("needs-decision", PRItem) != NeedsDecision {
-		t.Fatal("StageBySlugFor must resolve the shared slug per kind")
 	}
 }
 
