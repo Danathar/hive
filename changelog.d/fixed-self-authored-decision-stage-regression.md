@@ -1,1 +1,0 @@
-- Add regression coverage that resolved Hive-authored design questions leave the needs-decision stage label.

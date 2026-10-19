@@ -1,1 +1,0 @@
-- Let Hive-authored review decisions resolve low-risk sequencing, naming and config-shape questions by default while preserving risk escalations.

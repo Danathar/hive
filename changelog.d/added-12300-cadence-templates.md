@@ -1,1 +1,0 @@
-- Add single-click global cadence setting templates (New Level testing, Weekly sprint, Biweekly sprint, and Daily cadence) in the dashboard Governor matrix and via `POST /api/config/governor/cadence-templates` to allow operators to quickly configure governor cadences across all agents without excessive manual clicks (#12300).

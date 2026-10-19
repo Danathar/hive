@@ -258,7 +258,10 @@ spec omits `launch_cmd`, Hive still builds the backend command normally.
     busy_no_activity_threshold: 30m
                                  # surface Working/no-transcript activity after repeated
                                  #   undeliverable kicks; default 30m. At twice
-                                 #   this silence the session is restarted; a
+                                 #   this silence the session is restarted (also
+                                 #   when the live CLI pane shows no input prompt
+                                 #   at all, or, on non-inference backends, sits
+                                 #   on a consent/blocking menu); a
                                  #   kick_failed_repeatedly self-report is filed
                                  #   only if kicks still fail after that restart
     max_turn_duration: 0s        # optional visibility-only Working ceiling; 0 disables
@@ -921,7 +924,7 @@ Where you will see it: the agent's Prompt Template tab renders the guide where t
 
 ### Hive-authored issue decision policy (`project.agent_issue_decision_policy`)
 
-`project.agent_issue_decision_policy` controls what happens when Hive's own agents try to park an issue with `hive-open-issue --needs-decision` or `label … stage/045-needs-decision`. The default is `resolve`: Hive-authored issues do **not** park for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions. The agent should pick the simplest additive, backward-compatible option and record the choice in the issue body as `Decision taken by hive: …`; the relay downgrades non-risk parks to `stage/010-actionable` and writes an audit entry. Set `escalate` to preserve the older behavior where every Hive-authored decision request parks.
+`project.agent_issue_decision_policy` controls what happens when Hive's own agents try to park an issue with `hive-open-issue --needs-decision`, `hive-open-issue comment … --needs-decision` or `label … stage/045-needs-decision`. A typed `--step-kind` owner step is exempt and always parks. The default is `resolve`: Hive-authored issues do **not** park for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions. The agent should pick the simplest additive, backward-compatible option and record the choice in the issue body as `Decision taken by hive: …`; the relay downgrades non-risk parks to `stage/010-actionable` and writes an audit entry. Set `escalate` to preserve the older behavior where every Hive-authored decision request parks.
 
 Parking remains for risk categories: security posture, data loss, irreversible or public-facing behaviour, governance/policy/licensing, spend, credentials/secrets/infra the hive cannot access (owner-only), or a question about a human's intent that cannot be inferred. Parked issue bodies should include `Risk: <category>` so the maintainer can see why a person is needed. Human-origin issue filings are unaffected.
 

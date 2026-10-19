@@ -209,8 +209,9 @@ type PromptOptions struct {
 	Perspectives PerspectiveSet
 	Revise       bool
 	// ProposeFixesOnly tells the reviewer that no agent will push to this
-	// PR's branch — it was opened by someone outside the hive and
-	// the PR is not hive-authored — so every fix it wants has to travel in
+	// PR's branch — it was opened by someone outside the hive, and a
+	// hive-signed commit on it would fail the squash sign-off gate whatever
+	// review.fix_human_prs says (hivecommons/hive#12897) — so every fix it wants has to travel in
 	// the review comment itself, as a suggestion or a patch the author can
 	// apply. Without this a changes_requested verdict on such a PR would
 	// name a problem and then leave the author to guess at the fix the
@@ -263,7 +264,7 @@ func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOption
 	b.WriteString(findingSchemaInstruction)
 	b.WriteString("Use approve only when this perspective finds no IN-SCOPE blocker. Use changes_requested for agent-fixable in-scope issues. Use requires_human for ambiguous/high-risk in-scope judgment. Use reject for fundamentally unsuitable or harmful PRs. Out-of-scope findings alone must not lower the verdict.\n")
 	b.WriteString("For Hive-authored PRs, resolve sequencing, naming, config-shape, scope, and land-now-vs-later questions yourself: prefer approve with an advisory note, or changes_requested only for a concrete in-scope fix. Use requires_human only for risk a human must own: security, data loss, irreversible or public-facing behavior, policy/governance, licensing, spend, or when you could not read the diff.\n")
-	b.WriteString("A Hive-authored incomplete fix with concrete remediation is changes_requested, not requires_human. If there are two engineering remedies (for example, add producer code OR reword a changelog), choose the best route yourself and state it as the requested change; do not escalate the choice to a human unless it falls into one of the risk categories above.\n")
+	b.WriteString("A Hive-authored incomplete fix with concrete remediation is changes_requested, not requires_human. If there are two engineering remedies (for example, add producer code OR reword a changelog), choose the best route yourself and state it as the requested change; do not escalate the choice to a human unless it falls into one of the risk categories above. Intent-alignment cleanup such as trimming a PR summary or changelog fragment that duplicates already-landed work is also changes_requested when the remediation is concrete.\n")
 	if opts.PostComments {
 		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings, opts.Revise))
 	}
@@ -282,7 +283,7 @@ func buildProposeOnlyInstruction(pr PullRequest, opts PromptOptions) string {
 	}
 	var b strings.Builder
 	b.WriteString("\nPROPOSE FIXES, DO NOT PUSH THEM.\n")
-	fmt.Fprintf(&b, "PR %s#%d was opened by someone this hive does not speak for, so NO agent will push to its branch after your review; the legacy review.fix_human_prs setting does not permit non-App follow-up pushes. Do not check out, commit to, or push to this PR's branch yourself, and do not open a replacement PR.\n", pr.Repo, pr.Number)
+	fmt.Fprintf(&b, "PR %s#%d was opened by someone this hive does not speak for, so NO agent will push to its branch after your review, whatever review.fix_human_prs says: a commit signed off by the hive instead of the PR author fails the squash sign-off gate, and only the author could clear it. Do not check out, commit to, or push to this PR's branch yourself, and do not open a replacement PR.\n", pr.Repo, pr.Number)
 	b.WriteString("For every finding you would have asked an agent to fix, put the fix in the review comment so the author can apply it: a ```suggestion block for a change that fits in a few lines at one location, or a ```diff patch block for anything larger. A finding without a concrete fix is a request for the author's time; a finding with one is an offer of yours.\n")
 	b.WriteString("changes_requested still means what it says — the verdict is recorded and the PR waits on the author, not on the hive.\n")
 	return b.String()
@@ -444,7 +445,7 @@ func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool, revise 
 		b.WriteString("If this perspective found nothing a human needs, skip the comment entirely — but still record the verdict, or this PR is dispatched to you again from scratch:\n")
 		fmt.Fprintf(&b, "  hive-review %d --repo %s --record-verdict --verdict-file <verdict>\n", pr.Number, pr.Repo)
 	}
-	b.WriteString("If the PR body claims behavior the diff does not implement, say so with file:line — that gap is one of the most useful things you can report.\n")
+	b.WriteString("If the PR summary claims behavior the diff does not implement, say so with file:line — that gap is one of the most useful things you can report.\n")
 	b.WriteString("Be brief and specific. One comment, at most a few findings, worst first.\n")
 	b.WriteString(buildRoutingInstruction(pr))
 	return b.String()
@@ -556,7 +557,7 @@ func BuildCombinedPrompt(pr PullRequest, perspectives []Perspective, opts Prompt
 	b.WriteString(findingSchemaInstruction)
 	b.WriteString("Give each perspective its OWN verdict. Use approve only when THAT perspective finds no in-scope blocker. Use changes_requested for agent-fixable in-scope issues. Use requires_human for ambiguous/high-risk in-scope judgment. Use reject for fundamentally unsuitable or harmful PRs. Out-of-scope findings alone must not lower any verdict.\n")
 	b.WriteString("For Hive-authored PRs, resolve sequencing, naming, config-shape, scope, and land-now-vs-later questions yourself: prefer approve with an advisory note, or changes_requested only for a concrete in-scope fix. Use requires_human only for risk a human must own: security, data loss, irreversible or public-facing behavior, policy/governance, licensing, spend, or when you could not read the diff.\n")
-	b.WriteString("A Hive-authored incomplete fix with concrete remediation is changes_requested, not requires_human. If there are two engineering remedies (for example, add producer code OR reword a changelog), choose the best route yourself and state it as the requested change; do not escalate the choice to a human unless it falls into one of the risk categories above.\n")
+	b.WriteString("A Hive-authored incomplete fix with concrete remediation is changes_requested, not requires_human. If there are two engineering remedies (for example, add producer code OR reword a changelog), choose the best route yourself and state it as the requested change; do not escalate the choice to a human unless it falls into one of the risk categories above. Intent-alignment cleanup such as trimming a PR summary or changelog fragment that duplicates already-landed work is also changes_requested when the remediation is concrete.\n")
 	b.WriteString("A perspective you could not meaningfully assess is requires_human, not approve. Approving a perspective you did not actually consider is the one failure mode that makes this whole review worthless, because it is indistinguishable from having considered it.\n")
 	if opts.PostComments {
 		b.WriteString(buildCombinedPublishInstruction(pr, perspectives, opts))

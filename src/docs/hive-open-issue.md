@@ -64,7 +64,7 @@ hive-open-issue request-review --repo <owner/repo> <number|url> [--reviewer a,b]
 | `--step-kind` | — | issue, comment | `release`; requires `--needs-decision`, `--release-tag` and `--release-target`; records metadata only, never publishes a release |
 | `--release-tag` | — | issue, comment | release tag from the repository's version source |
 | `--release-target` | — | issue, comment | full lowercase 40-character commit SHA for the proposed release |
-| `--needs-decision` | — | issue, comment | park the new issue, or the existing issue being commented on, on a maintainer decision: the watcher applies the hive's configured needs-decision label itself (see [Parking an issue that needs a decision](#parking-an-issue-that-needs-a-decision)) |
+| `--needs-decision` | — | issue, comment | park the new issue, or the existing issue being commented on, on a maintainer decision: the watcher applies the hive's configured needs-decision label itself (see [Parking an issue that needs a decision](#parking-an-issue-that-needs-a-decision)). On both subcommands a Hive-authored non-risk question is downgraded instead of parked under `project.agent_issue_decision_policy: resolve` (the default); a typed `--step-kind` owner step always parks |
 | `--number` | — | comment, claim, close, label, request-review | the issue/PR number; a bare positional number or a `.../issues/N` or `.../pull/N` URL is also accepted |
 | `--dry-run` | `-n` | all | validate the arguments and print the exact request that would be written, then exit `0` **without writing it** — nothing is created, commented, claimed, or closed |
 
@@ -131,7 +131,7 @@ drops that pair with a warning and offers both.
 
 #### Parking an issue that needs a decision
 
-`--needs-decision` is the way an agent parks an issue it files. Hive-authored issues must not use it for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions: with `project.agent_issue_decision_policy: resolve` (default), the relay records `Decision taken by hive: …`, keeps the issue actionable, and audits the downgrade. Use it only when the body asks the maintainer to decide a risk category, and include `Risk: <category>` for security posture, data loss, irreversible or public-facing behaviour, governance/policy/licensing, spend, owner-only credentials/secrets/infra, or uninferable human intent. The script sends `"needs_decision": true` on the request, and
+`--needs-decision` is the way an agent parks an issue it files or, on `comment`, an existing issue. Hive-authored issues must not use it for sequencing, naming, numbering, config-shape, scope, or "approach A vs B" engineering questions: with `project.agent_issue_decision_policy: resolve` (default), the relay records `Decision taken by hive: …`, keeps the issue actionable, and audits the downgrade. Use it only when the body asks the maintainer to decide a risk category, and include `Risk: <category>` for security posture, data loss, irreversible or public-facing behaviour, governance/policy/licensing, spend, owner-only credentials/secrets/infra, or uninferable human intent. The script sends `"needs_decision": true` on the request, and
 the watcher adds the hive's configured needs-decision label
 (`project.issue_filter.hard_suppress_labels.needs_decision`, first entry;
 `stage/045-needs-decision` by default — the retired `needs-decision` spelling
@@ -170,7 +170,9 @@ fix is verified — nothing else routes it. The flag applies only to `issue` and
 
 #### Recording a release-only owner step
 
-When the only remaining step is a release, add `--step-kind release`,
+When the only remaining step is a release, add `--step-kind release`
+(a typed owner step is never downgraded by `agent_issue_decision_policy`,
+whatever the wording),
 `--release-tag <tag>` and `--release-target <full-commit-sha>` to an `issue`
 or `comment` request with `--needs-decision`:
 

@@ -1,1 +1,0 @@
-- Let Hive-authored issues resolve non-risk engineering decision questions without self-parking at `stage/045`; the `agent_issue_decision_policy` gate applies on the issue, label and `comment --needs-decision` paths alike.

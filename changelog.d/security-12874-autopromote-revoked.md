@@ -1,1 +1,0 @@
-- The contributor-lane auto-promotion ratchet no longer re-trusts a contributor whose registry tier is `revoked`, and counts a merged PR that a later merged revert undid as revert evidence ([#12874](https://github.com/hivecommons/hive/issues/12874)).
