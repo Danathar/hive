@@ -488,8 +488,10 @@ func prShape(p PullRequest, branch string) string {
 	return ""
 }
 
-// mergeability maps GitHub's answer: conflicts leave the front, unknown and
-// any other no wait for the next round.
+// mergeability is called after confirming the head contains the current tip
+// and its required checks pass. Conflicts and a remaining block leave the
+// front: the lane has no further action that can satisfy that block. Unknown
+// mergeability and other negative states wait for the next round.
 func mergeability(p PullRequest) (string, bool) {
 	switch ghub.MergeableFromState(p.MergeableState, p.Mergeable) {
 	case ghub.MergeableYes:
@@ -499,6 +501,9 @@ func mergeability(p PullRequest) (string, bool) {
 	}
 	if p.MergeableState == "dirty" {
 		return "pull request has merge conflicts", true
+	}
+	if p.MergeableState == "blocked" {
+		return "pull request is blocked despite passing required checks on an up-to-date head; no remaining lane action can satisfy the block", true
 	}
 	return fmt.Sprintf("pull request is not mergeable (state %q)", p.MergeableState), false
 }
@@ -642,9 +647,6 @@ func (r *round) finalCheck(head, tip string) (string, bool) {
 	if reason := prShape(q, r.branch); reason != "" {
 		return reason, true
 	}
-	if reason, leave := mergeability(q); reason != "" {
-		return reason, leave
-	}
 	if reason := r.l.policyProblem(r.repo, q.Labels); reason != "" {
 		return reason, true
 	}
@@ -657,6 +659,9 @@ func (r *round) finalCheck(head, tip string) (string, bool) {
 	}
 	if v := r.l.checks(r.ctx, r.repo, r.branch, head); v.outcome != ghub.CheckPassed {
 		return v.reason, v.outcome == ghub.CheckFailed
+	}
+	if reason, leave := mergeability(q); reason != "" {
+		return reason, leave
 	}
 	if r.authorize == nil {
 		return "no merge-path authorization was supplied", false

@@ -642,7 +642,8 @@ func TestMergeability(t *testing.T) {
 		{"unknown", nil, "not yet known", false},
 		{"unknown", &yes, "", false},
 		{"dirty", nil, "merge conflicts", true},
-		{"blocked", nil, "not mergeable", false},
+		{"blocked", nil, "no remaining lane action can satisfy the block", true},
+		{"blocked", &yes, "no remaining lane action can satisfy the block", true},
 	} {
 		reason, leave := mergeability(PullRequest{MergeableState: tc.state, Mergeable: tc.mergeable})
 		if leave != tc.leave || (tc.reason == "") != (reason == "") || !strings.Contains(reason, tc.reason) {

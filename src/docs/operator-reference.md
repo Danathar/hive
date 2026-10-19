@@ -553,6 +553,12 @@ every branch update) is the fallback for a front whose checks never finish;
 its reason says what the lane last knew, for example that the head after the
 branch update was never evaluated, or the last recorded waiting reason.
 
+A front that GitHub still reports as `blocked` after its head contains the
+current target tip and all required checks pass also leaves immediately. The
+lane records that no remaining lane action can satisfy the block and promotes
+the next pull request. Pending, missing or unreadable required checks still
+wait; an eligible pull request that returns joins the back of the lane.
+
 ### The remaining window, and GitHub's up-to-date rule
 
 No GitHub merge API can be made conditional on the target branch's tip; they
