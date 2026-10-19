@@ -520,3 +520,20 @@ func TestRecordReviewEvidenceCINormalizesShortRepo(t *testing.T) {
 		t.Fatalf("short-name directory created: %v", err)
 	}
 }
+
+func TestRecordReviewEvidenceCISkipsWithoutBaseSHA(t *testing.T) {
+	root := withEvidenceRoot(t)
+	c := newTestClient(t, newEvidenceContextServer(t, &evidenceContextFixture{head: "h1"}), "acme", []string{"acme/exult"})
+	c.SetReviewEvidence(func(string) ReviewEvidenceSettings { return ReviewEvidenceSettings{Enabled: true} })
+
+	pr := &gh.PullRequest{
+		User: &gh.User{Login: gh.Ptr("alice"), Type: gh.Ptr("User")},
+		Base: nil,
+	}
+	green := []*gh.CheckRun{evidenceCheckRun(1, "test", "completed", "success")}
+	c.recordReviewEvidenceCI("exult", 192, "h1", "success", pr, green)
+
+	if _, err := os.Stat(ReviewEvidencePath(root, "acme/exult", 192, "h1")); !os.IsNotExist(err) {
+		t.Fatalf("bundle written without a base sha: %v", err)
+	}
+}

@@ -256,7 +256,13 @@ func (c *Client) upsertReviewEvidence(repo string, number int, head string, u re
 			return
 		}
 		if pr.GetBase().GetSHA() == "" {
-			c.logger.Debug("review evidence: PR has no base sha, bundle not started",
+			// A CI-only snapshot can retry on the next eligibility pass; dropped
+			// verdicts cannot, so those stay loud.
+			level := slog.LevelWarn
+			if u.ci != nil && len(u.verdicts) == 0 {
+				level = slog.LevelDebug
+			}
+			c.logger.Log(context.Background(), level, "review evidence: PR has no base sha, bundle not started",
 				slog.String("repo", repo), slog.Int("number", number), slog.String("head", head))
 			return
 		}
