@@ -162,6 +162,14 @@ type AuditLog struct {
 	// they persist; "" keeps them in memory only (no /data volume, tests).
 	prCounters     PRThroughputCounters
 	prCountersPath string
+	// Writer lease state (#13046, audit_writer_lease.go). logPath is the
+	// canonical audit.jsonl; "" (bare struct literals, no /data) disables the
+	// lease entirely and writer is used as-is.
+	logPath       string
+	writerID      string
+	owner         bool
+	leaseReleased bool
+	stopLease     chan struct{}
 }
 
 func newAuditLog() *AuditLog {
@@ -172,15 +180,13 @@ func newAuditLog() *AuditLog {
 
 	dir := "/data"
 	if _, err := os.Stat(dir); err == nil {
-		a.writer = &lumberjack.Logger{
-			Filename:   auditLogPath,
-			MaxSize:    auditMaxSizeMB,
-			MaxBackups: auditMaxBackups,
-			MaxAge:     auditMaxAgeDays,
-			Compress:   true,
-		}
+		// initWriterLease must run before loadFromDisk: acquiring the lease
+		// merges orphaned spill files into audit.jsonl, and loadFromDisk is
+		// the only replay of that file into the in-memory ring.
+		a.initWriterLease(auditLogPath, auditWriterID())
 		a.loadFromDisk()
 		a.loadPRThroughputCounters(prThroughputCountersPath, auditLogPath)
+		go a.runWriterLease(a.stopLease)
 	}
 
 	return a
@@ -190,6 +196,17 @@ func (a *AuditLog) loadFromDisk() {
 	a.loadFromDiskPath(auditLogPath)
 }
 
+// parseAuditLine is the single accept-rule for a persisted audit line, shared
+// by the boot-time replay and the spill merge: non-empty, valid JSON, and
+// carrying a timestamp.
+func parseAuditLine(line []byte) (AuditEntry, bool) {
+	var entry AuditEntry
+	if len(line) == 0 || json.Unmarshal(line, &entry) != nil || entry.Timestamp == "" {
+		return AuditEntry{}, false
+	}
+	return entry, true
+}
+
 func (a *AuditLog) loadFromDiskPath(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -197,12 +214,7 @@ func (a *AuditLog) loadFromDiskPath(path string) {
 	}
 	lines := bytes.Split(data, []byte("\n"))
 	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		var entry AuditEntry
-		if json.Unmarshal(line, &entry) == nil && entry.Timestamp != "" {
+		if entry, ok := parseAuditLine(bytes.TrimSpace(line)); ok {
 			a.ring = append(a.ring, entry)
 			a.noteUserAction(entry.User, entry.Timestamp)
 		}
@@ -257,6 +269,7 @@ func (a *AuditLog) logRecordAt(timestamp, user, action, detail, agent, repo stri
 	a.ring = append(a.ring, entry)
 	a.noteUserAction(entry.User, entry.Timestamp)
 
+	a.reopenSpillIfRemovedLocked()
 	if a.writer != nil {
 		if data, err := json.Marshal(entry); err == nil {
 			if _, err := a.writer.Write(append(data, '\n')); err != nil {
@@ -631,6 +644,15 @@ func (s *Server) auditFromRequest(r *http.Request, action, detail, agent string)
 // config watcher, startup, login detector).
 func (s *Server) AuditLog(user, action, detail, agent string) {
 	s.audit.Log(user, action, detail, agent)
+}
+
+// ReleaseAuditWriter hands the shared audit.jsonl to the replacement pod at
+// shutdown (#13046); see AuditLog.ReleaseWriterLease.
+func (s *Server) ReleaseAuditWriter() {
+	if s == nil {
+		return
+	}
+	s.audit.ReleaseWriterLease()
 }
 
 // AuditLogRecord records a hive-mediated GitHub write with its typed repo and
