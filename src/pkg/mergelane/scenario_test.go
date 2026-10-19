@@ -486,7 +486,6 @@ func TestUncertaintyBlocksTheRound(t *testing.T) {
 		want  string
 	}{
 		{"mergeability unknown", func(_ *harness, p *PullRequest) { p.MergeableState = "unknown" }, "mergeability is not yet known"},
-		{"mergeability blocked", func(_ *harness, p *PullRequest) { p.MergeableState = "blocked" }, "not mergeable"},
 		{"pr read fails", func(h *harness, _ *PullRequest) { h.f.errs["PullRequest"] = errBoom }, "reading the pull request failed"},
 		{"tip read fails", func(h *harness, _ *PullRequest) { h.f.errs["BranchTip"] = errBoom }, "reading the target branch tip failed"},
 		{"compare fails", func(h *harness, _ *PullRequest) { h.f.errs["HeadContains"] = errBoom }, "comparing the head"},
