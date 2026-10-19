@@ -99,6 +99,13 @@ func notRunningReason(agent *AgentProcess) string {
 	}
 }
 
+// GovernorCadenceKickSource is the source the governor eval loop passes for
+// its cadence kicks. It matches the "governor-eval" trigger the dispatcher
+// already audits. Only kicks carrying it may be superseded by a queued
+// mention: the governor re-sends a cadence kick on its next tick, whereas any
+// other caller's message is one-shot (#12982).
+const GovernorCadenceKickSource = "governor-eval"
+
 func (m *Manager) SendKick(name string, message string) error {
 	return m.SendKickWithSource(name, message, "")
 }
@@ -211,8 +218,12 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 		return err
 	}
 
+	message, trigger, fromQueue := m.nextDeferredMentionKickLocked(agent, message, trigger)
 	if !m.deliverKickLocked(agent, message, trigger) {
 		return fmt.Errorf("agent %s kick delivery skipped", name)
+	}
+	if fromQueue {
+		removeDeferredMentionKickLocked(agent, trigger)
 	}
 
 	return nil
@@ -517,7 +528,7 @@ func (m *Manager) deliverStartupKick(agent *AgentProcess, prompt string, gen int
 			"name", agent.Name, "trigger", "startup")
 		return
 	}
-	trigger := "startup"
+	trigger := startupKickTrigger
 	if agent.pendingStartupKick != "" {
 		prompt = agent.pendingStartupKick
 		if agent.pendingStartupSource != "" {
@@ -528,10 +539,13 @@ func (m *Manager) deliverStartupKick(agent *AgentProcess, prompt string, gen int
 		agent.pendingStartupKick = ""
 		agent.pendingStartupSource = ""
 	}
+	prompt, trigger, fromQueue := m.nextDeferredMentionKickLocked(agent, prompt, trigger)
 	if prompt == "" {
 		return
 	}
-	m.deliverKickLocked(agent, prompt, trigger)
+	if m.deliverKickLocked(agent, prompt, trigger) && fromQueue {
+		removeDeferredMentionKickLocked(agent, trigger)
+	}
 }
 
 // inferenceKickActionSuffix is appended to every kick sent to an agent whose
@@ -1189,10 +1203,24 @@ func (m *Manager) GovernorMayStart(name string) bool {
 	return ok && agent.State == StateStopped && !agent.OperatorStopped
 }
 
-// deferStartupKickLocked records the latest kick that arrives while startup
-// owns delivery. It deliberately replaces the normal bootstrap prompt: one
-// readiness-gated kick should be typed into the fresh pane, and the governor's
-// actionable queue message is the fresher, more specific instruction.
+// maxDeferredMentionKicks bounds the per-agent deferred mention FIFO so a
+// burst of mentions against an agent stuck in startup cannot grow unbounded.
+const maxDeferredMentionKicks = 8
+
+type deferredKick struct {
+	message string
+	source  string
+}
+
+// deferStartupKickLocked records a kick that arrives while startup owns
+// delivery. Cadence/governor kicks coalesce: the latest one replaces the
+// normal bootstrap prompt, since one readiness-gated kick should be typed into
+// the fresh pane and the governor's actionable queue message is the fresher,
+// more specific instruction. Mention/action-sourced kicks are different — each
+// already carries a human-visible ack — so they are queued FIFO and never
+// evicted by a later cadence kick (#12982). The startup delivery types the
+// oldest queued mention unless a one-shot (non-cadence) kick is pending; the
+// rest are delivered on later governor cadence kicks. Stop drops them (#13055).
 //
 // Caller holds m.mu.
 func (m *Manager) deferStartupKickLocked(agent *AgentProcess, message, trigger string) bool {
@@ -1206,20 +1234,108 @@ func (m *Manager) deferStartupKickLocked(agent *AgentProcess, message, trigger s
 	if !agent.startupLaunchQueued && !startupKickInFlight {
 		return false
 	}
-	if mentionKickSource(agent.pendingStartupSource) {
-		m.notifyKickObserver(agent.Name, "kick-dropped", agent.pendingStartupSource)
+	if mentionKickSource(trigger) {
+		m.queueDeferredMentionKickLocked(agent, message, trigger)
+	} else {
+		agent.pendingStartupKick = message
+		agent.pendingStartupSource = trigger
 	}
-	agent.pendingStartupKick = message
-	agent.pendingStartupSource = trigger
 	agent.KickRefused = true
 	agent.KickRefusalReason = "deferred until startup completes"
 	m.logger.Info("agent kick deferred until startup completes",
 		"name", agent.Name,
 		"state", agent.State,
+		"trigger", trigger,
+		"queued_mentions", len(agent.deferredMentionKicks),
 		"startup_queued", agent.startupLaunchQueued,
 		"startup_kick_in_flight", startupKickInFlight,
 	)
 	return true
+}
+
+// queueDeferredMentionKickLocked appends a mention/action kick to the agent's
+// deferred FIFO. A re-sent kick for an already-queued source replaces its
+// message in place. When the FIFO is full the oldest entry is genuinely
+// dropped: that is audited and reported to the kick observer so the mention
+// store does not keep a pending entry that will never be delivered.
+//
+// Caller holds m.mu.
+func (m *Manager) queueDeferredMentionKickLocked(agent *AgentProcess, message, source string) {
+	for i := range agent.deferredMentionKicks {
+		if agent.deferredMentionKicks[i].source == source {
+			agent.deferredMentionKicks[i].message = message
+			return
+		}
+	}
+	if len(agent.deferredMentionKicks) >= maxDeferredMentionKicks {
+		dropped := agent.deferredMentionKicks[0]
+		agent.deferredMentionKicks = agent.deferredMentionKicks[1:]
+		m.logger.Warn("audit: deferred mention kick dropped",
+			"name", agent.Name,
+			"source", dropped.source,
+			"reason", "deferred mention queue full",
+			"queue_cap", maxDeferredMentionKicks,
+		)
+		m.notifyKickObserver(agent.Name, "kick-dropped", dropped.source)
+	}
+	agent.deferredMentionKicks = append(agent.deferredMentionKicks, deferredKick{message: message, source: source})
+}
+
+// startupKickTrigger is the trigger of the bootstrap prompt typed when an
+// agent finishes starting.
+const startupKickTrigger = "startup"
+
+// nextDeferredMentionKickLocked substitutes the oldest queued mention kick for
+// a kick that may safely yield to it: the governor cadence kick (re-sent on the
+// next tick) or the startup bootstrap prompt. Every other kick — mentions
+// themselves and one-shot messages from sourceless SendKick callers — is
+// delivered as sent and the mention stays queued for the next cadence kick.
+// fromQueue reports whether the returned kick must be removed from the FIFO
+// once it is delivered.
+//
+// Caller holds m.mu.
+func (m *Manager) nextDeferredMentionKickLocked(agent *AgentProcess, message, trigger string) (string, string, bool) {
+	if len(agent.deferredMentionKicks) == 0 || (trigger != GovernorCadenceKickSource && trigger != startupKickTrigger) {
+		return message, trigger, false
+	}
+	next := agent.deferredMentionKicks[0]
+	if message != "" {
+		m.logger.Info("cadence/startup kick superseded by queued mention kick",
+			"name", agent.Name, "superseded_trigger", trigger, "trigger", next.source)
+	}
+	return next.message, next.source, true
+}
+
+// drainDeferredMentionKicksLocked drops every queued mention kick when the
+// agent is stopped, so each mention's pending store entry and 👀 ack are
+// released via kick-dropped instead of lingering indefinitely (#13055).
+// Restarts keep the queue: the relaunched agent's startup delivery drains it.
+//
+// Caller holds m.mu.
+func (m *Manager) drainDeferredMentionKicksLocked(agent *AgentProcess, reason string) {
+	for _, dropped := range agent.deferredMentionKicks {
+		m.logger.Warn("audit: deferred mention kick dropped",
+			"name", agent.Name,
+			"source", dropped.source,
+			"reason", reason,
+		)
+		m.notifyKickObserver(agent.Name, "kick-dropped", dropped.source)
+	}
+	agent.deferredMentionKicks = nil
+}
+
+// removeDeferredMentionKickLocked removes a delivered kick from the FIFO by
+// source rather than by index: m.mu is released while a kick is typed, so the
+// queue may have changed underneath the delivery.
+//
+// Caller holds m.mu.
+func removeDeferredMentionKickLocked(agent *AgentProcess, source string) {
+	for i := range agent.deferredMentionKicks {
+		if agent.deferredMentionKicks[i].source == source {
+			agent.deferredMentionKicks = append(agent.deferredMentionKicks[:i], agent.deferredMentionKicks[i+1:]...)
+			return
+		}
+	}
 }
 
 func mentionKickSource(source string) bool {
