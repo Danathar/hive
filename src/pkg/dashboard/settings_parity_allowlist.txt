@@ -135,6 +135,7 @@ agents.<key>.variables.<key>.url # TODO #11854
 agents.<key>.variables.<key>.value # TODO #11854
 agents.github_api_hourly_cap # TODO #11854
 auto_merge.allow_unprotected_base[] # TODO #11854
+auto_merge.contributor_tier.auto_promote_after_merged # contributor trust ratchet; yaml-only (#12839)
 auto_merge.human_merge_paths.<key> # TODO #11854
 auto_merge.no_ci_ok[] # TODO #11854
 auto_merge.repos.<key>.required_checks[] # TODO #11854
@@ -318,6 +319,7 @@ knowledge.vaults[].name # TODO #11854
 knowledge.vaults[].path # TODO #11854
 planning.design_labels[] # TODO #11854
 planning.plan_labels[] # TODO #11854
+project.agent_issue_decision_policy # TODO #12851
 project.agents_md_max_bytes # TODO #11854
 project.checkouts_dir # TODO #11854
 project.forge # TODO #11854

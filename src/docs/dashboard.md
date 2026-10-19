@@ -274,7 +274,7 @@ someone else and Outside terms carry a ⓘ breakdown in `/api/status` as
 `actionableNow.equation.terms[].breakdown[]`; `actionableNow.outside.breakdown[]`
 has each Outside row naming the count, rule, current setting, and how to change
 it for this hive. The Outside rows cover hard-suppress labels
-(`stage/085-needs-decision` with its retired `needs-decision` / `needs-direction` spellings, `needs-spec`, and `needs-human`) only for
+(`stage/045-needs-decision` with its retired pre-045 `stage/085-needs-decision`, `needs-decision` / `needs-direction` spellings, `needs-spec`, and `needs-human`) only for
 items that are not your turn, exempt labels from `governor.labels.exempt` plus
 permanent exempt labels, reporter-trust triage from
 `project.issue_filter.reporter_trust`, require-label filtering from
@@ -321,7 +321,7 @@ and exposes the editable rows.
 
 | Bucket | Definition | Rule/config source | How to change |
 | --- | --- | --- | --- |
-| `needs-decision` (shown as "needs human decision") | Issue is parked for a maintainer ruling. | `stage/085-needs-decision` always, plus labels in `project.issue_filter.hard_suppress_labels.needs_decision` / `.needs_direction` and the retired `needs-decision` / `needs-direction` spellings until the reconciler migrates them ([#12683](https://github.com/hivecommons/hive/issues/12683)). | Settings → Labels → Triage buckets, or edit `hive.yaml`. |
+| `needs-decision` (shown as "needs human decision") | Issue is parked for a maintainer ruling. | `stage/045-needs-decision` always (and the PR-only `stage/085-needs-decision`, which a pre-045 issue may still carry), plus labels in `project.issue_filter.hard_suppress_labels.needs_decision` / `.needs_direction` and the retired `needs-decision` / `needs-direction` spellings until the reconciler migrates them ([#12683](https://github.com/hivecommons/hive/issues/12683)). | Settings → Labels → Triage buckets, or edit `hive.yaml`. |
 | `needs-spec` | Issue needs specification or acceptance criteria. | Labels in `project.issue_filter.hard_suppress_labels.needs_spec`; default `needs-spec`. | Settings → Labels → Triage buckets, or edit `hive.yaml`. |
 | Exempt labels | Issue or PR carries a deny-list label and is never agent work. | `governor.labels.exempt` plus permanent labels such as `do-not-merge`. | Settings → Labels → Exempt labels, or edit `hive.yaml`. |
 | Reporter triage | Reporter trust is enabled and the issue author is not trusted yet. | `project.issue_filter.reporter_trust` trusted associations/logins and untrusted required labels. | Settings → Labels → Reporter trust. |
@@ -402,9 +402,9 @@ in exactly one band, while non-winning states remain as badges on the pill:
    close it. Once acknowledged the issue falls through to Unclaimed/Claimed
    with the role badge still on the pill.
 4. **Parked** (`parked`) — the parking labels and `blocked` by default:
-   `needs-human`, `stage/085-needs-decision` (plus its retired
-   `needs-direction` / `needs-decision` spellings until the issue stage
-   reconciler migrates them), `needs-spec` and `blocked`. `blocked` is a gate only a person lifts, so it is parked
+   `needs-human`, `stage/045-needs-decision` (plus its retired pre-045
+   `stage/085-needs-decision`, `needs-direction` / `needs-decision` spellings
+   until the issue stage reconciler migrates them), `needs-spec` and `blocked`. `blocked` is a gate only a person lifts, so it is parked
    whatever it waits on; the Your turn decision still tells a block on another
    item (waiting elsewhere) from one nothing explains (`blocked_unexplained`)
    ([#12376](https://github.com/hivecommons/hive/issues/12376)).
@@ -446,7 +446,7 @@ Operators can tune only the display taxonomy under `dashboard.issue_bands`:
 ```yaml
 dashboard:
   issue_bands:
-    waiting_labels: [needs-human, stage/085-needs-decision, needs-direction, needs-decision, needs-spec, blocked]
+    waiting_labels: [needs-human, stage/045-needs-decision, stage/085-needs-decision, needs-direction, needs-decision, needs-spec, blocked]
     done_labels: [hive/already-done, hive/covered-by-pr, hive/likely-done]
     stale_days: 14
 ```

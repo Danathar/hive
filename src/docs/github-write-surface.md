@@ -84,7 +84,8 @@ as fact (`issue_request_label.go`):
 - the labels that record a person's decision or an escalation:
   `approved-direction`, `design-approved`, `needs-human`, `blocked`, the
   retired `needs-decision` / `needs-direction`, and `stage/*` (an agent may
-  only *add* `stage/085-needs-decision`, the park-for-a-ruling signal).
+  only *add* the park-for-a-ruling signals: `stage/045-needs-decision` on an
+  issue, `stage/085-needs-decision` on a PR).
 
 An agent parks an issue for the owner with the `--needs-decision` flag
 instead: on a create, or on `comment` for an existing issue whose remaining

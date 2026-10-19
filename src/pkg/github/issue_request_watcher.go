@@ -17,9 +17,11 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/decisionpolicy"
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/issueshape"
 	"github.com/hivecommons/hive/pkg/logscrub"
+	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
 // IssueRequestDir is where agents drop issue-create and comment requests. An
@@ -444,11 +446,30 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 	}
 
 	// Content gate for the label relay: hive-controlled labels are refused in
-	// both directions, before any GitHub call (#9587).
+	// both directions, before any GitHub call (#9587). Non-risk Hive-authored
+	// decision parks are downgraded before the reserved-label gate so agents do
+	// not self-park on engineering choices.
 	addLabels := normalizeLabelList(req.Labels)
+	originalAddLabels := append([]string(nil), addLabels...)
 	removeLabels := normalizeLabelList(req.RemoveLabels)
-	if kind == "label" {
-		if reason, refused := c.reservedLabelRefusal(addLabels, removeLabels); refused {
+	var issueDecisionDowngrade issueDecisionDowngrade
+	if kind == "label" && containsConfiguredDecisionParkLabel(addLabels, c.needsDecisionLabel()) {
+		var dErr error
+		issueDecisionDowngrade, dErr = c.issueDecisionDowngradeForLabel(ctx, req, addLabels)
+		if dErr != nil {
+			err = dErr
+		} else if issueDecisionDowngrade.Active {
+			addLabels = replaceDecisionParkWithActionable(addLabels, c.needsDecisionLabel())
+		}
+	}
+	if err != nil {
+		// Retry lookup failures rather than silently choosing whether to park.
+	} else if kind == "label" {
+		reservedCheckAdd := addLabels
+		if issueDecisionDowngrade.Active {
+			reservedCheckAdd = removeDecisionParkLabels(originalAddLabels, c.needsDecisionLabel())
+		}
+		if reason, refused := c.reservedLabelRefusal(reservedCheckAdd, removeLabels); refused {
 			c.denyIssueRequest(path, req, reason, nowFn)
 			return
 		}
@@ -456,6 +477,12 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 
 	meta := c.attributionMeta(req.Agent)
 	body := c.relayBody(req.Agent, req.Body)
+	if kind == "issue" && req.Parent > 0 {
+		// Machine-readable child → parent marker (hivecommons/hive#12857):
+		// the sub-issue link below is best-effort and the ledger is
+		// spoke-local, so the body carries the relation too.
+		body = withParentMarker(body, req.Parent)
+	}
 	if c.attributionTrailerOn() {
 		body = AppendTrailer(body, meta)
 	}
@@ -528,10 +555,21 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 				c.denyIssueRequest(path, req, fmt.Sprintf("needs_decision parks issues only: %s#%d is a pull request", req.Repo, req.Number), nowFn)
 				return
 			}
-			err = c.AddLabels(ctx, req.Repo, req.Number, []string{c.needsDecisionLabel()})
+			// Same policy gate as the issue and label paths: under
+			// `resolve` a non-risk Hive engineering question is not parked,
+			// the comment records the decision and the owner-step marker is
+			// withheld so the unpark menu does not offer `/hive done`.
+			issueDecisionDowngrade = c.issueDecisionDowngradeForComment(req, body)
+			if !issueDecisionDowngrade.Active {
+				err = c.AddLabels(ctx, req.Repo, req.Number, []string{c.needsDecisionLabel()})
+			}
 		}
 		if err == nil {
-			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, issueOwnerStepBody(body, req.NeedsDecision, req.OwnerStep))
+			commentBody := issueOwnerStepBody(body, req.NeedsDecision && !issueDecisionDowngrade.Active, req.OwnerStep)
+			if issueDecisionDowngrade.Active {
+				commentBody = appendHiveDecisionTaken(commentBody, issueDecisionDowngrade.Question)
+			}
+			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, commentBody)
 			if errors.Is(err, ErrIssueCommentBudget) {
 				c.denyIssueRequest(path, req, "comment refused: "+err.Error()+"; this issue already received its daily quota of hive comments, nothing more is needed on it today", nowFn)
 				return
@@ -581,6 +619,9 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 				resp.LabelsRemoved = append(resp.LabelsRemoved, label)
 			}
 		}
+		if err == nil && issueDecisionDowngrade.Active {
+			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, issueDecisionDowngrade.Note)
+		}
 		if err == nil {
 			resp.OK = true
 			resp.Number = req.Number
@@ -604,10 +645,18 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 	default: // "issue"
 		var res CreateIssueResult
 		createLabels := req.Labels
+		createBody := body
 		if req.NeedsDecision {
-			createLabels = appendLabelIfMissing(createLabels, c.needsDecisionLabel())
+			if d := c.issueDecisionDowngradeForCreate(req, createBody); d.Active {
+				issueDecisionDowngrade = d
+				createLabels = removeDecisionParkLabels(createLabels, c.needsDecisionLabel())
+				createLabels = appendLabelIfMissing(createLabels, stagelabels.Actionable.Label())
+				createBody = appendHiveDecisionTaken(createBody, d.Question)
+			} else {
+				createLabels = appendLabelIfMissing(createLabels, c.needsDecisionLabel())
+			}
 		}
-		res, err = c.createIssue(ctx, CreateIssueRequest{Repo: req.Repo, Title: req.Title, Body: issueOwnerStepBody(body, req.NeedsDecision, req.OwnerStep), Labels: createLabels, Origin: req.Agent, ConsolidateOpen: true})
+		res, err = c.createIssue(ctx, CreateIssueRequest{Repo: req.Repo, Title: req.Title, Body: issueOwnerStepBody(createBody, req.NeedsDecision && !issueDecisionDowngrade.Active, req.OwnerStep), Labels: createLabels, Origin: req.Agent, ConsolidateOpen: true})
 		if err == nil && res.RejectedTwin {
 			// Terminal, not retried: a maintainer already rejected this
 			// finding, and no amount of retrying changes their verdict
@@ -712,7 +761,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		"consolidated", strconv.FormatBool(resp.Consolidated),
 		"override_reason", req.OverrideReason,
 	}
-	if kind == "comment" && req.NeedsDecision {
+	if kind == "comment" && req.NeedsDecision && !issueDecisionDowngrade.Active {
 		extra = append(extra, "parked", c.needsDecisionLabel())
 	}
 	if kind == "label" {
@@ -734,6 +783,10 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		extra = append(extra, "path", PRAuditPathRelay)
 	}
 	c.recordWriteAudit(action, meta, WriteTarget{Repo: req.Repo, Number: resp.Number}, extra...)
+	if issueDecisionDowngrade.Active {
+		c.recordWriteAudit(AuditActionAgentIssueDecisionResolved, meta, WriteTarget{Repo: req.Repo, Number: resp.Number},
+			"policy", decisionpolicy.PolicyResolve, "question", issueDecisionDowngrade.Question)
+	}
 	c.writeIssueResult(path, resp)
 	_ = os.Remove(path)
 	c.issueClearRetry(path)
@@ -742,6 +795,163 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		slog.Int("number", resp.Number), slog.Bool("reused", resp.AlreadyExisted),
 		slog.Bool("consolidated", resp.Consolidated),
 		slog.String("agent", req.Agent))
+}
+
+type issueDecisionDowngrade struct {
+	Active   bool
+	Question string
+	Note     string
+}
+
+// A typed owner step (e.g. a release) proposes an action only a person
+// with owner credentials can take, so it is owner-only by construction and
+// never downgraded to a hive-taken decision, whatever the policy.
+func (c *Client) issueDecisionDowngradeForCreate(req IssueRequest, body string) issueDecisionDowngrade {
+	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
+		return issueDecisionDowngrade{}
+	}
+	return c.issueDecisionDowngrade(req.Title, body)
+}
+
+// issueDecisionDowngradeForComment classifies a `comment --needs-decision`
+// park on an existing issue. A comment always carries its own text, so the
+// classification reads the comment body rather than the issue.
+func (c *Client) issueDecisionDowngradeForComment(req IssueRequest, body string) issueDecisionDowngrade {
+	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
+		return issueDecisionDowngrade{}
+	}
+	return c.issueDecisionDowngrade("", body)
+}
+
+func (c *Client) issueDecisionDowngradeForLabel(ctx context.Context, req IssueRequest, addLabels []string) (issueDecisionDowngrade, error) {
+	if !hiveIssueRequestActor(req.Agent, addLabels) {
+		return issueDecisionDowngrade{}, nil
+	}
+	if decisionpolicy.EffectivePolicy(c.getAgentIssueDecisionPolicy()) == decisionpolicy.PolicyEscalate {
+		return issueDecisionDowngrade{}, nil
+	}
+	text := strings.TrimSpace(req.Body)
+	if text == "" {
+		owner, name := c.splitRepo(req.Repo)
+		issue, _, err := c.client.Issues.Get(ctx, owner, name, req.Number)
+		if err != nil {
+			return issueDecisionDowngrade{}, fmt.Errorf("checking issue decision policy: %w", err)
+		}
+		text = strings.TrimSpace(issue.GetTitle() + "\n" + issue.GetBody())
+	}
+	return c.issueDecisionDowngrade("", text), nil
+}
+
+func (c *Client) issueDecisionDowngrade(title, body string) issueDecisionDowngrade {
+	if decisionpolicy.EffectivePolicy(c.getAgentIssueDecisionPolicy()) == decisionpolicy.PolicyEscalate {
+		return issueDecisionDowngrade{}
+	}
+	text := strings.TrimSpace(title + "\n" + body)
+	class := decisionpolicy.Classify(text)
+	if class.Escalate {
+		return issueDecisionDowngrade{}
+	}
+	question := decisionQuestionSummary(title, body)
+	return issueDecisionDowngrade{Active: true, Question: question, Note: hiveDecisionDowngradeNote(question)}
+}
+
+func hiveIssueRequestActor(agent string, labels []string) bool {
+	if strings.TrimSpace(agent) != "" {
+		return true
+	}
+	for _, label := range labels {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(label)), "agent/") {
+			return true
+		}
+	}
+	return false
+}
+
+func decisionQuestionSummary(title, body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(strings.Trim(line, "*#>- "))
+		lower := strings.ToLower(trimmed)
+		for _, prefix := range []string{"question:", "decision:", "decision needed:", "what to decide:", "maintainer question:"} {
+			if strings.HasPrefix(lower, prefix) {
+				return strings.TrimSpace(trimmed[len(prefix):])
+			}
+		}
+	}
+	if strings.TrimSpace(title) != "" {
+		return strings.TrimSpace(title)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if trimmed := strings.TrimSpace(strings.Trim(line, "*#>- ")); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "non-risk engineering question"
+}
+
+func appendHiveDecisionTaken(body, question string) string {
+	line := "Decision taken by hive: Hive did not park this: engineering decision taken by hive — " + question + ". Owner may override with `/hive hold` or `needs-human`."
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return line
+	}
+	if strings.Contains(body, "Decision taken by hive:") {
+		return body
+	}
+	return body + "\n\n" + line
+}
+
+func hiveDecisionDowngradeNote(question string) string {
+	return "Hive did not park this: engineering decision taken by hive — " + question + ". Owner may override with `/hive hold` or `needs-human`."
+}
+
+func replaceDecisionParkWithActionable(labels []string, configured string) []string {
+	labels = removeDecisionParkLabels(labels, configured)
+	return appendLabelIfMissing(labels, stagelabels.Actionable.Label())
+}
+
+func containsConfiguredDecisionParkLabel(labels []string, configured string) bool {
+	configured = strings.TrimSpace(configured)
+	for _, label := range labels {
+		name := strings.TrimSpace(label)
+		if configured != "" && strings.EqualFold(name, configured) {
+			return true
+		}
+		if strings.EqualFold(name, PRNeedsDecisionStageLabel) {
+			return true
+		}
+	}
+	return false
+}
+
+// issueDecisionParkLabels are the decision-park spellings the resolve
+// decision policy may downgrade to actionable. It is deliberately narrower
+// than issueParkingLabels: needs-human and blocked are owner holds, not
+// decisions Hive may take, so the downgrade must leave them in place for the
+// reserved-label check to see.
+var issueDecisionParkLabels = []string{NeedsDecisionStageLabel, legacyIssueNeedsDecisionStageLabel, issueNeedsDecisionLabel, issueNeedsDirectionLabel}
+
+func removeDecisionParkLabels(labels []string, configured string) []string {
+	out := labels[:0]
+	for _, label := range labels {
+		name := strings.TrimSpace(label)
+		if name == "" {
+			continue
+		}
+		if strings.EqualFold(name, strings.TrimSpace(configured)) {
+			continue
+		}
+		drop := false
+		for _, parking := range issueDecisionParkLabels {
+			if strings.EqualFold(name, parking) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, label)
+		}
+	}
+	return out
 }
 
 // issueRequestWriteOp maps a validated issue-request kind to its write-surface

@@ -1380,7 +1380,10 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, "missing-head-sha", nil
 	}
 	c.noteStageRole(owner, repo, number, stagelabels.RoleTrusted)
-	c.noteStageVerdict(owner, repo, number, c.contributorLaneVerdictFor(owner+"/"+repo, number, evaluatedHeadSHA))
+	verdict := c.contributorLaneVerdictFor(owner+"/"+repo, number, evaluatedHeadSHA)
+	c.noteStageVerdict(owner, repo, number, verdict)
+	priorApprover, _ := c.trustedHumanApprovalForRequiresHuman(ctx, owner, repo, number, evaluatedHeadSHA, verdict)
+	priorChecked := verdictNeedsHuman(stageDetail{Verdict: verdict, VerdictKnown: true})
 	method := mergeMethodFor(pr)
 	mergeClaim := effects.Claim{
 		Repo:   owner + "/" + repo,
@@ -1500,7 +1503,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	// Review gate (#12592), on the re-verified head immediately before the
 	// merge call: the swarm verdict for exactly the SHA about to merge.
 	// Shadow (the default) records and merges; enforce holds.
-	if reviewReason := c.selfMergeReviewGate(ctx, displayRepo, owner, repo, lane, number, current, evaluatedHeadSHA); reviewReason != "" {
+	if reviewReason := c.selfMergeReviewGate(ctx, displayRepo, owner, repo, lane, number, current, evaluatedHeadSHA, priorApprover, priorChecked); reviewReason != "" {
 		return AutoMergeSweepEvent{}, reviewReason, nil
 	}
 
@@ -1894,7 +1897,9 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 		return AutoMergeSweepEvent{}, "untrusted-author-role", nil
 	}
 	c.noteStageRole(owner, repo, number, stagelabels.RoleTrusted)
-	c.noteStageVerdict(owner, repo, number, c.contributorLaneVerdictFor(owner+"/"+repo, number, pr.GetHead().GetSHA()))
+	verdict := c.contributorLaneVerdictFor(owner+"/"+repo, number, pr.GetHead().GetSHA())
+	c.noteStageVerdict(owner, repo, number, verdict)
+	c.trustedHumanApprovalForRequiresHuman(ctx, owner, repo, number, pr.GetHead().GetSHA(), verdict)
 	permission := trustedAuthorPermission{Allowed: true, Level: "not-required"}
 	if policy.RequireGitHubPermission {
 		var err error

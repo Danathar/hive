@@ -549,6 +549,8 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		HeadRef          string   `json:"head_ref"`
 		HeadRepo         string   `json:"head_repo"`
 		FromFork         bool     `json:"from_fork"`
+		ReachableAction  string   `json:"reachable_action"`
+		Adopted          bool     `json:"adopted"`
 		Held             bool     `json:"held"`
 		FailingChecks    []string `json:"failing_checks"`
 		Excerpt          string   `json:"excerpt"`
@@ -608,16 +610,26 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		kept = append(kept, pr)
 	}
 	payload.Items = kept
-	// Two queues, not one (hivecommons/hive#7386): a red PR whose head lives
-	// in a fork is comment-only for every agent — the App token pushes to the
-	// base repository and nowhere else. Rendering the two together as one
-	// "repair queue" sent a scanner through 107 PRs of which 66 were forks;
-	// it found out by pushing, and the push landed a stray branch on the base
-	// repo under the fork's head-ref name. The split keeps the push queue
-	// honest about its size and takes the discovery cost off the agent.
+	// Two queues, not one (hivecommons/hive#7386): a red PR whose head branch
+	// is not reachable by this App token is comment-only. Rendering those
+	// together as one "repair queue" sent a scanner through 107 PRs of which
+	// 66 were unreachable forks; it found out by pushing, and the push landed
+	// a stray branch on the base repo under the fork's head-ref name. The
+	// split keeps the push queue honest about its size and takes the discovery
+	// cost off the agent. reachable_action describes what the token COULD do
+	// (a fork that allows maintainer edits reports push); whether the hive
+	// MAY push is policy, and the only policy that owns a repair on a fork
+	// branch is stage 074 in-place adoption — the same gate FIX-BEFORE-NEW
+	// applies (formatRedPRFixData). A non-adopted fork PR stays comment-only
+	// whatever its reachable_action says, so a contributor PR opened with
+	// GitHub's default "allow edits by maintainers" never becomes a push
+	// instruction, and the CI-Repair step 4 "push a fixup commit to the PR
+	// branch" is never aimed at a branch that only exists in someone's fork.
 	var pushable, forks []ciFailingRow
 	for _, pr := range payload.Items {
-		if pr.FromFork {
+		if pr.FromFork && (!pr.Adopted || pr.ReachableAction != "push") {
+			forks = append(forks, pr)
+		} else if pr.ReachableAction == "comment-only" {
 			forks = append(forks, pr)
 		} else {
 			pushable = append(pushable, pr)
@@ -636,7 +648,18 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 			b.WriteString(prListOverflowLine(len(pushable)-i, limit))
 			break
 		}
-		b.WriteString(fmt.Sprintf("  #%d %s by @%s (sha:%s)%s — %s\n", pr.Number, pr.Repo, pr.Author, pr.HeadSHA, heldMarker(pr.Held), pr.Title))
+		// An adopted fork's head lives in the contributor's repository: name
+		// it so the agent fetches that branch instead of creating a
+		// same-named one on the base repo.
+		origin := ""
+		if pr.FromFork {
+			head := pr.HeadRepo
+			if pr.HeadRef != "" {
+				head += ":" + pr.HeadRef
+			}
+			origin = fmt.Sprintf(" [adopted fork: %s — push to the contributor's branch, never to a same-named base branch]", head)
+		}
+		b.WriteString(fmt.Sprintf("  #%d %s by @%s (sha:%s)%s%s — %s\n", pr.Number, pr.Repo, pr.Author, pr.HeadSHA, origin, heldMarker(pr.Held), pr.Title))
 	}
 	if len(deferred) > 0 {
 		b.WriteString(fmt.Sprintf("DEFERRED TO OPEN SHARED-CI INCIDENTS (%d — no repair: the base/infra failure is tracked on the incident issue; do not push, retry, or comment again; each PR returns to the list above when its incident closes):\n", len(deferred)))

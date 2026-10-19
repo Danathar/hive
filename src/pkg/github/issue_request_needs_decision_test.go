@@ -62,6 +62,7 @@ func runNeedsDecisionCreatePayload(t *testing.T, filter IssueAdmitter, req Issue
 	srv := newIssueCreateLabelServer(t, &mu, &got)
 	defer srv.Close()
 	c := issueTestClient(t, srv.URL)
+	c.SetAgentIssueDecisionPolicy("escalate")
 	if filter != nil {
 		c.SetIssueFilter(filter)
 	}
@@ -177,8 +178,16 @@ func runNeedsDecisionComment(t *testing.T, filter IssueAdmitter, req IssueReques
 // lane allowlist can be narrowed before the request is processed.
 func runNeedsDecisionCommentOn(t *testing.T, filter IssueAdmitter, req IssueRequest, targetIsPR bool, setup func(*Client)) ([]string, IssueResponse) {
 	t.Helper()
+	writes, _, resp := runNeedsDecisionCommentCapture(t, filter, req, targetIsPR, setup)
+	return writes, resp
+}
+
+// runNeedsDecisionCommentCapture also returns the bodies of the comments
+// posted, in order.
+func runNeedsDecisionCommentCapture(t *testing.T, filter IssueAdmitter, req IssueRequest, targetIsPR bool, setup func(*Client)) ([]string, []string, IssueResponse) {
+	t.Helper()
 	var mu sync.Mutex
-	var writes []string
+	var writes, bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -200,8 +209,13 @@ func runNeedsDecisionCommentOn(t *testing.T, filter IssueAdmitter, req IssueRequ
 			mu.Unlock()
 			_, _ = io.WriteString(w, `[{"name":"x"}]`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments"):
+			var body struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			writes = append(writes, "comment")
+			bodies = append(bodies, body.Body)
 			mu.Unlock()
 			_, _ = io.WriteString(w, `{"id":1}`)
 		default:
@@ -210,6 +224,9 @@ func runNeedsDecisionCommentOn(t *testing.T, filter IssueAdmitter, req IssueRequ
 	}))
 	defer srv.Close()
 	c := issueTestClient(t, srv.URL)
+	// Pin the park path like runNeedsDecisionCreatePayload does: the
+	// resolve-policy downgrade has its own tests below.
+	c.SetAgentIssueDecisionPolicy("escalate")
 	if filter != nil {
 		c.SetIssueFilter(filter)
 	}
@@ -224,7 +241,7 @@ func runNeedsDecisionCommentOn(t *testing.T, filter IssueAdmitter, req IssueRequ
 	c.ProcessIssueRequestsOnce(context.Background())
 	mu.Lock()
 	defer mu.Unlock()
-	return append([]string(nil), writes...), readIssueResultFile(t, reqPath)
+	return append([]string(nil), writes...), append([]string(nil), bodies...), readIssueResultFile(t, reqPath)
 }
 
 // needs_decision on a comment parks the EXISTING issue with the configured
@@ -317,4 +334,101 @@ func TestIssueRequestWatcher_CommentNeedsDecisionRefusesPullRequest(t *testing.T
 	if got := strings.Join(writes, ","); got != "comment" || !resp.OK {
 		t.Fatalf("writes = %q ok=%v, want only the comment to succeed", got, resp.OK)
 	}
+}
+
+func TestIssueRequestWatcher_NeedsDecisionResolveDowngradesHiveEngineeringQuestion(t *testing.T) {
+	labels := runNeedsDecisionCreateWithPolicy(t, nil, "resolve", IssueRequest{
+		Repo: "o/r", Title: "[scanner] Which ADR gets renumbered?", Body: "Question: which ADR gets renumbered / use a v6-only ADR block",
+		Labels: []string{"agent/scanner"}, Agent: "scanner", NeedsDecision: true,
+	})
+	if hasLabelFold(labels, NeedsDecisionStageLabel) {
+		t.Fatalf("needs-decision label applied for non-risk engineering question; labels = %v", labels)
+	}
+	if !hasLabelFold(labels, "stage/010-actionable") {
+		t.Fatalf("actionable stage not applied for downgraded question; labels = %v", labels)
+	}
+}
+
+func TestIssueRequestWatcher_NeedsDecisionResolveEscalatesRiskQuestion(t *testing.T) {
+	labels := runNeedsDecisionCreateWithPolicy(t, nil, "resolve", IssueRequest{
+		Repo: "o/r", Title: "[scanner] Rotate deploy key", Body: "Risk: credentials/secrets/owner-only infrastructure\nQuestion: rotate the deploy key",
+		Labels: []string{"agent/scanner"}, Agent: "scanner", NeedsDecision: true,
+	})
+	if !hasLabelFold(labels, NeedsDecisionStageLabel) {
+		t.Fatalf("needs-decision label not applied for risk question; labels = %v", labels)
+	}
+}
+
+func TestIssueRequestWatcher_NeedsDecisionHumanOriginUnaffected(t *testing.T) {
+	labels := runNeedsDecisionCreateWithPolicy(t, nil, "resolve", IssueRequest{
+		Repo: "o/r", Title: "Human asks", Body: "Question: pick A or B",
+		Labels: []string{"origin/dashboard"}, NeedsDecision: true,
+	})
+	if !hasLabelFold(labels, NeedsDecisionStageLabel) {
+		t.Fatalf("human-origin request should still park; labels = %v", labels)
+	}
+}
+
+// `comment --needs-decision` is the recommended route for an existing issue,
+// so it runs the same agent_issue_decision_policy gate as the issue and
+// label paths: under `resolve` a non-risk Hive engineering question is not
+// parked, the comment records the decision and omits the owner-step marker.
+func TestIssueRequestWatcher_CommentNeedsDecisionResolveDowngradesEngineeringQuestion(t *testing.T) {
+	writes, bodies, resp := runNeedsDecisionCommentCapture(t, nil, IssueRequest{
+		Kind: "comment", Repo: "o/r", Number: 31, Agent: "scanner", NeedsDecision: true,
+		Body: "Question: which ADR gets renumbered / use a v6-only ADR block",
+	}, false, func(c *Client) { c.SetAgentIssueDecisionPolicy("resolve") })
+	if got := strings.Join(writes, ","); got != "comment" {
+		t.Fatalf("writes = %q, want only the comment (no park label) for a downgraded question", got)
+	}
+	if !resp.OK || resp.Number != 31 {
+		t.Fatalf("result = %+v, want ok on #31", resp)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("bodies = %v, want exactly one comment", bodies)
+	}
+	if strings.Contains(bodies[0], unparkOwnerStepMarker) {
+		t.Fatalf("owner-step marker must be withheld when the park is downgraded; body = %q", bodies[0])
+	}
+	if !strings.Contains(bodies[0], "Decision taken by hive:") {
+		t.Fatalf("downgraded comment must record the decision; body = %q", bodies[0])
+	}
+}
+
+// A risk question still parks under `resolve`, with the marker intact.
+func TestIssueRequestWatcher_CommentNeedsDecisionResolveEscalatesRiskQuestion(t *testing.T) {
+	writes, bodies, resp := runNeedsDecisionCommentCapture(t, nil, IssueRequest{
+		Kind: "comment", Repo: "o/r", Number: 32, Agent: "scanner", NeedsDecision: true,
+		Body: "Risk: credentials/secrets/owner-only infrastructure\nQuestion: rotate the deploy key",
+	}, false, func(c *Client) { c.SetAgentIssueDecisionPolicy("resolve") })
+	if got := strings.Join(writes, ","); got != "label:"+NeedsDecisionStageLabel+",comment" || !resp.OK {
+		t.Fatalf("writes = %q ok=%v, want park then comment for a risk question", got, resp.OK)
+	}
+	if len(bodies) != 1 || !strings.Contains(bodies[0], unparkOwnerStepMarker) {
+		t.Fatalf("risk park must keep the owner-step marker; bodies = %v", bodies)
+	}
+}
+
+func runNeedsDecisionCreateWithPolicy(t *testing.T, filter IssueAdmitter, policy string, req IssueRequest) []string {
+	t.Helper()
+	var mu sync.Mutex
+	var got []issueCreatePayload
+	srv := newIssueCreateLabelServer(t, &mu, &got)
+	defer srv.Close()
+	c := issueTestClient(t, srv.URL)
+	c.SetAgentIssueDecisionPolicy(policy)
+	if filter != nil {
+		c.SetIssueFilter(filter)
+	}
+	dir := withIssueDir(t)
+	if _, err := WriteIssueRequest(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	c.ProcessIssueRequestsOnce(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 issue create, got %d", len(got))
+	}
+	return got[0].Labels
 }

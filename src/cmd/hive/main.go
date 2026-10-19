@@ -1306,9 +1306,14 @@ func (b *boot) wireBootClosures() {
 			if ac, ok := b.cfg.Agents[name]; (ok && ac.OnDemand) || b.onDemandFromPack[name] {
 				mode = "on_demand"
 			}
+			var laneQueued *int
+			if b.sched != nil {
+				laneQueued = b.sched.ReviewerLaneQueuedWork(name)
+			}
 			if includeBlockingChecks {
-				agents = append(agents, spoke.NewAgentSummary(name, string(proc.State), mode,
-					spoke.AgentActivityFor(b.agentMgr, b.cfg, govState, currentMode, name, proc, b.onDemandFromPack)))
+				full := spoke.AgentActivityFor(b.agentMgr, b.cfg, govState, currentMode, name, proc, b.onDemandFromPack)
+				full.LaneQueuedWork = laneQueued
+				agents = append(agents, spoke.NewAgentSummary(name, string(proc.State), mode, full))
 				continue
 			}
 			act := spoke.AgentActivity{
@@ -1321,6 +1326,7 @@ func (b *boot) wireBootClosures() {
 				QuotaExhausted: proc.QuotaExhausted,
 				LastActivityAt: proc.LastPaneChange,
 				KickInterval:   spoke.HeartbeatKickInterval(govState, name, proc, b.onDemandFromPack),
+				LaneQueuedWork: laneQueued,
 				Backend:        proc.Config.Backend,
 				Enabled:        proc.Config.Enabled,
 				CanOpenIssue:   proc.LaunchedMode.CanCreateIssues(),
@@ -6356,6 +6362,13 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 		if _, err := b.ghClient.MigrateOriginLabels(b.ctx, github.OriginLabelMigrationOptions{Logger: b.logger}); err != nil {
 			b.logger.Warn("origin provenance label migration incomplete; open items may still carry retired names such as "+github.LegacyOriginReviewLabel+" or "+github.LegacyFromReviewLabel, "error", err)
 		}
+		// Issues park at stage/045-needs-decision; stage/085 is PR-only
+		// (owner decision). Open issues still wearing 085 are re-staged
+		// once; the issue reconciler also does it per cycle for the issues
+		// it enumerates, so a failure here only delays the rest.
+		if _, err := b.ghClient.MigrateIssueNeedsDecisionStage(b.ctx, github.IssueNeedsDecisionMigrationOptions{Logger: b.logger}); err != nil {
+			b.logger.Warn("issue needs-decision stage migration incomplete; open issues may still carry "+github.PRNeedsDecisionStageLabel+" instead of "+github.NeedsDecisionStageLabel, "error", err)
+		}
 		// The hive/<hive-id> provenance label is retired (#12539): the origin
 		// marker in every agent-written body carries the same fact. Runs
 		// after the hold migration so that migration still sees the label
@@ -8559,29 +8572,38 @@ func getEscalationStore() *escalation.Store {
 }
 
 // hivePRObservations projects the enumerated hive-authored PRs into escalation
-// observations (repo fully-qualified, Red == a required check failed). Shared by
-// recordRedStaleness and the reaper so both classify PRs identically. A PR is
-// "red" here strictly per HasFailingRequiredCheck — GENERIC check state, never a
-// specific linter or language.
+// observations (repo fully-qualified, Red == a required check failed). Shared
+// by recordRedStaleness and the reaper so both classify PRs identically.
 //
 // owners maps "org/repo#number" to the agent that opened the PR (see
 // auditPRAgents); pass nil when ownership is not needed. Shared/base CI
-// breakage is classified across the WHOLE pass before the observations are
-// returned, so every consumer agrees on which failures belong to this PR
-// (hivecommons/hive#9473).
+// breakage is classified across every PR in the pass before human and
+// non-Hive observations are removed. A green PR is counter-evidence, and an
+// independent human-authored PR must confirm the shared failure.
 func hivePRObservations(cfg *config.Config, actionable *github.ActionableResult, owners map[string]string) []escalation.Observation {
 	if actionable == nil {
 		return nil
 	}
-	var obs []escalation.Observation
-	for _, pr := range actionable.PRs.Items {
-		if !isHiveAgentAuthor(cfg, pr.Author) {
-			continue
+	all := allEscalationObservations(cfg, actionable, owners)
+	agentObs := all[:0]
+	for i, pr := range actionable.PRs.Items {
+		if isHiveAgentAuthor(cfg, pr.Author) {
+			agentObs = append(agentObs, all[i])
 		}
-		obs = append(obs, escalationObservation(cfg, pr, owners))
 	}
-	escalation.MarkSharedFailures(obs)
-	return obs
+	return agentObs
+}
+
+func allEscalationObservations(cfg *config.Config, actionable *github.ActionableResult, owners map[string]string) []escalation.Observation {
+	all := make([]escalation.Observation, 0, len(actionable.PRs.Items)+len(actionable.PRs.Held))
+	for _, pr := range actionable.PRs.Items {
+		all = append(all, escalationObservation(cfg, pr, owners))
+	}
+	for _, pr := range actionable.PRs.Held {
+		all = append(all, escalationObservation(cfg, pr, owners))
+	}
+	escalation.MarkSharedFailures(all)
+	return all
 }
 
 // escalationObservation projects one enumerated PR into the fix-loop ledger's
@@ -8601,18 +8623,19 @@ func escalationObservation(cfg *config.Config, pr github.PullRequest, owners map
 	}
 	red := pr.HasFailingRequiredCheck()
 	return escalation.Observation{
-		Repo:          repo,
-		Number:        pr.Number,
-		HeadSHA:       pr.HeadSHA,
-		HeadTree:      pr.HeadTree,
-		Red:           red,
-		Pending:       !red && pr.CIStatus != "success",
-		CIRunning:     red && pr.CIChecksRunning,
-		Labeled:       escalation.HasNeedsHumanLabel(pr.Labels),
-		Excerpt:       pr.CIFailureExcerpt,
-		Labels:        pr.Labels,
-		FailingChecks: pr.FailingChecks,
-		Agent:         owners[escalation.Key(repo, pr.Number)],
+		Repo:               repo,
+		Number:             pr.Number,
+		HeadSHA:            pr.HeadSHA,
+		HeadTree:           pr.HeadTree,
+		Red:                red,
+		Pending:            !red && pr.CIStatus != "success",
+		CIRunning:          red && pr.CIChecksRunning,
+		Labeled:            escalation.HasNeedsHumanLabel(pr.Labels),
+		Excerpt:            pr.CIFailureExcerpt,
+		Labels:             pr.Labels,
+		FailingChecks:      pr.FailingChecks,
+		Agent:              owners[escalation.Key(repo, pr.Number)],
+		IndependentControl: isIndependentCIControl(cfg, pr),
 	}
 }
 
@@ -8661,6 +8684,13 @@ func isHiveAgentAuthor(cfg *config.Config, author string) bool {
 		return true
 	}
 	return strings.HasSuffix(author, "[bot]") && !dependencyBots[author]
+}
+
+// isIndependentCIControl reports whether a PR supplies human-authored evidence
+// independent of Hive. Bot-authored and Hive-attributed contributor-relay PRs
+// cannot prove that a failure also affects unrelated human work.
+func isIndependentCIControl(cfg *config.Config, pr github.PullRequest) bool {
+	return !isHiveAgentAuthor(cfg, pr.Author) && !pr.AuthorNonHuman && !pr.HiveAttributed
 }
 
 // recordRedStaleness updates the shared staleness clock (first-seen-red per red
@@ -8980,31 +9010,29 @@ func runEscalationSweep(
 	}
 	getEscalationStore()
 
-	var obs []escalation.Observation
 	type prMeta struct{ checks []string }
 	meta := map[string]prMeta{}
 	owners := auditPRAgents(cfg.Project.Org, time.Now().Add(-auditPRAttributionWindow), "")
-	prs := append([]github.PullRequest(nil), actionable.PRs.Items...)
-	for _, pr := range actionable.PRs.Held {
-		if pr.ReporterTrustReason != "" {
-			prs = append(prs, pr)
+	all := allEscalationObservations(cfg, actionable, owners)
+	itemCount := len(actionable.PRs.Items)
+
+	obs := all[:0]
+	for i, o := range all {
+		var pr *github.PullRequest
+		if i < itemCount {
+			pr = &actionable.PRs.Items[i]
+		} else {
+			pr = &actionable.PRs.Held[i-itemCount]
 		}
-	}
-	for _, pr := range prs {
-		if !isHiveAgentAuthor(cfg, pr.Author) && pr.ReporterTrustReason == "" {
-			continue
-		}
-		o := escalationObservation(cfg, pr, owners)
 		if pr.ReporterTrustReason != "" {
 			escalationStore.SetReporterTrustReason(o.Repo, o.Number, pr.ReporterTrustReason)
 		}
+		if (i >= itemCount || !isHiveAgentAuthor(cfg, pr.Author)) && pr.ReporterTrustReason == "" {
+			continue
+		}
 		obs = append(obs, o)
-		meta[escalation.Key(o.Repo, o.Number)] = prMeta{checks: pr.FailingChecks}
+		meta[escalation.Key(o.Repo, o.Number)] = prMeta{checks: o.FailingChecks}
 	}
-	// Classify shared/base CI breakage across the whole pass before counting:
-	// a check failing on this PR and on at least SharedFailureSiblings others
-	// is an incident, not a failed fix attempt (hivecommons/hive#9473).
-	escalation.MarkSharedFailures(obs)
 	results := escalationStore.Sweep(obs, cfg.Escalation.EffectiveThreshold())
 
 	for _, o := range obs {
@@ -10334,8 +10362,31 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		logger.Warn("review verdict artifact unavailable for dispatch planning", "error", err)
 	}
 	prAgents := auditPRAgents(cfg.Project.Org, time.Now().Add(-auditPRAttributionWindow), "")
-	prs := make([]review.PullRequest, 0, len(actionable.PRs.Items))
-	for _, pr := range actionable.PRs.Items {
+	candidates := make([]github.PullRequest, 0, len(actionable.PRs.Items)+len(actionable.PRs.Held))
+	seenPRs := map[string]bool{}
+	addCandidates := func(items []github.PullRequest) {
+		for _, pr := range items {
+			fullRepo := fullRepoName(pr.Repo, cfg.Project.Org)
+			key := github.ReviewQueueKey(fullRepo, pr.Number)
+			if fullRepo == "" || pr.Number <= 0 || seenPRs[key] {
+				continue
+			}
+			seenPRs[key] = true
+			candidates = append(candidates, pr)
+		}
+	}
+	addCandidates(actionable.PRs.Items)
+	addCandidates(actionable.PRs.Held)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ri, rj := candidates[i].ReviewRank, candidates[j].ReviewRank
+		if ri > 0 && rj > 0 && ri != rj {
+			return ri < rj
+		}
+		return ri > 0 && rj <= 0
+	})
+
+	prs := make([]review.PullRequest, 0, len(candidates))
+	for _, pr := range candidates {
 		lane := classify.Classify(github.Issue{Title: pr.Title, Labels: pr.Labels}).Lane
 		fullRepo := fullRepoName(pr.Repo, cfg.Project.Org)
 		prs = append(prs, review.PullRequest{
@@ -10573,18 +10624,19 @@ type reviewFixAuditor interface {
 // auditWithheldReviewFixes puts every fix the planner refused this cycle on
 // the audit trail (#8421). A refusal is silent by design — the PR just does
 // not get a bot commit — and silence is the one thing an operator cannot
-// investigate, so each one names the PR, who opened it, and the setting
-// that would have allowed the push. The planner reports each head once, so
+// investigate, so each one names the PR, who opened it, and the
+// review.fix_human_prs value at the time (on no longer permits the push:
+// hivecommons/hive#12897). The planner reports each head once, so
 // this does not repeat on every eval cycle.
 func auditWithheldReviewFixes(plan review.DispatchPlan, auditor reviewFixAuditor, logger *slog.Logger) {
 	for _, w := range plan.WithheldFixes {
-		logger.Info("review fix withheld: PR not hive-authored and "+w.Setting+" is off; review published, nothing pushed",
-			"repo", w.Repo, "pr", w.Number, "head_sha", w.HeadSHA, "author", w.Author, "setting", w.Setting)
+		logger.Info("review fix withheld: PR not hive-authored; review published, nothing pushed",
+			"repo", w.Repo, "pr", w.Number, "head_sha", w.HeadSHA, "author", w.Author, "setting", w.Setting, "setting_enabled", w.SettingEnabled)
 		if auditor == nil {
 			continue
 		}
 		auditor.AuditLog("governor", "review_fix_withheld",
-			fmt.Sprintf("pr=%s#%d head=%s author=%s setting=%s=false reason=%s", w.Repo, w.Number, w.HeadSHA, w.Author, w.Setting, w.Reason), "")
+			fmt.Sprintf("pr=%s#%d head=%s author=%s setting=%s=%t reason=%s", w.Repo, w.Number, w.HeadSHA, w.Author, w.Setting, w.SettingEnabled, w.Reason), "")
 	}
 }
 

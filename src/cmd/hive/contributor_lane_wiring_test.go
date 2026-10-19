@@ -15,7 +15,7 @@ func TestContributorLanePolicyFuncReadsConfig(t *testing.T) {
 	}
 	cfg := &config.Config{HiveID: "hive-prod"}
 	policy := contributorLanePolicyFunc(cfg)()
-	if !policy.Enabled || policy.HiveID != "hive-prod" || policy.Soak != time.Duration(config.DefaultContributorLaneSoakMinutes)*time.Minute || !policy.RequireReviewerVerdict {
+	if !policy.Enabled || policy.HiveID != "hive-prod" || policy.Soak != time.Duration(config.DefaultContributorLaneSoakMinutes)*time.Minute || !policy.RequireReviewerVerdict || policy.AutoPromoteAfterMergedPR != config.DefaultContributorTierAutoPromoteAfterMerged {
 		t.Fatalf("default policy = %+v", policy)
 	}
 	for _, label := range config.DefaultContributorLaneExcludeLabels {
@@ -28,8 +28,9 @@ func TestContributorLanePolicyFuncReadsConfig(t *testing.T) {
 	}
 	off := false
 	cfg.AutoMerge.ContributorLane = config.ContributorLaneAutoMergeConfig{Enabled: &off, SoakMinutes: 15, RequireReviewerVerdict: &off, Repos: []string{"Widget"}, RequireTiers: []string{"Advisor"}}
+	cfg.AutoMerge.ContributorTier = config.ContributorTierAutoMergeConfig{AutoPromoteAfterMerged: 9}
 	policy = contributorLanePolicyFunc(cfg)()
-	if policy.Enabled || policy.Soak != 15*time.Minute || policy.RequireReviewerVerdict || !policy.Repos["widget"] {
+	if policy.Enabled || policy.Soak != 15*time.Minute || policy.RequireReviewerVerdict || !policy.Repos["widget"] || policy.AutoPromoteAfterMergedPR != 9 {
 		t.Fatalf("explicit policy = %+v", policy)
 	}
 	if !policy.RequireTiers["advisor"] || len(policy.RequireTiers) != 1 {
@@ -91,6 +92,24 @@ func TestContributorLaneVerdictFunc(t *testing.T) {
 	}
 	if v := contributorLaneVerdictFunc(cfg, nil)("acme/widget", 8, "sha8"); v.Approved || v.Verdict != string(review.VerdictChangesRequested) {
 		t.Fatalf("request-changes = %+v", v)
+	}
+}
+
+func TestContributorLaneVerdictFromArtifactNormalizesLegacyRequiresHuman(t *testing.T) {
+	artifact := review.Artifact{Items: []review.Aggregate{{
+		Repo:           "acme/widget",
+		Number:         7,
+		HeadSHA:        "sha7",
+		Verdict:        review.VerdictRequiresHuman,
+		RequiresHuman:  true,
+		HumanSummaries: []string{"correctness requires human: field is plumbed but never populated; add the producer."},
+		Perspectives:   map[review.Perspective]review.Verdict{review.PerspectiveCorrectness: review.VerdictRequiresHuman},
+	}}}
+
+	got := contributorLaneVerdictFromArtifact(artifact, "acme/widget", 7, "sha7", false)
+
+	if got.Verdict != string(review.VerdictChangesRequested) || got.Approved || got.DecisionRequested {
+		t.Fatalf("verdict = %+v, want normalized changes_requested", got)
 	}
 }
 

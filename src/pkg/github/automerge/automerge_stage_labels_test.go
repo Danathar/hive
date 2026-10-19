@@ -38,11 +38,19 @@ type stageAPI struct {
 	// commits is what GET /pulls/N/commits answers (one message per
 	// commit); a PR not listed has no commits, so its DCO state stays
 	// unknown and the test's label expectations are unaffected.
-	commits     map[int][]string
-	commitReads int
+	commits       map[int][]string
+	commitDetails map[int][]stageCommitFixture
+	commitReads   int
 	// extra handles routes beyond labels/comments (returns true when it
 	// served the request); the adoption tests use it for refs and pulls.
 	extra func(w http.ResponseWriter, r *http.Request) bool
+}
+
+type stageCommitFixture struct {
+	message     string
+	authorLogin string
+	authorName  string
+	authorEmail string
 }
 
 func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
@@ -95,8 +103,18 @@ func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
 			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/pulls/"), "/commits"))
 			api.commitReads++
 			out := []map[string]any{}
-			for i, msg := range api.commits[n] {
-				out = append(out, map[string]any{"sha": fmt.Sprintf("c%d", i), "commit": map[string]any{"message": msg}, "parents": []map[string]string{{"sha": "p"}}})
+			if details := api.commitDetails[n]; len(details) > 0 {
+				for i, c := range details {
+					var author any
+					if c.authorLogin != "" {
+						author = map[string]string{"login": c.authorLogin}
+					}
+					out = append(out, map[string]any{"sha": fmt.Sprintf("c%d", i), "author": author, "committer": author, "commit": map[string]any{"message": c.message, "author": map[string]any{"name": c.authorName, "email": c.authorEmail}, "committer": map[string]any{"name": c.authorName, "email": c.authorEmail}}, "parents": []map[string]string{{"sha": "p"}}})
+				}
+			} else {
+				for i, msg := range api.commits[n] {
+					out = append(out, map[string]any{"sha": fmt.Sprintf("c%d", i), "commit": map[string]any{"message": msg}, "parents": []map[string]string{{"sha": "p"}}})
+				}
 			}
 			_ = json.NewEncoder(w).Encode(out)
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/labels"):
@@ -187,11 +205,89 @@ func newStageEngine(t *testing.T, apiURL string, clock *contributorLaneClock) (*
 	return e, tracker, store
 }
 
+func TestNormalizeContributorLaneVerdictPreservesPolicyOwnedHolds(t *testing.T) {
+	base := ContributorLaneVerdict{
+		Configured:     true,
+		Verdict:        "requires_human",
+		HumanSummaries: []string{"correctness requires human: field is plumbed but never populated; add the producer."},
+	}
+	knownHive := base
+	knownHive.HiveAuthoredKnown = true
+	knownHive.HiveAuthored = true
+	if got := normalizeContributorLaneVerdict(knownHive); got.Verdict != "changes_requested" {
+		t.Fatalf("known hive verdict normalized to %q, want changes_requested", got.Verdict)
+	}
+	knownHuman := base
+	knownHuman.HiveAuthoredKnown = true
+	if got := normalizeContributorLaneVerdict(knownHuman); got.Verdict != "requires_human" {
+		t.Fatalf("known human verdict normalized to %q, want requires_human", got.Verdict)
+	}
+	capped := base
+	capped.FixCycleCapReached = true
+	if got := normalizeContributorLaneVerdict(capped); got.Verdict != "requires_human" {
+		t.Fatalf("capped verdict normalized to %q, want requires_human", got.Verdict)
+	}
+	if got := normalizeContributorLaneVerdict(base); got.Verdict != "changes_requested" {
+		t.Fatalf("legacy verdict normalized to %q, want changes_requested", got.Verdict)
+	}
+}
+
+func TestResolveStageNormalizesRawConcreteRequiresHumanAcrossObservers(t *testing.T) {
+	raw := ContributorLaneVerdict{
+		Configured:     true,
+		Verdict:        "requires_human",
+		HumanSummaries: []string{"correctness requires human: LaneQueuedWork is plumbed but never populated; add the producer in AgentActivityFor."},
+	}
+	list := []stageObservation{
+		{Lane: stageLaneSelf, HeadSHA: "bbb5676", Reason: contributorLaneReasonNoVerdict, Detail: stageDetail{VerdictKnown: true, Verdict: raw}},
+		{Lane: stageLaneTrusted, HeadSHA: "bbb5676", Reason: contributorLaneReasonNoVerdict, Detail: stageDetail{VerdictKnown: true, Verdict: raw}},
+	}
+
+	got, _, obs := resolveStage(list)
+
+	if got.Stage != stagelabels.Fixing || got.Reason != stagelabels.LaneReasonChangesRequested || obs.Lane != stageLaneSelf {
+		t.Fatalf("stage=%s reason=%q lane=%s, want 070 fixing from normalized changes_requested", got.Stage, got.Reason, obs.Lane)
+	}
+}
+
+func TestPreserveNormalizedFixingStageBlocksRawHumanFlap(t *testing.T) {
+	prev := stagelabels.Record{
+		Stage:        stagelabels.Fixing,
+		Reason:       stagelabels.LaneReasonChangesRequested,
+		ActivityHead: "bbb5676",
+	}
+	obs := stageObservation{HeadSHA: "bbb5676", Detail: stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human", HumanSummaries: []string{"correctness requires human: field is plumbed but never populated; add the producer."}}}}
+	rawHuman := stageVerdict{Stage: stagelabels.NeedsDecision, Rank: stageRankOwned, Reason: stageReasonVerdictRequiresHuman, Human: true}
+
+	got, ok := preserveNormalizedFixingStage(prev, true, obs, rawHuman)
+
+	if !ok || got.Stage != stagelabels.Fixing || got.Reason != stagelabels.LaneReasonChangesRequested || got.Human {
+		t.Fatalf("guard = (%+v, %v), want preserved fixing verdict", got, ok)
+	}
+}
+
+func TestPreserveNormalizedFixingStageAllowsCurrentHumanHold(t *testing.T) {
+	prev := stagelabels.Record{
+		Stage:        stagelabels.Fixing,
+		Reason:       stagelabels.LaneReasonChangesRequested,
+		ActivityHead: "bbb5676",
+	}
+	obs := stageObservation{HeadSHA: "bbb5676", Detail: stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human", HiveAuthoredKnown: true, HumanSummaries: []string{"correctness requires human: field is plumbed but never populated; add the producer."}}}}
+	rawHuman := stageVerdict{Stage: stagelabels.NeedsDecision, Rank: stageRankOwned, Reason: stageReasonVerdictRequiresHuman, Human: true}
+
+	got, ok := preserveNormalizedFixingStage(prev, true, obs, rawHuman)
+
+	if ok || got.Rank != stageRankNone {
+		t.Fatalf("guard = (%+v, %v), want current policy-owned human hold to pass through", got, ok)
+	}
+}
+
 func TestClassifyStageMapping(t *testing.T) {
 	approve := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Approved: true, Verdict: "approve"}}
 	reject := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "changes_requested"}}
 	incomplete := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "incomplete"}}
 	human := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human"}}
+	humanApproved := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human"}, HumanApprover: "clubanderson", HumanApprovalHead: "sha"}
 	decision := stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "approve", DecisionRequested: true, DecisionQuestion: "@clubanderson should decide."}}
 	cases := []struct {
 		name   string
@@ -209,6 +305,8 @@ func TestClassifyStageMapping(t *testing.T) {
 		{name: "review pending", obs: stageObservation{Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict}, want: stagelabels.ReviewPending, rank: stageRankOwned},
 		{name: "incomplete verdict is still pending", obs: stageObservation{Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict, Detail: incomplete}, want: stagelabels.ReviewPending, rank: stageRankOwned},
 		{name: "requires_human behind no-verdict hands off to a person", obs: stageObservation{Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict, Detail: human}, want: stagelabels.NeedsDecision, rank: stageRankOwned, reason: "reviewer-verdict:requires_human"},
+		{name: "trusted human approval clears requires_human on current head", obs: stageObservation{Lane: stageLaneContributor, HeadSHA: "sha", Reason: contributorLaneReasonNoVerdict, Detail: humanApproved}, want: stagelabels.ReviewPending, rank: stageRankOwned},
+		{name: "trusted human approval does not clear requires_human on new head", obs: stageObservation{Lane: stageLaneContributor, HeadSHA: "newsha", Reason: contributorLaneReasonNoVerdict, Detail: humanApproved}, want: stagelabels.NeedsDecision, rank: stageRankOwned, reason: "reviewer-verdict:requires_human"},
 		{name: "decision request behind no-verdict hands off to a person", obs: stageObservation{Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict, Detail: decision}, want: stagelabels.NeedsDecision, rank: stageRankOwned, reason: stageReasonDecisionRequested},
 		{name: "decision request behind pending ci still hands off to a person", obs: stageObservation{Lane: stageLaneContributor, Reason: "required-check-pending:unit", Detail: decision}, want: stagelabels.NeedsDecision, rank: stageRankOwned, reason: stageReasonDecisionRequested},
 		{name: "ci pending no verdict", obs: stageObservation{Lane: stageLaneSelf, Reason: "check-pending"}, want: stagelabels.ReviewPending, rank: stageRankOwned},
@@ -252,6 +350,11 @@ func TestClassifyStageMapping(t *testing.T) {
 		got := classifyStage(tc.obs)
 		if got.Stage != tc.want || got.Rank != tc.rank || got.Terminal != tc.term || got.Reason != tc.reason {
 			t.Errorf("%s: got %+v want stage=%v rank=%d terminal=%v reason=%q", tc.name, got, tc.want, tc.rank, tc.term, tc.reason)
+		}
+		// Owner decision: 045 is the ISSUE parking bay; a PR parks at 085
+		// and PR derivation never emits an issue-only stage.
+		if got.Stage != stagelabels.None && !got.Stage.Applies(stagelabels.PRItem) {
+			t.Errorf("%s: PR derivation emitted issue-only stage %v", tc.name, got.Stage)
 		}
 	}
 	// requires_human is a human hand-off too, so routeHuman posts the 085
@@ -314,6 +417,35 @@ func TestResolveStageLanePrecedence(t *testing.T) {
 	})
 	if v.Stage != stagelabels.Fixing {
 		t.Fatalf("self lane got %v", v.Stage)
+	}
+}
+
+func TestResolveStageTrustedHumanApprovalClearsRequiresHuman(t *testing.T) {
+	humanApproved := stageDetail{
+		VerdictKnown:      true,
+		Verdict:           ContributorLaneVerdict{Configured: true, Verdict: "requires_human"},
+		HumanApprover:     "clubanderson",
+		HumanApprovalHead: "sha7",
+		Role:              stagelabels.RoleContributor,
+	}
+	v, author, obs := resolveStage([]stageObservation{{
+		Lane:    stageLaneContributor,
+		HeadSHA: "sha7",
+		Reason:  contributorLaneReasonSoaking + "(remaining=30m)",
+		Detail:  humanApproved,
+	}})
+	if v.Stage != stagelabels.MergeQueue || v.Reason != "reviewer-verdict:requires_human:human-approved@clubanderson" || author != stagelabels.RoleContributor || obs.Lane != stageLaneContributor {
+		t.Fatalf("current head got stage=%v reason=%q author=%v lane=%s", v.Stage, v.Reason, author, obs.Lane)
+	}
+
+	v, _, _ = resolveStage([]stageObservation{{
+		Lane:    stageLaneContributor,
+		HeadSHA: "sha8",
+		Reason:  contributorLaneReasonSoaking + "(remaining=30m)",
+		Detail:  humanApproved,
+	}})
+	if v.Stage != stagelabels.NeedsDecision || v.Reason != "reviewer-verdict:requires_human" {
+		t.Fatalf("new head got stage=%v reason=%q, want 085 requires_human", v.Stage, v.Reason)
 	}
 }
 
@@ -430,6 +562,48 @@ func TestStageAuthorTierSurvivesContributorLane(t *testing.T) {
 			t.Fatalf("trustedFirst=%v added %v", trustedFirst, api.added)
 		}
 		srv.Close()
+	}
+}
+
+func TestApplyStageLabelsContributorConflictBeatsTrustTier(t *testing.T) {
+	api, closeAPI := seededStageAPI(t)
+	defer closeAPI()
+	clock := &contributorLaneClock{at: time.Date(2026, 10, 17, 22, 0, 0, 0, time.UTC)}
+	e, _, _ := newStageEngine(t, apiURLOf(t, api), clock)
+
+	pr := nudgePR(12822, "sha-conflict")
+	e.recordStage(stageLaneTrusted, "acme/widget", "acme", "widget", pr, "untrusted-author-role", false, nil)
+	e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, "conflicting", false, nil)
+	e.noteStageRole("acme", "widget", 12822, stagelabels.RoleContributor)
+	res, err := e.ApplyStageLabels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := api.added
+	if len(added) != 1 || !slices.Contains(added[0], "stage/072-returned-to-contributor") || slices.Contains(added[0], "stage/090-ready-for-human-merge") {
+		t.Fatalf("conflicting contributor staged incorrectly: result=%+v added=%v", res, added)
+	}
+	rec, ok := e.stageStoreOrShared().Get(stageKey("acme", "widget", 12822))
+	if !ok || rec.Stage != stagelabels.ReturnedToContributor || rec.Reason != "conflicting" {
+		t.Fatalf("record = %+v, want 072 conflicting", rec)
+	}
+}
+
+func TestApplyStageLabelsUnknownMergeabilityDoesNotFlipToHumanMerge(t *testing.T) {
+	api, closeAPI := seededStageAPI(t)
+	defer closeAPI()
+	clock := &contributorLaneClock{at: time.Date(2026, 10, 17, 22, 0, 0, 0, time.UTC)}
+	e, _, _ := newStageEngine(t, apiURLOf(t, api), clock)
+	labels := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
+	pr := nudgePR(12822, "sha-unknown", labels...)
+	e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, "mergeable-unknown", false, nil)
+	e.noteStageRole("acme", "widget", 12822, stagelabels.RoleContributor)
+	res, err := e.ApplyStageLabels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Writes != 0 || api.writes() != 0 {
+		t.Fatalf("unknown mergeability should keep previous stage: result=%+v added=%v removed=%v comments=%v", res, api.added, api.removed, api.comments)
 	}
 }
 
@@ -1645,6 +1819,69 @@ func TestApplyStageLabelsDCOFromCommits(t *testing.T) {
 	}
 	if !reflect.DeepEqual(api.added, [][]string{{"author/hive", stagelabels.NoDCOLabel, "stage/070-fixing"}}) || len(api.comments) != 0 {
 		t.Fatalf("self-authored: added=%v comments=%v", api.added, api.comments)
+	}
+}
+
+func TestApplyStageLabelsHiveBotSignoffOnContributorHeadIsHiveOwned(t *testing.T) {
+	api := &stageAPI{labels: map[string]string{}, commitDetails: map[int][]stageCommitFixture{
+		80: {{
+			message:     "docs: follow-up\n\nSigned-off-by: hivecommons-hive[bot] <280983584+hivecommons-hive[bot]@users.noreply.github.com>",
+			authorLogin: testHiveAppBotLogin,
+			authorName:  "hivecommons-hive[bot]",
+			authorEmail: "280983584+hivecommons-hive[bot]@users.noreply.github.com",
+		}},
+	}}
+	srv := newStageAPI(t, api)
+	defer srv.Close()
+	clock := &contributorLaneClock{at: time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)}
+	e, _, store := newStageEngine(t, srv.URL, clock)
+	e.stageLabelPolicy = func() StageLabelPolicy { return StageLabelPolicy{Enabled: true, ContributorNudge: true} }
+
+	pr := stagePR(80, "role/trusted", "author/clanker", "stage/072-returned-to-contributor")
+	pr.User = &gh.User{Login: gh.Ptr("arteeh")}
+	pr.Body = gh.Ptr(clankerBody)
+	e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, contributorLaneReasonNoVerdict, false, nil)
+	e.noteStageRole("acme", "widget", 80, stagelabels.RoleTrusted)
+	e.noteStageDCOGate("acme", "widget", 80, "sha", map[string]bool{"Sign-off survives the squash": true}, map[string]bool{"Sign-off survives the squash": true})
+
+	if _, err := e.ApplyStageLabels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := store.Get(stageKey("acme", "widget", 80))
+	if !ok || rec.Stage != stagelabels.Fixing || rec.Reason != stagelabels.LaneReasonHiveSignoffAttribution {
+		t.Fatalf("record %+v ok=%v", rec, ok)
+	}
+	if rec.DCOSquashUnsafeHive != 1 || rec.DCO("sha") != stagelabels.DCOYes {
+		t.Fatalf("dco cache %+v", rec)
+	}
+	if !reflect.DeepEqual(api.added, [][]string{{stagelabels.DCOLabel, "stage/070-fixing"}}) {
+		t.Fatalf("added %v", api.added)
+	}
+	if !reflect.DeepEqual(api.removed, []string{"stage/072-returned-to-contributor"}) || len(api.comments) != 0 {
+		t.Fatalf("removed=%v comments=%v", api.removed, api.comments)
+	}
+}
+
+func TestApplyStageLabelsResolvedSelfAuthoredDecisionDropsNeedsDecision(t *testing.T) {
+	api := &stageAPI{}
+	srv := newStageAPI(t, api)
+	defer srv.Close()
+	clock := &contributorLaneClock{at: time.Date(2026, 10, 17, 21, 30, 0, 0, time.UTC)}
+	e, _, _ := newStageEngine(t, srv.URL, clock)
+	ctx := context.Background()
+
+	const number = 12808
+	pr := stagePR(number, "author/hive", "role/trusted", "stage/085-needs-decision")
+	pr.User = &gh.User{Login: gh.Ptr(testHiveAppBotLogin)}
+	e.recordStage(stageLaneSelf, "acme/widget", "acme", "widget", pr, "required-check-pending:build", false, nil)
+	e.noteStageRole("acme", "widget", number, stagelabels.RoleTrusted)
+	e.noteStageVerdict("acme", "widget", number, ContributorLaneVerdict{Configured: true, Approved: true, Verdict: "approve"})
+
+	if _, err := e.ApplyStageLabels(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(api.added, [][]string{{"stage/060-reviewed"}}) || !reflect.DeepEqual(api.removed, []string{"stage/085-needs-decision"}) || len(api.comments) != 0 {
+		t.Fatalf("resolved self-authored decision should leave 085: added=%v removed=%v comments=%v", api.added, api.removed, api.comments)
 	}
 }
 

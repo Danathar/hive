@@ -178,15 +178,17 @@ type ReviewConfig struct {
 	// reviewer is no less stuck than an agent's, and it is the one with a
 	// person waiting on the other end.
 	AllAuthors bool `yaml:"all_authors,omitempty" json:"all_authors,omitempty"`
-	// FixHumanPRs lets the review-fix kick push commits onto PRs that this
-	// hive's agents did NOT open: a contributor's fork branch (through "allow
-	// edits by maintainers"), a maintainer's branch in the upstream repo, or
-	// another bot's PR. AllAuthors alone never implies it. AllAuthors promises
-	// that every PR is REVIEWED; a changes_requested verdict on a PR the hive
-	// did not author then stops at the published review, and the author
-	// decides what to change. Only with this on does the fixer agent
-	// (FixerAgent, then the PR lane, then scanner) check out someone else's
-	// branch and push to it (hivecommons/hive#8421).
+	// FixHumanPRs once let the review-fix kick push commits onto PRs that
+	// this hive's agents did NOT open: a contributor's fork branch (through
+	// "allow edits by maintainers"), a maintainer's branch in the upstream
+	// repo, or another bot's PR (hivecommons/hive#8421). It no longer does:
+	// the pushed commit is signed off by the hive, not the PR author, and the
+	// squash sign-off gate rejects it as bot-signoff, a red only the author
+	// can clear (hivecommons/hive#12897). A changes_requested verdict on such
+	// a PR stops at the published review, with the fix proposed there as a
+	// suggestion or patch block, whichever way this is set. On still makes
+	// the review-thread reconciler answer review-bot threads on those PRs,
+	// again with suggestions rather than pushes. AllAuthors never implies it.
 	//
 	// Pointer so "never set" is distinguishable from an explicit false: a hive
 	// that already ran with all_authors on was pushing fixes to every PR, and
@@ -448,6 +450,9 @@ type AutoMergeConfig struct {
 	// hold an operator-granted tier (require_tiers) and a GitHub login proven
 	// against GitHub (#12041); everyone else's PRs wait for a human.
 	ContributorLane ContributorLaneAutoMergeConfig `yaml:"contributor_lane,omitempty" json:"contributor_lane,omitempty"`
+	// ContributorTier controls automatic contributor trust ratchets used by
+	// the contributor lane.
+	ContributorTier ContributorTierAutoMergeConfig `yaml:"contributor_tier,omitempty" json:"contributor_tier,omitempty"`
 	// HumanMergePaths maps owner/repo to glob patterns (same syntax as
 	// intent.guardrail_path_patterns) for paths a person must merge. Unset
 	// means no such paths. This key only declares the paths; enforcement
@@ -545,6 +550,32 @@ type ContributorLaneAutoMergeConfig struct {
 	// than closes its issue, or was claimed outside the relay, waits for a
 	// human (`contributor-lane:no-linked-issue` / `no-claim`).
 	RegistryTiersSufficient *bool `yaml:"registry_tiers_sufficient,omitempty" json:"registry_tiers_sufficient,omitempty"`
+}
+
+// ContributorTierAutoMergeConfig is auto_merge.contributor_tier.*.
+type ContributorTierAutoMergeConfig struct {
+	// AutoPromoteAfterMerged lets the contributor lane conservatively treat a
+	// contributor as trusted after this many recently merged PRs by the same
+	// author in the repository, provided that window has no reverts or sentinel
+	// alerts — including reverts of those PRs merged by someone else — and
+	// the author is not `revoked` in the contributor registry. 0/unset means
+	// DefaultContributorTierAutoPromoteAfterMerged;
+	// negative disables the ratchet.
+	AutoPromoteAfterMerged int `yaml:"auto_promote_after_merged,omitempty" json:"auto_promote_after_merged,omitempty"`
+}
+
+// DefaultContributorTierAutoPromoteAfterMerged is the clean merged-PR count
+// needed before the contributor lane trusts a contributor automatically.
+const DefaultContributorTierAutoPromoteAfterMerged = 5
+
+func (c ContributorTierAutoMergeConfig) EffectiveAutoPromoteAfterMerged() int {
+	if c.AutoPromoteAfterMerged < 0 {
+		return 0
+	}
+	if c.AutoPromoteAfterMerged == 0 {
+		return DefaultContributorTierAutoPromoteAfterMerged
+	}
+	return c.AutoPromoteAfterMerged
 }
 
 // DefaultContributorLaneRequireTiers is the contributor-lane tier allow-list
@@ -657,6 +688,10 @@ func (c ContributorLaneAutoMergeConfig) Validate() error {
 			return fmt.Errorf("auto_merge.contributor_lane.require_tiers: %q is not an operator-granted tier (allowed: %s)", tier, strings.Join(ContributorLaneGrantableTiers, ", "))
 		}
 	}
+	return nil
+}
+
+func (c ContributorTierAutoMergeConfig) Validate() error {
 	return nil
 }
 
@@ -889,8 +924,9 @@ func (r ReviewConfig) EffectiveMaxParallelReviews() int {
 	return DefaultMaxParallelReviews
 }
 
-// FixHumanPRsEnabled reports whether the review-fix kick may push to PRs the
-// hive's own agents did not open. Nil (never set) and an explicit false both
+// FixHumanPRsEnabled reports whether review.fix_human_prs is on for PRs the
+// hive's own agents did not open (see FixHumanPRs: it no longer permits a
+// push). Nil (never set) and an explicit false both
 // mean no: pushing to someone else's branch is a power to grant deliberately.
 func (r ReviewConfig) FixHumanPRsEnabled() bool {
 	return r.FixHumanPRs != nil && *r.FixHumanPRs
@@ -904,12 +940,12 @@ var reviewFixHumanPRsMigrationLogOnce sync.Once
 // MigrateReviewFixHumanPRs is the upgrade step for review.fix_human_prs
 // (hivecommons/hive#8421). Before that setting existed, review.all_authors
 // alone made the fixer agent push commits onto every changes_requested PR,
-// whoever opened it. A hive that ran that way must keep running that way
-// across the upgrade, so:
+// whoever opened it. The stored value is kept for audit/UI continuity even
+// though fix dispatch now still requires hive authorship, so:
 //
 //   - all_authors true and fix_human_prs never set: fix_human_prs becomes an
-//     explicit true, logged once, so the dashboard shows it ON and the operator
-//     can turn it off deliberately.
+//     explicit true, logged once, so the dashboard shows the legacy state and
+//     the operator can turn it off deliberately.
 //   - anything else (new hives, all_authors off): left nil, which reads as
 //     false. An explicit false is never touched.
 //
@@ -922,7 +958,7 @@ func (c *Config) MigrateReviewFixHumanPRs() bool {
 	enabled := true
 	c.Review.FixHumanPRs = &enabled
 	reviewFixHumanPRsMigrationLogOnce.Do(func() {
-		log.Printf("[config] migrating review.fix_human_prs: all_authors is on and fix_human_prs was never set, so it is now stored as true to keep this hive pushing review fixes to PRs its agents did not open (as it did before #8421). Turn it off under Features > Review Gate > Reviewers if that is not wanted.")
+		log.Printf("[config] migrating review.fix_human_prs: all_authors is on and fix_human_prs was never set, so it is now stored as true for audit/UI continuity. Review-fix pushes still require hive authorship; turn the legacy setting off under Features > Review Gate > Reviewers if it is not wanted.")
 	})
 	return true
 }

@@ -83,7 +83,7 @@ RUN --mount=type=cache,id=hive-go-build,target=/tmp/gobuild \
 # supply-chain risk. Refresh deliberately (same technique as golang above,
 # repo library/node, tag 26-slim) and update both the tag and the @sha256
 # digest together in BOTH FROM node:26-slim lines in this file.
-FROM mirror.gcr.io/library/node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS tmux-builder
+FROM mirror.gcr.io/library/node:26-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS tmux-builder
 ARG TARGETARCH
 ARG TMUX_VERSION=3.5a
 ARG TMUX_SHA256_AMD64=16216bd0877170dfcc64157085ba9013610b12b082548c7c9542cc0103198951
@@ -111,7 +111,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (and the rewrite RUN below) from the branch-scoped GHA cache — so a fresh
 # binary was rebuilt and then discarded, and the OLD binary shipped. See the
 # stale-binary note in .github/workflows/docker.yml.
-FROM mirror.gcr.io/library/node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS runtime
+FROM mirror.gcr.io/library/node:26-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS runtime
 
 # --- Layer 1: system packages (rarely changes) ---
 # util-linux provides `setpriv`, used by the entrypoint to drop to `dev` with an
@@ -280,7 +280,7 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit @openai/codex@${CODEX_V
     echo "WARN: OpenAI Codex CLI install failed — skipping"
 
 # --- Layer 7: Claude Code (most frequent updates) ---
-ARG CLAUDE_CODE_VERSION=2.1.302
+ARG CLAUDE_CODE_VERSION=2.1.303
 # --ignore-scripts (kept, deliberately: no arbitrary postinstall runs during the
 # build) skips claude-code's install.cjs, which is what LINKS the platform
 # native binary into the package's bin/. The binary itself ships in the
@@ -349,9 +349,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
 # --- Layer 8.27: OMP CLI (Oh My Pi — backend: omp) ---
 # Mirrored from Dockerfile.contributor so hub agents can launch backend: omp.
 # Downloads are optional like Goose/agy, but checksum mismatches are fatal.
-ARG OMP_VERSION=18.11.0
-ARG OMP_SHA256_AMD64=c23a58ad8a92f4e738aa12dc904f3b0a1ac7035b953b9bf5d39b71a226179f6f
-ARG OMP_SHA256_ARM64=299e0b63c482d78f00f2bae75000815ad6890cb6192cbc9f66c8d98e9ce70b80
+ARG OMP_VERSION=18.12.1
+ARG OMP_SHA256_AMD64=16181401e616d7d895bae31fa97476f1513d4080807d60d3a1a04006191a1bb3
+ARG OMP_SHA256_ARM64=16545d7e747b31dbc66f2bcd63f24f12dc1dc7e944767b09b0df6591bf826a93
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
   && case "$ARCH" in \
        amd64|x86_64) OMP_ASSET=omp-linux-x64; OMP_SHA256="$OMP_SHA256_AMD64" ;; \

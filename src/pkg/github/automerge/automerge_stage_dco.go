@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/stagelabels"
@@ -29,33 +30,74 @@ const stageDCOMaxPages = 3
 // signedOffByRE matches one Signed-off-by trailer line.
 var signedOffByRE = regexp.MustCompile(`(?mi)^Signed-off-by: .+`)
 
+type dcoStats struct {
+	total            int
+	unsigned         int
+	unsignedHive     int
+	unsignedOther    int
+	squashUnsafeHive int
+}
+
 // dcoCommitStats counts the non-merge commits and those without a trailer.
 // Merge-from-base commits are skipped, as the DCO App and Prow's plugin do.
 func dcoCommitStats(commits []*gh.RepositoryCommit) (total, unsigned int) {
+	stats := dcoCommitStatsDetailed(commits, "")
+	return stats.total, stats.unsigned
+}
+
+func dcoCommitStatsDetailed(commits []*gh.RepositoryCommit, appLogin string) dcoStats {
+	return dcoCommitStatsDetailedForAuthor(commits, appLogin, "")
+}
+
+func dcoCommitStatsDetailedForAuthor(commits []*gh.RepositoryCommit, appLogin, prAuthor string) dcoStats {
+	var stats dcoStats
 	for _, rc := range commits {
 		if rc == nil || len(rc.Parents) > 1 {
 			continue
 		}
-		total++
-		if !signedOffByRE.MatchString(rc.GetCommit().GetMessage()) {
-			unsigned++
+		stats.total++
+		msg := rc.GetCommit().GetMessage()
+		if !signedOffByRE.MatchString(msg) {
+			stats.unsigned++
+			if dcoCommitByHive(rc, appLogin) {
+				stats.unsignedHive++
+			} else {
+				stats.unsignedOther++
+			}
+		} else if dcoCommitByHive(rc, appLogin) && !messageHasPRAuthorSignoff(msg, prAuthor) {
+			stats.squashUnsafeHive++
 		}
 	}
-	return total, unsigned
+	return stats
+}
+
+// dcoCommitByHive reports whether an unsigned commit is the hive's own to
+// rewrite with sign-off. Only GitHub's linkage of the commit to the App bot
+// counts (commitByApp): git author/committer names and emails are
+// contributor-controlled, so a lane-looking address never makes a commit
+// hive-owned. Anything else is "other" and re-homes.
+func dcoCommitByHive(commit *gh.RepositoryCommit, appLogin string) bool {
+	return commitByApp(commit, appLogin)
 }
 
 // stageDCO returns the commit check for the observation's head, reading the
 // commits only when the store has no result for this head (the caller
-// caches the result with Store.NoteDCO once the record exists). A read
+// caches the result, including how many unsigned commits are the App's own,
+// with Store.NoteDCO once the record exists). A read
 // failure leaves the state unknown (labels untouched, stage unchanged) and
 // is reported, never fatal.
-func (c *Engine) stageDCO(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation) (total, unsigned int, err error) {
+func (c *Engine) stageDCO(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation) (dcoStats, error) {
 	if obs.HeadSHA == "" {
-		return 0, 0, nil
+		return dcoStats{}, nil
 	}
 	if rec, ok := store.Get(key); ok {
 		if t, u, cached := rec.DCOFor(obs.HeadSHA); cached {
-			return t, u, nil
+			// Records cached before the ownership split existed carry
+			// none; an in-place adoption decides repair-vs-rehome on it,
+			// so read the commits once more for that case only.
+			if (u > 0 || rec.DCOSquashUnsafeKnown) && (u == 0 || rec.DCOSplitKnown(obs.HeadSHA) || !rec.AdoptedInPlace()) {
+				return dcoStats{total: t, unsigned: u, unsignedHive: rec.DCOUnsignedHive, unsignedOther: u - rec.DCOUnsignedHive, squashUnsafeHive: rec.DCOSquashUnsafeHive}, nil
+			}
 		}
 	}
 	opts := &gh.ListOptions{PerPage: 100}
@@ -63,7 +105,7 @@ func (c *Engine) stageDCO(ctx context.Context, store *stagelabels.Store, key str
 	for page := 0; page < stageDCOMaxPages; page++ {
 		commits, resp, err := c.gh.PullRequests.ListCommits(ctx, obs.Owner, obs.Repo, obs.Number, opts)
 		if err != nil {
-			return 0, 0, fmt.Errorf("listing commits for %s#%d: %w", obs.Display, obs.Number, err)
+			return dcoStats{}, fmt.Errorf("listing commits for %s#%d: %w", obs.Display, obs.Number, err)
 		}
 		all = append(all, commits...)
 		if resp == nil || resp.NextPage == 0 {
@@ -71,8 +113,56 @@ func (c *Engine) stageDCO(ctx context.Context, store *stagelabels.Store, key str
 		}
 		opts.Page = resp.NextPage
 	}
-	total, unsigned = dcoCommitStats(all)
-	return total, unsigned, nil
+	return dcoCommitStatsDetailedForAuthor(all, c.transport.AppBotLogin(), obs.Author), nil
+}
+
+func messageHasPRAuthorSignoff(message, prAuthor string) bool {
+	login := strings.ToLower(strings.TrimSpace(prAuthor))
+	if login == "" {
+		return false
+	}
+	for _, line := range strings.Split(message, "\n") {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "signed-off-by:") {
+			continue
+		}
+		email := signedOffEmail(line)
+		if githubNoreplyMatchesLogin(email, login) {
+			return true
+		}
+	}
+	return false
+}
+
+func signedOffEmail(line string) string {
+	start := strings.LastIndex(line, "<")
+	end := strings.LastIndex(line, ">")
+	if start < 0 || end <= start {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(line[start+1 : end]))
+}
+
+func githubNoreplyMatchesLogin(email, login string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	login = strings.ToLower(strings.TrimSpace(login))
+	const suffix = "@users.noreply.github.com"
+	if email == "" || login == "" || !strings.HasSuffix(email, suffix) {
+		return false
+	}
+	local := strings.TrimSuffix(email, suffix)
+	if local == login {
+		return true
+	}
+	parts := strings.SplitN(local, "+", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] != login {
+		return false
+	}
+	for _, r := range parts[0] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // dcoState folds the commit counts into the label state. A PR with no
