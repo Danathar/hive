@@ -2,6 +2,7 @@ package automerge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/effects"
+	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -197,6 +199,40 @@ func adoptionBlocked(labels []string) string {
 	}
 	return ""
 }
+
+// adoptionDiffRefusal applies the contributor lane's diff fences (CI
+// workflow/action definitions, test deletion) before adoption, so the hive
+// never re-homes such a head into an App-authored PR (hivecommons/hive#12850).
+// It returns the contributor-lane skip reason, or "" when adoption may
+// proceed. The files API answers for the PR's current head while adoption
+// acts on obs.HeadSHA, so a head that moved since the lane recorded it is
+// refused (head-changed-since-eval) rather than judged by another head's
+// diff; the fetched PR also carries changed_files, so an incomplete list
+// (more files than the API will ever return) is a standing files-evidence
+// refusal with a nil error. A transport failure refuses with the error set,
+// so callers can tell a transient read fault from a verdict; both are
+// re-read on the next sweep.
+func (c *Engine) adoptionDiffRefusal(ctx context.Context, obs stageObservation) (string, error) {
+	pr, _, err := c.gh.PullRequests.Get(ctx, obs.Owner, obs.Repo, obs.Number)
+	if err != nil {
+		return contributorLaneReasonFilesEvidence, err
+	}
+	if head := pr.GetHead().GetSHA(); head == "" || head != obs.HeadSHA {
+		return adoptionReasonHeadChanged, nil
+	}
+	files, err := ListChangedFiles(ctx, c.gh, obs.Owner, obs.Repo, pr)
+	if errors.Is(err, hgithub.ErrIncompletePRFileList) {
+		return contributorLaneReasonFilesEvidence, nil
+	}
+	if err != nil {
+		return contributorLaneReasonFilesEvidence, err
+	}
+	return contributorLaneDiffReason(files), nil
+}
+
+// adoptionReasonHeadChanged is adoptionDiffRefusal's verdict for a PR whose
+// head moved after the lane observed it.
+const adoptionReasonHeadChanged = "head-changed-since-eval"
 
 // adoptionCloses extracts the closing-keyword lines from the original body.
 func adoptionCloses(body string) []string {
@@ -428,6 +464,12 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 		c.info("stage labels: adoption due but blocked by label", "repo", obs.Display, "pr", obs.Number, "label", l)
 		return 0, nil
 	}
+	if refusal, err := c.adoptionDiffRefusal(ctx, obs); refusal != "" {
+		// Not recorded as an attempt: the PR stays on its 072 route and a
+		// new head from the author is judged afresh.
+		c.info("stage labels: adoption due but refused by diff fence", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head", obs.HeadSHA, "reason", refusal, "error", err)
+		return 0, nil
+	}
 	grace := adoptionGrace(rec, policy)
 	appLogin := strings.TrimSpace(c.transport.AppBotLogin())
 	// Record the attempt first: whatever happens below, this head is tried once.
@@ -540,6 +582,25 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 	if adoptedHeadDCORed(obs, rec) {
 		canPushInPlace := c.canPushToPRBranch(ctx, obs)
 		if adoptedHeadNeedsDCORehome(obs, rec, canPushInPlace) {
+			if refusal, err := c.adoptionDiffRefusal(ctx, obs); refusal != "" {
+				if err != nil {
+					// A transient read failure is not a verdict: keep the
+					// adoption so the next sweep re-reads, rather than
+					// releasing it and re-adopting with a duplicate comment.
+					c.warn("stage labels: DCO re-home deferred, diff fence unreadable", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", refusal, "error", err)
+					return 0, nil
+				}
+				if refusal == adoptionReasonHeadChanged {
+					// The next sweep observes the new head and re-reads.
+					c.info("stage labels: DCO re-home deferred, head moved", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA)
+					return 0, nil
+				}
+				// The hive cannot take this head over, so it gives the PR
+				// back: it returns to 072, where the same fence holds it.
+				c.info("stage labels: DCO re-home refused by diff fence; releasing adoption", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", refusal)
+				store.ClearAdoption(key)
+				return 0, nil
+			}
 			c.info("stage labels: re-homing adopted PR for DCO repair", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "unsigned", obs.Detail.DCOUnsigned, "unsigned_hive", obs.Detail.DCOUnsignedHive, "can_push", canPushInPlace)
 			// Record the attempt first, as adoptContributorPR does: this
 			// head is re-homed once, whatever the API says below.

@@ -777,6 +777,22 @@ When a clanker-authored contributor PR goes red the hive does not just relabel i
      (hivecommons/hive#12858).
    A PR carrying `hold`, `do-not-merge` or `do-not-merge/hold` is never
    adopted (a human parked it; one log line, the stage stays 072).
+   Neither is a PR whose diff trips the contributor lane's diff fences —
+   it touches `.github/workflows/` or `.github/actions/`, deletes a test
+   file, or guts tests — nor one whose file list cannot be read
+   (hivecommons/hive#12850): the hive will not re-home such a head into an
+   App-authored PR or take over its branch. It logs
+   `adoption due but refused by diff fence` with the `contributor-lane:*`
+   reason, the stage stays 072, and the attempt is not recorded, so a later
+   sweep or a new head is judged afresh. The fence reads the PR itself and
+   judges only the head the lane recorded: if the head moved in between
+   (`head-changed-since-eval`) or the file list is shorter than GitHub's
+   `changed_files` count (`contributor-lane:files-evidence`), adoption
+   waits for the next sweep. The same fence guards the `dco-rehome`
+   takeover; only a genuine refusal there releases the in-place adoption, so
+   the PR drops back to 072, where the fence keeps holding it. A transient
+   files-API error defers the re-home and keeps the adoption, as
+   `head-changed-since-eval` does.
    How the hive takes over depends on whether it can push to the PR's own
    branch (`governor.labels.stage.adoption.in_place`, default `true`):
    - **in place** (`mode=in-place`) — the head is in the base repo, or the
