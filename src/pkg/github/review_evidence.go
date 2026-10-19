@@ -255,6 +255,11 @@ func (c *Client) upsertReviewEvidence(repo string, number int, head string, u re
 				slog.String("repo", repo), slog.Int("number", number), slog.String("head", head))
 			return
 		}
+		if pr.GetBase().GetSHA() == "" {
+			c.logger.Debug("review evidence: PR has no base sha, bundle not started",
+				slog.String("repo", repo), slog.Int("number", number), slog.String("head", head))
+			return
+		}
 		b = c.newReviewEvidenceBundle(repo, number, head, pr, policy, now)
 		// A bundle started after the PR already merged (the merge path ran
 		// before the first review wrote one, or someone else merged) would
