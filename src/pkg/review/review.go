@@ -130,6 +130,9 @@ type PerspectiveReport struct {
 	HiveAuthored bool        `json:"hive_authored,omitempty"`
 	AuthorModel  string      `json:"author_model,omitempty"`
 	ReviewModel  string      `json:"review_model,omitempty"`
+	// Confidence is the optional binned self-report; it never feeds the gate.
+	Confidence    *float64 `json:"confidence,omitempty"`
+	ConfidenceRaw *float64 `json:"confidence_raw,omitempty"`
 	// DecisionRequested means the review found no code defect it can route
 	// to the author, but explicitly deferred a maintainer/product decision.
 	DecisionRequested bool   `json:"decision_requested,omitempty"`
@@ -276,6 +279,7 @@ func ValidateReportFor(raw []byte, set PerspectiveSet) (*PerspectiveReport, erro
 	if report.Number <= 0 {
 		return nil, fmt.Errorf("number must be greater than zero")
 	}
+	normalizeReportedConfidence(&report)
 	return &report, nil
 }
 
