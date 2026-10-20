@@ -737,9 +737,7 @@ func (h *ContributeWSHub) markAlreadyDoneUnverified(repo string, number int, rep
 	if h == nil || repo == "" || number <= 0 {
 		return
 	}
-	if len(reason) > noWorkReasonMaxLen {
-		reason = reason[:noWorkReasonMaxLen]
-	}
+	reason = truncateReasonBytes(reason)
 	claim := ghpkg.IssueClaim{Repo: repo, Issue: number, Source: ghpkg.ClaimSourceVerdict, SourceReporter: reporter}
 	if evidence != nil {
 		claim.PRNumber = evidence.PR
@@ -857,9 +855,7 @@ func (h *ContributeWSHub) markTaskCompletedVerdictKeySignal(key string, prURL, v
 		// past this cooldown until a human clears it. The no-PR streak is
 		// left alone: it exists to escalate, and this is already the ceiling.
 		cooldown = withPRCooldown
-		if len(reason) > noWorkReasonMaxLen {
-			reason = reason[:noWorkReasonMaxLen]
-		}
+		reason = truncateReasonBytes(reason)
 		h.noWorkVerdicts[key] = noWorkVerdictRecord{
 			RecordedAt:    time.Now(),
 			SuppressHours: withPRCooldown.Hours(),
@@ -881,9 +877,7 @@ func (h *ContributeWSHub) markTaskCompletedVerdictKeySignal(key string, prURL, v
 		// issue activity. Only the OFFER surfaces read this ledger; the
 		// escalating cooldown above still stands as the backstop.
 		if verdict == completionVerdictNoWorkNeeded {
-			if len(reason) > noWorkReasonMaxLen {
-				reason = reason[:noWorkReasonMaxLen]
-			}
+			reason = truncateReasonBytes(reason)
 			h.noWorkVerdicts[key] = noWorkVerdictRecord{
 				RecordedAt:    time.Now(),
 				SuppressHours: withPRCooldown.Hours(),
