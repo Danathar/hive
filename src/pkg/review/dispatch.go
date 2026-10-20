@@ -747,7 +747,7 @@ func hiveAuthored(pr PullRequest, opts DispatchOptions) bool {
 
 // fixPushAllowed is the authorship check in front of every fix kick. A fix
 // kick tells an agent to push a commit onto the PR branch, so it is only ever
-// dispatched when the PR's LOGIN author is an agent or App login. AllAuthors
+// dispatched when the PR's LOGIN author is a bot-shaped (App) login. AllAuthors
 // is deliberately not consulted: it widens what is REVIEWED, and reviewing a
 // contributor's PR is not a reason to rewrite it (hivecommons/hive#8421).
 // review.fix_human_prs is not consulted either. The fixer's commit is signed
@@ -764,7 +764,14 @@ func hiveAuthored(pr PullRequest, opts DispatchOptions) bool {
 // place (`stage/074-adopted-by-hive`): adoption is the explicit decision that the
 // hive owns the branch and fixes it there (hivecommons/hive#12987).
 func fixPushAllowed(pr PullRequest, opts DispatchOptions) bool {
-	return isAgentAuthored(pr.Author, opts.AIAuthor) || hasLabelFold(pr.Labels, stagelabels.AdoptedByHive.Label())
+	return fixPushAuthorOK(pr.Author) || hasLabelFold(pr.Labels, stagelabels.AdoptedByHive.Label())
+}
+
+// fixPushAuthorOK admits only bot-shaped logins, the ones the squash check
+// skips (is_bot_identity in src/scripts/check-squash-signoff-attribution.sh).
+// A plain-login ai_author is reviewed but never pushed to.
+func fixPushAuthorOK(author string) bool {
+	return strings.HasSuffix(strings.TrimSpace(author), "[bot]")
 }
 
 // withholdFix records that a changes_requested PR got no fix kick because
@@ -782,9 +789,9 @@ func (p *DispatchPlan) withholdFix(pr PullRequest, opts DispatchOptions, now tim
 			return
 		}
 	}
-	reason := "PR's login author is not a hive agent; review published, fix not pushed"
+	reason := "PR's login author is not a bot login, so a squash would attribute it to a person; review published, fix not pushed"
 	if opts.FixHumanPRs {
-		reason = "PR's login author is not a hive agent; a hive-signed fix commit would fail the squash sign-off gate, so the fix was proposed in the review, not pushed"
+		reason = "PR's login author is not a bot login, so a squash would attribute it to a person; a hive-signed fix commit would fail the squash sign-off gate, so the fix was proposed in the review, not pushed"
 	}
 	w := WithheldFix{
 		Repo:           pr.Repo,
