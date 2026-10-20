@@ -129,10 +129,14 @@ contribute.
 export HIVE_CONTAINER_OCI_RUNTIME=krun   # or put it in ~/.config/hive/contributor.env
 CONTRIBUTOR_MODE=headless just contribute-hive claude
 just contribute-hive omp                 # interactive, through the VM console
+just contribute-hive omp krun            # same as HIVE_CONTAINER_OCI_RUNTIME=krun, for one launch
 ```
 
 `HIVE_CONTAINER_OCI_RUNTIME` is honoured from the environment or from
-`contributor.env`. Once it is set, the launch never falls back to a plain
+`contributor.env`; `krun` as the recipe's mode argument is equivalent and
+goes through the same preflight. The accepted modes are `docker` (the
+default), `local` and `krun`; an unknown mode or backend is refused before
+the image is pulled (#13249). Once it is set, the launch never falls back to a plain
 container, to docker or to local mode: it either starts the contributor under
 krun or refuses with the reason. `krun` is the only accepted value; Kata
 Containers is not supported here because it does not run under podman.
@@ -1911,10 +1915,14 @@ loaded, and **before** backend detection and the tmux/CLI launch. Hooks are
   `backend_perm_flag()` and the override survives, because nothing reloads the
   defaults after the seam runs.
 
-A minimal derived image:
+A minimal derived image. The base tag must match the launcher's channel:
+`:edge` for a v6 checkout, `:latest` for v5 (see `HIVE_CONTRIBUTOR_IMAGE` in
+[env-vars.md](env-vars.md)). Deriving from the other channel reproduces
+[#13248](https://github.com/hivecommons/hive/issues/13248), since the
+launcher's entrypoint features are missing from the image.
 
 ```dockerfile
-FROM ghcr.io/hivecommons/hive-contributor:latest
+FROM ghcr.io/hivecommons/hive-contributor:edge
 COPY 10-my-setup.sh /etc/hive/entrypoint.d/10-my-setup.sh
 ```
 
