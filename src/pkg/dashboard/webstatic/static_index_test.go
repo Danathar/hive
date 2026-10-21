@@ -919,3 +919,23 @@ func TestStaticExperimentLabResetSection(t *testing.T) {
 		}
 	}
 }
+
+// The providers chip is hidden whenever every provider is usable, but
+// `.nav-chip { display: inline-flex }` outranks the UA `[hidden]` rule, so
+// without an explicit escape hatch it painted as an empty outlined pill
+// between Settings and the health badge.
+func TestStaticTopbarProvidersChipNeverRendersEmpty(t *testing.T) {
+	body, err := os.ReadFile("../static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{
+		`.oc-providers-chip[hidden] { display: none; }`,
+		`id="oc-providers" data-status="warn" role="status" title="AI providers: all usable" aria-label="AI providers: all usable" hidden>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static dashboard providers chip missing %q", want)
+		}
+	}
+}

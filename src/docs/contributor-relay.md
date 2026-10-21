@@ -40,6 +40,8 @@ For a homelab service with accounts independent of the host, use the
 It keeps GitHub, Codex, Hive configuration and work in a named volume and
 requires no host GitHub or provider CLI installation.
 
+### From source
+
 From a checkout of this repository:
 
 ```bash
@@ -248,6 +250,69 @@ tmux's `Ctrl-B r` redraws it.
   container.
 - `podman compose` with the docker-compose provider silently ignores
   `runtime: krun`; use `just contribute-hive` for krun mode.
+
+### Homebrew
+
+Homebrew is an additional way to install the relay without cloning this
+repository:
+
+```bash
+brew install hivecommons/hive/contribute
+```
+
+The formula installs `hive-contribute`, a wrapper around a pinned contributor
+image. Linux uses Apptainer; macOS requires a configured Docker, Podman, or
+Lima runtime. See the [tap README's platform notes](https://github.com/hivecommons/homebrew-hive#platform-reality)
+and [credential inputs](https://github.com/hivecommons/homebrew-hive#runtime-inputs-passed-through)
+for runtime prerequisites and authentication for your chosen CLI backend.
+Installing the formula does not register you with a hive.
+
+For a new registration, choose a hive from the [Hive Hub](https://hive.hivecommons.dev)
+and open its `/contribute` page to identify its dashboard URL. Replace
+`hive.example.com` with that dashboard's host and `YOUR_GITHUB_USERNAME` with
+your GitHub username:
+
+```bash
+curl --fail --show-error --silent --max-time 15 \
+  -X POST https://hive.example.com/api/contribute/register \
+  -H 'Content-Type: application/json' \
+  -d '{"github_username":"YOUR_GITHUB_USERNAME"}'
+```
+
+This is the same registration endpoint used by `just contribute-setup`; it
+does not need a GitHub token or an Authorization header. Save the returned
+`registration_token` privately: it is shown only once. If the response says
+"Already registered", it will not contain a token. Reuse your existing
+`contributor.env` from that hive, or follow
+[Moving the relay to another machine](#moving-the-relay-to-another-machine)
+to recover access.
+
+Create a private config file (these commands preserve an existing file):
+
+```bash
+mkdir -p "$HOME/.config/hive"
+(umask 077; touch "$HOME/.config/hive/contributor.env")
+chmod 600 "$HOME/.config/hive/contributor.env"
+```
+
+Edit `~/.config/hive/contributor.env` to contain the following, replacing the
+host and token with the values for the **same hive** and choosing an
+authenticated backend. If you already use multiple hive profiles, keep
+their existing hub/token pairs instead of replacing them with this single-hive
+example.
+
+```sh
+HIVE_HUB=wss://hive.example.com/contribute
+HIVE_REGISTRATION_TOKEN=YOUR_REGISTRATION_TOKEN
+AGENT_BACKEND=claude
+```
+
+The wrapper mounts this directory and the image entrypoint reads the file.
+Start the relay from the directory you want to use as its workspace:
+
+```bash
+hive-contribute
+```
 
 ## Docker Compose workflow
 
@@ -671,7 +736,11 @@ hivectl hives remove staging                              # asks you to type the
 
 The active profile is written first in each list, which is the hub the relay solicits from when it starts. When a relay is **already running**, `hivectl hives use <name>` writes the projection and signals that relay to reload it, so the next solicitation goes to the new active hive without a restart. Work already in flight stays with the hub that assigned it and completes there.
 
-The relay writes two non-secret control files beside the profiles (plus the activity history below): `contributor-relay.pid`, so `hivectl hives use` can signal the native process or recorded docker/podman container, and `hubs-seen.json`, so `hivectl hives list` can show when each hub last authenticated or heartbeated successfully without probing every hub.
+The relay writes three non-secret control files beside the profiles (plus the activity history below): `contributor-relay.pid`, so `hivectl hives use` can signal the native process or recorded docker/podman container; `hubs-seen.json`, so `hivectl hives list` can show when each hub last authenticated or heartbeated successfully without probing every hub; and `relay-status.json`, an owner-only (`0600`) atomic snapshot of adopted scope, subscription readiness, and current work. `HIVE_RELAY_STATUS_FILE` overrides its path.
+
+The status file's `pid`, `started_at`, and per-start `session` match the PID record. `adopted_scope_version` and `adopted_at` change only after the relay successfully reads `contributor.env` on reload. Each `subscriptions` entry identifies its Hive by canonical HTTP origin and records `readiness` (`connected`, `scope-pending`, `scope-unsupported`, `quota-held`, `disabled`, or `discovery-unavailable`), `acknowledged_scope_version`, and `observed_at`. `current_task` has the Hive, canonical repository, issue and task identifiers, start time, and a `draining` flag when its target leaves the adopted scope; the existing lease can finish, but that target receives no new lease. `idle_reason` distinguishes an all-disabled set from a set with no selected repositories.
+
+`hivectl` treats a missing, malformed, dead-process, or mismatched-session status as unknown. A saved generation remains pending until its subscription acknowledges at least that version. The snapshot contains no prompt, task payload, token, credential, or log text.
 
 ### Local activity history (`hivectl hives activity`)
 
@@ -736,6 +805,20 @@ The profile list is available in the terminal UI: `just contribute-tui` (or `hiv
 From a fresh checkout, `just contribute-tui`, `just contribute-watch` and `just contribute-hives` share `bin/hivectl-bootstrap.sh`: they first honor `HIVECTL`, then `./bin/hivectl`, user/system installs, and `PATH`; when none is present, they extract `hivectl` from the Hive image into `./bin/hivectl`. The checkout records the image digest beside the binary and refreshes when the digest changes, refusing to run an unverifiable stale copy if Podman cannot inspect or pull the image.
 
 See [hivectl.md](hivectl.md#hives--named-profiles-for-the-hives-you-contribute-to) for the full command reference, including adding a hive whose token you already hold (`--token-stdin`) and reissuing one saved hive token through the profile store (`hivectl hives reissue <name> --hub <url>`).
+
+### Onboarding a whole hub's Hives (`hivectl hives hub`)
+
+A hub that publishes a federation registry can be tracked as a discovery collection, so you do not run `hives add` once per Hive. Tracking stores only the hub's name and URL in `profiles.yml` — never a credential — and each Hive is still registered through the same per-Hive registration and identity flow as `hives add`:
+
+```bash
+hivectl hives hub add commons --url https://hub.example             # track it, store no credential
+hivectl hives hub show commons                                      # read-only: which Hives it advertises
+hivectl hives hub adopt commons                                     # review the list, confirm, enroll missing Hives
+hivectl hives hub follow commons --mode current-and-future-repos    # policy for Hives it advertises later
+hivectl hives hub refresh commons                                   # apply the policy: additions and removals, shown separately
+```
+
+`adopt` prompts before any registration (`--yes` skips the prompt for scripted setups). `follow` only records the hub's `follow` policy (`off`, `current`, `current-and-future-repos`); it is applied by `refresh`, not by a background poller. `refresh` enrolls newly advertised Hives within that policy, lists Hives the hub no longer advertises as `no longer advertised`, and never removes a profile for you. See [hivectl.md](hivectl.md#hives--named-profiles-for-the-hives-you-contribute-to) for the `hubs:` schema and the exact confirmation rules.
 
 ## Moving the relay to another machine
 

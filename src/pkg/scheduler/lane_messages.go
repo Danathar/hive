@@ -555,11 +555,14 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		FromFork         bool     `json:"from_fork"`
 		ReachableAction  string   `json:"reachable_action"`
 		Adopted          bool     `json:"adopted"`
+		SentinelAlert    bool     `json:"sentinel_alert"`
 		Held             bool     `json:"held"`
 		FailingChecks    []string `json:"failing_checks"`
 		Excerpt          string   `json:"excerpt"`
 		DeferredIncident int      `json:"deferred_incident"`
 		DeferredExternal bool     `json:"deferred_external"`
+		BaseRedChecks    []string `json:"base_red_checks"`
+		BaseRed          bool     `json:"base_red"`
 	}
 	var payload struct {
 		Items []ciFailingRow `json:"ci_failing"`
@@ -590,7 +593,7 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 	// under the repair queue had agents re-derive the DEFER_TO_INCIDENT
 	// verdict on every kick. It is named under its own heading, without
 	// repair instructions, until the incident closes.
-	var deferred []ciFailingRow
+	var deferred, baseRed []ciFailingRow
 	// A red PR an agent already triaged as failing upstream at this head
 	// (hivecommons/hive#11609) is in the same position: nothing in this
 	// repository can fix it, so it is named under its own heading until a
@@ -609,6 +612,12 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		}
 		if pr.DeferredExternal {
 			external = append(external, pr)
+			continue
+		}
+		if pr.BaseRed {
+			// Red only on checks that are red on the base branch too
+			// (base_branch_red.go): nothing to repair on the PR.
+			baseRed = append(baseRed, pr)
 			continue
 		}
 		kept = append(kept, pr)
@@ -667,6 +676,9 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		if pr.FromFork {
 			b.WriteString(adoptedPRStatusRule)
 		}
+		if pr.SentinelAlert {
+			b.WriteString("    " + adoptedSentinelNote + "\n")
+		}
 	}
 	if len(deferred) > 0 {
 		b.WriteString(fmt.Sprintf("DEFERRED TO OPEN SHARED-CI INCIDENTS (%d — no repair: the base/infra failure is tracked on the incident issue; do not push, retry, or comment again; each PR returns to the list above when its incident closes):\n", len(deferred)))
@@ -690,6 +702,16 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 				checks = " — failing: " + strings.Join(pr.FailingChecks, ", ")
 			}
 			b.WriteString(fmt.Sprintf("  #%d %s (sha:%s) — %s%s\n", pr.Number, pr.Repo, pr.HeadSHA, pr.Title, checks))
+		}
+	}
+	if len(baseRed) > 0 {
+		b.WriteString(fmt.Sprintf("RED ONLY BECAUSE THE BASE BRANCH IS RED (%d — no repair: the same checks fail on the base branch tip, so this is not the PR's fault; do not push, retry, or comment; each PR returns to the list above if it is still red once the base recovers):\n", len(baseRed)))
+		for i, pr := range baseRed {
+			if i >= limit {
+				b.WriteString(prListOverflowLine(len(baseRed)-i, limit))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  #%d %s — base branch red on %s — %s\n", pr.Number, pr.Repo, strings.Join(pr.BaseRedChecks, ", "), pr.Title))
 		}
 	}
 	if len(forks) > 0 {

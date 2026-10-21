@@ -23,6 +23,9 @@ package github
 // enumeration records it on the row ("blocked until <t>") and the sweep lifts
 // the label once it passes, unless the body also carries
 // `<!-- hive:ops-tracking -->` (a maintainer's soak checklist, left blocked).
+// On the hive's own project such a checklist instead gets one soak-evidence
+// comment and the checklist lines it proves ticked (hivecommons/hive#13311,
+// issue_recheck_soak.go).
 
 import (
 	"context"
@@ -99,6 +102,12 @@ func blockedFilterReason(body string) string {
 func blockedRecheck(body string) (time.Time, bool) {
 	at, _ := gfi.ParseRecheckAfter(body)
 	return at, gfi.HasOpsTrackingMarker(body)
+}
+
+// blockedRecheckDone reports whether the soak triage already ran on the
+// body (hivecommons/hive#13311).
+func blockedRecheckDone(body string) bool {
+	return strings.Contains(body, RecheckDoneMarker)
 }
 
 // blockedStageReason is the IssueStageFor reason for an issue wearing the
@@ -225,7 +234,9 @@ type BlockedIssueResult struct {
 	Items     int
 	Unblocked int
 	Stripped  int
-	Errors    int
+	// SoakTriaged counts ops-tracking issues that got soak evidence.
+	SoakTriaged int
+	Errors      int
 }
 
 // blockedIssueTarget is one blocked issue the sweep looks at.
@@ -236,6 +247,7 @@ type blockedIssueTarget struct {
 	reason       string
 	recheckAfter time.Time
 	opsTracking  bool
+	recheckDone  bool
 }
 
 // ReconcileBlockedIssues walks the cycle's blocked issues (filtered rows
@@ -246,8 +258,10 @@ type blockedIssueTarget struct {
 // (the org workflow adds it on every labelled issue) so the parked issue
 // does not advertise itself. A row with no tracked PR whose recheck-after
 // deadline has passed loses `blocked` with a one-line note (once per
-// deadline) so the next enumeration re-triages it; ops-tracking rows are left
-// alone. Lookup failures are counted and skipped.
+// deadline) so the next enumeration re-triages it; an ops-tracking row on the
+// hive's own project gets soak evidence instead (runRecheckSoak) and keeps
+// `blocked`, other ops-tracking rows are left alone. Lookup failures are
+// counted and skipped.
 func ReconcileBlockedIssues(ctx context.Context, client *Client, result *ActionableResult, logger *slog.Logger) BlockedIssueResult {
 	var res BlockedIssueResult
 	if client == nil || client.client == nil || result == nil {
@@ -267,7 +281,7 @@ func ReconcileBlockedIssues(ctx context.Context, client *Client, result *Actiona
 			if row.Number <= 0 || row.Bucket != workBucketFiltered || !IsBlockedIssueReason(row.Reason) || !hasBlockedLabel(row.Labels) {
 				continue
 			}
-			targets = append(targets, blockedIssueTarget{repo: row.Repo, number: row.Number, labels: row.Labels, reason: row.Reason, recheckAfter: row.RecheckAfter, opsTracking: row.OpsTracking})
+			targets = append(targets, blockedIssueTarget{repo: row.Repo, number: row.Number, labels: row.Labels, reason: row.Reason, recheckAfter: row.RecheckAfter, opsTracking: row.OpsTracking, recheckDone: row.RecheckDone})
 		}
 	}
 	lookups := 0
@@ -278,19 +292,27 @@ func ReconcileBlockedIssues(ctx context.Context, client *Client, result *Actiona
 		}
 		res.Items++
 		prRepo, prNumber, ok := parseBlockedOnReason(t.reason)
-		if !ok {
-			if lookups >= blockedSweepCommentLookups {
-				continue
-			}
+		if !ok && lookups < blockedSweepCommentLookups {
 			lookups++
 			scan, err := client.blockedSweepComments(ctx, t.repo, t.number, t.recheckAfter)
 			prRepo, prNumber, ok = scan.prRepo, scan.pr, scan.ok
-			if !ok {
-				if !t.recheckAfter.IsZero() && !now.Before(t.recheckAfter) {
+			if !ok && !t.recheckAfter.IsZero() && !now.Before(t.recheckAfter) {
+				if t.opsTracking && isRecheckSoakRepo(t.repo) {
+					// hivecommons/hive#13311: a maintainer's soak checklist
+					// on the hive's own project gets evidence, not a lift.
+					runRecheckSoak(ctx, client, t, scan.evidenceNoted, err, now, &res, logger)
+				} else {
 					liftBlockedDeadline(ctx, client, t, scan.deadlineNoted, err, &res, logger)
+					continue
 				}
-				continue
 			}
+		}
+		if !ok {
+			// No tracked PR (a blocked verdict from a contributor relay, or
+			// a maintainer's label, as on hivecommons/hive#13267): nothing
+			// to lift, but the issue still must not advertise itself.
+			stripBlockedHelpWanted(ctx, client, t, &res, logger)
+			continue
 		}
 		closed, err := client.pullRequestSettled(ctx, prRepo, prNumber)
 		if err != nil {
@@ -312,16 +334,23 @@ func ReconcileBlockedIssues(ctx context.Context, client *Client, result *Actiona
 			logger.Info("blocked sweep: issue unblocked", "repo", t.repo, "issue", t.number, "pr", prRepo+"#"+strconv.Itoa(prNumber))
 			continue
 		}
-		if issueHasLabel(t.labels, helpWantedLabel) {
-			if err := client.RemoveLabel(ctx, t.repo, t.number, helpWantedLabel); err != nil {
-				res.Errors++
-				logger.Warn("blocked sweep: help wanted not stripped", "repo", t.repo, "issue", t.number, "error", err)
-				continue
-			}
-			res.Stripped++
-		}
+		stripBlockedHelpWanted(ctx, client, t, &res, logger)
 	}
 	return res
+}
+
+// stripBlockedHelpWanted removes `help wanted` from a blocked issue that
+// wears it, counting the strip or the failure on res.
+func stripBlockedHelpWanted(ctx context.Context, client *Client, t blockedIssueTarget, res *BlockedIssueResult, logger *slog.Logger) {
+	if !issueHasLabel(t.labels, helpWantedLabel) {
+		return
+	}
+	if err := client.RemoveLabel(ctx, t.repo, t.number, helpWantedLabel); err != nil {
+		res.Errors++
+		logger.Warn("blocked sweep: help wanted not stripped", "repo", t.repo, "issue", t.number, "error", err)
+		return
+	}
+	res.Stripped++
 }
 
 // parseBlockedOnReason reads "blocked on owner/repo#N" back into its parts.
@@ -384,12 +413,13 @@ type blockedSweepScan struct {
 	pr            int
 	ok            bool
 	deadlineNoted bool
+	evidenceNoted bool
 }
 
 // blockedSweepComments reads the issue's comments once: the newest
 // blocked-on marker (the scanner's blocked note carries one) and, when
-// recheckAfter is set, whether the unblocked note for that deadline is
-// already there.
+// recheckAfter is set, whether the unblocked note for that deadline or a
+// soak-evidence comment is already there.
 func (c *Client) blockedSweepComments(ctx context.Context, repo string, number int, recheckAfter time.Time) (blockedSweepScan, error) {
 	var scan blockedSweepScan
 	owner, name := c.splitRepo(repo)
@@ -408,6 +438,9 @@ func (c *Client) blockedSweepComments(ctx context.Context, repo string, number i
 		}
 		if passed != "" && strings.Contains(body, blockedUnblockedMarker) && strings.Contains(body, passed) {
 			scan.deadlineNoted = true
+		}
+		if strings.Contains(body, recheckEvidenceMarkerPrefix) {
+			scan.evidenceNoted = true
 		}
 	}
 	return scan, nil
