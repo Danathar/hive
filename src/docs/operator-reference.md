@@ -1020,12 +1020,17 @@ v5 and v6 spokes) tracking one repo all stay on webhook mode.
   debounced for `governor.webhook_wake_debounce_s` so a push and its check
   fan-out coalesce into one cycle, and webhook-triggered cycles are at least
   `governor.webhook_wake_min_gap_s` apart so a delivery storm stretches the
-  batch instead of spinning cycles. The wake cycle is a mini-cycle in cost:
-  repositories with no dirty PR reuse their previous GraphQL PR batch
-  (`graphql_pr_batch.webhook_skips`), clean PRs are served from the PR detail
-  cache past `github.pr_detail_ttl_s`, and only the dirty PRs are re-read.
-  The log line is `github webhook wake: running an early eval cycle`
-  (`reason`, `deliveries`, `coalesced`).
+  batch instead of spinning cycles. **The wake cycle does not re-list
+  repositories.** It plans from the governor's cached actionable snapshot
+  (the one the last cadence tick enumerated, patched by the targeted
+  re-reads described below), so a wake costs the targeted re-read plus the
+  dirty-PR detail refreshes and nothing else: repositories with no dirty PR
+  reuse their previous GraphQL PR batch (`graphql_pr_batch.webhook_skips`),
+  clean PRs are served from the PR detail cache past
+  `github.pr_detail_ttl_s`, and only the dirty PRs are re-read. The log line
+  is `github webhook wake: running an early eval cycle` (`reason`,
+  `deliveries`, `coalesced`, `source=cached`), followed by
+  `eval cycle planning from cached snapshot`.
 - Webhooks are **healthy** while the last delivery for a managed repository is
   newer than `2 × governor.eval_interval_s`. While healthy the governor's base
   eval interval rises to `governor.eval_interval_webhook_s` (default `900`,
@@ -1057,13 +1062,81 @@ v5 and v6 spokes) tracking one repo all stay on webhook mode.
   `check_run` deliveries costs one request. The re-read patches that row of
   the status snapshot in place — labels, title, draft flag, last activity;
   a closed or merged item leaves — then drops the tracker cache again and
-  sends the `stage-tracker` SSE nudge. No repository is re-enumerated: an
-  item the snapshot never listed (a PR opened a moment ago) waits for the
-  wake cycle above. The read goes through the paced REST transport and is
+  sends the `stage-tracker` SSE nudge. The same re-read is handed to the
+  governor, which upserts the item into its cached actionable snapshot —
+  a new issue or PR appears, a closed or merged one leaves, a label change
+  moves it between the actionable / held / sidelined buckets — so the wake
+  cycle that follows plans against the patched item. No repository is
+  re-enumerated. The read goes through the paced REST transport and is
   skipped outright while the API budget is `critical`; it refreshes the PR
   detail cache, so the following cycle does not pay for it again.
   `dashboard.stage_tracker.webhook_refresh: false` turns the re-read off
-  (deliveries then still invalidate caches and wake the loop).
+  (deliveries then still invalidate caches and wake the loop, and wake
+  cycles fall back to a full enumeration because nothing else patches the
+  snapshot).
+
+#### Polling cadence vs webhook patch vs reconcile
+
+Inbound webhooks cost nothing against the GitHub rate limit; outbound API
+calls do. The governor therefore keeps three distinct paths and never lets a
+delivery trigger a full re-list:
+
+| Path | Trigger | GitHub cost | What it does |
+| --- | --- | --- | --- |
+| **Reconcile** | cadence tick — `governor.eval_interval_webhook_s` (default `900`) while webhooks are healthy, `governor.eval_interval_s` otherwise | full: lists issues and PRs for every tracked repo | Authoritative. Rebuilds the actionable snapshot from scratch and **overwrites** every webhook patch. If the pass fails outright (every repo refused: rate limit, 429, 5xx) the previous snapshot — patches included — stays published, marked stale for every repo (`stale_repos`, repo card `countsStale`), and the next tick retries; a repo refused on its own is served from its last-good enumeration the same way. |
+| **Webhook patch** | one delivery naming an issue/PR | one `GET` per item, debounced and coalesced | Upserts, moves or removes that single item in both the activity-monitor row and the governor's cached snapshot. Counted in `/api/status.webhookPatches`. |
+| **Cached cycle** | webhook wake, review wake, continuous-agent wake | dirty-PR detail refreshes only | Runs the governor's decision pass (kicks, automerge, stage moves) from the patched snapshot without listing. `source=cached` in the wake log; counted in `/api/status.cachedCycles`. Before the first reconcile has produced a snapshot a wake enumerates instead. |
+
+Cadence ticks reconcile; webhooks keep the picture current in between. The
+priority order is accuracy of issue/PR state, then latency, then API thrift,
+which fixes four rules for the patch path:
+
+- **The payload is a hint, never state.** A delivery only names the item;
+  the GET decides what the row says. A `closed` delivery whose re-read finds
+  the item open leaves it open.
+- **Upserts are monotonic.** A re-read whose `updated_at` is older than the
+  copy already held (two deliveries' GETs landing out of order) is dropped.
+  Each applied read is recorded in the snapshot's `item_patches` (fetch time,
+  `updated_at`, head SHA, `X-GitHub-Delivery` id) for audit.
+- **Closed/merged removes at once; reopened re-adds** — both after the
+  confirming GET.
+- **Irreversible actions are freshness-bounded.** Before an issue close or a
+  PR merge planned from the snapshot (stage sync, close-on-merge, automerge
+  sweep), the governor refuses outright while that repo's share is stale and
+  otherwise re-reads the item once if its copy is older than 60 s
+  (`DecisionFreshnessBound`), proceeding only if it is still open. Refused
+  actions log `irreversible action deferred` and retry next pass.
+
+Startup runs a full enumeration before the first decision pass; a cold cache
+whose GitHub share failed is published stale, never as "0 items".
+`/api/status.staleSince` (and per-repo `countsStaleSince`) carries the
+stale-as-of time and the Overview shows a `stale · as of HH:MM` badge.
+Raising `eval_interval_webhook_s` lowers list-call volume further at the cost
+of a longer window before a missed delivery is corrected by reconciliation.
+
+##### Rate-limit pacing priority
+
+After a GitHub rate-limit refusal (a secondary-limit 403 or a primary-limit
+reset) the shared transport enters a slow-start caution window and paces
+requests about 2s apart. Pacing is prioritised so periodic housekeeping cannot
+starve the governor:
+
+- the reconcile pass (`EnumerateActionable`) runs **high** priority and is
+  bounded only by its own deadline;
+- ordinary requests may queue at most 30s ahead;
+- housekeeping (self-authored and queued automerge sweeps, the review-request
+  watcher, advisory digest lookups, the dashboard metrics and fleet-stats
+  collectors) runs **low** priority: a request that would queue more than 5s
+  ahead is refused immediately (`github pacing: request shed`) instead of
+  taking a slot, and a tick whose first slot is already further out than the
+  tick could wait is skipped outright (`low-priority work shed`, logged at
+  most once a minute per caller) and retried on its next tick;
+- the self-authored automerge sweep backs its tick off to at least 60s while
+  the window is engaged and resumes its adaptive interval when it ends;
+- GitHub App installation-token mints (and the other App-JWT endpoints) do
+  not go through the pacer at all: they are a separate rate-limit bucket, and
+  a mint that queued behind paced traffic failed every request that needed
+  the token.
 
 `/api/status` and `/api/gh-rate-limits` expose
 `webhooks: {healthy, last_event_at, events_1h, invalidations_1h,

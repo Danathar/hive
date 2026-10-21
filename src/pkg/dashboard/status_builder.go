@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -392,6 +393,7 @@ func BuildFrontendStatus(
 		Tokens:                buildTokens(tokenCollector),
 		Repos:                 repos,
 		OverviewKPIIncomplete: overviewKPIIncomplete(cfg, actionable),
+		StaleSince:            staleSinceRFC3339(actionable),
 		Beads:                 BuildBeadsFromConfig(beadStores, cfg),
 		Planning:              BuildPlanning(beadStores, architectPausedFromStatuses(agentStatuses), detectACMMLevel(cfg)),
 		Health:                health,
@@ -446,11 +448,33 @@ func buildProviderStatus(agents []FrontendAgent, cfg *config.Config) []agent.Pro
 	return agent.RollUpProviderStatus(evidence)
 }
 
+// staleSinceRFC3339 renders the snapshot's stale-since marker; the
+// generation time stands in for an older snapshot that has no marker.
+func staleSinceRFC3339(actionable *github.ActionableResult) string {
+	if !actionable.Stale() {
+		return ""
+	}
+	since := actionable.StaleSince
+	if since.IsZero() {
+		since = actionable.GeneratedAt
+	}
+	if since.IsZero() {
+		return ""
+	}
+	return since.UTC().Format(time.RFC3339)
+}
+
 func overviewKPIIncomplete(cfg *config.Config, actionable *github.ActionableResult) bool {
 	if cfg == nil || len(cfg.Project.Repos) == 0 {
 		return false
 	}
 	if actionable == nil {
+		return true
+	}
+	// A repo served from its last-good enumeration after a transient GitHub
+	// refusal has counts, but they are not this snapshot's observation; KPI
+	// history must not record them as a fresh point.
+	if actionable.Stale() {
 		return true
 	}
 	for _, repoName := range cfg.Project.Repos {
@@ -2302,6 +2326,10 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 		}
 		if actionable != nil && !r.Paused && !countsPresent {
 			r.CountsIncomplete = true
+		}
+		if actionable != nil && slices.Contains(actionable.StaleRepos, repoName) {
+			r.CountsStale = true
+			r.CountsStaleSince = staleSinceRFC3339(actionable)
 		}
 		if r.ActionableIssues == nil {
 			r.ActionableIssues = []any{}
