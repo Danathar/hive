@@ -49,10 +49,14 @@ func (s *Server) handlePacksList(w http.ResponseWriter, r *http.Request) {
 
 // ApplyPackResult holds the outcome of applying an ACMM pack.
 type ApplyPackResult struct {
-	Name            string           `json:"name"`
-	Created         []string         `json:"created"`
-	Updated         []string         `json:"updated"`
-	Skipped         []string         `json:"skipped"`
+	Name    string   `json:"name"`
+	Created []string `json:"created"`
+	Updated []string `json:"updated"`
+	Skipped []string `json:"skipped"`
+	// Preserved lists agents whose hand-set backend (no owner stamp, differing
+	// from the pack default) was kept and stamped operator-owned (#13221).
+	// Preserved agents are also counted in Skipped.
+	Preserved       []string         `json:"preserved,omitempty"`
 	Paused          []string         `json:"paused"`
 	Resumed         []string         `json:"resumed"`
 	GovernorChanges *GovernorChanges `json:"governor_changes,omitempty"`
@@ -132,6 +136,7 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	var skipped []string
 
 	var updated []string
+	var preserved []string
 	// Collect per-agent create failures instead of aborting the whole apply on
 	// the first one. Aborting mid-loop leaves a partially reconciled roster
 	// (some of the level's agents added, the rest missing) that no longer
@@ -158,6 +163,9 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 		}
 		if existing, exists := s.deps.Config.Agents[pa.Name]; exists {
 			changed := false
+			// stamped records an ownership-only change that must be persisted
+			// but is not a value update (so it never feeds `updated`).
+			stamped := false
 
 			// Pack-behavior fields define what an agent DOES at a given ACMM
 			// level (which kick template it runs, its issue/PR mode, which model,
@@ -278,27 +286,54 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 			// Backend is fill-if-empty: it never varies by level (always the same
 			// per agent across all packs), and users legitimately pin it, so the
 			// pack must not stomp a user's choice. The spoke's backends
-			// allow/deny list (#11310) replaces a denied pack backend, and moves
-			// a still pack-owned agent off a backend that has since been denied.
-			if existing.Backend == "" && packBackend != "" && !existing.BackendIsOperatorOwned() {
+			// allow/deny list (#11310) replaces a denied pack backend and moves
+			// any agent — stamped pack-owned or unstamped (hand-set) — off a
+			// backend that has since been denied; an unstamped allowed backend
+			// that differs from the pack is kept and stamped operator (#13221).
+			//
+			// moveToPackBackend is the shared fill/deny path: put the agent on
+			// the pack backend as pack-owned and drop a non-operator model so
+			// the new backend uses its own default (unless the caller says the
+			// pack model still applies, i.e. the pack backend itself was kept).
+			moveToPackBackend := func(clearModel bool) {
 				existing.Backend = packBackend
 				existing.BackendOwner = config.FieldOwnerPack
-				if backendReplaced && !existing.ModelIsOperatorOwned() {
-					existing.Model = ""
-				}
-				changed = true
-			} else if existing.Backend != "" && !existing.BackendIsOperatorOwned() && !s.deps.Config.BackendAllowed(existing.Backend) {
-				s.logger.Info("moving pack-owned agent off backend denied by spoke backends config", "agent", pa.Name, "backend", existing.Backend, "replacement", packBackend)
-				existing.Backend = packBackend
-				existing.BackendOwner = config.FieldOwnerPack
-				if !existing.ModelIsOperatorOwned() {
+				if clearModel && !existing.ModelIsOperatorOwned() {
 					existing.Model = ""
 				}
 				changed = true
 			}
+			if existing.Backend == "" && packBackend != "" && !existing.BackendIsOperatorOwned() {
+				moveToPackBackend(backendReplaced)
+			} else if existing.Backend != "" && existing.BackendOwner != "" && !existing.BackendIsOperatorOwned() && !s.deps.Config.BackendAllowed(existing.Backend) {
+				s.logger.Info("moving pack-owned agent off backend denied by spoke backends config", "agent", pa.Name, "backend", existing.Backend, "replacement", packBackend)
+				moveToPackBackend(true)
+			} else if existing.Backend != "" && existing.BackendOwner == "" {
+				// A backend with no owner stamp predates ownership tracking or
+				// was written by hand in hive.yaml. A denied one is moved to the
+				// pack backend like a pack-owned one, so the spoke-wide deny
+				// (#11310) holds. An allowed one matching the pack default (or
+				// the pack's own raw value) is adopted as pack-owned; an allowed
+				// differing one is an operator choice and is stamped so it stays
+				// put (#13221).
+				switch {
+				case !s.deps.Config.BackendAllowed(existing.Backend):
+					s.logger.Warn("moving hand-set agent backend off backend denied by spoke backends config",
+						"agent", pa.Name, "backend", existing.Backend, "replacement", packBackend)
+					moveToPackBackend(true)
+				case strings.EqualFold(existing.Backend, packBackend) || strings.EqualFold(existing.Backend, pa.Backend):
+					existing.BackendOwner = config.FieldOwnerPack
+				default:
+					existing.BackendOwner = config.FieldOwnerOperator
+					preserved = append(preserved, pa.Name)
+					s.logger.Info("keeping hand-set agent backend that differs from the ACMM pack default",
+						"agent", pa.Name, "backend", existing.Backend, "pack_backend", packBackend)
+				}
+				stamped = true
+			}
 
 			// Respect user's enabled: false — don't override it.
-			if changed {
+			if changed || stamped {
 				s.deps.Config.Agents[pa.Name] = existing
 				_ = s.deps.AgentMgr.UpdateConfig(pa.Name, existing)
 				if agentsDir != "" {
@@ -312,7 +347,9 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 						s.ClearSystemAlert(alertID)
 					}
 				}
-				updated = append(updated, pa.Name)
+				if changed {
+					updated = append(updated, pa.Name)
+				}
 				// A flag flip is a statement about whether a process should
 				// EXIST (#7446): leaving on-demand starts the agent — nothing
 				// else will, it was skipped at launch for being on-demand —
@@ -330,7 +367,8 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 						s.logger.Warn("could not stop agent after pack made it on-demand", "agent", pa.Name, "error", err)
 					}
 				}
-			} else {
+			}
+			if !changed {
 				skipped = append(skipped, pa.Name)
 			}
 			// The manager's process table tracks ENABLED agents only — it is
@@ -561,7 +599,7 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	// grep by agent name against this one line answers it. Since #5632 the
 	// list holds genuinely NEW roster members only — manager-table repairs are
 	// logged separately as readded_agents below.
-	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "created_agents", created, "tombstoned_agents", tombstoned, "skipped_agents", skipped)
+	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "preserved", len(preserved), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "created_agents", created, "tombstoned_agents", tombstoned, "skipped_agents", skipped, "preserved_agents", preserved)
 	if len(readded) > 0 {
 		// A repair worth naming, at INFO not buried in `created`: an ENABLED
 		// agent missing from the manager's process table is unusual (the table
@@ -582,6 +620,7 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 		Created:    created,
 		Updated:    updated,
 		Skipped:    skipped,
+		Preserved:  preserved,
 		Paused:     paused,
 		Resumed:    resumed,
 		Tombstoned: tombstoned,

@@ -135,7 +135,9 @@ func (c *Config) validateAgentOverlay(name string, agent AgentConfig) error {
 }
 
 // MergeAgentOverrides merges overlay agents into the config's agent map.
-// Overlay agents override base config agents with the same name.
+// Overlay agents override base config agents with the same name, except that
+// a hand-set base backend outranks a pack-owned overlay backend (see
+// keepHandSetBackend, #13221).
 //
 // Tombstoned agents (Config.RemovedAgents) are skipped AND evicted from the
 // base map. Both halves matter: skipping stops a stale
@@ -160,10 +162,52 @@ func (c *Config) MergeAgentOverrides(overlays map[string]AgentConfig) {
 			)
 			continue
 		}
+		if base, ok := c.Agents[name]; ok {
+			agent = c.keepHandSetBackend(name, base, agent)
+		}
 		agent.Managed = true
 		c.Agents[name] = agent
 	}
 	c.PruneRemovedAgents()
+}
+
+// keepHandSetBackend stops a pack-written overlay from shadowing a backend an
+// operator wrote by hand into the base config (#13221). ApplyPack persists
+// every agent it reconciles to the overlay layers with backend_owner: pack;
+// because an overlay replaces the whole base entry, a later hand edit of
+// `backend:` in hive.yaml lost to that stale pack value on the next load, and
+// ApplyPack then saw nothing to change. A base backend with no owner stamp
+// that differs from a pack-owned overlay backend is an operator edit, so it
+// wins; its owner stays empty so ApplyPack treats it as hand-set (and stamps
+// it operator) instead of reconciling it. Operator-owned or unowned overlay
+// backends, and an empty base backend, keep the overlay value as before.
+//
+// Only an UNSTAMPED base backend counts as a hand edit. A base entry whose
+// backend: line alone was edited while it still carries a backend_owner: line
+// — pack from a runtime file saved before the first apply, or operator after
+// Save() wrote the stamp back — loses to the overlay: a pack-owned base/overlay
+// pair that disagree can also be a runtime file saved before a pack upgrade,
+// and keeping the stale base there would pin an old pack backend for good. The
+// changelog fragment and docs/agent-configuration.md name the workaround
+// (delete the backend_owner: line too, whatever its value).
+func (c *Config) keepHandSetBackend(name string, base, overlay AgentConfig) AgentConfig {
+	if base.Backend == "" || base.BackendOwner != "" || overlay.BackendOwner != FieldOwnerPack ||
+		strings.EqualFold(base.Backend, overlay.Backend) {
+		return overlay
+	}
+	if c.Governor.ValidateBackend(base.Backend) != nil || c.Governor.ValidateLaunchCmdBackend(base.Backend, overlay.LaunchCmd) != nil {
+		return overlay
+	}
+	slog.Default().Info("config: keeping hand-set agent backend over pack-owned overlay value",
+		"hive_id", c.HiveID,
+		"agent", name,
+		"backend", base.Backend,
+		"overlay_backend", overlay.Backend,
+		"file", overlay.sourceFile,
+	)
+	overlay.Backend = base.Backend
+	overlay.BackendOwner = ""
+	return overlay
 }
 
 // PruneRemovedAgents drops every tombstoned agent from the in-memory agent
