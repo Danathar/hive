@@ -1471,6 +1471,7 @@ contribute-hive backend="" mode="docker": check-version
         echo "      See src/docs/contributor-relay.md → 'How the reading reaches the guard'."
       fi
 
+      export HIVE_RELAY_LOG_FILE="{{config_dir}}/contributor-relay.log"
       node "$RELAY" &
       RELAY_PID=$!
       echo ""
@@ -1481,6 +1482,7 @@ contribute-hive backend="" mode="docker": check-version
         echo "  CLI:    $CMD (tmux session: $TMUX_SESSION)"
       fi
       echo "  Relay:  PID $RELAY_PID"
+      echo "  Watch it: just contribute-watch"
       if [[ -n "$QUOTA_PUBLISHER_PID" ]]; then
         echo "  Quota:  publisher PID $QUOTA_PUBLISHER_PID (HIVE_CONTRIBUTOR_QUOTA_PUBLISH=0 to opt out)"
       fi
@@ -2215,6 +2217,7 @@ contribute-hive backend="" mode="docker": check-version
         fi
       fi
 
+      echo "Watch it: just contribute-watch"
       # Open the CLI session in a new terminal window
       if [[ "$KRUN_MODE" == "true" && "${CONTRIBUTOR_MODE:-}" == "headless" ]]; then
         # The krun handler refuses `podman exec`, so there is nothing to
@@ -2347,7 +2350,13 @@ contribute-status:
       echo ""
     done
 
-# Open the contributor Hives overlay in the terminal dashboard.
+# Watch and steer your running contributor (session, relay log, attach).
+contribute-watch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec ./bin/hivectl-bootstrap.sh tui --watch
+
+# Configure where your contributor works (Hives overlay).
 contribute-tui:
     #!/usr/bin/env bash
     set -euo pipefail
