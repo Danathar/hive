@@ -104,6 +104,7 @@ func (f *evalCycleFixture) run(t *testing.T) {
 		f.advisoryIssues,
 		nil, // restartedAgents
 		nil, // approvalDesk
+		evalSourceEnumerate,
 		restoreTestLogger())
 }
 

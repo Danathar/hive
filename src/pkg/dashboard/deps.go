@@ -286,9 +286,37 @@ type Dependencies struct {
 	// reason names the delivery ("pull_request_review org/repo#12"). Nil
 	// leaves invalidated items waiting for the next cadence tick.
 	WebhookWake func(reason string)
+	// ApplyWebhookItems hands the targeted re-reads a webhook delivery
+	// caused (webhook_tracker_refresh.go) to the governor so its cached
+	// actionable snapshot is patched for those items only; the wake cycle
+	// then plans from the patched snapshot without re-listing. Nil leaves
+	// the governor's snapshot to the reconcile pass.
+	ApplyWebhookItems func(snaps []ghpkg.WebhookItemSnapshot)
+	// WebhookDelivery receives every verified GitHub delivery for a managed
+	// repo after the PR caches applied it: the forgestate cache patches the
+	// named item and the automerge lanes schedule a pass for the affected
+	// PRs (hivecommons/hive#13377). nil installs no receiver.
+	WebhookDelivery func(event, deliveryID string, payload []byte, res ghpkg.WebhookEventResult)
 	// EvalLoop reports the governor loop's live pacing (poll vs webhook mode
 	// and the last early wake) for /api/status. Nil omits the fields.
 	EvalLoop func() EvalLoopStatus
+	// SentinelPREvent evaluates one PR with the sentinel after a verified
+	// `pull_request` opened/synchronize/reopened delivery named it (#13379);
+	// repo is the configured slug. It must not block the webhook response.
+	// Nil leaves PRs to the sentinel's reconcile cadence.
+	SentinelPREvent func(repo string, number int)
+	// ProjectsV2ItemEvent applies a verified `projects_v2_item` delivery to
+	// the GitHub Projects work source cache as a targeted patch (#13379).
+	// These deliveries are organization-scoped and carry no repository. Nil
+	// leaves the project list to its reconcile cadence.
+	ProjectsV2ItemEvent func(payload []byte) WebhookPatchOutcome
+}
+
+// WebhookPatchOutcome is what a targeted webhook patch did, for the
+// delivery response and the log line.
+type WebhookPatchOutcome struct {
+	Applied bool   `json:"applied"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // EvalLoopStatus is the governor loop's pacing block served by /api/status:
@@ -301,6 +329,11 @@ type EvalLoopStatus struct {
 	LastWakeReason string     `json:"lastWakeReason,omitempty"`
 	LastWakeAt     *time.Time `json:"lastWakeAt,omitempty"`
 	WebhookWakes   int        `json:"webhookWakes,omitempty"`
+	// CachedCycles counts eval cycles that planned from the cached snapshot
+	// (webhook and re-kick wakes) instead of re-listing; WebhookPatches
+	// counts items webhook re-reads upserted into that snapshot.
+	CachedCycles   int `json:"cachedCycles,omitempty"`
+	WebhookPatches int `json:"webhookPatches,omitempty"`
 }
 
 // NousScopeRepo is the only experiment scope the Experiment Lab supports.

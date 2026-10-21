@@ -111,6 +111,11 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		AuthorKind:       obs.AuthorKind,
 		ManualMerge:      manualMergeReason(obs.Reason),
 	}
+	if rec, ok := c.stageStoreOrShared().Get(key); ok && rec.AdoptedHead != "" && rec.AdoptDiffFence != "" && rec.AdoptDiffFence == obs.Reason && e.CauseReason != "" {
+		// An adopted head whose diff fence is the blocker: the 085 note
+		// says the hive repaired it and why it still will not merge it.
+		e.CauseReason = "the hive adopted this PR to repair CI, but " + e.CauseReason
+	}
 	sentinel := c.sentinelLabelName()
 	if sentinel == "" {
 		sentinel = defaultSentinelLabel

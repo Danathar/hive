@@ -53,6 +53,7 @@ func (b *boot) configureGitHubClient(client *github.Client) {
 	b.applyGitHubClientMutationBoundary(client)
 	b.applyGitHubClientAgentHooks(client)
 	b.applyGitHubClientDashboardHooks(client)
+	b.applyGitHubClientForgeState(client)
 }
 
 // newConfiguredGitHubAppClient is the rebuild paths' constructor: the same

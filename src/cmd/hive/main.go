@@ -45,6 +45,7 @@ import (
 	"github.com/hivecommons/hive/pkg/extwork"
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/forge"
+	"github.com/hivecommons/hive/pkg/forgestate"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/github/automerge"
 	"github.com/hivecommons/hive/pkg/governor"
@@ -1204,6 +1205,9 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 		Commit: gitShort,
 		Image:  deps.selfImage(),
 	})
+	// The forgestate cache stretches its reconcile cadence from the same
+	// rate-limit headers the GitHub transport observes (hivecommons/hive#13380).
+	forgestate.SetDefaultBudgetSource(github.RateLimitBudget)
 	if traceErr != nil {
 		b.logger.Warn("tracing init failed; continuing without tracing", "error", traceErr)
 	} else if otelCfg.Enabled {
@@ -1257,6 +1261,7 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 func (b *boot) wireBootClosures() {
 	b.installReviewEvents()
 	b.installWebhookWake()
+	b.installSentinelEvents()
 	b.heartbeatFleetStats = func() (*int, *int, *int, string) {
 		var prsMerged, prsRejected, cvesClosed *int
 		collectedAt := ""
@@ -1462,24 +1467,28 @@ func (b *boot) wireBootClosures() {
 				}
 				return dashboardChatPoll(b.dashChat, since)
 			},
-			Governor:          b.gov,
-			GHClient:          b.ghClient,
-			StageEngineStatus: func() stageengine.Status { return stageEngineStatus(b.cfg, b.ghClient, b.logger) },
-			ReviewEvents:      b.reviewEvents,
-			WebhookWake:       b.webhookWakeFunc(),
-			EvalLoop:          b.evalLoopStatusFunc(),
-			GHAppAuth:         b.appAuth,
-			GHTokenScopes:     b.ghAuth.TokenScopes,
-			Tokens:            b.tokenCollector,
-			Knowledge:         b.knowledgeAPI,
-			Inception:         b.inceptionEngine,
-			Nous:              b.nousState,
-			Scheduler:         b.sched,
-			KnowledgePrimer:   knowledgePrimerControl{b: b},
-			MetricsCollector:  b.metricsCollector,
-			RotationMgr:       b.rotationMgr,
-			HeadroomPublisher: b.quotaReadingPublisher,
-			QuestionAutoclose: questionAutocloseView{b: b},
+			Governor:            b.gov,
+			GHClient:            b.ghClient,
+			StageEngineStatus:   func() stageengine.Status { return stageEngineStatus(b.cfg, b.ghClient, b.logger) },
+			ReviewEvents:        b.reviewEvents,
+			WebhookWake:         b.webhookWakeFunc(),
+			ApplyWebhookItems:   b.applyWebhookItemsFunc(),
+			WebhookDelivery:     b.webhookDeliveryFunc(),
+			EvalLoop:            b.evalLoopStatusFunc(),
+			SentinelPREvent:     b.sentinelPREventFunc(),
+			ProjectsV2ItemEvent: b.projectsV2ItemEventFunc(),
+			GHAppAuth:           b.appAuth,
+			GHTokenScopes:       b.ghAuth.TokenScopes,
+			Tokens:              b.tokenCollector,
+			Knowledge:           b.knowledgeAPI,
+			Inception:           b.inceptionEngine,
+			Nous:                b.nousState,
+			Scheduler:           b.sched,
+			KnowledgePrimer:     knowledgePrimerControl{b: b},
+			MetricsCollector:    b.metricsCollector,
+			RotationMgr:         b.rotationMgr,
+			HeadroomPublisher:   b.quotaReadingPublisher,
+			QuestionAutoclose:   questionAutocloseView{b: b},
 			// #3972: hand the ACMM advisor the SAME cached fleet-stats collector
 			// the heartbeat reads, so its merge-success signal reuses the existing
 			// 30-minute collect loop instead of issuing a second GitHub fetch.
@@ -1659,7 +1668,7 @@ func (b *boot) wireBootClosures() {
 				configureEscalationDispatcher(b.ctx, b.cfg, b.notifier, b.dashSrv.AgentAuditSink(), b.logger)
 			},
 			EnumerateFunc: func() {
-				runEvalCycle(b.ctx, b.cfg, b.ghClient, b.gov, b.sched, b.agentMgr, b.dashSrv, b.notifier, b.beadStores, b.tokenCollector, b.metricsCollector, b.nousState, &b.lastActionable, &b.lastMergeVerdicts, b.advisoryStore, b.advisoryIssues, nil, b.approvalDesk, b.logger)
+				runEvalCycle(b.ctx, b.cfg, b.ghClient, b.gov, b.sched, b.agentMgr, b.dashSrv, b.notifier, b.beadStores, b.tokenCollector, b.metricsCollector, b.nousState, &b.lastActionable, &b.lastMergeVerdicts, b.advisoryStore, b.advisoryIssues, nil, b.approvalDesk, evalSourceEnumerate, b.logger)
 			},
 			// The REPOSITORIES "Rescan" button. Unlike EnumerateFunc above — which
 			// runs the WHOLE eval cycle, kicks included — this only refreshes what
@@ -2485,6 +2494,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// anything, and a sockpuppet pair defeats the self-merge ban. Resolved
 	// against the SAME allowlist the dashboard uses so there is one notion of
 	// trust; read through cfg on every call so a config reload takes effect.
+	// ForgeState (hivecommons/hive#13377): with the cache on, the lanes read
+	// its open-PR set and run on webhook events instead of listing /pulls.
+	forgeOpenPRs := b.forgeStateOpenPRs()
 	autoMergeOpts := automerge.Options{
 		Logger:                  b.logger,
 		MergerAuthorizer:        trustedMergerFunc(b.cfg),
@@ -2499,6 +2511,10 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		StageLabelPolicy:        stageLabelPolicyFunc(b.cfg),
 		StageEngine:             stageEngineOptions(b.cfg, b.logger),
 		SentinelLabel:           func() string { return b.cfg.Sentinel.LabelOrDefault() },
+		SweepTrigger:            b.sweepTrigger,
+	}
+	if forgeOpenPRs != nil {
+		autoMergeOpts.OpenPRs = forgeOpenPRs
 	}
 	// Resolved lazily: bootDashboard has not run yet, so b.dashSrv is nil
 	// here (see lateContributorNudgeSink).
@@ -3138,6 +3154,10 @@ func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 		}
 		return time.UnixMilli(history[0].Timestamp).UTC()
 	})
+	// Merged / closed counts move on webhook events and the Search API is
+	// asked only hourly; with forgestate.enabled the Overview's open totals
+	// come from the cache the governor already reads (#13376).
+	wireForgeStateCounts(b.metricsCollector, b.forgeState.Load)
 	deps.startCollector(b.ctx, "metrics", b.metricsCollector)
 
 	// Fleet-stats collector: computes this hive's AI-author contribution counts
@@ -6459,8 +6479,14 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			b.logger.Warn("claimed-by-human label migration incomplete; open issues may still carry a per-login hive/claimed-by-<login> label", "error", err)
 		}
 	}
+	// Startup gate (#13375): with the state cache on, the first decision
+	// pass waits for the first successful reconcile of every repo so it
+	// never plans against an empty or partial cache.
+	if err := waitForgeStateReady(b.ctx, b.forgeState.Load(), b.logger, forgeStateReadyLogInterval); err != nil {
+		return
+	}
 	b.evalCycles++
-	deps.runEval(b, nil)
+	deps.runEval(b, nil, evalSourceEnumerate)
 	deps.runRotation(b)
 	if b.wd != nil {
 		b.wd.Tick(b.ctx)
@@ -6468,10 +6494,13 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 	deps.runSweeps(b)
 	deps.persist(b)
 
-	// tick is one governor pass. The cadence ticker runs it, and so does a
-	// review webhook wake (hivecommons/hive#11091) so a pushed PR is planned
-	// now instead of at the next cadence, under exactly the same gates.
-	tick := func() {
+	// tick is one governor pass. The cadence ticker runs it with
+	// evalSourceEnumerate (the reconcile pass that re-lists every repo). The
+	// review webhook wake (hivecommons/hive#11091), the GitHub webhook wake
+	// and the continuous re-kick wake run it with evalSourceCached: the same
+	// gates, planning from the stored snapshot — already patched by the
+	// delivery's targeted re-read — so a wake costs no listing.
+	tick := func(source evalCycleSource) {
 		b.cfgReloadMu.Lock()
 		restarted := deps.restartCrashed(b.ctx, b.agentMgr)
 		for _, name := range restarted {
@@ -6531,7 +6560,7 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			}
 		}
 		b.evalCycles++
-		deps.runEval(b, restarted)
+		deps.runEval(b, restarted, source)
 		deps.runRotation(b)
 		deps.runSweeps(b)
 		// Trajectory review runs after the eval cycle (so kicks/intents are
@@ -6665,23 +6694,33 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			deps.persist(b)
 			return
 		case <-ticker.Chan():
-			tick()
+			tick(evalSourceEnumerate)
 			armContinuousWake()
 			armWebhookHealthRecheck()
 		case <-b.reviewWake:
-			b.logger.Info("review webhook wake: running an early eval cycle")
-			tick()
+			b.logger.Info("review webhook wake: running an early eval cycle from the cached snapshot")
+			tick(evalSourceCached)
 			armContinuousWake()
 			armWebhookHealthRecheck()
 		case batch := <-b.webhookWakeChan():
 			now := healthNow()
+			// Apply the delivery's targeted re-reads first so this cycle
+			// sees the patched item rather than the row as it was. With the
+			// re-read disabled nothing patches the snapshot, so the wake
+			// has to enumerate as it did before.
+			source := evalSourceCached
+			if b.cfg != nil && !b.cfg.StageTrackerWebhookRefresh() {
+				source = evalSourceEnumerate
+			} else if b.dashSrv != nil {
+				b.dashSrv.FlushWebhookTrackerRefresh()
+			}
 			b.logger.Info("github webhook wake: running an early eval cycle",
 				"reason", batch.Reason, "last_reason", batch.LastRe, "deliveries", batch.Count,
-				"coalesced", batch.Coalesced.Round(time.Millisecond).String())
+				"coalesced", batch.Coalesced.Round(time.Millisecond).String(), "source", source.String())
 			if b.evalLoop != nil {
 				b.evalLoop.noteWake(batch, now)
 			}
-			tick()
+			tick(source)
 			armContinuousWake()
 			armWebhookHealthRecheck()
 		case <-healthCh:
@@ -6710,7 +6749,7 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 					"agent", who, "next_kick", next.UTC().Format(time.RFC3339), "idle_for", idleFor.String(),
 					"was_armed_for", wakeArmedFor.UTC().Format(time.RFC3339))
 				lastWake = now
-				tick()
+				tick(evalSourceCached)
 				after, afterWho := b.gov.NextContinuousKickAt()
 				if backoff, stalled := wakeHold.observe(next, after, who, afterWho, wakeNow()); stalled {
 					b.logger.Info("continuous re-kick wake: eval cycle left the due re-kick unchanged (agent gated outside the governor); backing off",
@@ -7307,7 +7346,28 @@ func actionableAfterGitHubEnumerate(cfg *config.Config, actionable *github.Actio
 	if actionable == nil {
 		actionable = &github.ActionableResult{GeneratedAt: time.Now()}
 	}
+	// The GitHub share of this result is missing, not zero: every configured
+	// repo is marked stale so the dashboard shows the gap as stale rather
+	// than as an empty hive (a cold cache has no last-good to fall back on).
+	markConfiguredReposStale(actionable, cfg.Project.Repos)
 	return actionable, true
+}
+
+// markConfiguredReposStale flags every configured repo the result does not
+// already cover as stale, with a zero count entry so the repo still appears.
+func markConfiguredReposStale(actionable *github.ActionableResult, repos []string) {
+	if actionable == nil {
+		return
+	}
+	if actionable.TotalByRepo == nil {
+		actionable.TotalByRepo = map[string]github.RepoCounts{}
+	}
+	for _, repo := range repos {
+		if _, ok := actionable.TotalByRepo[repo]; !ok {
+			actionable.TotalByRepo[repo] = github.RepoCounts{}
+		}
+	}
+	actionable.MarkAllStale()
 }
 
 func tokensForBackend(summary *tokens.AggregateSummary, backend string) int64 {
@@ -7342,6 +7402,7 @@ func runEvalCycle(
 	advisoryIssues map[string]int,
 	restartedAgents []string,
 	approvalDesk *toolapprove.Desk,
+	source evalCycleSource,
 	logger *slog.Logger,
 ) {
 	// Governor eval-cycle span. When tracing is disabled (the default) this is
@@ -7362,6 +7423,19 @@ func runEvalCycle(
 
 	budgetMode, _ := ghClient.APIBudgetMode()
 	budgetDecision := decideEvalBudgetWork(budgetMode, cfg.Governor.OptionalSweepEveryNCycles, evalAPIBudgetCycle.Add(1))
+
+	// A cached cycle (webhook or re-kick wake) plans from the stored
+	// snapshot: no listing, and none of the enrichment or unstick sweeps
+	// that walk every item — those belong to the reconcile pass. The first
+	// cycle has no snapshot yet and enumerates regardless of source.
+	cachedSnapshot := cachedSnapshotFor(source, lastActionable)
+	if cachedSnapshot != nil {
+		budgetDecision.SkipOptional = true
+		budgetDecision.SkipUnstick = true
+		budgetDecision.SkippedSteps = append(budgetDecision.SkippedSteps, cachedSnapshotSkippedStep)
+	} else if source == evalSourceCached {
+		logger.Info("eval cycle: no cached snapshot yet; enumerating")
+	}
 	ghClient.RecordAPIBudgetSkippedSteps(budgetDecision.SkippedSteps)
 
 	// Re-ensure the pinned advisory issue whenever it is still unresolved, not
@@ -7389,20 +7463,34 @@ func runEvalCycle(
 			ctx, advisoryIssues, primaryRepoAtCycleStart, advisoryEnsureDepsForCycle, logger)
 	}
 
-	enumCtx, enumSpan := tracing.StartSpan(ctx, "governor.enumerate_actionable")
-	actionable, err := ghClient.EnumerateActionable(enumCtx)
-	enumSpan.End()
-	actionable, ok := actionableAfterGitHubEnumerate(cfg, actionable, err, logger)
-	if !ok {
-		return
-	}
+	var actionable *github.ActionableResult
+	if cachedSnapshot != nil {
+		actionable = cachedSnapshot
+		logger.Info("eval cycle planning from cached snapshot",
+			"snapshot_age", time.Since(actionable.GeneratedAt).Round(time.Second).String(),
+			"issues", actionable.Issues.Count, "prs", actionable.PRs.Count, "hold", actionable.Hold.Total,
+			"stale", actionable.Stale())
+	} else {
+		enumCtx, enumSpan := tracing.StartSpan(ctx, "governor.enumerate_actionable")
+		fresh, err := ghClient.EnumerateActionable(enumCtx)
+		enumSpan.End()
+		var ok bool
+		actionable, ok = actionableAfterGitHubEnumerate(cfg, fresh, err, logger)
+		if !ok {
+			if kept := keepLastGoodAfterFailedEnumerate(lastActionable, logger); kept != nil && dashSrv != nil {
+				dashSrv.MarkStatusStale(kept.StaleSince)
+			}
+			return
+		}
 
-	// If a non-default or additive work source is configured, overlay its
-	// issues onto the actionable result. PRs always come from GitHub.
-	if workSourceOverlayEnabled(cfg.Governor.WorkSource) {
-		var ws worksource.WorkSource
-		actionable.Issues, ws = workSourceIssuesForConfiguredCycle(ctx, cfg, ghClient, actionable.Issues, logger)
-		reportWorkSourceDisplayStats(dashSrv, ws)
+		// If a non-default or additive work source is configured, overlay its
+		// issues onto the actionable result. PRs always come from GitHub. A
+		// cached cycle keeps the overlay the reconcile pass already applied.
+		if workSourceOverlayEnabled(cfg.Governor.WorkSource) {
+			var ws worksource.WorkSource
+			actionable.Issues, ws = workSourceIssuesForConfiguredCycle(ctx, cfg, ghClient, actionable.Issues, logger)
+			reportWorkSourceDisplayStats(dashSrv, ws)
+		}
 	}
 	if swarmRepo := dashSrv.ActiveSwarmRepo(); swarmRepo != "" {
 		github.BoostActionableRepoPriority(actionable.Issues.Items, swarmRepo)
@@ -7456,11 +7544,16 @@ func runEvalCycle(
 	// nothing that gates work reads the stamp.
 	reviewQueue := stampReviewQueue(cfg, actionable, logger)
 
-	lastActionable.Store(actionable)
-	publishStageSharedCIIncidents(actionable)
-	if data, err := json.Marshal(actionable); err == nil {
-		atomicWrite(lastActionablePath, data)
+	// Only the reconcile pass publishes the snapshot: a cached cycle works
+	// on a copy, and storing it back would overwrite a webhook patch that
+	// landed while the cycle ran.
+	if cachedSnapshot == nil {
+		lastActionable.Store(actionable)
+		if data, err := json.Marshal(actionable); err == nil {
+			atomicWrite(lastActionablePath, data)
+		}
 	}
+	publishStageSharedCIIncidents(actionable)
 
 	// Record enumerated issues into the lifecycle timeline so the dashboard's
 	// lifecycle view has real data. Cheap and fully guarded: a nil dashboard or
@@ -7795,6 +7888,10 @@ func runEvalCycle(
 	// the governor kick owns the agent and the fix kick times out every
 	// cycle (hivecommons/hive#13100).
 	messages = orderReviewFixKicksFirst(messages, reviewKickByMessage)
+	// Freshness bound before a kick (#13375): a ref older than
+	// github.DecisionFreshnessBound in a cache-served or last-good snapshot
+	// is confirmed with one targeted GET; a stale repo's refs are withheld.
+	messages = freshenKickMessages(ctx, ghClient.SnapshotFreshnessGuard(actionable, time.Now), actionable, messages, logger)
 	// #4294: drop EVERY assembled kick while the provider is refusing on a
 	// spending limit. Placed after all three sources have contributed —
 	// governor-due agents, the CEL union, and the review swarm — because gating
@@ -8228,6 +8325,11 @@ func runEvalCycle(
 	// previously unreachable without a tmux session and a live governor.
 	var deliveredReviewKicks []review.DispatchKick
 	if len(messages) > 0 {
+		// governor.kick wraps the whole dispatch pass; each delivered kick
+		// still gets its own agent.kick child via startKickSpan below.
+		kickCtx, kickPassSpan := tracing.StartSpan(ctx, "governor.kick",
+			attribute.Int("hive.kicks.assembled", len(messages)))
+		ctx := kickCtx
 		dispatchAgentKicks(messages, releaseProviderBudgetProbe, kickDispatchDeps{
 			backoffRemaining: agentMgr.ProviderErrorBackoffRemaining,
 			sendKick: func(agentName, message string) error {
@@ -8322,6 +8424,8 @@ func runEvalCycle(
 			markProbeReleased: providerBudgetProbe.MarkReleased,
 			now:               time.Now,
 		}, logger)
+		kickPassSpan.SetAttributes(attribute.Int("hive.kicks.review_delivered", len(deliveredReviewKicks)))
+		kickPassSpan.End()
 	}
 	persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 
@@ -9409,6 +9513,10 @@ func unparkEscalatedPR(ctx context.Context, writer forge.IssueWriter, o escalati
 // hammering the GitHub API on short eval intervals.
 const autoMergeSweepInterval = time.Minute
 
+// autoMergeSweepTickBudget is how long the queued automerge sweep may wait
+// for its first pacing slot before the sweep is shed to the next cycle.
+const autoMergeSweepTickBudget = 5 * time.Second
+
 // taskListSweepInterval is the minimum spacing between task-list sweeps. The
 // sweep enumerates every open issue in every repo — much heavier than the
 // auto-merge sweep's label-scoped query — and "done" moves at PR-merge cadence,
@@ -9519,9 +9627,22 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < autoMergeSweepInterval {
 		return
 	}
+	// Housekeeping against the pacer: while a caution window has the pacing
+	// queue deeper than this sweep could wait, skip the sweep (it is due
+	// again next cycle) rather than queue behind the enumeration.
+	if github.ShedLowPriorityTick("automerge:queued-sweep", autoMergeSweepTickBudget) {
+		return
+	}
 	if lastRun != nil {
 		*lastRun = now
 	}
+	ctx = github.WithPacingClass(ctx, github.PacingLow)
+	// governor.automerge covers the queued, trusted-author and contributor-
+	// lane sweeps plus the stage-label pass that follows them. The sweep runs
+	// on its own cadence in the run loop, so this is a sibling of
+	// governor.eval_cycle rather than a child.
+	ctx, sweepSpan := tracing.StartSpan(ctx, "governor.automerge")
+	defer sweepSpan.End()
 	opts := automerge.Options{
 		Logger:                  logger,
 		MergerAuthorizer:        trustedMergerFunc(cfg),
@@ -9573,6 +9694,10 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 	if len(result.Merged) > 0 || result.Seen > 0 {
 		logger.Info("automerge sweep complete", "seen", result.Seen, "merged", len(result.Merged), "skipped", result.Skipped)
 	}
+	sweepSpan.SetAttributes(
+		attribute.Int("hive.automerge.seen", result.Seen),
+		attribute.Int("hive.automerge.merged", len(result.Merged)),
+		attribute.Int("hive.automerge.skipped", result.Skipped))
 	remaining := automerge.DefaultAutoMergeSweepMaxMerges - len(result.Merged)
 	if remaining > 0 && opts.TrustedAuthorPolicy().Enabled {
 		trustedResult, trustedErr := automerge.SweepTrustedAuthorAutoMerges(ctx, ghClient, opts, automerge.AutoMergeSweepOptions{
@@ -9834,28 +9959,20 @@ func runDuplicateSweepIfDue(ctx context.Context, cfg *config.Config, ghClient *g
 	})
 }
 
-// sentinelSweepInterval is the minimum spacing between sentinel passes. The
-// sweep lists open PRs per repo every pass but fetches a PR's files only when
-// its head SHA changed since the last evaluation, so steady state is one list
-// call per repo; fifteen minutes bounds how long a hostile PR sits unlabelled.
-const sentinelSweepInterval = 15 * time.Minute
+// sentinelSweepInterval is the reconcile cadence of the full sentinel pass
+// (#13379). `pull_request` opened/synchronize/reopened webhooks evaluate the
+// named PR as they arrive (runSentinelPREvent); the full pass enumerates
+// open PRs from the forgestate cache, skips every head it already evaluated
+// without a GitHub call, and exists to catch a PR whose delivery was lost.
+// Fifteen minutes bounds how long such a PR sits unlabelled.
+const sentinelSweepInterval = github.SentinelReconcileInterval
 
-// runSentinelSweepIfDue flags open PRs that look like security overrides,
-// privilege escalation or codebase damage (pkg/sentinel) at most once per
-// sentinelSweepInterval. Default on; `sentinel.enabled: false` disables it.
-func runSentinelSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
-	if ghClient == nil || cfg == nil || !cfg.Sentinel.IsEnabled() {
-		return
-	}
-	now := time.Now()
-	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < sentinelSweepInterval {
-		return
-	}
-	if lastRun != nil {
-		*lastRun = now
-	}
+// sentinelSweepOptions is the one option set both sentinel entry points use,
+// so the webhook path and the reconcile pass cannot disagree on label,
+// trust or rules.
+func sentinelSweepOptions(cfg *config.Config, ghClient *github.Client, dashSrv *dashboard.Server) github.SentinelSweepOptions {
 	sc := cfg.Sentinel
-	result, err := ghClient.SweepSentinel(ctx, github.SentinelSweepOptions{
+	return github.SentinelSweepOptions{
 		Label:               sc.LabelOrDefault(),
 		LabelColor:          config.DefaultSentinelLabelColor,
 		LabelDescription:    config.DefaultSentinelLabelDescription,
@@ -9872,25 +9989,47 @@ func runSentinelSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *co
 				event.Repo, event.Number, event.Author, event.HeadSHA, strings.Join(event.Rules(), ","))
 			dashSrv.AuditLogRecord("system", "sentinel-alert", detail, "", event.Repo, event.Number)
 		},
-	})
+	}
+}
+
+// runSentinelPREvent is the dashboard.Dependencies.SentinelPREvent hook: a
+// verified `pull_request` opened/synchronize/reopened delivery evaluates
+// that one PR now, reading only it and its files. Default on with the
+// sweep; `sentinel.enabled: false` disables both.
+func runSentinelPREvent(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, repo string, number int, logger *slog.Logger) {
+	if ghClient == nil || cfg == nil || !cfg.Sentinel.IsEnabled() {
+		return
+	}
+	result, err := ghClient.SweepSentinelPR(ctx, repo, number, sentinelSweepOptions(cfg, ghClient, dashSrv))
+	if err != nil {
+		logger.Warn("sentinel webhook evaluation failed", "repo", repo, "pr", number, "error", err)
+		return
+	}
+	logSentinelResult(result, logger)
+}
+
+// runSentinelSweepIfDue flags open PRs that look like security overrides,
+// privilege escalation or codebase damage (pkg/sentinel) at most once per
+// sentinelSweepInterval. Default on; `sentinel.enabled: false` disables it.
+func runSentinelSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil || cfg == nil || !cfg.Sentinel.IsEnabled() {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < sentinelSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepSentinel(ctx, sentinelSweepOptions(cfg, ghClient, dashSrv))
 	if err != nil {
 		logger.Warn("sentinel sweep failed", "error", err)
 		return
 	}
-	for _, e := range result.Errors {
-		logger.Warn("sentinel sweep: PR skipped", "detail", e)
-	}
-	for _, ev := range result.Flagged {
-		logger.Warn("sentinel alert", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "rules", strings.Join(ev.Rules(), ","))
-	}
-	for _, ev := range result.Notified {
-		logger.Info("sentinel notice", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "trusted_reason", ev.TrustedReason, "rules", strings.Join(ev.Rules(), ","))
-	}
-	for _, ev := range result.Remediated {
-		logger.Info("sentinel unflagged trusted author PR", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "trusted_reason", ev.TrustedReason, "head", ev.HeadSHA)
-	}
+	logSentinelResult(result, logger)
 	if len(result.Flagged) > 0 || len(result.Notified) > 0 || len(result.Remediated) > 0 || result.Seen > 0 {
-		logger.Info("sentinel sweep complete", "seen", result.Seen, "flagged", len(result.Flagged), "notified", len(result.Notified), "remediated", len(result.Remediated), "skipped", result.Skipped, "errors", len(result.Errors))
+		logger.Info("sentinel sweep complete", "seen", result.Seen, "flagged", len(result.Flagged), "notified", len(result.Notified), "remediated", len(result.Remediated), "skipped", result.Skipped, "errors", len(result.Errors), "cached_repos", result.CachedRepos, "listed_repos", result.ListedRepos)
 	}
 	hookDispatcher().Fire(context.Background(), hooks.Payload{
 		Transition: hooks.TransitionSweepCompleted,
@@ -9903,6 +10042,21 @@ func runSentinelSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *co
 			"skipped":    strconv.Itoa(result.Skipped),
 		},
 	})
+}
+
+func logSentinelResult(result *github.SentinelSweepResult, logger *slog.Logger) {
+	for _, e := range result.Errors {
+		logger.Warn("sentinel sweep: PR skipped", "detail", e)
+	}
+	for _, ev := range result.Flagged {
+		logger.Warn("sentinel alert", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "rules", strings.Join(ev.Rules(), ","))
+	}
+	for _, ev := range result.Notified {
+		logger.Info("sentinel notice", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "trusted_reason", ev.TrustedReason, "rules", strings.Join(ev.Rules(), ","))
+	}
+	for _, ev := range result.Remediated {
+		logger.Info("sentinel unflagged trusted author PR", "repo", ev.Repo, "pr", ev.Number, "author", ev.Author, "trusted_reason", ev.TrustedReason, "head", ev.HeadSHA)
+	}
 }
 
 // issueUnparkSweepInterval is the minimum spacing between un-park sweeps. A
@@ -10114,8 +10268,13 @@ func applyDuplicatePRGuard(
 	// pass, so bound the sync; a paced request whose slot would miss the
 	// deadline fails fast and the best-effort sync retries next cycle.
 	stageCtx, stageCancel := context.WithTimeout(ctx, issueStageSyncTimeout)
+	stageCtx, stageSpan := tracing.StartSpan(stageCtx, "governor.stage_labels")
 	syncStageEngineMode(cfg, ghClient, logger)
 	res := github.SyncIssueStageLabelsWith(stageCtx, ghClient, actionable, nil, time.Now(), logger, stageEngineOptions(cfg, logger))
+	stageSpan.SetAttributes(
+		attribute.Int("hive.stage_labels.items", res.Items),
+		attribute.Int("hive.stage_labels.writes", res.Writes))
+	stageSpan.End()
 	stageCancel()
 	if res.Writes+res.Comments > 0 {
 		logger.Info("issue stage labels applied", "items", res.Items, "writes", res.Writes, "comments", res.Comments, "healed", res.Healed)
@@ -10127,7 +10286,9 @@ func applyDuplicatePRGuard(
 		logger.Info("blocked issues reconciled", "items", br.Items, "unblocked", br.Unblocked, "help_wanted_stripped", br.Stripped, "errors", br.Errors)
 	}
 	blockedCancel()
-	runCloseOnMergeSweep(ctx, cfg, ghClient, ledger, logger)
+	// Closing an issue is irreversible: refuse while the snapshot is stale and
+	// re-read an item whose copy is older than DecisionFreshnessBound.
+	runCloseOnMergeSweep(github.WithIrreversibleGuard(ctx, ghClient.SnapshotFreshnessGuard(actionable, time.Now)), cfg, ghClient, ledger, logger)
 }
 
 // inProgressSetting resolves the pr-in-progress stage label setting from config.

@@ -166,6 +166,11 @@ if (stdioUnident.includes('build skew')) throw new Error('unexpected skew warnin
 
 const stdioNone = renderVersionDetails({hash:'abc1234567890', short:'abc1234'});
 if (stdioNone.includes('>Stdio client</span>')) throw new Error('unexpected Stdio client row when none seen: '+stdioNone);
+// a superseded success must not read as a plain "succeeded · 2h ago".
+const sup = versionLastUpgradeText({releaseStatus:{attempt:{state:'succeeded', superseded:true, rolledExternally:true, runningCommit:'2a9e3f5', target:'54e5c90', completedAt:'2026-10-20T15:00:00Z'}}});
+if (sup.text !== 'Last upgrade: superseded (rolled externally, now 2a9e3f5) · 2h ago') throw new Error('superseded last-upgrade text: '+sup.text);
+const ok = versionLastUpgradeText({releaseStatus:{attempt:{state:'succeeded', completedAt:'2026-10-20T15:00:00Z'}}});
+if (ok.text !== 'Last upgrade: succeeded · 2h ago') throw new Error('plain last-upgrade text changed: '+ok.text);
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {

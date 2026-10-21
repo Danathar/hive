@@ -19,6 +19,7 @@ import (
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/effects"
+	"github.com/hivecommons/hive/pkg/forgestate"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/issueclaim"
 	"github.com/hivecommons/hive/pkg/logscrub"
@@ -45,7 +46,16 @@ type Client struct {
 	// rateLimits clamps rate-limit readings to be monotone within a window
 	// (kubestellar/hive#5733). Per-client because the artifact it corrects is a
 	// property of THIS client's token minting. Zero value is ready to use.
-	rateLimits             rateLimitTracker
+	rateLimits rateLimitTracker
+	// lastGoodEnum keeps each repo's newest successful enumeration so a
+	// transiently refused fetch does not publish the repo as empty
+	// (enumerate_lastgood.go). Zero value is ready to use.
+	lastGoodEnum lastGoodEnumeration
+	// forge is the per-repo state cache EnumerateActionable reads listings
+	// from when attached (forgestate_reader.go, hivecommons/hive#13375).
+	// Nil lists GitHub directly.
+	forgeMu                sync.RWMutex
+	forge                  *forgestate.Store
 	prDetailTTL            func() time.Duration
 	graphQLPRBatchEnabled  func() bool
 	graphQLPRBatchPageSize func() int
@@ -316,6 +326,12 @@ type Client struct {
 	// Zero values are ready to use.
 	prRetries     retryTracker
 	reviewRetries retryTracker
+	// forgeState memoizes the advisory issue the attached ForgeState cache
+	// resolved (advisory_forgestate.go, hivecommons/hive#13378).
+	forgeState forgeStateBinding
+	// reviewWake wakes the review-request watcher between ticks
+	// (review_request_wake.go). Zero value is ready to use.
+	reviewWake reviewRequestWaker
 	// defaultBranchMu guards defaultBranches, which memoizes the resolved
 	// default branch per "owner/repo" (see defaultbranch.go). A repo's default
 	// branch changes about as often as the repo is renamed, so caching it keeps
@@ -1056,6 +1072,99 @@ type ActionableResult struct {
 	TotalByRepo         map[string]RepoCounts        `json:"total_by_repo,omitempty"`
 	WorkBreakdownByRepo map[string]RepoWorkBreakdown `json:"work_breakdown_by_repo,omitempty"`
 	WorkDetailsByRepo   map[string]RepoWorkDetails   `json:"work_details_by_repo,omitempty"`
+	// StaleRepos lists repos whose fetch GitHub refused transiently this pass
+	// (rate limit, 429, 5xx) and whose share of the result is the previous
+	// successful enumeration instead (enumerate_lastgood.go). Consumers must
+	// treat the snapshot as stale, not as a drop in work.
+	StaleRepos []string `json:"stale_repos,omitempty"`
+	// StaleSince is the time the stale share of the result was last fetched
+	// for real: the data is current as of then. Zero when nothing is stale.
+	StaleSince time.Time `json:"stale_since,omitzero"`
+	// ItemPatches records, per item, when its copy was last read from GitHub
+	// and (for a webhook-driven upsert) from which delivery, so an
+	// irreversible action can bound its staleness and an operator can audit
+	// which delivery moved a row. It is filled by the webhook path
+	// (webhook_item_patch.go) and, when the governor reads from the
+	// forgestate cache (forgestate_reader.go), by every item served from
+	// it, since GeneratedAt then says nothing about an item's age. Keyed by
+	// ItemPatchKey.
+	ItemPatches map[string]ItemPatchMeta `json:"item_patches,omitempty"`
+}
+
+// ItemPatchMeta is the audit record of one webhook-driven upsert.
+type ItemPatchMeta struct {
+	FetchedAt  time.Time `json:"fetched_at"`
+	UpdatedAt  time.Time `json:"updated_at,omitzero"`
+	DeliveryID string    `json:"delivery_id,omitempty"`
+	HeadSHA    string    `json:"head_sha,omitempty"`
+}
+
+// RepoStale reports whether repo's share of the result is last-good data.
+func (r *ActionableResult) RepoStale(repo string) bool {
+	if r == nil {
+		return false
+	}
+	for _, s := range r.StaleRepos {
+		if repoRefsMatch(s, repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// repoRefsMatch reports whether two repo references name the same repo.
+// The result keys repos the way they were configured (a bare name under
+// the org, or owner/name) while action paths ask with owner/name; a bare
+// name matches an owner-qualified one on the name.
+func repoRefsMatch(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	_, an, aq := strings.Cut(a, "/")
+	_, bn, bq := strings.Cut(b, "/")
+	if aq && bq {
+		return false
+	}
+	if !aq {
+		an = a
+	}
+	if !bq {
+		bn = b
+	}
+	return strings.EqualFold(an, bn)
+}
+
+// ItemFetchedAt is when the result's copy of an item was last read from
+// GitHub: the webhook re-read that patched it, else the enumeration pass.
+func (r *ActionableResult) ItemFetchedAt(repo string, number int, isPR bool) time.Time {
+	if r == nil {
+		return time.Time{}
+	}
+	if meta, ok := r.ItemPatches[ItemPatchKey(repo, number, isPR)]; ok && !meta.FetchedAt.IsZero() {
+		return meta.FetchedAt
+	}
+	if _, name, qualified := strings.Cut(repo, "/"); qualified {
+		// The result may key the repo by its bare configured name.
+		if meta, ok := r.ItemPatches[ItemPatchKey(name, number, isPR)]; ok && !meta.FetchedAt.IsZero() {
+			return meta.FetchedAt
+		}
+	}
+	return r.GeneratedAt
+}
+
+// ItemPatchKey is the ItemPatches key for one issue or PR.
+func ItemPatchKey(repo string, number int, isPR bool) string {
+	kind := "issue"
+	if isPR {
+		kind = "pr"
+	}
+	return strings.ToLower(repo) + "#" + strconv.Itoa(number) + ":" + kind
+}
+
+// Stale reports whether any repo's share of the result was served from the
+// last-good enumeration rather than fetched this pass.
+func (r *ActionableResult) Stale() bool {
+	return r != nil && len(r.StaleRepos) > 0
 }
 
 type RepoCounts struct {
@@ -1323,6 +1432,9 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	if c == nil {
 		return nil, ErrNoGitHubClient
 	}
+	// The reconcile pass is what every decision and dashboard row depends
+	// on; under caution it takes precedence over periodic housekeeping.
+	ctx = WithPacingClass(ctx, PacingHigh)
 	now := time.Now()
 	result := &ActionableResult{
 		GeneratedAt: now,
@@ -1347,34 +1459,108 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	clankerRequestedBudget := newClankerRequestedBudget()
 	failedRepos := 0
 	var lastFetchErr error
+	var staleRepos []string
+	var staleSince time.Time
+	// appendRepo folds one repo's enumeration into the aggregate; shared by
+	// the fresh path and the last-good substitution path so both produce the
+	// same shape.
+	appendRepo := func(repo string, enum repoEnumeration) {
+		allIssues = append(allIssues, enum.issues...)
+		holdItems = append(holdItems, enum.held...)
+		allPRs = append(allPRs, enum.prs...)
+		allAttributedPRs = append(allAttributedPRs, enum.attributed...)
+		allHeldPRs = append(allHeldPRs, enum.heldPRs...)
+		allStaleDrafts = append(allStaleDrafts, enum.staleDrafts...)
+		totalByRepo[repo] = enum.counts
+		workBreakdownByRepo[repo] = enum.breakdown
+		workDetailsByRepo[repo] = enum.details
+	}
+	// serveLastGood substitutes the repo's previous successful enumeration
+	// after a transient refusal. Reports whether one was available.
+	serveLastGood := func(repo, side string, err error) bool {
+		if !isTransientEnumerationError(err) {
+			return false
+		}
+		enum, ok := c.lastGoodEnum.get(repo)
+		if !ok {
+			return false
+		}
+		appendRepo(repo, enum)
+		staleRepos = append(staleRepos, repo)
+		if staleSince.IsZero() || enum.fetchedAt.Before(staleSince) {
+			staleSince = enum.fetchedAt
+		}
+		c.logger.Warn("GitHub refused repo enumeration transiently; serving last-good snapshot for this repo (marked stale)",
+			"repo", repo, "side", side, "last_good_at", enum.fetchedAt.UTC().Format(time.RFC3339), "error", err)
+		return true
+	}
+	itemPatches := map[string]ItemPatchMeta{}
 	for _, repo := range repos {
-		issues, held, issueTotal, issueBreakdown, issueDetails, err := c.fetchIssues(ctx, repo, now, reporterTrustWaitBudget)
+		// With a state cache attached the listing comes from it; the
+		// classification below is unchanged (forgestate_reader.go).
+		listing, err := c.forgeListingForRepo(repo)
 		if err != nil {
-			c.logger.Warn("failed to fetch issues", "repo", repo, "error", err)
 			failedRepos++
 			lastFetchErr = err
+			if !serveLastGood(repo, "forgestate", err) {
+				c.logger.Warn("forgestate: repo cache not ready; skipping repo this pass", "repo", repo, "error", err)
+			}
 			continue
 		}
-		allIssues = append(allIssues, issues...)
-		holdItems = append(holdItems, held...)
-
-		prs, heldItems, heldPRs, staleDrafts, attributedPRs, prTotal, prBreakdown, sidelinedPRs, err := c.fetchPRsWithDetails(ctx, repo, clankerRequestedBudget)
+		repoCtx := withForgeListing(ctx, listing)
+		issues, held, issueTotal, issueBreakdown, issueDetails, err := c.fetchIssues(repoCtx, repo, now, reporterTrustWaitBudget)
 		if err != nil {
-			// Issues for this repo were already collected; a PR-only failure
-			// is partial and must not count toward the all-repos-failed guard,
-			// which would discard real issue data and report an outage.
-			c.logger.Warn("failed to fetch PRs", "repo", repo, "error", err)
+			failedRepos++
+			lastFetchErr = err
+			if !serveLastGood(repo, "issues", err) {
+				c.logger.Warn("failed to fetch issues", "repo", repo, "error", err)
+			}
 			continue
 		}
-		allPRs = append(allPRs, prs...)
-		allAttributedPRs = append(allAttributedPRs, attributedPRs...)
-		holdItems = append(holdItems, heldItems...)
-		allHeldPRs = append(allHeldPRs, heldPRs...)
-		allStaleDrafts = append(allStaleDrafts, staleDrafts...)
 
-		totalByRepo[repo] = RepoCounts{Issues: issueTotal, PRs: prTotal}
-		workBreakdownByRepo[repo] = RepoWorkBreakdown{Issues: issueBreakdown, PRs: prBreakdown}
-		workDetailsByRepo[repo] = RepoWorkDetails{Issues: issueDetails, PRs: sidelinedPRs}
+		prs, heldItems, heldPRs, staleDrafts, attributedPRs, prTotal, prBreakdown, sidelinedPRs, err := c.fetchPRsWithDetails(repoCtx, repo, clankerRequestedBudget)
+		if err != nil {
+			// A PR-only failure is partial and must not count toward the
+			// all-repos-failed guard, which would discard real issue data and
+			// report an outage. With a last-good enumeration the whole repo
+			// is served from it (its PR side is the newest known); without
+			// one the fresh issues are kept, as before.
+			if serveLastGood(repo, "prs", err) {
+				continue
+			}
+			c.logger.Warn("failed to fetch PRs", "repo", repo, "error", err)
+			allIssues = append(allIssues, issues...)
+			holdItems = append(holdItems, held...)
+			continue
+		}
+		enum := repoEnumeration{
+			issues:      issues,
+			held:        append(append([]HoldItem(nil), held...), heldItems...),
+			prs:         prs,
+			heldPRs:     heldPRs,
+			staleDrafts: staleDrafts,
+			attributed:  attributedPRs,
+			counts:      RepoCounts{Issues: issueTotal, PRs: prTotal},
+			breakdown:   RepoWorkBreakdown{Issues: issueBreakdown, PRs: prBreakdown},
+			details:     RepoWorkDetails{Issues: issueDetails, PRs: sidelinedPRs},
+		}
+		appendRepo(repo, enum)
+		if listing != nil {
+			listing.itemPatches(repo, itemPatches)
+			if listing.snap.Stale {
+				// The cache's last reconcile failed: these are last-good
+				// items, and nothing irreversible may act on them.
+				staleRepos = append(staleRepos, repo)
+				if since := forgeStaleSince(listing.snap); staleSince.IsZero() || since.Before(staleSince) {
+					staleSince = since
+				}
+				c.logger.Warn("forgestate: repo cache is stale; serving last-good items (marked stale)",
+					"repo", repo, "last_good_at", listing.snap.LastGoodAt.UTC().Format(time.RFC3339), "reason", listing.snap.StaleReason)
+				continue
+			}
+		}
+		c.lastGoodEnum.store(repo, enum)
+		RecordGitHubActivity(newestEnumeratedUpdate(issues, prs, heldPRs))
 	}
 
 	// If every repo failed (e.g. API rate limit exhausted), returning a
@@ -1421,6 +1607,11 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	result.TotalByRepo = totalByRepo
 	result.WorkBreakdownByRepo = workBreakdownByRepo
 	result.WorkDetailsByRepo = workDetailsByRepo
+	result.StaleRepos = staleRepos
+	result.StaleSince = staleSince
+	if len(itemPatches) > 0 {
+		result.ItemPatches = itemPatches
+	}
 
 	return result, nil
 }
@@ -1444,7 +1635,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 	// #9839: the list call keeps GitHub's issue_dependencies_summary so only
 	// issues that report an open "blocked by" count pay for a per-issue
 	// dependency fetch below.
-	allIssues, blockedCounts, subIssueSummaries, err := c.listOpenIssuesWithBlockedCounts(ctx, owner, repoName)
+	allIssues, blockedCounts, subIssueSummaries, err := c.listOpenIssuesForEnumeration(ctx, owner, repoName)
 	if err != nil {
 		return nil, nil, 0, RepoIssueBreakdown{}, nil, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
 	}
@@ -1723,22 +1914,9 @@ func (c *Client) fetchPRs(ctx context.Context, repo string, clankerBudget *repor
 func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBudget *reporterTrustWaitBudget) (actionable []PullRequest, held []HoldItem, heldPRs []PullRequest, staleDrafts []PullRequest, attributed []PullRequest, totalPRs int, breakdown RepoPRBreakdown, sidelined []RepoWorkPR, err error) {
 	now := time.Now()
 	owner, repoName := c.splitRepo(repo)
-	opts := &gh.PullRequestListOptions{
-		State:       "open",
-		ListOptions: gh.ListOptions{PerPage: 100},
-	}
-
-	var allPRs []*gh.PullRequest
-	for {
-		prs, resp, err := c.client.PullRequests.List(ctx, owner, repoName, opts)
-		if err != nil {
-			return nil, nil, nil, nil, nil, 0, RepoPRBreakdown{}, nil, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
-		}
-		allPRs = append(allPRs, prs...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
+	allPRs, err := c.listOpenPRsForEnumeration(ctx, owner, repoName)
+	if err != nil {
+		return nil, nil, nil, nil, nil, 0, RepoPRBreakdown{}, nil, err
 	}
 	c.prefetchOpenPRDetailsGraphQL(ctx, owner, repoName, repo)
 
@@ -1908,7 +2086,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 	}
 
 	attributed = append(attributed, collectAttributedPRsFromList(repo, allPRs)...)
-	closed, err := c.fetchAttributedClosedPRs(ctx, owner, repoName, repo)
+	closed, err := c.fetchAttributedClosedPRsForEnumeration(ctx, owner, repoName, repo)
 	if err != nil {
 		c.warnAttributedClosedPRScan(repo, owner, repoName, err)
 		closed = c.cachedAttributedClosedPRs(repo)
@@ -2016,16 +2194,23 @@ func (c *Client) storeAttributedClosedPRs(repo string, prs []PullRequest) {
 }
 
 func (c *Client) cachedAttributedClosedPRs(repo string) []PullRequest {
+	prs, _, _ := c.cachedAttributedClosedPRsWithAge(repo)
+	return prs
+}
+
+// cachedAttributedClosedPRsWithAge is cachedAttributedClosedPRs plus when
+// the scan ran; ok is false when there is no scan for repo.
+func (c *Client) cachedAttributedClosedPRsWithAge(repo string) ([]PullRequest, time.Time, bool) {
 	if c == nil {
-		return nil
+		return nil, time.Time{}, false
 	}
 	c.attributedClosedPRMu.Lock()
 	defer c.attributedClosedPRMu.Unlock()
 	entry, ok := c.attributedClosedPRCache[repo]
 	if !ok {
-		return nil
+		return nil, time.Time{}, false
 	}
-	return append([]PullRequest(nil), entry.prs...)
+	return append([]PullRequest(nil), entry.prs...), entry.fetched, true
 }
 
 func (c *Client) warnAttributedClosedPRScan(repo, owner, repoName string, err error) {
@@ -2715,7 +2900,7 @@ func (c *Client) addLabelsObserved(ctx context.Context, repo string, number int,
 		return nil
 	}
 	owner, repoName := c.splitRepo(repo)
-	return c.executeIssueWrite(ctx, effects.Claim{
+	err := c.executeIssueWrite(ctx, effects.Claim{
 		Repo:   owner + "/" + repoName,
 		Kind:   effects.KindLabelMutation,
 		Target: strconv.Itoa(number),
@@ -2726,6 +2911,10 @@ func (c *Client) addLabelsObserved(ctx context.Context, repo string, number int,
 	}, func(ctx context.Context) (effects.ExternalState, error) {
 		return c.observeIssueLabels(ctx, owner, repoName, number, labels, "")
 	})
+	if err == nil {
+		c.forgeWriteThrough(repo, number, forgestate.Mutation{Op: forgestate.OpLabelAdd, Labels: labels})
+	}
+	return err
 }
 
 // RemoveLabel removes one label from an issue or PR. A label that is not
@@ -2744,7 +2933,7 @@ func (c *Client) removeLabelObserved(ctx context.Context, repo string, number in
 		return nil
 	}
 	owner, repoName := c.splitRepo(repo)
-	return c.executeIssueWrite(ctx, effects.Claim{
+	err := c.executeIssueWrite(ctx, effects.Claim{
 		Repo:   owner + "/" + repoName,
 		Kind:   effects.KindLabelMutation,
 		Target: strconv.Itoa(number),
@@ -2758,6 +2947,10 @@ func (c *Client) removeLabelObserved(ctx context.Context, repo string, number in
 	}, func(ctx context.Context) (effects.ExternalState, error) {
 		return c.observeIssueLabels(ctx, owner, repoName, number, nil, label)
 	})
+	if err == nil {
+		c.forgeWriteThrough(repo, number, forgestate.Mutation{Op: forgestate.OpLabelRemove, Labels: []string{label}})
+	}
+	return err
 }
 
 // labelMutationInputs adds the observed item state to a label mutation's

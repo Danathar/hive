@@ -90,7 +90,13 @@ type costResponse struct {
 	CountUpdatedAt   string `json:"count_updated_at,omitempty"`
 	CountStatus      string `json:"count_status,omitempty"`
 	CountStale       bool   `json:"count_stale,omitempty"`
-	CountAvailable   bool   `json:"count_available"`
+	// CountStaleSince is when the counts stopped being confirmed by GitHub
+	// (RFC 3339), set with CountStale (hivecommons/hive#13376).
+	CountStaleSince string `json:"count_stale_since,omitempty"`
+	// CountSource is "search" or "forgestate" (webhook-maintained counters
+	// reconciled against search hourly).
+	CountSource    string `json:"count_source,omitempty"`
+	CountAvailable bool   `json:"count_available"`
 	// AdvisorByAgent is each agent's advisor-lane spend over the retained
 	// advisor records (#9725), reported beside Estimated.ByAgent rather than
 	// folded into it: the advisor's cost is the lane's, not the agent's
@@ -206,6 +212,8 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 		resp.CountStatus = counts.Status
 		resp.CountStale = counts.Stale
 		resp.CountAvailable = true
+		resp.CountStaleSince = counts.StaleSince
+		resp.CountSource = counts.Source
 		if counts.WindowStart != "" {
 			if t, err := time.Parse(time.RFC3339, counts.WindowStart); err == nil {
 				resp.CountWindowStart = t.UnixMilli()
