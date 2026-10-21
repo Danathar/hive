@@ -66,7 +66,7 @@ These are the acceptance criteria of #13373 and the tests that hold them.
 | health window | `2 × governor.eval_interval_s` (10 min at the defaults) | how recent the newest verified delivery must be for webhooks to count as healthy |
 | recovery hysteresis | `WebhookRecoveryHealthyWindows` = `2` | consecutive healthy windows required before the cadence returns to webhook mode after a degradation |
 
-Defaults: `src/pkg/config/config.go:7192` (`DefaultEvalIntervalWebhookS`,
+Defaults: `src/pkg/config/defaults.go:30-32` (`DefaultEvalIntervalWebhookS`,
 `DefaultWebhookWakeDebounceS`, `DefaultWebhookWakeMinGapS`),
 `src/pkg/config/forgestate.go:8` (`DefaultForgeStateReconcileInterval`,
 `DefaultForgeStateFreshnessBound`, `DefaultForgeStateDriftThreshold`),
