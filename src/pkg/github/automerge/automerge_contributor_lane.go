@@ -975,7 +975,7 @@ func (c *Engine) evaluateContributorLanePR(ctx context.Context, displayRepo, own
 	if mergeableState == "dirty" || mergeableState == "conflicting" {
 		return eval, "conflicting", nil
 	}
-	eval.method = mergeMethodFor(pr)
+	eval.method = c.mergeMethodFor(ctx, owner, repo, pr)
 	eval.mergeClaim = effects.Claim{
 		Repo:   fullRepo,
 		Kind:   effects.KindPullRequestMerge,
