@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -982,5 +983,23 @@ func TestForgeIssueLabels(t *testing.T) {
 	}
 	if got := forgeIssueLabels(labels, &IssueClaimContext{CoveredLabelSynthesized: true}); len(got) != 1 || got[0] != "bug" {
 		t.Fatalf("synthesised label must come off: %v", got)
+	}
+}
+
+func TestForgeIssueLabelsDoesNotAlias(t *testing.T) {
+	// Test that forgeIssueLabels does not mutate the caller's backing array.
+	// This verifies the fix for hivecommons/hive#13323: removeIssueLabel used
+	// to compact in-place (out := labels[:0]), which would mutate the backing
+	// array shared with the caller.
+	original := []string{"bug", "help wanted", CoveredByPRLabel}
+	originalCopy := append([]string(nil), original...)
+
+	result := forgeIssueLabels(original, &IssueClaimContext{CoveredLabelSynthesized: true})
+
+	if !slices.Equal(original, originalCopy) {
+		t.Errorf("forgeIssueLabels mutated input: got %v, want %v", original, originalCopy)
+	}
+	if got := []string{"bug", "help wanted"}; !slices.Equal(result, got) {
+		t.Errorf("forgeIssueLabels result: got %v, want %v", result, got)
 	}
 }
