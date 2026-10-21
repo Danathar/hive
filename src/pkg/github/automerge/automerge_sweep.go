@@ -2587,7 +2587,17 @@ func (c *Engine) commitGreenForPRWith(ctx context.Context, owner, repo, branch, 
 	if prNumber > 0 && !isFreshHeadOrMissingExpectedReason(st.Reason) {
 		c.rememberEvaluatedHead(owner, repo, prNumber, sha)
 	}
-	return st.Green, st.Reason, nil
+	reason := st.Reason
+	if !st.Green && prNumber > 0 && classifyCIReason(reason) == ciReasonRed {
+		// Red, but every failing check is also red on the base branch: the
+		// merge is still blocked (we never merge on red), yet the recorded
+		// skip reason names the base, not the head, so the stage engine and
+		// the dashboard say whose fault it is (base_branch_red.go).
+		if checks := stageBaseBranchRed(c.stagePolicy(), owner, repo, prNumber, sha); len(checks) > 0 {
+			reason = baseBranchRedReason(checks)
+		}
+	}
+	return st.Green, reason, nil
 }
 
 func isFreshHeadOrMissingExpectedReason(reason string) bool {
