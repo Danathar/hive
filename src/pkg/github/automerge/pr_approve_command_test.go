@@ -14,9 +14,9 @@ import (
 
 func TestPRApproveReply(t *testing.T) {
 	for _, tc := range []struct {
-		name, author, actor, verdict, file, want string
-		labels                                   []string
-		bot, disabled, readError, trustedAuthor  bool
+		name, author, actor, verdict, file, body, want string
+		labels                                         []string
+		bot, disabled, readError, trustedAuthor        bool
 	}{
 		{name: "says no needs-human blocks", author: testHiveAppBotLogin, actor: "owner", want: "No `needs-human` label blocks this PR."},
 		{name: "says needs-human still blocks", author: testHiveAppBotLogin, actor: "owner", labels: []string{"needs-human"}, want: "`needs-human` still blocks this PR"},
@@ -33,6 +33,7 @@ func TestPRApproveReply(t *testing.T) {
 		{name: "rejected contributor", author: "contributor", actor: "owner", verdict: "reject", want: "cannot override this contributor-lane verdict"},
 		{name: "manual workflow", author: "contributor", actor: "owner", file: ".github/workflows/ci.yml", want: "requires a person to merge manually"},
 		{name: "manual path", author: testHiveAppBotLogin, actor: "owner", file: "sensitive/config.yaml", want: "requires a person to merge manually"},
+		{name: "carried fence on App lane", author: testHiveAppBotLogin, actor: "owner", body: CarriedFenceMarker(contributorLaneReasonTestsRemoved, 9), want: "carries a diff fence from the contributor PR it supersedes"},
 		{name: "disabled lane", author: "contributor", actor: "owner", disabled: true, want: "must merge it manually"},
 		{name: "missing path evidence", author: "contributor", actor: "owner", readError: true},
 	} {
@@ -53,7 +54,7 @@ func TestPRApproveReply(t *testing.T) {
 					for _, l := range tc.labels {
 						labels = append(labels, &gh.Label{Name: gh.Ptr(l)})
 					}
-					json.NewEncoder(w).Encode(&gh.PullRequest{Number: gh.Ptr(7), State: gh.Ptr("open"), User: &gh.User{Login: gh.Ptr(tc.author)}, Head: &gh.PullRequestBranch{SHA: gh.Ptr("sha7")}, Labels: labels})
+					json.NewEncoder(w).Encode(&gh.PullRequest{Number: gh.Ptr(7), State: gh.Ptr("open"), User: &gh.User{Login: gh.Ptr(tc.author)}, Body: gh.Ptr(tc.body), Head: &gh.PullRequestBranch{SHA: gh.Ptr("sha7")}, Labels: labels})
 				case "/repos/acme/widget/pulls/7/files":
 					if tc.readError {
 						w.WriteHeader(http.StatusInternalServerError)

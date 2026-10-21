@@ -28,6 +28,9 @@ type WebhookHealth struct {
 	// deliveries and refreshes caused.
 	TargetedRefreshes1h    int `json:"targeted_refreshes_1h"`
 	TrackerInvalidations1h int `json:"tracker_invalidations_1h"`
+	// WebhookModeStatus is the reconcile cadence the health drives:
+	// `mode` webhook|polling and `since` (hivecommons/hive#13381).
+	WebhookModeStatus
 }
 
 // WebhookEventResult reports what one delivered GitHub webhook did.
@@ -47,6 +50,13 @@ type WebhookEventResult struct {
 	// ConfiguredRepo is the repo as this hive configured it (the name the
 	// status snapshot uses), which may differ in case from Repo.
 	ConfiguredRepo string `json:"configured_repo,omitempty"`
+	// WokeReviewWatcher is set when the delivery woke the review-request
+	// watcher (hivecommons/hive#13378).
+	WokeReviewWatcher bool `json:"woke_review_watcher,omitempty"`
+	// HeadSHA is the commit a check_suite, check_run or status event
+	// reported on; a reader with its own PR set (forgestate) resolves it to
+	// a PR the detail cache may not hold (hivecommons/hive#13377).
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 // webhookTracker records webhook liveness per repository and the set of PRs a
@@ -66,6 +76,12 @@ type webhookTracker struct {
 	refreshes     []time.Time
 	trackerDrops  []time.Time
 	wasHealthy    bool
+	// lastActivity is the newest GitHub `updated_at` a poll listed and
+	// lastFailure the newest delivery that failed verification; both feed
+	// the cadence mode machine (webhook_mode.go).
+	lastActivity time.Time
+	lastFailure  time.Time
+	mode         webhookModeMachine
 }
 
 func newWebhookTracker() *webhookTracker {
@@ -305,7 +321,8 @@ func (t *webhookTracker) snapshot() WebhookHealth {
 	t.trackerDrops = pruneWebhookTimes(t.trackerDrops, now)
 	healthy, latest := t.healthyLocked(now)
 	out := WebhookHealth{Healthy: healthy, Events1h: len(t.events), Invalidations1h: len(t.invalidations),
-		TargetedRefreshes1h: len(t.refreshes), TrackerInvalidations1h: len(t.trackerDrops)}
+		TargetedRefreshes1h: len(t.refreshes), TrackerInvalidations1h: len(t.trackerDrops),
+		WebhookModeStatus: t.mode.status(t.window, now)}
 	if !latest.IsZero() {
 		at := latest.UTC()
 		out.LastEventAt = &at
@@ -426,6 +443,10 @@ func (c *Client) HandleWebhookEvent(event string, payload []byte) (WebhookEventR
 	if n, ok := webhookTouchedIssue(event, p); ok {
 		res.TouchedIssues = []int{n}
 	}
+	if reviewRequestWakeEvent(event, p) {
+		c.reviewWake.wake()
+		res.WokeReviewWatcher = true
+	}
 
 	if n, ok := webhookIssueLabelTarget(event, p); ok {
 		sharedWebhookTracker.markIssueDirty(aliases, n)
@@ -442,6 +463,7 @@ func (c *Client) HandleWebhookEvent(event string, payload []byte) (WebhookEventR
 		// the title and body, so this costs no GitHub call (#13241).
 		c.RecordReviewEvidenceRevert(merged)
 	}
+	res.HeadSHA = webhookHeadSHA(event, p)
 	numbers := webhookInvalidationTargets(event, p, aliases)
 	for _, n := range numbers {
 		c.invalidateWebhookPR(aliases, n)
@@ -531,6 +553,24 @@ func issueReopenedHook() IssueReopenedHook {
 	issueReopenedHookMu.RLock()
 	defer issueReopenedHookMu.RUnlock()
 	return issueReopenedHookFn
+}
+
+// webhookHeadSHA returns the head commit a check_suite, check_run or status
+// event concerns; "" for every other event.
+func webhookHeadSHA(event string, p webhookEventPayload) string {
+	switch event {
+	case "check_suite":
+		if p.CheckSuite != nil {
+			return strings.TrimSpace(p.CheckSuite.HeadSHA)
+		}
+	case "check_run":
+		if p.CheckRun != nil {
+			return strings.TrimSpace(p.CheckRun.HeadSHA)
+		}
+	case "status":
+		return strings.TrimSpace(p.SHA)
+	}
+	return ""
 }
 
 func webhookInvalidationTargets(event string, p webhookEventPayload, aliases []string) []int {

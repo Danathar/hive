@@ -63,6 +63,14 @@ func TestFetchWebhookItemSnapshotReadsOnePRAndOneIssue(t *testing.T) {
 	}
 	want := WebhookItemSnapshot{Repo: "repo", Number: 42, IsPR: true, Title: "Relabelled", Author: "mina",
 		Labels: []string{"stage/050-review-pending", "kind/bug"}, Draft: true, State: "open", UpdatedAt: updated, URL: "https://github.com/org/repo/pull/42"}
+	// The governor-side classification is covered by webhook_item_patch_test.
+	if pr.Patch.Bucket != WebhookBucketSidelined {
+		t.Fatalf("draft PR bucket = %q, want sidelined", pr.Patch.Bucket)
+	}
+	if pr.HeadSHA != "abc" || pr.FetchedAt.IsZero() {
+		t.Fatalf("pr snapshot must carry head SHA and fetch time: %+v", pr)
+	}
+	pr.Patch, pr.HeadSHA, pr.FetchedAt = WebhookItemPatch{}, "", time.Time{}
 	if !reflect.DeepEqual(pr, want) {
 		t.Fatalf("pr snapshot = %+v, want %+v", pr, want)
 	}
@@ -173,5 +181,30 @@ func TestHandleWebhookEventNamesTouchedIssues(t *testing.T) {
 		if !reflect.DeepEqual(res.TouchedIssues, tc.touched) || !reflect.DeepEqual(res.Invalidated, tc.invalidated) {
 			t.Fatalf("%s %s: touched=%v invalidated=%v, want %v / %v", tc.event, tc.body, res.TouchedIssues, res.Invalidated, tc.touched, tc.invalidated)
 		}
+	}
+}
+
+// TestFetchWebhookItemSnapshotRefusesDuringRateLimitCaution: while GitHub
+// is pacing the hive after a rate-limit refusal the targeted GET stands
+// down; the next eval cycle re-reads the item anyway.
+func TestFetchWebhookItemSnapshotRefusesDuringRateLimitCaution(t *testing.T) {
+	// Isolate from any budget state another test left in the shared REST
+	// accounting; the budget check runs before the caution check.
+	resetRESTAccountingForTest(t, time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("caution window must not reach GitHub: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv, "org", []string{"repo"})
+	t.Cleanup(ResetRateLimitPacingForTest)
+	sharedSlowStartState.mu.Lock()
+	sharedSlowStartState.cautiousUntil = time.Now().Add(time.Hour)
+	sharedSlowStartState.mu.Unlock()
+	if !RateLimitCautionEngaged() {
+		t.Fatal("caution window not engaged")
+	}
+	if _, err := c.FetchWebhookItemSnapshot(context.Background(), "repo", 42, true); !errors.Is(err, ErrRateLimitCaution) {
+		t.Fatalf("err = %v, want ErrRateLimitCaution", err)
 	}
 }

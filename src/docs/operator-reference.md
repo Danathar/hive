@@ -104,6 +104,53 @@ Before reference, captured 2026-10-08 from the hosted fleet:
 | Second fleet consumer | `hive GET /repos/{owner}/{repo}/issues/{number}/comments 1819/3298` |
 | Third fleet consumer | `hive:enrich_pr_ci GET /repos/{owner}/{repo}/pulls/{number} 1157/2325` |
 
+## OpenTelemetry: GitHub API spend and cache freshness
+
+Hive emits OpenTelemetry spans and metrics for every GitHub call, the governor
+eval cycle, and the ForgeState cache ([#13380](https://github.com/hivecommons/hive/issues/13380),
+Phase 3 of [#13373](https://github.com/hivecommons/hive/issues/13373)). Both
+signals share one switch and are **off by default**; nothing is exported and
+no behaviour changes until an endpoint is configured.
+
+| Setting | Effect |
+|---|---|
+| `otel.enabled: true` (alias `tracing.enabled`) | Turns the pipeline on. Without an endpoint it stays a no-op. |
+| `otel.endpoint` | OTLP/HTTP collector URL. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OTel env var; used when `otel.endpoint` is empty. Traces and metrics go to the same collector. |
+| `otel.headers`, `otel.service_name`, `otel.insecure` | Exporter headers, `service.name` resource attribute, plaintext HTTP. |
+
+Spans:
+
+| Span | Where | Attributes |
+|---|---|---|
+| `github.request` | Outermost layer of the GitHub HTTP transport chain (one per REST/GraphQL call, including ETag replays and pacer refusals) | `http.request.method`, `http.response.status_code`, `github.endpoint` (templated path, e.g. `/repos/{owner}/{repo}/pulls/{number}`; no ids), `github.repo`, `hive.caller` (REST caller tag, `unknown` when untagged), `hive.pacing_class` (`high` / `normal` / `low`), `github.cache_hit` (304 / ETag-cache served), `github.ratelimit.remaining`, `github.ratelimit.bucket` (`core`, `search`, `graphql`, …), `github.shed` (request refused by the pacer) |
+| `governor.eval_cycle` | One per governor eval cycle | `hive.id`, `hive.acmm_level` |
+| `governor.enumerate_actionable` | child of `eval_cycle` | items found |
+| `governor.stage_labels` | child of `eval_cycle` | `hive.stage_labels.items`, `hive.stage_labels.writes` |
+| `governor.kick` | child of `eval_cycle` | `hive.kicks.assembled`, `hive.kicks.review_delivered`; `agent.kick` children per dispatched agent |
+| `governor.automerge` | Sibling of `eval_cycle` (the sweep runs on its own cadence) | `hive.automerge.seen`, `hive.automerge.merged`, `hive.automerge.skipped` |
+
+GitHub calls made inside those spans attach as `github.request` children, so a
+trace answers "which stage of which cycle spent the quota".
+
+Metrics (OTLP, exported on the SDK's periodic reader):
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `github.requests` | counter | `caller`, `endpoint`, `status` | Every GitHub call; `status` is the HTTP code, `shed`, or `error`. |
+| `github.ratelimit.remaining` | gauge | `bucket` | Last `X-RateLimit-Remaining` seen per bucket (unauthenticated 60/hour buckets are ignored). |
+| `github.secondary_limit_hits` | counter | — | 403/429 responses GitHub flagged as secondary/abuse limits. |
+| `forgestate.staleness_s` | observable gauge | `repo` | Seconds since each cached repo was last reconciled or patched. |
+| `forgestate.drift` | counter | `repo`, `kind` (`issue`, `pr`) | Entries the reconcile pass found differing between cache and API. |
+| `webhook.event_to_patch_ms` | histogram | `repo`, `writer` (`forgestate`, `cache_invalidate`) | Latency from webhook receipt to the cache patch being applied. |
+
+Adaptive reconcile: `forgestate.reconcile_interval_s` is the base cadence. The
+store stretches it from the latest `core` bucket observation
+(`forgestate.AdaptiveInterval`): below 20% remaining → 2×, below 10% → 4×,
+below 5% → 8×. Webhook patches keep the cache fresh in the meantime, and the
+interval snaps back once the window resets. When a hive has not yet seen a
+rate-limit header the base interval is used unchanged.
+
 ## Configuration blocks
 
 Top-level YAML keys accepted by `config.Config`:
@@ -179,6 +226,7 @@ Top-level YAML keys accepted by `config.Config`:
 | `auto_merge.allow_unprotected_base` | Deprecated no-op. | Accepted so older configs keep loading. `hive-merge` now merges into any protected or unprotected branch the App can write, subject to the CI-evidence gate and GitHub's own merge rules. |
 | `auto_merge.no_ci_ok` | Empty by default. | Explicit repo list whose zero-CI merge-request verdict may pass; failing or pending CI evidence is still enforced. |
 | `auto_merge.human_merge_paths` | Unset (off). | Per-repo map of `owner/repo` to glob patterns (same syntax as `intent.guardrail_path_patterns`) for paths a person must merge. Applies to every merge lane (App self-merge, trusted-author, label-queued, merge-request relay) whatever the intent tier; a matching PR is held with one comment, and an incomplete changed-file list fails closed. Details in the sweep key table below. |
+| `forgestate.enabled` | `false` | Runs the per-repo ForgeState cache ([#13373](https://github.com/hivecommons/hive/issues/13373)) and switches the automerge sweep lanes (self-authored, trusted-author, contributor lane) to it: no `/pulls` list per 10 s tick, passes triggered by `check_suite`/`check_run`/`status`/`pull_request_review`/`pull_request` webhooks for the affected PR plus a 5-minute floor pass, and a 60 s freshness-bounded read-through before every merge; a stale snapshot never merges ([#13377](https://github.com/hivecommons/hive/issues/13377)). `forgestate.reconcile_interval_s` (900), `freshness_bound_s` (60), `drift_threshold` (0.05) and `search_budget` (20) tune the cache. |
 | `evidence.enabled` | On by default. | The review relay writes one [review evidence bundle](review-evidence.md) per PR head to `/data/evidence/<owner>/<repo>/<number>/<head>.json` when it records a verdict or posts a review; the sentinel sweep adds its findings to the flagged head's bundle; and every merge path adds the head's CI check-run summary, the human approvals and label changes, and the merge event. Owners and mergers read bundles through `GET /api/review/evidence` and `GET /api/review/evidence/list` (see the [API reference](api-reference.md)). Set `false` to stop writing new bundles; existing ones are left in place. |
 | `evidence.signing_key_file` | Unset (bundles unsigned). | Path to an Ed25519 private key (32-byte seed or 64-byte key, hex or base64). When set and readable, bundles are signed; when empty, absent or unusable they are written with `"signed": false` and a warning is logged for an unusable key. Keep the key off shared hosts. |
 | `evidence.complexity.enabled` | On by default (when `evidence.enabled` is on). | Once a month, for each managed repo, the hive downloads the default-branch tarball through the GitHub App and writes one Go cyclomatic-complexity snapshot to `/data/evidence/<owner>/<repo>/complexity/<YYYY-MM>.json` (see [Monthly complexity snapshot](review-evidence.md#monthly-complexity-snapshot-report-only)). Report-only: it never affects merge eligibility. Cheap by design — one archive download and an AST pass per repo per month, no module downloads and no compile. An existing month is never rewritten; the hive re-checks hourly and retries a failed repo on the next check. The last 24 months are kept per repo. Set `false` to stop writing snapshots; existing ones stay. |
@@ -843,11 +891,23 @@ someone re-runs it. The shared-CI rerun sweep
 
 ## Suspicious-activity alerts (`sentinel`)
 
-The sentinel sweep runs every ~15 minutes alongside the other run-loop sweeps
-(`pkg/sentinel`, `pkg/github.SweepSentinel`). It inspects every open PR in the
-watched repos — human, bot, or agent — and, when a PR matches one of the
-behaviors below, posts one `<!-- hive-sentinel -->` comment per head SHA
-listing the matched rules and paths. For untrusted authors, it also adds the
+The sentinel evaluates open PRs in the watched repos — human, bot, or agent —
+and, when a PR matches one of the behaviors below, posts one
+`<!-- hive-sentinel -->` comment per head SHA listing the matched rules and
+paths (`pkg/sentinel`, `pkg/github/sentinel_sweep.go`). Since
+[#13379](https://github.com/hivecommons/hive/issues/13379) it runs in two
+ways. A verified `pull_request` `opened`/`synchronize`/`reopened` webhook
+evaluates that one PR at once, reading only the PR and its changed files
+(`SweepSentinelPR`); deliveries for the same PR coalesce while one is
+pending. The full sweep (`SweepSentinel`) is the reconcile cadence: every
+`github.SentinelReconcileInterval` (15 minutes) it enumerates open PRs from
+the ForgeState cache when `forgestate.enabled` is on (registered at boot by
+`cmd/hive/forgestate_boot.go`; with the cache off it lists the repo as
+before), skips every head it has already
+evaluated with no GitHub call, reads the remaining candidates once each, and
+so bounds how long a PR whose delivery was lost sits unevaluated. The log
+line `sentinel sweep complete` carries `cached_repos`/`listed_repos`. Both
+paths share one option set and the detection, comment and label logic. For untrusted authors, it also adds the
 alert label. The label is a hard hold: while present, Hive will not submit an
 APPROVE review, apply LGTM/approval labels, or merge the PR through any
 auto-merge lane (dashboard queue, self-authored App sweep, trusted bot authors,
@@ -1221,7 +1281,9 @@ manage are ignored.
    `/api/webhook/github` for a stand-alone hive (a repository or organization
    webhook with the same secret works too). Subscribe the App to these events:
    `pull_request`, `pull_request_review`, `pull_request_review_comment`,
-   `issue_comment`, `issues`, `check_suite`, `check_run`, `status`, `push`.
+   `issue_comment`, `issues`, `check_suite`, `check_run`, `status`, `push`,
+   and, with `governor.work_source.type: github_projects`, `projects_v2_item`
+   (organization-scoped; see [Work sources](work-sources.md#type-github_projects--github-projects-projects-v2)).
 3. **Hub relay.** The hub verifies the HMAC and relays the body byte-for-byte,
    with the original signature and `X-GitHub-Delivery`, to the spoke whose
    reported dashboard URL manages the repository. Nothing to configure on the
@@ -1250,29 +1312,55 @@ v5 and v6 spokes) tracking one repo all stay on webhook mode.
   without a PR list); `push` invalidates every open PR whose base or head
   branch is the pushed branch. `issues` `labeled`/`unlabeled`/`reopened`
   mark the issue for the next un-park sweep.
+- `pull_request` `opened`/`synchronize`/`reopened` also hands the PR to the
+  [sentinel](#suspicious-activity-alerts-sentinel), which evaluates it now
+  instead of waiting for its reconcile cadence
+  ([#13379](https://github.com/hivecommons/hive/issues/13379)).
+- `projects_v2_item` (`created`/`edited`/`deleted`/`reordered`/`archived`/
+  `restored`/`converted`) patches the GitHub Projects work-source cache: the
+  delivery names the item and its project, the hive re-reads that one item
+  (one GraphQL call) and upserts it, or drops it on `deleted`/archived. The
+  payload carries no repository, so the spoke receiver routes it ahead of the
+  repository-keyed events and the response carries `projects_patch`. The hub
+  relay forwards repository-keyed deliveries only, so a hosted spoke using a
+  Projects board needs the organization webhook pointed at its own
+  `/api/webhook/github` for this event.
 - **Every invalidating delivery wakes the governor loop.** The wake is
   debounced for `governor.webhook_wake_debounce_s` so a push and its check
   fan-out coalesce into one cycle, and webhook-triggered cycles are at least
   `governor.webhook_wake_min_gap_s` apart so a delivery storm stretches the
-  batch instead of spinning cycles. The wake cycle is a mini-cycle in cost:
-  repositories with no dirty PR reuse their previous GraphQL PR batch
-  (`graphql_pr_batch.webhook_skips`), clean PRs are served from the PR detail
-  cache past `github.pr_detail_ttl_s`, and only the dirty PRs are re-read.
-  The log line is `github webhook wake: running an early eval cycle`
-  (`reason`, `deliveries`, `coalesced`).
+  batch instead of spinning cycles. **The wake cycle does not re-list
+  repositories.** It plans from the governor's cached actionable snapshot
+  (the one the last cadence tick enumerated, patched by the targeted
+  re-reads described below), so a wake costs the targeted re-read plus the
+  dirty-PR detail refreshes and nothing else: repositories with no dirty PR
+  reuse their previous GraphQL PR batch (`graphql_pr_batch.webhook_skips`),
+  clean PRs are served from the PR detail cache past
+  `github.pr_detail_ttl_s`, and only the dirty PRs are re-read. The log line
+  is `github webhook wake: running an early eval cycle` (`reason`,
+  `deliveries`, `coalesced`, `source=cached`), followed by
+  `eval cycle planning from cached snapshot`.
 - Webhooks are **healthy** while the last delivery for a managed repository is
-  newer than `2 × governor.eval_interval_s`. While healthy the governor's base
-  eval interval rises to `governor.eval_interval_webhook_s` (default `900`,
-  capped by `governor.eval_interval_max_s`) — safe because the wakes above
-  carry the latency — and `/api/status.evalMode` reads `webhook`. The API
-  budget stretch still applies; the larger interval wins.
-- When deliveries stop, webhooks go stale after `2 × governor.eval_interval_s`.
-  The loop re-checks health as that window closes (not just at the next
-  stretched tick), resets its ticker to the configured interval, logs one
-  WARN per healthy → stale transition
-  (`github webhooks went stale; eval mode poll`) and one INFO per stale →
-  healthy transition (`github webhooks healthy; eval mode webhook`), and
-  `evalMode` reads `poll`.
+  newer than `2 × governor.eval_interval_s`. The first healthy window puts
+  the loop in **webhook mode**: the governor's base eval interval rises to
+  `governor.eval_interval_webhook_s` (default `900`, capped by
+  `governor.eval_interval_max_s`) — safe because the wakes above carry the
+  latency — and `/api/status.evalMode` reads `webhook`,
+  `/api/status.webhooks.mode` reads `webhook`. The API budget stretch still
+  applies; the larger interval wins.
+- **Fallback to polling** ([webhooks.md](webhooks.md#fallback-when-webhooks-degrade)).
+  Webhook mode degrades when the window lapses *while GitHub was active*
+  (a cadence pass listed an item updated after the newest delivery) or when
+  deliveries reach the receiver but fail verification; a quiet repository
+  with no deliveries and no activity keeps the stretched tick. The loop
+  re-checks as the window closes (not just at the next stretched tick),
+  resets its ticker to `governor.eval_interval_s`, logs one INFO
+  `webhooks degraded; polling cadence restored` (with `reason`), and
+  `evalMode` reads `poll`, `webhooks.mode` reads `polling` with `since` and
+  `mode_reason`. The way back has hysteresis: deliveries must keep arriving
+  for `2` consecutive healthy windows (`webhooks.healthy_windows` counts
+  them) before one INFO `webhooks healthy; webhook cadence engaged` restores
+  the webhook cadence.
 - `pull_request` `opened`, `reopened`, `synchronize`, `ready_for_review` and
   `review_requested` deliveries also queue an early review dispatch when
   `review.event_driven` is on; see
@@ -1291,18 +1379,161 @@ v5 and v6 spokes) tracking one repo all stay on webhook mode.
   `check_run` deliveries costs one request. The re-read patches that row of
   the status snapshot in place — labels, title, draft flag, last activity;
   a closed or merged item leaves — then drops the tracker cache again and
-  sends the `stage-tracker` SSE nudge. No repository is re-enumerated: an
-  item the snapshot never listed (a PR opened a moment ago) waits for the
-  wake cycle above. The read goes through the paced REST transport and is
+  sends the `stage-tracker` SSE nudge. The same re-read is handed to the
+  governor, which upserts the item into its cached actionable snapshot —
+  a new issue or PR appears, a closed or merged one leaves, a label change
+  moves it between the actionable / held / sidelined buckets — so the wake
+  cycle that follows plans against the patched item. No repository is
+  re-enumerated. The read goes through the paced REST transport and is
   skipped outright while the API budget is `critical`; it refreshes the PR
   detail cache, so the following cycle does not pay for it again.
   `dashboard.stage_tracker.webhook_refresh: false` turns the re-read off
-  (deliveries then still invalidate caches and wake the loop).
+  (deliveries then still invalidate caches and wake the loop, and wake
+  cycles fall back to a full enumeration because nothing else patches the
+  snapshot).
+
+#### Polling cadence vs webhook patch vs reconcile
+
+The full model — the three writers, the accuracy guarantees of #13373, every
+cadence key with its default, and the webhook-outage fallback — is
+[webhooks.md](webhooks.md). In brief: inbound webhooks cost nothing against
+the GitHub rate limit; outbound API calls do. The governor therefore keeps three distinct paths and never lets a
+delivery trigger a full re-list:
+
+| Path | Trigger | GitHub cost | What it does |
+| --- | --- | --- | --- |
+| **Reconcile** | cadence tick — `governor.eval_interval_webhook_s` (default `900`) while webhooks are healthy, `governor.eval_interval_s` otherwise | full: lists issues and PRs for every tracked repo | Authoritative. Rebuilds the actionable snapshot from scratch and **overwrites** every webhook patch. If the pass fails outright (every repo refused: rate limit, 429, 5xx) the previous snapshot — patches included — stays published, marked stale for every repo (`stale_repos`, repo card `countsStale`), and the next tick retries; a repo refused on its own is served from its last-good enumeration the same way. |
+| **Webhook patch** | one delivery naming an issue/PR | one `GET` per item, debounced and coalesced | Upserts, moves or removes that single item in both the activity-monitor row and the governor's cached snapshot. Counted in `/api/status.webhookPatches`. |
+| **Cached cycle** | webhook wake, review wake, continuous-agent wake | dirty-PR detail refreshes only | Runs the governor's decision pass (kicks, automerge, stage moves) from the patched snapshot without listing. `source=cached` in the wake log; counted in `/api/status.cachedCycles`. Before the first reconcile has produced a snapshot a wake enumerates instead. |
+
+Cadence ticks reconcile; webhooks keep the picture current in between. The
+priority order is accuracy of issue/PR state, then latency, then API thrift,
+which fixes four rules for the patch path:
+
+- **The payload is a hint, never state.** A delivery only names the item;
+  the GET decides what the row says. A `closed` delivery whose re-read finds
+  the item open leaves it open.
+- **Upserts are monotonic.** A re-read whose `updated_at` is older than the
+  copy already held (two deliveries' GETs landing out of order) is dropped.
+  Each applied read is recorded in the snapshot's `item_patches` (fetch time,
+  `updated_at`, head SHA, `X-GitHub-Delivery` id) for audit.
+- **Closed/merged removes at once; reopened re-adds** — both after the
+  confirming GET.
+- **Irreversible actions are freshness-bounded.** Before an issue close or a
+  PR merge planned from the snapshot (stage sync, close-on-merge, automerge
+  sweep), the governor refuses outright while that repo's share is stale and
+  otherwise re-reads the item once if its copy is older than 60 s
+  (`DecisionFreshnessBound`), proceeding only if it is still open. Refused
+  actions log `irreversible action deferred` and retry next pass.
+
+Startup runs a full enumeration before the first decision pass; a cold cache
+whose GitHub share failed is published stale, never as "0 items".
+`/api/status.staleSince` (and per-repo `countsStaleSince`) carries the
+stale-as-of time and the Overview shows a `stale · as of HH:MM` badge.
+Raising `eval_interval_webhook_s` lowers list-call volume further at the cost
+of a longer window before a missed delivery is corrected by reconciliation.
+
+##### Reading from the ForgeState cache (`forgestate.enabled: true`)
+
+With the per-repo state cache on (`forgestate:` block in `hive.yaml`,
+default off; [#13373](https://github.com/hivecommons/hive/issues/13373)) the
+governor work source stops listing GitHub on the cadence tick too
+([#13375](https://github.com/hivecommons/hive/issues/13375)). The cache's own
+reconcile loop (`forgestate.reconcile_interval_s`, default `900`, shortened
+to one minute while a repo is stale or its drift is high) is the **only**
+full list; every governor pass — cadence tick, webhook wake, review wake —
+takes each repo's open issues and PRs from the cached snapshot and classifies
+them exactly as before. What changes:
+
+- **Startup gate.** No decision pass runs before every repo has completed
+  its first successful reconcile. The loop logs `forgestate: waiting for the
+  first reconcile before the first decision pass` once a minute while it
+  waits and `first reconcile complete` when it is released. A repo whose
+  cache is not ready in a later pass is served from its last-good
+  enumeration and marked stale, like a transient GitHub refusal.
+- **Stale is inherited.** A repo whose last reconcile failed keeps its
+  last-good items and appears in `stale_repos` with `stale_since` set to the
+  last good reconcile, so the same close/merge guard applies.
+- **Freshness bound before a kick.** Every GitHub ref in an assembled kick
+  goes through the same 60 s bound as close and merge: a copy younger than
+  the bound is kicked as-is, an older one is confirmed with one targeted
+  `GET` (dropped from the kick if it closed or merged meanwhile), and a ref
+  in a stale repo is withheld (`kick ref withheld: snapshot not fresh enough
+  to act on`). A kick whose refs all fail is not sent.
+- **Single-item reads feed the cache.** The webhook patch `GET` and the
+  freshness confirmation `GET` are observed into the cache (as a webhook
+  patch carrying the `X-GitHub-Delivery` id, or as a read-through), and the
+  hive's own label add/remove, issue close and PR merge are written through
+  immediately, so the next pass sees them without waiting for a webhook.
+- **`item_patches` covers every cached item.** With the cache, the pass's
+  `generated_at` says nothing about an item's age, so the fetch time of
+  every item served from the cache is recorded there; the closed attributed
+  PR history scan is reused for one reconcile interval rather than re-run
+  on every wake.
+- **Automerge lanes read the same cache.** The self-authored, trusted-author
+  and contributor-lane sweeps take their open-PR set from the cached
+  snapshot and run event-driven with a 5-minute floor pass; see
+  `hive-merge.md` → "Event-driven sweeps on the ForgeState cache"
+  ([#13377](https://github.com/hivecommons/hive/issues/13377)).
+
+Repos added to the config after boot list live until the next restart
+rebuilds the store with them. Enabling the cache changes no classification:
+only the two list calls per repo move behind it.
+
+##### Rate-limit pacing priority
+
+After a GitHub rate-limit refusal (a secondary-limit 403 or a primary-limit
+reset) the shared transport enters a slow-start caution window and paces
+requests about 2s apart. Pacing is prioritised so periodic housekeeping cannot
+starve the governor:
+
+- the reconcile pass (`EnumerateActionable`) runs **high** priority and is
+  bounded only by its own deadline;
+- ordinary requests may queue at most 30s ahead;
+- housekeeping (self-authored and queued automerge sweeps, the review-request
+  watcher, advisory digest lookups, the dashboard metrics and fleet-stats
+  collectors) runs **low** priority: a request that would queue more than 5s
+  ahead is refused immediately (`github pacing: request shed`) instead of
+  taking a slot, and a tick whose first slot is already further out than the
+  tick could wait is skipped outright (`low-priority work shed`, logged at
+  most once a minute per caller) and retried on its next tick;
+- the self-authored automerge sweep backs its tick off to at least 60s while
+  the window is engaged and resumes its adaptive interval when it ends;
+- GitHub App installation-token mints (and the other App-JWT endpoints) do
+  not go through the pacer at all: they are a separate rate-limit bucket, and
+  a mint that queued behind paced traffic failed every request that needed
+  the token.
+
+##### Event-driven readers (ForgeState phase 2d)
+
+- **The review-request watcher runs on events.** The relay that submits
+  `hive-review` requests (`review_request_watcher.go`) no longer polls its
+  drop box every 10 s. A request file drop wakes it through a directory
+  notification, and `issue_comment`, `pull_request_review`,
+  `pull_request_review_comment` and `issues` `labeled`/`unlabeled`
+  deliveries wake it for a pass (`/api/status.webhooks` deliveries report
+  `woke_review_watcher`). While webhooks are healthy the unprompted scan is a
+  five-minute reconcile (`ReviewRequestWebhookFallbackInterval`); when
+  webhooks go stale, or the drop box cannot be watched, the watcher returns
+  to the legacy 10 s poll. A `--revise` request for a repo outside
+  `review.revise_repos` is a policy denial (`.denied`, one WARN), not a
+  retried failure.
+- **The advisory issue is resolved from the ForgeState cache.** When a
+  `forgestate` store is bound to the GitHub client (`forgestate.enabled`,
+  hivecommons/hive#13373), `EnsureAdvisoryIssue` answers from the cache: the
+  memoized advisory issue is read through the cache within its freshness
+  bound (zero GitHub calls on a healthy cycle), a stale or missing cached
+  copy costs one targeted `GET` of that issue, and a closed advisory issue
+  is reopened in place and written through. The search → label list →
+  title-scan path runs only when the cache cannot answer (repo not yet
+  reconciled, or no labelled advisory issue to confirm).
 
 `/api/status` and `/api/gh-rate-limits` expose
 `webhooks: {healthy, last_event_at, events_1h, invalidations_1h,
-targeted_refreshes_1h, tracker_invalidations_1h}` (the last two count the
-single-item re-reads and the tracker cache drops webhooks caused);
+targeted_refreshes_1h, tracker_invalidations_1h, mode, since, mode_reason,
+healthy_windows}` (the middle two count the single-item re-reads and the
+tracker cache drops webhooks caused; `mode` is `webhook` | `polling` and
+`since` when it began — see [webhooks.md](webhooks.md));
 `/api/status` adds `evalMode` (`webhook` | `poll`), `evalIntervalS`,
 `lastWakeReason`, `lastWakeAt` and `webhookWakes`;
 `graphql_pr_batch.webhook_skips` counts batch queries skipped because nothing

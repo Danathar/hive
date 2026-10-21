@@ -20,7 +20,9 @@ import (
 	"github.com/hivecommons/hive/pkg/dashchat"
 	"github.com/hivecommons/hive/pkg/defsrc"
 	"github.com/hivecommons/hive/pkg/effects"
+	"github.com/hivecommons/hive/pkg/forgestate"
 	"github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/github/automerge"
 	"github.com/hivecommons/hive/pkg/governor"
 	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/knowledge"
@@ -82,8 +84,17 @@ type boot struct {
 	// requestRelays runs the request watchers and the self-authored merge
 	// sweep on the current client. adoptGitHubClient swaps both on every
 	// rebuild (#9621); see github_client_provider.go.
-	ghClientLive  atomic.Pointer[githubClientRef]
-	requestRelays *requestRelaySupervisor
+	ghClientLive atomic.Pointer[githubClientRef]
+
+	// forgeState is the per-repo GitHub state cache the governor work
+	// source reads from when `forgestate.enabled` is on (#13375). Built
+	// once by the first configureGitHubClient and attached to every
+	// rebuilt client after that; forgeStateOnce guards the build. Held in
+	// an atomic because the dashboard's count wiring reads it late, from
+	// the metrics collector goroutine (#13376).
+	forgeState     atomic.Pointer[forgestate.Store]
+	forgeStateOnce sync.Once
+	requestRelays  *requestRelaySupervisor
 
 	// bootConfig
 	startTime time.Time
@@ -243,6 +254,17 @@ type boot struct {
 	// eval cycles and evalLoop is the pacing block /api/status reports.
 	webhookWaker *webhookWaker
 	evalLoop     *evalLoopState
+	// snapshotPatch applies webhook re-reads to lastActionable so wake
+	// cycles plan from a patched snapshot instead of re-listing.
+	snapshotPatch *snapshotPatcher
+
+	// sentinelEvents serializes the per-PR sentinel evaluations that
+	// `pull_request` webhooks request (#13379).
+	sentinelEvents *sentinelEventQueue
+	// forgeView is the owner/name view over forgeState the automerge lanes
+	// read and sweepTrigger their webhook trigger over it (#13377).
+	forgeView    *github.ForgeStateView
+	sweepTrigger *automerge.SweepTrigger
 }
 
 // deferStack stands in for the `defer` statements that used to sit in

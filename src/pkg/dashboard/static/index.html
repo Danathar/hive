@@ -1320,7 +1320,7 @@
     .ham-input { flex: 0 1 18em; min-width: 8em; padding: var(--sp-1) var(--sp-3); background: var(--bg); color: var(--text); border: var(--line-width) solid var(--line); border-radius: var(--r-pill); font-size: var(--fs-sm); outline: none; }
     .ham-input:focus { border-color: var(--line-strong); }
     .ham-dir { padding: var(--sp-1) var(--sp-2); min-width: 2em; }
-    /* Merge sound toggle: a speaker chip at the toolbar's far end; pressed = on. */
+    /* Sound toggle (merge zap + new-item buzz): a speaker chip at the toolbar's far end; pressed = on. */
     .ham-sound { margin-left: auto; padding: var(--sp-1) var(--sp-2); min-width: 2em; line-height: 1; }
     .ham-sound[aria-pressed="true"] { color: var(--green); border-color: var(--green); }
     .ham-labels { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-bottom: var(--sp-3); }
@@ -2317,6 +2317,7 @@
     .overview-kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr) auto) minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--sp-3); align-items: stretch; }
     .overview-kpi-operator { display: inline-flex; align-items: center; justify-content: center; align-self: start; padding-top: var(--sp-3); color: var(--muted); font-size: var(--fs-lg); font-weight: 800; line-height: 1; }
     .overview-kpi-coverage-spacer { width: 1px; min-height: 100%; background: var(--border); opacity: 0.8; }
+    .overview-kpi-stale { display: inline-flex; align-items: center; gap: var(--sp-1); margin-left: var(--sp-2); padding: var(--sp-1) var(--sp-2); border-radius: var(--r-pill); border: 1px solid var(--orange); color: var(--orange); font-size: var(--fs-xs); font-weight: 700; white-space: nowrap; }
     @media (max-width: 1799px) { .overview-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overview-kpi-operator, .overview-kpi-coverage-spacer { display: none; } }
     @media (max-width: 720px) { .overview-kpis { grid-template-columns: minmax(0, 1fr); } }
     .overview-kpi-range { display: inline-flex; gap: var(--sp-1); }
@@ -6873,7 +6874,7 @@
         <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Reverse sort direction">↓</button></label>
         <label class="ham-repo-filter"><span>Per page</span><select id="activity-monitor-size" class="ham-select" data-change-action="hamFilter" data-arg0="size" data-arg-types="s,v"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
         <button type="button" class="ham-chip ham-reset" id="activity-monitor-reset" data-action="hamFilter" data-arg0="reset" hidden>Clear filters</button>
-        <button type="button" class="ham-chip ham-sound" id="activity-monitor-sound" data-action="hamSoundToggle" aria-pressed="false" aria-label="Merge sound off — turn on (plays a test zap)" title="Merge sound off — turn on (plays a test zap)">🔇</button>
+        <button type="button" class="ham-chip ham-sound" id="activity-monitor-sound" data-action="hamSoundToggle" aria-pressed="false" aria-label="Sound off — turn on (merge zap + new-item buzz; plays a test of each)" title="Sound off — turn on (merge zap + new-item buzz; plays a test of each)">🔇</button>
       </div>
       <div class="ham-labels" id="activity-monitor-labels" role="group" aria-label="Filter by label"></div>
       <div class="ham-meta" id="activity-monitor-meta" aria-live="polite"></div>
@@ -11877,18 +11878,47 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       }
     }
 
-    // ── Cost spend-over-time (hourly / daily / weekly / monthly) ──
+    // ── Cost spend-over-time (hourly / daily / weekly / monthly / custom) ──
     // The server keeps 30 days of CUMULATIVE all-time estimated-$ snapshots at
     // ~5-min resolution. We derive per-bucket SPEND on the client by taking the
     // delta of the cumulative value across each bucket boundary — no backend
     // change needed. Selected range persists across re-renders and page loads.
+    //
+    // Every selector value defines ONE window and ONE bucket size, and the bar
+    // chart, "spend in selected range" and the run-rate are all derived from
+    // that same window (costWindow()). Boundaries are in the browser's local
+    // clock, matching the axis labels:
+    //   hourly  — the current clock hour plus the COST_HOURLY_WINDOW_H−1 before
+    //             it (≈ last 24h); one bar per hour, labelled by hour.
+    //   daily   — the last COST_DAILY_WINDOW_DAYS calendar days, today
+    //             included; one bar per day, labelled by weekday.
+    //   weekly  — the current calendar week (Mon → Sun); one bar per day,
+    //             labelled by weekday. Days still ahead draw empty.
+    //   monthly — the current calendar month (1st → last day); one bar per
+    //             day, labelled by date. Days still ahead draw empty.
+    //   custom  — the picked bounds; hourly bars when the span is at most
+    //             COST_CUSTOM_HOUR_BUCKET_MAX_MS, daily bars otherwise.
+    // The run-rate is spend-in-window ÷ ELAPSED window length (never the part
+    // of a calendar week/month still in the future), shown per hour for hourly
+    // bars and per day for daily bars.
+    const COST_HOUR_MS = 3600e3;
+    const COST_DAY_MS = 24 * COST_HOUR_MS;
+    const COST_HOURLY_WINDOW_H = 24;
+    const COST_DAILY_WINDOW_DAYS = 7;
+    const COST_WEEK_DAYS = 7;
+    const COST_CUSTOM_HOUR_BUCKET_MAX_MS = 2 * COST_DAY_MS;
+    const COST_CUSTOM_MIN_SPAN_MS = 60e3;
+    // Charts with this many bars or fewer label every bar; wider charts label
+    // first / middle / last only.
+    const COST_AXIS_LABEL_EVERY_BAR_MAX = 7;
+    const COST_WEEKDAY_LABELS = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa'];
     const COST_RANGES = {
-      // key: { label, bucketMs, windowMs, buckets }
-      hourly:  { label: 'hourly',  bucketMs: 3600e3,        windowMs: 24 * 3600e3,      buckets: 24 },
-      daily:   { label: 'daily',   bucketMs: 24 * 3600e3,   windowMs: 30 * 24 * 3600e3, buckets: 30 },
-      weekly:  { label: 'weekly',  bucketMs: 7 * 24 * 3600e3, windowMs: 12 * 7 * 24 * 3600e3, buckets: 12 },
-      monthly: { label: 'monthly', bucketMs: 30 * 24 * 3600e3, windowMs: 12 * 30 * 24 * 3600e3, buckets: 12 },
-      custom:  { label: 'custom' }, // bounds come from _costCustom; slices derived
+      // key: { label, bucket } — bucket 'hour' | 'day' | 'auto' (custom: by span)
+      hourly:  { label: 'hourly',  bucket: 'hour' },
+      daily:   { label: 'daily',   bucket: 'day' },
+      weekly:  { label: 'weekly',  bucket: 'day' },
+      monthly: { label: 'monthly', bucket: 'day' },
+      custom:  { label: 'custom',  bucket: 'auto' }, // bounds come from _costCustom
     };
     let _costRange = (() => {
       try { const s = localStorage.getItem('hiveCostRange'); if (s && COST_RANGES[s]) return s; } catch {}
@@ -11901,21 +11931,68 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         if (s && typeof s.start === 'number' && typeof s.end === 'number' && s.end > s.start) return s;
       } catch {}
       const now = Date.now();
-      return { start: now - 24 * 3600e3, end: now };
+      return { start: now - COST_DAY_MS, end: now };
     })();
-    const COST_CUSTOM_BUCKETS = 24; // bar-chart slices for a custom range
 
-    // costWindow: {start, end, bucketMs, count} for the active range. Preset
-    // ranges anchor to now and walk backwards; custom uses the picked bounds.
-    function costWindow() {
-      if (_costRange === 'custom') {
-        const span = Math.max(_costCustom.end - _costCustom.start, 60e3);
-        return { start: _costCustom.start, end: _costCustom.end,
-                 bucketMs: span / COST_CUSTOM_BUCKETS, count: COST_CUSTOM_BUCKETS };
+    function costStartOfHour(ms) { const d = new Date(ms); d.setMinutes(0, 0, 0); return d.getTime(); }
+    function costStartOfDay(ms) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
+    // Calendar-day stepping (setDate) so DST transitions keep bucket edges on
+    // local midnight instead of drifting an hour.
+    function costAddDays(ms, n) { const d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime(); }
+
+    // costBucketEdges: ascending boundaries [start, …, end] stepping one hour or
+    // one calendar day from start; the final bucket is clipped at end.
+    function costBucketEdges(start, end, bucket) {
+      const edges = [start];
+      let t = start;
+      while (t < end) {
+        const next = bucket === 'day' ? costAddDays(t, 1) : t + COST_HOUR_MS;
+        t = Math.min(next, end);
+        edges.push(t);
       }
-      const cfg = COST_RANGES[_costRange];
-      const now = Date.now();
-      return { start: now - cfg.windowMs, end: now, bucketMs: cfg.bucketMs, count: cfg.buckets };
+      return edges;
+    }
+
+    // costWindow: the single source of truth for the active range —
+    // {key, start, end, bucket, bucketMs, edges, count, elapsedMs}. The chart
+    // buckets, the "spend in selected range" sum and the run-rate all read it.
+    // `now` is injectable for tests.
+    function costWindow(now) {
+      now = typeof now === 'number' ? now : Date.now();
+      const key = _costRange;
+      let start, end, bucket;
+      if (key === 'custom') {
+        start = _costCustom.start;
+        end = Math.max(_costCustom.end, start + COST_CUSTOM_MIN_SPAN_MS);
+        bucket = (end - start) <= COST_CUSTOM_HOUR_BUCKET_MAX_MS ? 'hour' : 'day';
+      } else if (key === 'hourly') {
+        start = costStartOfHour(now) - (COST_HOURLY_WINDOW_H - 1) * COST_HOUR_MS;
+        end = now;
+        bucket = 'hour';
+      } else if (key === 'daily') {
+        start = costAddDays(costStartOfDay(now), -(COST_DAILY_WINDOW_DAYS - 1));
+        end = now;
+        bucket = 'day';
+      } else if (key === 'weekly') {
+        const today = costStartOfDay(now);
+        const sinceMonday = (new Date(today).getDay() + 6) % 7;
+        start = costAddDays(today, -sinceMonday);
+        end = costAddDays(start, COST_WEEK_DAYS);
+        bucket = 'day';
+      } else { // monthly
+        const d = new Date(now);
+        start = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+        end = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime();
+        bucket = 'day';
+      }
+      const edges = costBucketEdges(start, end, bucket);
+      return {
+        key, start, end, bucket,
+        bucketMs: bucket === 'day' ? COST_DAY_MS : COST_HOUR_MS,
+        edges,
+        count: edges.length - 1,
+        elapsedMs: Math.max(0, Math.min(now, end) - start),
+      };
     }
 
     function fmtCostDateTime(ms) {
@@ -12050,18 +12127,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return v;
     }
 
-    // costBuckets: returns [{start, end, spend}] for the active range. spend is the
-    // cumulative-$ delta over the bucket; 30d of history means longer ranges are
-    // truncated to whatever the ring buffer holds (labeled in the UI).
-    function costBuckets() {
-      const win = costWindow();
+    // costBuckets: returns [{start, end, spend, hasData}] — one per bucket of the
+    // active window (costWindow()). spend is the cumulative-$ delta over the
+    // bucket; 30d of history means older buckets may be uncovered (hasData=false),
+    // as are calendar days still ahead in the weekly/monthly views.
+    function costBuckets(win) {
+      win = win || costWindow();
       const hist = costHist();
       const buckets = [];
-      for (let i = win.count - 1; i >= 0; i--) {
-        const end = win.end - i * win.bucketMs;
-        const start = end - win.bucketMs;
-        if (end <= win.start) continue;
-        buckets.push({ start, end, spend: 0, hasData: false });
+      for (let i = 0; i + 1 < win.edges.length; i++) {
+        buckets.push({ start: win.edges[i], end: win.edges[i + 1], spend: 0, hasData: false });
       }
       if (hist.length < 2) return buckets;
       // Per-bucket spend = sum of POSITIVE per-model token increments inside the
@@ -12120,20 +12195,40 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return saw ? spend : null;
     }
 
-    function costBucketAxisLabel(b) {
-      const d = new Date(b.end);
-      if (_costRange === 'hourly') return String(d.getHours()).padStart(2, '0');
-      if (_costRange === 'daily')  return `${d.getMonth() + 1}/${d.getDate()}`;
-      if (_costRange === 'weekly') return `${d.getMonth() + 1}/${d.getDate()}`;
-      if (_costRange === 'custom') return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}h`;
-      return formatDashboardDateTime(d, { month:'short', timeZoneName:undefined });
+    // costBucketAxisLabel: the bar is labelled by the hour/day it COVERS (its
+    // start), in the browser's local clock like the window boundaries.
+    function costBucketAxisLabel(b, win) {
+      win = win || costWindow();
+      const d = new Date(b.start);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const md = `${d.getMonth() + 1}/${d.getDate()}`;
+      if (win.key === 'hourly') return hh;
+      if (win.key === 'daily' || win.key === 'weekly') return COST_WEEKDAY_LABELS[d.getDay()];
+      if (win.key === 'monthly') return md;
+      return win.bucket === 'hour' ? `${md} ${hh}h` : md;
     }
 
-    // costRunRate: estimated $ spent per millisecond, from recent token
-    // consumption. Uses the per-model TOKEN delta over the most recent span of
-    // history (price-independent, monotonic) priced at each model's current
-    // effective rate — so it never goes negative across a price change. Returns
-    // null if there isn't enough history to establish a pace.
+    // costAxisLabelsHtml: every bar when there are few (weekday views), else
+    // first / middle / last to avoid crowding.
+    function costAxisLabelsHtml(buckets, win) {
+      if (!buckets.length) return '';
+      const picks = buckets.length <= COST_AXIS_LABEL_EVERY_BAR_MAX
+        ? buckets
+        : [buckets[0], buckets[Math.floor(buckets.length / 2)], buckets[buckets.length - 1]];
+      return picks.map(b => `<span>${esc(costBucketAxisLabel(b, win))}</span>`).join('');
+    }
+
+    // costWindowRunRate: $ per ms = spend inside the window ÷ the part of the
+    // window that has elapsed so far. null when nothing was spent or no time
+    // has passed (the caller then omits the run-rate).
+    function costWindowRunRate(spend, win) {
+      if (!(spend > 0) || !(win && win.elapsedMs > 0)) return null;
+      return spend / win.elapsedMs;
+    }
+    // costRunRateUnit: the natural unit for the window's bucket size.
+    function costRunRateUnit(win) {
+      return win.bucket === 'hour' ? { ms: COST_HOUR_MS, label: '/hr' } : { ms: COST_DAY_MS, label: '/day' };
+    }
     // priceMap: current $/token per model from the newest snapshot that has one.
     function costPriceMap(hist) {
       const rate = {};
@@ -12338,29 +12433,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return sawWindow ? spend : null;
     }
 
-    function costRunRate() {
-      const hist = costHist();
-      if (hist.length < 2) return null;
-      const latest = hist[hist.length - 1];
-      const rate = costPriceMap(hist);
-      // Spend over the most recent 6h (or all history if shorter), divided by the
-      // span, using the positive-increment sum so a shrinking counter can't zero it.
-      const start = latest.timestamp - 6 * 3600e3;
-      let anchorTs = null;
-      for (const e of hist) { if (e.models && e.timestamp >= start) { anchorTs = e.timestamp; break; } }
-      if (anchorTs == null) { for (const e of hist) { if (e.models) { anchorTs = e.timestamp; break; } } }
-      if (anchorTs == null || anchorTs >= latest.timestamp) return null;
-      // Same discontinuity ceiling as the hourly buckets so a one-time re-seed
-      // jump can't inflate the run-rate either.
-      const ceiling = costDiscontinuityCeiling(hist, rate);
-      const spend = costSpendBetween(hist, rate, anchorTs, latest.timestamp, ceiling);
-      const dMs = latest.timestamp - anchorTs;
-      if (spend == null || !(dMs > 0) || !(spend > 0)) return null;
-      return spend / dMs; // $ per ms
-    }
-
-    function costTrendHtml() {
-      const cfg = COST_RANGES[_costRange];
+    // `now` is injectable for tests; renders use the wall clock.
+    function costTrendHtml(now) {
+      const win = costWindow(now);
       const pills = Object.keys(COST_RANGES).map(k =>
         `<button data-cost-range="${k}" class="${k === _costRange ? 'active' : ''}">${COST_RANGES[k].label}</button>`
       ).join('');
@@ -12374,7 +12449,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           <input type="datetime-local" id="cost-custom-end" value="${toLocal(_costCustom.end)}" data-change-action="costCustomChanged" title="Custom range end">
         </div>`;
       }
-      const buckets = costBuckets();
+      const buckets = costBuckets(win);
       const withData = buckets.filter(b => b.hasData);
       const total = withData.reduce((s, b) => s + b.spend, 0);
       const max = Math.max(...buckets.map(b => b.spend), 0);
@@ -12401,44 +12476,27 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const overlay = allZero
           ? `<div class="cost-bars-note">no spend recorded in this range</div>`
           : '';
-        // Show first, middle, and last axis labels to avoid crowding.
-        const first = buckets[0], mid = buckets[Math.floor(buckets.length / 2)], last = buckets[buckets.length - 1];
         body = `<div class="cost-bars-wrap"><div class="cost-bars">${bars}</div>${overlay}</div>
-          <div class="cost-bars-axis"><span>${esc(costBucketAxisLabel(first))}</span><span>${esc(costBucketAxisLabel(mid))}</span><span>${esc(costBucketAxisLabel(last))}</span></div>`;
+          <div class="cost-bars-axis">${costAxisLabelsHtml(buckets, win)}</div>`;
       }
 
       const totalLabel = 'spend in selected range';
-      // Spend during the selected range. Agents are always running, so a bare
-      // $0.00 is misleading — when the range has no computable delta (too few snapshots,
-      // or a price-table shift zeroed the cumulative delta), estimate it from the
-      // run-rate × range length and mark it approximate (~).
-      const rate = costRunRate(); // $ per ms, or null
-      const rangeMs = _costRange === 'custom'
-        ? Math.max(_costCustom.end - _costCustom.start, 60e3)
-        : cfg.windowMs;
-      let spendStr, approx = false;
-      if (total > 0) {
-        spendStr = fmtUSD(total);
-      } else if (rate != null) {
-        spendStr = '~' + fmtUSD(rate * rangeMs); approx = true;
-      } else {
-        spendStr = fmtUSD(0);
-      }
-      // Run-rate normalized to a readable unit per range.
+      // Spend and run-rate come from the SAME window as the bars: the run-rate
+      // is that spend over the elapsed part of the window, in the unit of the
+      // bucket size (per hour for hourly bars, per day for daily bars).
+      const spendStr = fmtUSD(total);
+      const rate = costWindowRunRate(total, win); // $ per ms, or null
       let rateStr = '';
       if (rate != null) {
-        const perUnit = _costRange === 'hourly' ? rate * 3600e3
-          : _costRange === 'weekly' ? rate * 24 * 3600e3          // $/day within a week view
-          : _costRange === 'monthly' ? rate * 24 * 3600e3         // $/day within a month view
-          : rate * 24 * 3600e3;                                    // daily/custom → $/day
-        const unit = _costRange === 'hourly' ? '/hr' : '/day';
-        rateStr = ` &nbsp;·&nbsp; run-rate: <b>~${fmtUSD(perUnit)}${unit}</b>`;
+        const unit = costRunRateUnit(win);
+        rateStr = ` &nbsp;·&nbsp; run-rate: <b>~${fmtUSD(rate * unit.ms)}${unit.label}</b>`;
       }
+      const summaryTitle = `${costRangeTitle(win.start, win.end, win.bucketMs)} · elapsed ${fmtCostDuration(win.elapsedMs)}`;
       return `<div class="cost-trend">
         <div class="cost-trend-head">
           <div class="cost-range">${pills}</div>
           ${customControls}
-          <div class="cost-trend-total">${totalLabel}: <b>${spendStr}</b>${approx ? ' <span title="estimated from current run-rate — selected range had no computable delta">(est.)</span>' : ''}${rateStr}</div>
+          <div class="cost-trend-total" title="${esc(summaryTitle)}">${totalLabel}: <b>${spendStr}</b>${rateStr}</div>
         </div>
         ${body}
       </div>`;
@@ -13589,7 +13647,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     function renderStageTracker(data) {
-      if (data && typeof data === 'object') { _stageTracker = data; stageTrackerNoteMerges(data); }
+      if (data && typeof data === 'object') { _stageTracker = data; stageTrackerNoteMerges(data); stageTrackerNoteOpened(data); }
       const el = document.getElementById('activity-monitor-panel');
       if (!el) return;
       const d = _stageTracker;
@@ -13659,22 +13717,36 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       } catch (e) { /* keep the previous render */ }
     }
 
-    /* ---- Activity monitor merge sound (#13275) ----------------------------
-       Opt-in "bug zapper" when a PR the tab was already watching merges.
-       The detector is pure (stageTrackerMergeState + stageTrackerNewlyMerged,
-       run under node by stage_tracker_merge_sound_test.go): a PR counts as
-       newly merged when the previous payload listed it open and the next
-       one lists it merged — a stage at/after the terminal cap, or its key
-       in recently_merged (the audit log's pr_merged entries, which is how
-       a PR that simply dropped out of the open list is told apart from one
-       closed unmerged). First load has no previous payload, so it never
-       fires; issues never fire; a per-PR "zapped" set stops replays; N
-       merges in one refresh play at most STAGE_TRACKER_SOUND_MAX_PLAYS
-       zaps. The sound is synthesised with the Web Audio API (no asset, no
-       URL — the CSP allows neither): a short burst of crackling white
-       noise through a bandpass sweeping ~3.6 kHz → 1.2 kHz, plus a low
-       sine "thunk" at onset, all under one master gain. The AudioContext
-       is created lazily on a user gesture and resumed when suspended. */
+    /* ---- Activity monitor sounds (#13275) ---------------------------------
+       Opt-in "bug zapper" when a PR the tab was already watching merges,
+       and a short bee-like buzz when an issue or PR first appears.
+       The merge detector is pure (stageTrackerMergeState +
+       stageTrackerCarryOpen + stageTrackerNewlyMerged, run under node by
+       stage_tracker_merge_sound_test.go): a PR counts as newly merged when
+       an earlier payload listed it open and a later one lists it merged —
+       a stage at/after the terminal cap, or its key in recently_merged
+       (the audit log's pr_merged entries, which is how a PR that simply
+       dropped out of the open list is told apart from one closed
+       unmerged). The open list and the audit entry do not always land in
+       the same payload — a webhook-patched snapshot can drop the PR a poll
+       before the poller records the merge — so a PR seen open is carried
+       as "still open" after it vanishes until recently_merged settles it.
+       recently_merged may name the repo by its short name; it is matched
+       against the owner/name the items carry. First load has no previous
+       payload, so it never fires; issues never fire; a per-PR "zapped" set
+       stops replays; N merges in one refresh play at most
+       STAGE_TRACKER_SOUND_MAX_PLAYS zaps. The new-item detector
+       (stageTrackerOpenKeys + stageTrackerNewlyOpened) works the same way
+       on every item's key with a per-key "buzzed" set and the same cap.
+       Both sounds are synthesised with the Web Audio API (no asset, no
+       URL — the CSP allows neither). Zap: a short burst of crackling
+       white noise through a bandpass sweeping ~3.6 kHz → 1.2 kHz, plus a
+       low sine "thunk" at onset. Buzz: a sawtooth near 120 Hz with a ~30 Hz
+       amplitude tremolo through a lowpass, quieter than the zap. The
+       AudioContext is created lazily on a user gesture and resumed when
+       suspended; a context the autoplay policy still holds suspended at
+       play time re-arms the gesture listeners instead of queueing stale
+       voices. */
     const STAGE_TRACKER_SOUND_KEY = 'hive.tracker.sound';
     const STAGE_TRACKER_SOUND_MAX_PLAYS = 2;
     const STAGE_TRACKER_SOUND_OFFSET_S = 0.26;
@@ -13688,25 +13760,56 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_THUNK_HZ = 90;
     const STAGE_TRACKER_THUNK_S = 0.14;
     const STAGE_TRACKER_GAIN_FLOOR = 0.0001;
+    const STAGE_TRACKER_BUZZ_S = 0.18;
+    const STAGE_TRACKER_BUZZ_MASTER_GAIN = 0.2;
+    const STAGE_TRACKER_BUZZ_HZ = 120;
+    const STAGE_TRACKER_BUZZ_DRIFT_HZ = 14;
+    const STAGE_TRACKER_BUZZ_TREMOLO_HZ = 30;
+    const STAGE_TRACKER_BUZZ_TREMOLO_DEPTH = 0.45;
+    const STAGE_TRACKER_BUZZ_LOWPASS_HZ = 900;
+    const STAGE_TRACKER_BUZZ_ATTACK_S = 0.015;
     var _stageTrackerMergeState = null;
     var _stageTrackerZapped = {};
+    var _stageTrackerOpenState = null;
+    var _stageTrackerBuzzed = {};
     var _stageTrackerAudioCtx = null;
     var _stageTrackerSoundOn = false;
     var _stageTrackerSoundPrimed = false;
 
     function stageTrackerPRKey(repo, number) { return (repo || '') + '/pr#' + (Number(number) || 0); }
+    function stageTrackerItemKey(it) { return (it.repo || '') + '/' + (it.kind || '') + '#' + (Number(it.number) || 0); }
 
-    // Pure: PR key → merged? for one payload. Issues are not tracked.
+    // Pure: PR key → merged? for one payload. Issues are not tracked. A
+    // recently_merged repo given by its short name is resolved against the
+    // owner/name of the items when exactly one item repo matches.
     function stageTrackerMergeState(d) {
       const out = {};
       if (!d || typeof d !== 'object') return out;
+      const byShort = {};
       for (const it of (Array.isArray(d.items) ? d.items : [])) {
         if (!it || it.kind !== 'pr') continue;
         out[stageTrackerPRKey(it.repo, it.number)] = (Number(it.stage) || 0) >= STAGE_TRACKER_TERMINAL;
+        const repo = String(it.repo || '');
+        const slash = repo.lastIndexOf('/');
+        if (slash > 0) { const short = repo.slice(slash + 1); byShort[short] = (short in byShort && byShort[short] !== repo) ? '' : repo; }
       }
       for (const m of (Array.isArray(d.recently_merged) ? d.recently_merged : [])) {
-        if (m && m.repo && m.number) out[stageTrackerPRKey(m.repo, m.number)] = true;
+        if (!m || !m.repo || !m.number) continue;
+        const repo = String(m.repo);
+        const full = repo.indexOf('/') < 0 && byShort[repo] ? byShort[repo] : repo;
+        out[stageTrackerPRKey(full, m.number)] = true;
       }
+      return out;
+    }
+
+    // Pure: next plus every PR prev listed open that next no longer lists at
+    // all, kept as open. A PR the snapshot dropped before the audit log
+    // recorded its merge stays comparable until recently_merged settles it
+    // (or, when it was closed unmerged, for the life of the tab — a few keys).
+    function stageTrackerCarryOpen(prev, next) {
+      const out = Object.assign({}, next || {});
+      if (!prev) return out;
+      for (const k of Object.keys(prev)) if (prev[k] === false && !(k in out)) out[k] = false;
       return out;
     }
 
@@ -13717,12 +13820,37 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     function stageTrackerNoteMerges(d) {
-      const next = stageTrackerMergeState(d);
+      const next = stageTrackerCarryOpen(_stageTrackerMergeState, stageTrackerMergeState(d));
       const fresh = stageTrackerNewlyMerged(_stageTrackerMergeState, next).filter(k => !_stageTrackerZapped[k]);
       _stageTrackerMergeState = next;
       if (!fresh.length) return;
       fresh.forEach(k => { _stageTrackerZapped[k] = true; });
       if (_stageTrackerSoundOn && !document.hidden) stageTrackerPlayZap(Math.min(fresh.length, STAGE_TRACKER_SOUND_MAX_PLAYS));
+    }
+
+    // Pure: item key → true for every issue and PR one payload lists.
+    function stageTrackerOpenKeys(d) {
+      const out = {};
+      if (!d || typeof d !== 'object' || !Array.isArray(d.items)) return out;
+      for (const it of d.items) if (it && it.kind && Number(it.number) > 0) out[stageTrackerItemKey(it)] = true;
+      return out;
+    }
+
+    // Pure: keys listed in next that prev did not list, sorted. No prev, or
+    // an empty prev (first populated payload), → none: a page load never
+    // buzzes for everything already open.
+    function stageTrackerNewlyOpened(prev, next) {
+      if (!prev || !next || !Object.keys(prev).length) return [];
+      return Object.keys(next).filter(k => !(k in prev)).sort();
+    }
+
+    function stageTrackerNoteOpened(d) {
+      const next = stageTrackerOpenKeys(d);
+      const fresh = stageTrackerNewlyOpened(_stageTrackerOpenState, next).filter(k => !_stageTrackerBuzzed[k]);
+      _stageTrackerOpenState = next;
+      if (!fresh.length) return;
+      fresh.forEach(k => { _stageTrackerBuzzed[k] = true; });
+      if (_stageTrackerSoundOn && !document.hidden) stageTrackerPlayBuzz(Math.min(fresh.length, STAGE_TRACKER_SOUND_MAX_PLAYS));
     }
 
     function stageTrackerAudioContext() {
@@ -13735,11 +13863,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     // Prime the context on the first gesture after load when sound was left
     // on in a previous visit, so a merge that lands before the user clicks
-    // anything in the tracker can still play (autoplay policy).
+    // anything in the tracker can still play (autoplay policy). Re-armed
+    // whenever a play finds the context still suspended: the gesture that
+    // created it may have been consumed, or it was created outside one.
     function stageTrackerSoundPrime() {
       if (_stageTrackerSoundPrimed) return;
       _stageTrackerSoundPrimed = true;
-      const prime = () => { if (_stageTrackerSoundOn) stageTrackerAudioContext(); };
+      const prime = () => { _stageTrackerSoundPrimed = false; if (_stageTrackerSoundOn) stageTrackerAudioContext(); };
       document.addEventListener('pointerdown', prime, { once: true, passive: true });
       document.addEventListener('keydown', prime, { once: true, passive: true });
     }
@@ -13778,17 +13908,59 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       osc.start(at); osc.stop(at + STAGE_TRACKER_THUNK_S);
     }
 
-    function stageTrackerPlayZap(count) {
+    // A bee passing by: a sawtooth that drifts down a few Hz, chopped by a
+    // ~30 Hz tremolo on its gain, rounded off through a lowpass.
+    function stageTrackerBuzzVoice(ctx, out, at) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(STAGE_TRACKER_BUZZ_HZ + STAGE_TRACKER_BUZZ_DRIFT_HZ, at);
+      osc.frequency.linearRampToValueAtTime(STAGE_TRACKER_BUZZ_HZ, at + STAGE_TRACKER_BUZZ_S);
+      const low = ctx.createBiquadFilter();
+      low.type = 'lowpass';
+      low.frequency.value = STAGE_TRACKER_BUZZ_LOWPASS_HZ;
+      const trem = ctx.createGain();
+      trem.gain.value = 1 - STAGE_TRACKER_BUZZ_TREMOLO_DEPTH;
+      const lfo = ctx.createOscillator();
+      lfo.type = 'sine';
+      lfo.frequency.value = STAGE_TRACKER_BUZZ_TREMOLO_HZ;
+      const depth = ctx.createGain();
+      depth.gain.value = STAGE_TRACKER_BUZZ_TREMOLO_DEPTH;
+      lfo.connect(depth); depth.connect(trem.gain);
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(STAGE_TRACKER_GAIN_FLOOR, at);
+      env.gain.exponentialRampToValueAtTime(1, at + STAGE_TRACKER_BUZZ_ATTACK_S);
+      env.gain.setValueAtTime(1, at + STAGE_TRACKER_BUZZ_S * 0.6);
+      env.gain.exponentialRampToValueAtTime(STAGE_TRACKER_GAIN_FLOOR, at + STAGE_TRACKER_BUZZ_S);
+      osc.connect(low); low.connect(trem); trem.connect(env); env.connect(out);
+      osc.start(at); lfo.start(at);
+      osc.stop(at + STAGE_TRACKER_BUZZ_S); lfo.stop(at + STAGE_TRACKER_BUZZ_S);
+    }
+
+    // Schedules count voices (capped) from startOffsetS under one master
+    // gain. A context the autoplay policy still holds suspended gets no
+    // voices — they would all burst out together on the next gesture — and
+    // re-arms the gesture priming instead.
+    function stageTrackerPlayVoices(voice, count, gain, startOffsetS) {
       const ctx = stageTrackerAudioContext();
       if (!ctx) return false;
+      if (ctx.state === 'suspended') { stageTrackerSoundPrime(); return false; }
       try {
         const master = ctx.createGain();
-        master.gain.value = STAGE_TRACKER_SOUND_MASTER_GAIN;
+        master.gain.value = gain;
         master.connect(ctx.destination);
         const n = Math.max(1, Math.min(Number(count) || 1, STAGE_TRACKER_SOUND_MAX_PLAYS));
-        for (let i = 0; i < n; i++) stageTrackerZapVoice(ctx, master, ctx.currentTime + i * STAGE_TRACKER_SOUND_OFFSET_S);
+        const at = ctx.currentTime + (Number(startOffsetS) || 0);
+        for (let i = 0; i < n; i++) voice(ctx, master, at + i * STAGE_TRACKER_SOUND_OFFSET_S);
         return true;
       } catch { return false; }
+    }
+
+    function stageTrackerPlayZap(count, startOffsetS) {
+      return stageTrackerPlayVoices(stageTrackerZapVoice, count, STAGE_TRACKER_SOUND_MASTER_GAIN, startOffsetS);
+    }
+
+    function stageTrackerPlayBuzz(count, startOffsetS) {
+      return stageTrackerPlayVoices(stageTrackerBuzzVoice, count, STAGE_TRACKER_BUZZ_MASTER_GAIN, startOffsetS);
     }
 
     function stageTrackerSoundSyncButton() {
@@ -13797,7 +13969,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const on = _stageTrackerSoundOn;
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
       b.textContent = on ? '🔊' : '🔇';
-      const label = on ? 'Merge sound on — turn off' : 'Merge sound off — turn on (plays a test zap)';
+      const label = on ? 'Sound on (merge zap + new-item buzz) — turn off' : 'Sound off — turn on (merge zap + new-item buzz; plays a test of each)';
       b.setAttribute('aria-label', label);
       b.setAttribute('title', label);
     }
@@ -13809,12 +13981,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     // Toolbar speaker chip: flips the preference, persists it, and plays one
-    // test zap when turning on so the user hears what they opted into.
+    // test zap then one buzz when turning on so the user hears both sounds
+    // they opted into.
     function hamSoundToggle() {
       _stageTrackerSoundOn = !_stageTrackerSoundOn;
       try { localStorage.setItem(STAGE_TRACKER_SOUND_KEY, _stageTrackerSoundOn ? '1' : '0'); } catch {}
       stageTrackerSoundSyncButton();
-      if (_stageTrackerSoundOn) { stageTrackerSoundPrime(); stageTrackerPlayZap(1); }
+      if (_stageTrackerSoundOn) { stageTrackerPlayZap(1); stageTrackerPlayBuzz(1, STAGE_TRACKER_ZAP_S + STAGE_TRACKER_SOUND_OFFSET_S); }
     }
 
     function parseCadenceMinutes(cadence) {
@@ -19228,6 +19401,23 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return rows.map(row => `${Number(row?.count || 0)} ${row?.label || row?.key || 'other'}`).join(' · ');
     }
 
+    // overviewStaleSince is the earliest countsStaleSince over the selected
+    // repos, or the server's staleSince when every repo is selected.
+    function overviewStaleSince(repos) {
+      if (_overviewKPILocalScope === 'all' && window._lastStatus?.staleSince) return window._lastStatus.staleSince;
+      let earliest = '';
+      (repos || []).forEach(r => {
+        if (!r || !r.countsStale || !r.countsStaleSince) return;
+        if (!earliest || r.countsStaleSince < earliest) earliest = r.countsStaleSince;
+      });
+      return earliest;
+    }
+    function fmtOverviewStaleSince(ts) {
+      if (typeof formatDashboardDateTime === 'function') return formatDashboardDateTime(ts, undefined, String(ts || ''));
+      const t = new Date(ts || '').getTime();
+      return Number.isFinite(t) ? new Date(t).toISOString() : String(ts || '');
+    }
+
     function renderOverviewTotalPartitionSubline(equation) {
       if (!equation) return '';
       const count = key => overviewEquationTermCount(equation, key);
@@ -19362,11 +19552,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         { key: 'outside', field: 'overviewOutside', label: 'Outside', value: outside, rawValue: outside, color: 'var(--muted)', tip: `${outside} outside = ${outsideIssues} issues + ${outsidePRs} PRs. Open items excluded before they enter Overview bands by this hive's scanner settings, and draft PRs. Click to filter Projects.`, subline: renderOverviewSplitSubline(outside, outsideIssues, outsidePRs, 'outside'), infoHTML: outsideInfo }
       ];
       const coverageCard = overviewCoverageCard();
-      const snapshotComplete = !(repos || []).some(r => r && r.countsIncomplete) && !(_overviewKPILocalScope === 'all' && window._lastStatus?.overviewKPIIncomplete);
+      const snapshotComplete = !(repos || []).some(r => r && (r.countsIncomplete || r.countsStale)) && !(_overviewKPILocalScope === 'all' && window._lastStatus?.overviewKPIIncomplete);
       if (snapshotComplete) overviewKPIRecordLocal(overviewKPICurrentSample(coverageCard ? cards.concat([coverageCard]) : cards));
       const ops = ['+', '=', '+', '+', '+', '+', '+'];
       const equationLabel = `${openIssues} total open issues + ${openPRs} total open PRs = ${actionableNow} actionable now + ${yourTurn} your turn + ${waiting} waiting on someone else + ${held} held + ${blocked} blocked + ${outside} outside`;
-      return `<div class="overview-headline sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}<div class="overview-kpis" aria-label="${esc(equationLabel)}">${cards.map((card, i) => {
+      // Last-good figures after a refused enumeration (#13382) or a failed
+      // forgestate reconcile (#13376) are current as of staleSince, not
+      // zero; say so beside the KPIs.
+      const staleSince = overviewStaleSince(repos);
+      const staleBadge = staleSince ? `<span class="overview-kpi-stale" role="status" title="GitHub refused the latest enumeration or count reconcile (rate limit or outage). These figures are the last successful read plus webhook updates since, as of ${esc(fmtOverviewStaleSince(staleSince))}; the hourly reconcile clears this.">⚠ stale since ${esc(fmtOverviewStaleSince(staleSince))}${(() => { const ago = relativeTimeShort(staleSince); return ago ? ` (${esc(ago)})` : ''; })()} · serving last-good</span>` : '';
+      return `<div class="overview-headline sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}${staleBadge}<div class="overview-kpis" aria-label="${esc(equationLabel)}">${cards.map((card, i) => {
         const value = card.value;
         const n = Number(card.rawValue);
         const attrs = Number.isFinite(n) ? ` data-overview-kpi-key="${esc(card.key)}" data-overview-kpi-value="${n}" data-overview-kpi-display="${esc(String(value ?? '—'))}"` : '';
@@ -23128,7 +23323,8 @@ function burnAreaChart() {
     function costCountLabel(cost, count, unitLabel, outcomeWindow) {
       if (!cost || !cost.count_available) return 'counts unavailable (GitHub rate-limited)';
       const n = Number(count) || 0;
-      const stale = cost.count_stale ? ` · ${cost.count_status || 'stale'}` : '';
+      const staleSince = cost.count_stale && cost.count_stale_since ? ` since ${fmtOverviewStaleSince(cost.count_stale_since)}` : '';
+      const stale = cost.count_stale ? ` · ${cost.count_status || 'stale'}${staleSince}` : '';
       const window = outcomeWindow ? ` ${outcomeWindow}` : '';
       return `${formatNumber(n, 'en-US')} ${unitLabel}${window}${stale}`;
     }
@@ -37199,7 +37395,12 @@ function burnAreaChart() {
       const at = rs && rs.attempt ? rs.attempt : null;
       if (at && at.state && at.state !== 'never') {
         const when = at.completedAt || at.at || '';
-        const label = at.state.replace('_', ' ');
+        let label = at.state.replace('_', ' ');
+        // A superseded success is history: say so, and name the running build
+        // so "succeeded · 1d ago" is not read as the age of what runs.
+        if (at.superseded && at.state === 'succeeded') {
+          label = 'superseded' + (at.rolledExternally ? ' (rolled externally' + (at.runningCommit ? ', now ' + at.runningCommit : '') + ')' : '');
+        }
         return { text: 'Last upgrade: ' + label + (when ? ' · ' + relativeAge(when) : ''), title: when || label };
       }
       const mu = v && v.manualUpgrade;
@@ -37886,16 +38087,20 @@ function burnAreaChart() {
       var at = rs.attempt || {};
       var aTone = 'muted', aIcon = 'ⓘ', aLabel = '';
       var hideAttemptRow = false;
+      var supersededNote = '';
       var targetShort = at.target ? versionShortSHA(at.target) : '';
       switch (at.state) {
         case 'succeeded':
           if (at.superseded && at.runningCommit) {
             // The recorded upgrade landed but the hive has since been rolled to
             // another commit: headline the running commit (the one the version
-            // menu shows) so the old target is not read as the current version.
+            // menu shows) and age the RUNNING build, not the superseded
+            // attempt. The superseded note moves to the secondary line with
+            // its own timestamp so the two ages are never conflated.
             aTone = 'muted'; aIcon = '↷';
             aLabel = 'Running <strong>' + escapeHtml(at.runningCommit) + '</strong>' +
-              (targetShort ? ' <span class="text-muted">(last spoke-side upgrade to ' + escapeHtml(targetShort) + ' superseded)</span>' : '');
+              (at.rolledExternally ? ' <span class="text-muted">(rolled externally)</span>' : '');
+            supersededNote = targetShort ? 'Last spoke-side upgrade to ' + targetShort + ' superseded' : '';
             break;
           }
           aTone = 'success'; aIcon = '✅';
@@ -37924,15 +38129,34 @@ function burnAreaChart() {
           hideAttemptRow = true;
           break;
       }
-      // Timestamp — relative at a glance, absolute in the tooltip.
-      var when = at.completedAt || at.at || '';
+      // Timestamp — relative at a glance, absolute in the tooltip. For a
+      // superseded attempt the headline names the running build, so its age
+      // must be the running build's (runningSince), never the superseded
+      // attempt's completedAt — that is what made a build rolled hours ago
+      // read "1d ago".
+      var attemptWhen = at.completedAt || at.at || '';
+      var when = attemptWhen;
+      var whenTitle = '';
+      if (supersededNote) {
+        when = at.runningSince || '';
+        if (when) whenTitle = 'running since ' + when;
+      }
       var whenHtml = '';
       if (when) {
-        whenHtml = ' · <span class="text-muted" title="' + escapeHtml(when) + '">' + escapeHtml(relativeAge(when)) + '</span>';
+        whenHtml = ' · <span class="text-muted" title="' + escapeHtml(whenTitle || when) + '">' + escapeHtml(relativeAge(when)) + '</span>';
       }
       var detail = at.detail || '';
       if (targetShort && /hive is running/i.test(detail) && detail.toLowerCase().indexOf(targetShort.toLowerCase()) >= 0) detail = '';
       var detailHtml = detail ? '<div class="release-status-detail">' + escapeHtml(detail) + '</div>' : '';
+      if (supersededNote) {
+        // Secondary line: what the spoke upgrader last did, with its own age.
+        // Once that attempt predates the running build it is plain history.
+        var noteAge = attemptWhen ? relativeAge(attemptWhen) : '';
+        var noteOld = attemptWhen && when && Date.parse(attemptWhen) < Date.parse(when);
+        detailHtml = '<div class="release-status-detail' + (noteOld ? ' text-muted' : '') + '" title="' + escapeHtml(at.detail || '') + '">' +
+          escapeHtml(supersededNote) + (noteAge ? ' · <span title="' + escapeHtml(attemptWhen) + '">' + escapeHtml(noteAge) + '</span>' : '') +
+          '</div>';
+      }
 
       // --- Staleness warning: never present stale data as current truth. ---
       var staleHtml = '';

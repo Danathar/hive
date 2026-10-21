@@ -251,22 +251,21 @@ func TestAdvisorSpendParams(t *testing.T) {
 }
 
 // TestAdvisorSpendRangesMatchCostSelector pins the preset windows to the Cost
-// section's COST_RANGES so the two never report different "daily" spans.
+// section's costWindow constants so the two never report different spans.
 func TestAdvisorSpendRangesMatchCostSelector(t *testing.T) {
 	html := indexHTML(t)
 	for _, want := range []string{
-		"hourly:  { label: 'hourly',  bucketMs: 3600e3,        windowMs: 24 * 3600e3,",
-		"daily:   { label: 'daily',   bucketMs: 24 * 3600e3,   windowMs: 30 * 24 * 3600e3,",
-		"weekly:  { label: 'weekly',  bucketMs: 7 * 24 * 3600e3, windowMs: 12 * 7 * 24 * 3600e3,",
-		"monthly: { label: 'monthly', bucketMs: 30 * 24 * 3600e3, windowMs: 12 * 30 * 24 * 3600e3,",
+		"const COST_HOURLY_WINDOW_H = 24;",
+		"const COST_DAILY_WINDOW_DAYS = 7;",
+		"const COST_WEEK_DAYS = 7;",
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("COST_RANGES changed; update advisorSpendRanges to match: missing %q", want)
+			t.Errorf("cost window constants changed; update advisorSpendRanges to match: missing %q", want)
 		}
 	}
-	if advisorSpendRanges["hourly"] != 24*time.Hour || advisorSpendRanges["daily"] != 30*24*time.Hour ||
-		advisorSpendRanges["weekly"] != 12*7*24*time.Hour || advisorSpendRanges["monthly"] != 12*30*24*time.Hour {
-		t.Errorf("advisorSpendRanges drifted from COST_RANGES: %v", advisorSpendRanges)
+	if advisorSpendRanges["hourly"] != 24*time.Hour || advisorSpendRanges["daily"] != 7*24*time.Hour ||
+		advisorSpendRanges["weekly"] != 7*24*time.Hour || advisorSpendRanges["monthly"] != 30*24*time.Hour {
+		t.Errorf("advisorSpendRanges drifted from costWindow: %v", advisorSpendRanges)
 	}
 }
 
