@@ -15,15 +15,42 @@ import (
 )
 
 const (
-	stageRepoA  = ContributionFixtureRepoA
-	stageRepoB  = ContributionFixtureRepoB
-	stageHubOne = ContributionFixtureHubOne
-	stageHubTwo = ContributionFixtureHubTwo
+	stageRepoA  = "github/github.com/org/a"
+	stageRepoB  = "github/github.com/org/b"
+	stageHubOne = "https://one.example"
+	stageHubTwo = "https://two.example"
 )
 
 // stageFixture is the shared fixture every tree surface's tests also use.
 func stageFixture() (*ProfileSet, []TreeHubSnapshot, map[string]TreeRepositorySnapshot) {
-	return ContributionStageFixture()
+	return stageFixtureData()
+}
+
+// stageFixtureData mirrors hivectltest.ContributionStageFixture, which cannot be
+// imported here without an import cycle. Keep the two in sync: any edit here
+// must be applied to pkg/hivectltest/contribution_fixture.go too, since the
+// surface tests compare against that copy; TestStageFixtureMatchesHivectltest
+// fails when they diverge. It returns two scoped subscriptions ("alpha", shared
+// across hubs one and two; "beta", on hub one only), both with complete
+// discovery of repositories a and b and nothing selected. Each call returns
+// fresh values the caller may modify.
+func stageFixtureData() (*ProfileSet, []TreeHubSnapshot, map[string]TreeRepositorySnapshot) {
+	set := &ProfileSet{Version: ProfilesVersion, Active: "alpha", Profiles: []Profile{
+		{Name: "alpha", Hub: "wss://alpha.example/contribute?token=endpoint-secret", RegistrationToken: "registration-secret", Selection: &RepositorySelection{Mode: SelectionSelected}},
+		{Name: "beta", Hub: "wss://beta.example/contribute", RegistrationToken: "other-secret", Selection: &RepositorySelection{Mode: SelectionSelected}},
+	}, Hubs: []HubEntry{
+		{Name: "one", URL: stageHubOne, Follow: HubFollowCurrentAndFutureRepos},
+		{Name: "two", URL: stageHubTwo, Follow: HubFollowCurrent},
+	}}
+	hubs := []TreeHubSnapshot{
+		{Name: "one", URL: stageHubOne, Discovery: TreeComplete, HiveOrigins: []string{"https://alpha.example", "https://beta.example"}},
+		{Name: "two", URL: stageHubTwo, Discovery: TreeComplete, HiveOrigins: []string{"https://alpha.example"}},
+	}
+	repos := map[string]TreeRepositorySnapshot{
+		"alpha": {Discovery: TreeComplete, Repositories: []string{stageRepoA, stageRepoB}},
+		"beta":  {Discovery: TreeComplete, Repositories: []string{stageRepoA, stageRepoB}},
+	}
+	return set, hubs, repos
 }
 
 func mustStage(t *testing.T, set *ProfileSet, hubs []TreeHubSnapshot, repos map[string]TreeRepositorySnapshot) *StagedEdits {
