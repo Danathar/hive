@@ -1070,10 +1070,32 @@ Notes:
 - **The Commons web UI is local-only.** `hivectl hives web` prints a
   tokenized `http://127.0.0.1:<port>/` URL, serves only on loopback, and backs
   the page with the same `profiles.yml` / generated `contributor.env` store as
-  the CLI and TUI. The page can subscribe (register) a hive, unsubscribe, drag
-  rows or use ↑/↓ to rank them, and choose `ranked`, `spread` or `neediest`.
-  The API and HTML never return registration tokens; the printed URL carries a
-  short-lived local UI token and should not be shared.
+  the CLI and TUI. Its Hub → Hive → Repository tree reads saved consent without
+  migrating legacy profiles. **Refresh membership** discovers public membership
+  without registering or enrolling anything; failed discovery remains incomplete.
+  Selection, exclusions, follow rules, enable/disable and **Review and restrict**
+  are staged through the shared contribution editor. **Apply** commits the reviewed
+  diff; **Discard** drops unsaved edits. Shared branches and cross-Hive exclusions
+  are named in the diff. An empty explicit selection stays idle; legacy scope
+  remains labelled **Unrestricted — legacy** until explicitly restricted.
+  **Saved**, **Relay reload**, and **Acknowledged** are separate receipt fields.
+  A partial projection failure requires retrying Apply; a successful reload signal
+  is not acknowledgement. Readiness and activity remain **unavailable** until
+  evidence is integrated. Existing subscription, rank and strategy controls save
+  separately after an explicit Apply; pending tree edits must be applied or
+  discarded first.
+  Arrow keys expand/collapse and move through the tree, Space stages selection,
+  and Tab reaches search, row actions, Apply and Discard. Search keeps ancestry;
+  refreshing a staged review preserves edits and focus. Back, in-page navigation
+  and **Leave page** use a styled discard dialog. Browser toolbar reload and tab
+  close cannot show a custom dialog and abandon unsaved browser reviews; there is
+  no native confirmation prompt. Reviews are process-local, bounded to 64 tabs,
+  and abandoned reviews can expire after eight hours.
+  The API and HTML never return registration tokens, provider credentials or
+  GitHub tokens. API calls require the local token header and valid loopback
+  Host/same-origin requests. The printed URL carries a process-lifetime local UI
+  token and should not be shared; the page removes it from browser history.
+  No third-party assets are loaded.
 - **Concurrent edits are never silently lost.** The CLI, the TUI and the web
   UI all commit `profiles.yml` under a shared owner-only lock file
   (`profiles.yml.lock`) and only if the file is still the revision they loaded.

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,8 +36,8 @@ func newHivesWebCommand(env *commandEnv) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
 		Short: "Serve a loopback-only The Commons web UI",
-		Long: "Serves a local, token-authenticated page for subscribing to hives, " +
-			"unsubscribing, changing rank order and choosing The Commons routing strategy. " +
+		Long: "Serves a local, token-authenticated contribution tree with staged Apply/Discard, " +
+			"plus subscription, rank order and The Commons routing strategy controls. " +
 			"The server binds only to loopback and never returns registration tokens.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return env.runHivesWeb(cmd, opts)
@@ -111,13 +112,15 @@ func randomCommonsWebToken() (string, error) {
 }
 
 type commonsWebServer struct {
-	deps  *hivesDeps
-	token string
-	mu    sync.Mutex
+	deps     *hivesDeps
+	token    string
+	mu       sync.Mutex
+	stages   map[string]*commonsWebStage
+	discover func(context.Context, *hivectl.ProfileSet) ([]hivectl.TreeHubSnapshot, map[string]hivectl.TreeRepositorySnapshot)
 }
 
 func newCommonsWebServer(deps *hivesDeps, token string) http.Handler {
-	return &commonsWebServer{deps: deps, token: token}
+	return &commonsWebServer{deps: deps, token: token, stages: make(map[string]*commonsWebStage), discover: discoverCommonsTree}
 }
 
 func (s *commonsWebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +145,10 @@ func (s *commonsWebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.URL.Path == "/api/tree" && r.Method == http.MethodGet:
+		s.handleTree(w, r)
+	case (r.URL.Path == "/api/tree/diff" || r.URL.Path == "/api/tree/apply" || r.URL.Path == "/api/tree/discard") && r.Method == http.MethodPost:
+		s.handleTreeEdit(w, r)
 	case r.URL.Path == "/api/hives" && r.Method == http.MethodGet:
 		s.handleList(w, r)
 	case r.URL.Path == "/api/hives" && r.Method == http.MethodPost:
@@ -235,7 +242,7 @@ type commonsWebListResponse struct {
 func (s *commonsWebServer) handleList(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	set, err := s.loadSet(true)
+	set, err := s.reviewSet()
 	if err != nil {
 		writeCommonsError(w, err)
 		return
@@ -266,7 +273,7 @@ func commonsWebResponse(store *hivectl.ProfileStore, set *hivectl.ProfileSet) co
 	for i, profile := range set.Ordered() {
 		resp.Hives = append(resp.Hives, commonsWebHive{
 			Name:          profile.Name,
-			Hub:           profile.Hub,
+			Hub:           commonsWebOrigin(profile.Hub),
 			ContributorID: profile.ContributorID,
 			Session:       profile.Session,
 			Active:        active != nil && strings.EqualFold(active.Name, profile.Name),
@@ -478,7 +485,7 @@ func decodeCommonsJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, commonsWebReadBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		http.Error(w, "bad JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad JSON", http.StatusBadRequest)
 		return false
 	}
 	return true
@@ -491,15 +498,19 @@ func writeCommonsJSON(w http.ResponseWriter, v any) {
 
 func writeCommonsError(w http.ResponseWriter, err error) {
 	code := http.StatusBadRequest
+	message := "hive operation failed; check the local configuration and retry"
 	switch {
 	case errors.Is(err, hivectl.ErrNoProfiles) || errors.Is(err, hivectl.ErrProfileNotFound):
 		code = http.StatusNotFound
 	case errors.Is(err, hivectl.ErrStaleRevision):
 		code = http.StatusConflict
-		err = errors.New("the hive profiles were changed by hivectl, the TUI or another tab after this page loaded; nothing was saved — reload and review the current hives before retrying (requires renewed review)")
+		message = "the hive profiles were changed by hivectl, the TUI or another tab after this page loaded; nothing was saved — reload and review the current hives before retrying (requires renewed review)"
 	}
-	http.Error(w, err.Error(), code)
+	http.Error(w, message, code)
 }
+
+//go:embed hives_web_tree.js
+var commonsWebTreeJS string
 
 var commonsWebTemplate = template.Must(template.New("commons").Parse(`<!doctype html>
 <html lang="en">
@@ -507,10 +518,21 @@ var commonsWebTemplate = template.Must(template.New("commons").Parse(`<!doctype 
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>The Commons — Hive</title>
 <style>
-:root{color-scheme:light dark;font-family:system-ui,sans-serif;line-height:1.4}body{max-width:920px;margin:2rem auto;padding:0 1rem}button,input,select{font:inherit}table{width:100%;border-collapse:collapse;margin-top:1rem}th,td{border-bottom:1px solid #8884;padding:.45rem;text-align:left}.muted{color:#777}.row-actions{white-space:nowrap}.error{color:#b00020}.ok{color:#087f23}form{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}input[type=text]{min-width:16rem;flex:1}.pill{border:1px solid #8886;border-radius:999px;padding:.1rem .45rem;font-size:.85em}.modal-back{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50}.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;max-width:420px;width:90%}.modal div{display:flex;gap:8px;justify-content:flex-end}.modal button{border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:#fff;cursor:pointer}.modal [data-act=yes]{background:#b42318;color:#fff;border-color:#b42318}
+:root{--card:Canvas;--border:GrayText;color-scheme:light dark;font-family:system-ui,sans-serif;line-height:1.4}body{max-width:920px;margin:2rem auto;padding:0 1rem}button,input,select{font:inherit}table{width:100%;border-collapse:collapse;margin-top:1rem}th,td{border-bottom:1px solid #8884;padding:.45rem;text-align:left}.muted{color:#777}.row-actions{white-space:nowrap}.error{color:#b00020}.ok{color:#087f23}form{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}input[type=text]{min-width:16rem;flex:1}.pill{border:1px solid #8886;border-radius:999px;padding:.1rem .45rem;font-size:.85em}
+
+:focus-visible{outline:3px solid #327bd6;outline-offset:3px}button{cursor:pointer}button:disabled,button[aria-disabled=true]{cursor:default;opacity:.65}#contribution-tree,[role=group]{list-style:none;padding-left:1rem}.tree-row{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;padding:.4rem;border-bottom:1px solid #8884}.identity{overflow-wrap:anywhere;flex:1;min-width:10rem}.tree-meta{font-size:.85em;overflow-wrap:anywhere}.staging{position:sticky;bottom:0;background:Canvas;border:1px solid GrayText;padding:.7rem;z-index:2}.staging pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:15rem;overflow:auto}.tree-tools{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}table{display:block;overflow:auto}#tree-receipt{white-space:pre-wrap}dialog{background:Canvas;color:CanvasText;border:1px solid GrayText;border-radius:12px;max-width:28rem}dialog::backdrop{background:#0008}
 </style>
 <h1>The Commons</h1>
 <p class="muted">This loopback-only page edits the same local profile store as <code>hivectl hives</code> and the TUI. Registration tokens are never displayed.</p>
+<section aria-labelledby="tree-title">
+<h2 id="tree-title">Contribution tree</h2>
+<p>Review current membership, then Apply. Following is separate from selection; deselecting current membership retains follow rules, which can repopulate it. Readiness and activity are unavailable until relay evidence is connected.</p>
+<div class="tree-tools"><label>Search <input id="tree-search" type="search"></label><button id="tree-refresh">Refresh membership</button><button id="tree-leave">Leave page</button></div>
+<ul id="contribution-tree" role="tree" aria-label="Hub, Hive and repository contributions"></ul>
+<div class="staging" aria-labelledby="diff-title"><h3 id="diff-title">Staged changes</h3><p id="diff-summary">No staged changes.</p><details><summary>Named targets and shared effects</summary><pre id="tree-diff"></pre></details><button id="tree-apply" disabled>Apply</button> <button id="tree-discard" disabled>Discard</button><p id="tree-receipt"></p></div>
+</section>
+<h2>Profile management</h2>
+<p>These existing controls save separately. Apply or discard tree edits first.</p>
 <section>
   <label>Routing strategy
     <select id="strategy">
@@ -519,14 +541,14 @@ var commonsWebTemplate = template.Must(template.New("commons").Parse(`<!doctype 
       <option value="neediest">neediest — queued work + idle capacity</option>
     </select>
   </label>
-  <button id="save-strategy">Save strategy</button>
+  <button id="save-strategy">Apply strategy</button>
 </section>
 <form id="subscribe">
-  <input id="name" type="text" required placeholder="profile name, e.g. acme">
-  <input id="hub" type="text" required placeholder="wss://hive.example/contribute">
-  <button>Subscribe</button>
+  <input id="name" aria-label="Profile name" type="text" required placeholder="profile name, e.g. acme">
+  <input id="hub" aria-label="Hive URL" type="text" required placeholder="wss://hive.example/contribute">
+  <button>Apply subscription</button>
 </form>
-<div id="message" class="muted"></div>
+<div id="message" class="muted" role="status" aria-live="polite" aria-atomic="true"></div>
 <table>
   <thead><tr><th>Rank</th><th>Hive</th><th>Hub</th><th>Contributor</th><th>Session</th><th>Actions</th></tr></thead>
   <tbody id="hives"></tbody>
@@ -559,7 +581,6 @@ async function load(){
   body.textContent = '';
   for (const h of data.hives || []) {
     const tr = document.createElement('tr');
-    tr.draggable = true;
     tr.dataset.name = h.name;
     tr.innerHTML = '<td>' + h.rank + '</td><td><strong></strong> <span class="pill" hidden>active</span></td><td></td><td></td><td></td><td class="row-actions"><button data-act="up">↑</button> <button data-act="down">↓</button> <button data-act="delete">Unsubscribe</button></td>';
     tr.children[1].querySelector('strong').textContent = h.name;
@@ -573,55 +594,55 @@ async function load(){
 document.getElementById('subscribe').addEventListener('submit', async ev => {
   ev.preventDefault();
   try {
+    if (!await leaveTreeEdits()) return;
     await api('/api/hives', {method:'POST', body: JSON.stringify({name: nameInput.value, hub: hubInput.value})});
-    ev.target.reset(); say('Subscribed.', 'ok'); await load();
+    ev.target.reset(); say('Subscribed.', 'ok'); await load(); await loadTree();
   } catch(e) { say(e.message, 'error'); }
+  finally { if(!review) await loadTree().catch(e => say(e.message, 'error')); }
 });
-function styledConfirm(message) {
+function styledConfirm(text, accept='Confirm') {
   return new Promise(resolve => {
-    const back = document.createElement('div');
-    back.className = 'modal-back';
-    back.innerHTML = '<div class="modal" role="dialog" aria-modal="true"><p></p><div><button data-act="no">Cancel</button><button data-act="yes">Confirm</button></div></div>';
-    back.querySelector('p').textContent = message;
-    function done(v) { document.removeEventListener('keydown', key, true); back.remove(); resolve(v); }
-    function key(e) { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); }
-    back.addEventListener('click', e => { if (e.target === back) done(false); const act = e.target.dataset && e.target.dataset.act; if (act) done(act === 'yes'); });
-    document.addEventListener('keydown', key, true);
-    document.body.appendChild(back);
-    back.querySelector('[data-act="yes"]').focus();
+    const previous = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('aria-labelledby', 'confirm-message');
+    const p = document.createElement('p'); p.id = 'confirm-message'; p.textContent = text;
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const yes = document.createElement('button'); yes.textContent = accept;
+    dialog.append(p, cancel, yes); document.body.appendChild(dialog);
+    let finished = false;
+    function done(value) { if(finished) return; finished = true; dialog.close(); dialog.remove(); if(previous && previous.isConnected) previous.focus(); resolve(value); }
+    cancel.onclick = () => done(false); yes.onclick = () => done(true);
+    dialog.addEventListener('cancel', e => { e.preventDefault(); done(false); });
+    dialog.addEventListener('keydown', e => {
+      if(e.key !== 'Tab') return;
+      if(e.shiftKey && document.activeElement === cancel) { e.preventDefault(); yes.focus(); }
+      else if(!e.shiftKey && document.activeElement === yes) { e.preventDefault(); cancel.focus(); }
+    });
+    dialog.showModal(); cancel.focus();
   });
 }
 document.getElementById('save-strategy').addEventListener('click', async () => {
-  try { await api('/api/strategy', {method:'POST', body: JSON.stringify({strategy: strategySelect.value})}); say('Strategy saved.', 'ok'); await load(); }
+  try { if (!await leaveTreeEdits()) return; await api('/api/strategy', {method:'POST', body: JSON.stringify({strategy: strategySelect.value})}); say('Strategy saved.', 'ok'); await load(); await loadTree(); }
   catch(e) { say(e.message, 'error'); }
+  finally { if(!review) await loadTree().catch(e => say(e.message, 'error')); }
 });
 document.getElementById('hives').addEventListener('click', async ev => {
   const button = ev.target.closest('button'); if(!button) return;
   const tr = ev.target.closest('tr'); const name = tr.dataset.name;
   try {
-    if (button.dataset.act === 'delete') {
-      if (!await styledConfirm('Unsubscribe from ' + name + '?')) return;
+    const deleting = button.dataset.act === 'delete';
+    const question = deleting ? 'Unsubscribe from ' + name + '?' : 'Move ' + name + ' ' + button.dataset.act + ' in routing priority?';
+    if (!await styledConfirm(question, 'Apply') || !await leaveTreeEdits()) return;
+    if (deleting) {
       await api('/api/hives/' + encodeURIComponent(name), {method:'DELETE'});
     } else {
       await api('/api/hives/' + encodeURIComponent(name) + '/move', {method:'POST', body: JSON.stringify({direction: button.dataset.act})});
     }
-    say('Saved.', 'ok'); await load();
+    say('Saved.', 'ok'); await load(); await loadTree();
   } catch(e) { say(e.message, 'error'); }
+  finally { if(!review) await loadTree().catch(e => say(e.message, 'error')); }
 });
-let dragName = '';
-document.getElementById('hives').addEventListener('dragstart', ev => { const tr=ev.target.closest('tr'); dragName = tr ? tr.dataset.name : ''; });
-document.getElementById('hives').addEventListener('dragover', ev => ev.preventDefault());
-document.getElementById('hives').addEventListener('drop', async ev => {
-  ev.preventDefault();
-  const target = ev.target.closest('tr'); if(!dragName || !target || dragName === target.dataset.name) return;
-  try {
-    const rows = Array.from(document.querySelectorAll('#hives tr')).map(tr => tr.dataset.name);
-    let from = rows.indexOf(dragName), to = rows.indexOf(target.dataset.name);
-    while (from < to) { await api('/api/hives/' + encodeURIComponent(dragName) + '/move', {method:'POST', body: JSON.stringify({direction:'down'})}); from++; }
-    while (from > to) { await api('/api/hives/' + encodeURIComponent(dragName) + '/move', {method:'POST', body: JSON.stringify({direction:'up'})}); from--; }
-    say('Rank order saved.', 'ok'); await load();
-  } catch(e) { say(e.message, 'error'); }
-});
-load().catch(e => say(e.message, 'error'));
+` + commonsWebTreeJS + `
+Promise.all([load(), loadTree()]).catch(e => say(e.message, 'error'));
 </script>
 </html>`))
