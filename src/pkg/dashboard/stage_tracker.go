@@ -1002,7 +1002,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			default:
 				w := it.WorkPR
 				addPR(repoName, github.PullRequest{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Draft: w.Draft,
-					AppAuthored: w.AppAuthored, HiveAttributed: w.HiveAttributed, CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL}, nil, w.Bucket, w.Reason)
+					AppAuthored: w.AppAuthored, HiveAttributed: w.HiveAttributed, CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, LinkedIssues: w.LinkedIssues}, nil, w.Bucket, w.Reason)
 			}
 		}
 	}
@@ -1220,7 +1220,7 @@ func stageTrackerPRLinkedIssues(pr github.PullRequest, baseURL string) []StageTr
 		}
 		seen[li.Number] = true
 		out = append(out, StageTrackerLinkedIssue{
-			Number: li.Number, State: strings.ToLower(strings.TrimSpace(li.State)),
+			Number: li.Number, Title: li.Title, State: strings.ToLower(strings.TrimSpace(li.State)),
 			URL: overviewItemURL(li.URL, pr.Repo, li.Number, "issue", baseURL),
 		})
 	}

@@ -7531,7 +7531,11 @@ func runEvalCycle(
 	// review/link signals only — no mergeability or check-run fetches, a
 	// draft is not a merge candidate (hivecommons/hive#8968).
 	if !budgetDecision.SkipOptional {
-		ghClient.EnrichReviewSignals(ctx, actionable.PRs.StaleDrafts)
+		// Sidelined PRs (drafts, exempt labels) sit in the same column and
+		// need their closing references to pair with the issue they fix
+		// (hivecommons/hive#13421); one shared collector keeps the budget at
+		// one query per repo for both.
+		ghClient.EnrichReviewSignalsAndWorkPRs(ctx, actionable.PRs.StaleDrafts, actionable.WorkDetailsByRepo)
 	}
 
 	// Publish the human-facing "what should I merge next?" digest. This reads
