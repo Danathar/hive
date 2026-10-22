@@ -355,10 +355,16 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 	}
 	report.HeadSHA = c.canonicalVerdictHead(req, report.HeadSHA, auth.HeadSHA, prHead)
 	report.HiveAuthored = auth.HiveAuthored
-	// The review head comes from the dispatch record this verdict bound to,
-	// never the reviewer's own JSON: a head cannot claim to be another head,
-	// and an advisory admission carries none (hivecommons/hive#13542).
+	// The review head, and whether this is the decision step's reconciled
+	// report, come from the dispatch record this verdict bound to, never the
+	// reviewer's own JSON: a head cannot claim to be another head or to have
+	// decided, and an advisory admission carries neither
+	// (hivecommons/hive#13542). Only a decided report may carry dispositions.
 	report.Head = auth.ReviewHead
+	report.Decided = auth.Decided
+	if !report.Decided {
+		report.Dispositions = nil
+	}
 	dispatchBodyDigest := auth.BodyDigest
 	if review.ConcreteRemediationText(req.Body) {
 		report.ConcreteRemediation = true
@@ -402,6 +408,9 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 	if report.Head != "" {
 		name += "-" + verdictSlug(report.Head)
 	}
+	if report.Decided {
+		name += "-decided"
+	}
 	name += review.ReviewReportFileSuffix
 	path := filepath.Join(dir, name)
 
@@ -440,6 +449,9 @@ type verdictAuthorization struct {
 	BodyDigest   string
 	HiveAuthored bool
 	ReviewHead   string
+	// Decided marks a verdict bound to the review-heads decision step's
+	// dispatch: the reconciled report for its perspective (#13542).
+	Decided bool
 }
 
 func verdictRefused(reason string) verdictAuthorization {
@@ -462,7 +474,7 @@ func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req 
 		if c.sameVerdictAuthor(verdictAuthorAgent(p.AuthorAgent, report), req.Agent) {
 			return verdictRefused("author_self_approval")
 		}
-		return verdictAuthorization{OK: true, HeadSHA: p.HeadSHA, BodyDigest: p.BodyDigest, HiveAuthored: strings.TrimSpace(p.AuthorAgent) != "", ReviewHead: strings.TrimSpace(p.Head)}
+		return verdictAuthorization{OK: true, HeadSHA: p.HeadSHA, BodyDigest: p.BodyDigest, HiveAuthored: strings.TrimSpace(p.AuthorAgent) != "", ReviewHead: strings.TrimSpace(p.Head), Decided: p.Decision}
 	}
 	cutoff := now.Add(-review.RecentDispatchTTL)
 	for _, r := range state.Recent {
@@ -475,7 +487,7 @@ func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req 
 		if c.sameVerdictAuthor(verdictAuthorAgent(r.AuthorAgent, report), req.Agent) {
 			return verdictRefused("author_self_approval")
 		}
-		return verdictAuthorization{OK: true, HeadSHA: r.HeadSHA, BodyDigest: r.BodyDigest, HiveAuthored: strings.TrimSpace(r.AuthorAgent) != "", ReviewHead: strings.TrimSpace(r.Head)}
+		return verdictAuthorization{OK: true, HeadSHA: r.HeadSHA, BodyDigest: r.BodyDigest, HiveAuthored: strings.TrimSpace(r.AuthorAgent) != "", ReviewHead: strings.TrimSpace(r.Head), Decided: r.Decision}
 	}
 	// Queue-mode reviewer prompts can reach the relay through the ordinary
 	// PR-list comment path rather than a review-swarm dispatch. That still is

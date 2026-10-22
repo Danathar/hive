@@ -159,7 +159,11 @@ func TestHeadsReaskOnlyTheHeadThatHasNotReported(t *testing.T) {
 	}
 }
 
-func TestHeadsAggregateStrictestVerdictAndHeads(t *testing.T) {
+// Raw head reports are evidence, never a verdict (part 2 of #13542): until
+// the decision step records its reconciled reports, a disagreement between
+// heads leaves the PR head incomplete. Perspectives still shows the strictest
+// head's verdict, and Heads which heads answered, for the queue and planner.
+func TestHeadsRawReportsNeverRoute(t *testing.T) {
 	agg := AggregateReports([]PerspectiveReport{
 		{Repo: "acme/hive", Number: 7, HeadSHA: "sha1", Perspective: PerspectiveCorrectness, Verdict: VerdictChangesRequested, Head: "cr-sol",
 			AgentReport: outputschema.AgentReport{Findings: []outputschema.Finding{{Title: "nil deref", Severity: "medium", File: "a.go", Line: 3}}}},
@@ -171,8 +175,8 @@ func TestHeadsAggregateStrictestVerdictAndHeads(t *testing.T) {
 	if got := agg.Heads[PerspectiveCorrectness]; len(got) != 2 || got[0] != "cr-sol" || got[1] != "cr-sonnet" {
 		t.Fatalf("heads = %v", got)
 	}
-	if agg.Verdict != VerdictChangesRequested || len(agg.Findings) != 1 {
-		t.Fatalf("aggregate = %s findings=%d", agg.Verdict, len(agg.Findings))
+	if agg.Verdict != VerdictIncomplete || agg.FixCycle || agg.RequiresHuman || agg.MergeEligible {
+		t.Fatalf("aggregate routed on raw head reports: %+v", agg)
 	}
 }
 

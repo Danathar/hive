@@ -78,6 +78,13 @@ type headPerspective struct {
 func pendingMissingHeadPerspectives(state DispatchState, pr PullRequest, perspectives []Perspective, heads []string, delivered map[Perspective]Verdict, deliveredHeads map[Perspective][]string) []headPerspective {
 	covered := map[headPerspective]bool{}
 	coveredAll := map[Perspective]bool{}
+	// A head that ran out of retries while another head answered is settled
+	// for the decision step and is not re-sent.
+	for _, m := range state.MissingHeads {
+		if samePRHead(m.Repo, m.Number, m.HeadSHA, pr.Repo, pr.Number, pr.HeadSHA) {
+			covered[headPerspective{m.Perspective, m.Head}] = true
+		}
+	}
 	for _, p := range state.Pending {
 		if !samePRHead(p.Repo, p.Number, p.HeadSHA, pr.Repo, pr.Number, pr.HeadSHA) {
 			continue
@@ -186,6 +193,13 @@ func removePendingForPerspectivesAndHeads(pending []PendingReview, pr PullReques
 	out := pending[:0]
 	for _, p := range pending {
 		if _, done := reported[p.Perspective]; done && samePRHead(p.Repo, p.Number, p.HeadSHA, pr.Repo, pr.Number, pr.HeadSHA) {
+			// The decision dispatch stays pending until its decided report
+			// settles the PR head: the heads' reports for a perspective do not
+			// answer it.
+			if p.Decision {
+				out = append(out, p)
+				continue
+			}
 			if p.Head == "" || containsHead(heads[p.Perspective], p.Head) {
 				continue
 			}

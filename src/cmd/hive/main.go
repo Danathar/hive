@@ -7351,6 +7351,9 @@ func runEvalCycle(
 	agentsSkipped = append(agentsSkipped, firstScanDeferredSkips(dueBeforeDeferral, agentsDue)...)
 	reviewPlan := planReviewDispatch(cfg, actionable, agentMgr, beadStores, logger)
 	auditWithheldReviewFixes(reviewPlan, dashSrv, logger)
+	if ghClient != nil {
+		postReviewAcknowledgements(ctx, ghClient, reviewPlan, logger)
+	}
 	applyHumanDecisionLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	if ghClient != nil {
 		applyReviewPriorityLabels(ctx, cfg, ghClient, reviewQueue, logger)
@@ -10471,6 +10474,7 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		ReviseVerdictsBefore:  parseReviseCutoff(cfg.Review.ReviseVerdictsBefore, logger),
 		PendingTTL:            cfg.Review.PendingReviewTTL(),
 		MaxRedispatch:         cfg.Review.EffectiveMaxRedispatch(),
+		HeadMaxRetries:        cfg.Review.HeadMaxRetries,
 		ProjectOrg:            cfg.Project.Org,
 		AIAuthor:              cfg.EffectiveAIAuthor(),
 		Agents:                agents,
@@ -10506,6 +10510,7 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		SelfAuthoredDecisionPolicy: cfg.Review.EffectiveSelfAuthoredDecisionPolicy(),
 		ModelStamps:                reviewModelStamps(logger),
 		ExpectedHeads:              cfg.ExpectedReviewHeads(),
+		MissingHeads:               reviewMissingHeads(),
 	}, time.Now().UTC())
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -10687,6 +10692,40 @@ func auditWithheldReviewFixes(plan review.DispatchPlan, auditor reviewFixAuditor
 		}
 		auditor.AuditLog("governor", "review_fix_withheld",
 			fmt.Sprintf("pr=%s#%d head=%s author=%s setting=%s=%t reason=%s", w.Repo, w.Number, w.HeadSHA, w.Author, w.Setting, w.SettingEnabled, w.Reason), "")
+	}
+}
+
+// reviewMissingHeads reads the review heads that ran out of retries while
+// another head answered (hivecommons/hive#13542), so their perspectives count
+// as settled for the decision step. No state is none.
+func reviewMissingHeads() map[string][]string {
+	state, err := review.LoadDispatchState("")
+	if err != nil {
+		return nil
+	}
+	return review.MissingHeadsFromState(state)
+}
+
+// reviewCommentPoster is the GitHub write postReviewAcknowledgements needs.
+type reviewCommentPoster interface {
+	CreateIssueCommentBudgeted(ctx context.Context, repo string, number int, body string) error
+}
+
+// postReviewAcknowledgements posts the one-line no-findings comment for each
+// PR head the review-heads skip rule settled this cycle: every head approved
+// every perspective with no findings, so no decision session ran to post it
+// (hivecommons/hive#13542). The planner records each head once, so a failed
+// post is logged rather than repeated.
+func postReviewAcknowledgements(ctx context.Context, poster reviewCommentPoster, plan review.DispatchPlan, logger *slog.Logger) {
+	if len(plan.Acknowledgements) == 0 || poster == nil {
+		return
+	}
+	for _, a := range plan.Acknowledgements {
+		if err := poster.CreateIssueCommentBudgeted(ctx, a.Repo, a.Number, a.Body); err != nil {
+			logger.Warn("review heads: could not post the no-findings acknowledgement", "repo", a.Repo, "pr", a.Number, "head_sha", a.HeadSHA, "error", err)
+			continue
+		}
+		logger.Info("review heads: posted the no-findings acknowledgement", "repo", a.Repo, "pr", a.Number, "head_sha", a.HeadSHA)
 	}
 }
 

@@ -218,8 +218,12 @@ type DispatchOptions struct {
 	// before the PR is held for a human instead of re-kicked. Zero means
 	// DefaultMaxRedispatch.
 	MaxRedispatch int
-	Agents        []AgentCapability
-	Now           time.Time
+	// HeadMaxRetries caps how many times one review head's expired review of a
+	// perspective is re-sent (review.head_max_retries). Zero means
+	// MaxRedispatch.
+	HeadMaxRetries int
+	Agents         []AgentCapability
+	Now            time.Time
 }
 
 type DispatchState struct {
@@ -239,6 +243,14 @@ type DispatchState struct {
 	// bounded number of retries and then a human hold, rather than either an
 	// indefinite stall or an endless re-kick.
 	Redispatches []RedispatchCount `json:"redispatches,omitempty"`
+	// Review heads (hivecommons/hive#13542). HeadRetries counts each
+	// (PR head, perspective, head)'s expiries against review.head_max_retries;
+	// MissingHeads are the heads that ran out while another head answered,
+	// which the decision step proceeds without; Acknowledged are the PR heads
+	// whose no-findings acknowledgement was already posted under the skip rule.
+	HeadRetries  []HeadRetryCount   `json:"head_retries,omitempty"`
+	MissingHeads []MissingHead      `json:"missing_heads,omitempty"`
+	Acknowledged []AcknowledgedHead `json:"acknowledged,omitempty"`
 }
 
 // RedispatchCount is the per-head expiry counter behind review.max_redispatch.
@@ -295,7 +307,10 @@ type PendingReview struct {
 	Agent       string      `json:"agent"`
 	// Head is the review head key this perspective was dispatched to, empty
 	// outside review_heads (hivecommons/hive#13542).
-	Head        string `json:"head,omitempty"`
+	Head string `json:"head,omitempty"`
+	// Decision marks the decision step's dispatch: the base reviewer
+	// reconciling the heads' reports for this perspective.
+	Decision    bool   `json:"decision,omitempty"`
 	AuthorAgent string `json:"author_agent,omitempty"`
 	// AuthorModel/ReviewModel are what the planner knew when it dispatched:
 	// the PR's attribution-trailer model, and the model the kick told the
@@ -314,6 +329,7 @@ type RecentReview struct {
 	Perspective Perspective `json:"perspective"`
 	Agent       string      `json:"agent"`
 	Head        string      `json:"head,omitempty"`
+	Decision    bool        `json:"decision,omitempty"`
 	AuthorAgent string      `json:"author_agent,omitempty"`
 	AuthorModel string      `json:"author_model,omitempty"`
 	ReviewModel string      `json:"review_model,omitempty"`
@@ -360,6 +376,8 @@ type DispatchKick struct {
 	AuthorAgent string
 	// Head is the review head key for a head kick (hivecommons/hive#13542).
 	Head string
+	// Decision marks the decision kick that reconciles the heads' reports.
+	Decision bool
 	// Perspectives is every perspective this kick covers. It is set only by
 	// combined dispatch; Perspective stays populated with the first of them so
 	// existing consumers (logging, metrics, kick dedup) keep working unchanged
@@ -409,7 +427,11 @@ type DispatchPlan struct {
 	// Exhausted are the heads that hit MaxRedispatch this cycle and were
 	// held for a human instead of re-kicked.
 	Exhausted []HumanReviewHold
-	State     DispatchState
+	// Acknowledgements are the no-findings comments to post this cycle for PR
+	// heads the review-heads skip rule settled (every head clean), when
+	// review.acknowledge_no_findings is on. The caller posts them.
+	Acknowledgements []ReviewAcknowledgement
+	State            DispatchState
 }
 
 type FixDispatchExclusion struct {
@@ -489,7 +511,9 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 	if !opts.RequireApproval || !opts.FanOut {
 		return plan
 	}
-	heads, reviewers := dispatchReviewers(reviewCapableAgents(opts), opts.CombinedPerspectives)
+	capable := reviewCapableAgents(opts)
+	heads, reviewers := dispatchReviewers(capable, opts.CombinedPerspectives)
+	headsMode := len(heads) > 0
 	maxParallel := opts.MaxParallelReviews
 	if maxParallel <= 0 {
 		maxParallel = DefaultMaxParallelReviews
@@ -508,6 +532,7 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		revisiting := false
 		var delivered map[Perspective]Verdict
 		var deliveredHeads map[Perspective][]string
+		var awaiting *Aggregate
 		if req := pr.HumanChangeRequest; req != nil && SameHeadSHA(req.HeadSHA, pr.HeadSHA) {
 			// A trusted maintainer answered this head — a changes_requested
 			// review or `/hive decision <text>` — so whatever the swarm said
@@ -541,12 +566,22 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 					plan.State.Pending = removePendingForPerspectivesAndHeads(plan.State.Pending, pr, agg.Perspectives, agg.Heads)
 					delivered = agg.Perspectives
 					deliveredHeads = agg.Heads
+					if agg.AwaitingDecision {
+						a := agg
+						awaiting = &a
+					}
 					if plan.redispatchExhausted(pr) {
 						continue
+					}
+					if headsMode {
+						plan.expireHeadPending(pr, opts, deliveredHeads, now)
 					}
 					plan.expirePending(pr, opts, now)
 				} else {
 					plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
+					if headsMode {
+						plan.acknowledgeSkippedDecision(pr, agg, opts, now)
+					}
 					switch agg.Verdict {
 					case VerdictChangesRequested:
 						if fixPushAllowed(pr, opts) {
@@ -586,6 +621,9 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		} else if plan.redispatchExhausted(pr) {
 			continue
 		} else {
+			if headsMode {
+				plan.expireHeadPending(pr, opts, nil, now)
+			}
 			plan.expirePending(pr, opts, now)
 		}
 		if availableSlots <= 0 {
@@ -594,6 +632,11 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		authorBase := prAuthorBase(pr, opts.Agents)
 		if prHeads := reviewersForPR(heads, pr.AuthorAgent, authorBase); len(prHeads) > 0 {
 			availableSlots = plan.dispatchHeads(pr, prHeads, opts, delivered, deliveredHeads, revisiting, availableSlots, now)
+			// Once every head has settled, the base reviews the heads'
+			// reports and records the decided verdict (#13542).
+			if awaiting != nil {
+				availableSlots = plan.dispatchDecision(pr, *awaiting, reviewersForPR(decisionAgents(capable), pr.AuthorAgent, authorBase), opts, revisiting, availableSlots, now)
+			}
 		}
 		// Plain reviewers (none in a hive whose config passed
 		// validateReviewHeads with heads on) take the perspectives the heads
@@ -1105,7 +1148,7 @@ func ConfirmDelivered(state DispatchState, planned, delivered []DispatchKick) Di
 			// first perspective alone would leave every other verdict in the
 			// array with nothing to bind to once its pending entry is gone.
 			for _, p := range kickPerspectives(k) {
-				state.Recent = upsertRecentReview(state.Recent, RecentReview{Repo: k.Repo, Number: k.Number, HeadSHA: k.HeadSHA, BodyDigest: k.BodyDigest, Perspective: p, Agent: k.Agent, Head: k.Head, AuthorAgent: k.AuthorAgent, AuthorModel: k.AuthorModel, ReviewModel: k.ReviewModel, Confirmed: now})
+				state.Recent = upsertRecentReview(state.Recent, RecentReview{Repo: k.Repo, Number: k.Number, HeadSHA: k.HeadSHA, BodyDigest: k.BodyDigest, Perspective: p, Agent: k.Agent, Head: k.Head, Decision: k.Decision, AuthorAgent: k.AuthorAgent, AuthorModel: k.AuthorModel, ReviewModel: k.ReviewModel, Confirmed: now})
 			}
 		}
 	}
@@ -1478,6 +1521,7 @@ func pruneState(state DispatchState, prs []PullRequest, org string) DispatchStat
 		}
 	}
 	state.Redispatches = redispatches
+	state = pruneReviewHeadState(state, openHeads)
 	return state
 }
 

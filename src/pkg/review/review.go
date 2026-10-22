@@ -134,6 +134,15 @@ type PerspectiveReport struct {
 	// code-reviewer-sol) this report came from, set by the relay from the
 	// dispatch record. Empty for ordinary single-reviewer perspectives.
 	Head string `json:"head,omitempty"`
+	// Decided marks the decision step's reconciled report for this perspective
+	// (hivecommons/hive#13542), set by the relay from the dispatch record,
+	// never from the reviewer's JSON. When a PR has review heads, only decided
+	// reports drive routing; the heads' raw reports are evidence.
+	Decided bool `json:"decided,omitempty"`
+	// Dispositions is the decision step's call on each finding the heads
+	// raised for this perspective: confirmed, not_reproducible or
+	// out_of_scope, with a reason.
+	Dispositions []FindingDisposition `json:"dispositions,omitempty"`
 	// Confidence is the optional binned self-report; it never feeds the gate.
 	Confidence    *float64 `json:"confidence,omitempty"`
 	ConfidenceRaw *float64 `json:"confidence_raw,omitempty"`
@@ -193,6 +202,12 @@ type AggregateOptions struct {
 	// aggregate stays incomplete until each expected head has reported each
 	// perspective. Reports without Head are judged as before.
 	ExpectedHeads []string
+	// MissingHeads names, per PR head (reviewKey without a body digest), the
+	// "<perspective>/<head>" pairs whose head ran out of retries
+	// (review.head_max_retries) while another head answered the perspective
+	// (MissingHeadsFromState). They count as settled: the decision proceeds
+	// without them and says so.
+	MissingHeads map[string][]string
 }
 
 type Aggregate struct {
@@ -222,6 +237,22 @@ type Aggregate struct {
 	// aggregate holds. Empty unless reports came from review_heads; with
 	// several heads Perspectives holds the strictest of their verdicts.
 	Heads map[Perspective][]string `json:"heads,omitempty"`
+	// Review-heads decision state (hivecommons/hive#13542). Decided: the
+	// verdict comes from the decision step's reconciled reports.
+	// DecisionSkipped: every head approved every perspective with no
+	// findings, so no decision session ran. AwaitingDecision: every head has
+	// settled and the reconciliation is still owed (Verdict is incomplete).
+	Decided          bool `json:"decided,omitempty"`
+	DecisionSkipped  bool `json:"decision_skipped,omitempty"`
+	AwaitingDecision bool `json:"awaiting_decision,omitempty"`
+	// HeadReports are the heads' raw reports, kept as the decision step's
+	// input and as the reference reviewer accuracy scores each head against.
+	HeadReports []HeadReport `json:"head_reports,omitempty"`
+	// Dispositions are the decision step's call on every head finding.
+	Dispositions []FindingDisposition `json:"dispositions,omitempty"`
+	// MissingHeads are "<perspective>/<head>" pairs that never answered after
+	// review.head_max_retries; the decision was made without them.
+	MissingHeads []string `json:"missing_heads,omitempty"`
 	// Confidence is the derived 0–5 mergeability score (hivecommons/hive#8182),
 	// computed from the same reports as the verdict so the two never disagree.
 	Confidence Confidence `json:"confidence"`
@@ -292,11 +323,23 @@ func ValidateReportFor(raw []byte, set PerspectiveSet) (*PerspectiveReport, erro
 	if report.Number <= 0 {
 		return nil, fmt.Errorf("number must be greater than zero")
 	}
+	if err := validateDispositions(report.Dispositions); err != nil {
+		return nil, err
+	}
 	normalizeReportedConfidence(&report)
 	return &report, nil
 }
 
 func AggregateReports(reports []PerspectiveReport, opts AggregateOptions) Aggregate {
+	if usesReviewHeads(reports) {
+		return aggregateWithHeads(reports, opts)
+	}
+	return aggregatePlainReports(reports, opts)
+}
+
+// aggregatePlainReports is the aggregate of reports that need no
+// reconciliation: one judgement per perspective.
+func aggregatePlainReports(reports []PerspectiveReport, opts AggregateOptions) Aggregate {
 	agg := aggregateReports(reports, opts)
 	if agg.PermissionsTighteningOnly && agg.Verdict != VerdictRequiresHuman {
 		// The suppression removed a human hold; say so where the verdict is
@@ -486,13 +529,6 @@ func aggregateReports(reports []PerspectiveReport, opts AggregateOptions) Aggreg
 		return agg
 	}
 	if len(seenVerdicts) == 1 && seenVerdicts[VerdictApprove] {
-		if missing := missingHeadReports(agg, opts.ExpectedHeads); missing != "" {
-			// Every head that answered approved, but not every head has
-			// answered yet: the same in-flight state as a missing perspective.
-			agg.Verdict = VerdictIncomplete
-			agg.Reasons = []string{"review coverage incomplete: waiting on " + missing}
-			return agg
-		}
 		if hasAllRequiredPerspectives(agg.Perspectives, opts.MaxPerspectivesPerPR, opts.Perspectives.Len()) {
 			agg.Verdict = VerdictApprove
 			agg.MergeEligible = true
@@ -1422,9 +1458,10 @@ func reviewKey(repo string, number int, headSHA, bodyDigest string) string {
 	return fmt.Sprintf("%s#%d@%s body:%s", repo, number, headSHA, bodyDigest)
 }
 
-// verdictStrictness orders verdicts for folding several heads' reports on one
+// verdictStrictness orders verdicts for folding several reports on one
 // perspective into the aggregate's per-perspective verdict: the strictest
-// head wins until a decision step reconciles them (hivecommons/hive#13542).
+// wins. Review heads' raw reports are folded this way only for display while
+// the decision step is owed (hivecommons/hive#13542).
 func verdictStrictness(v Verdict) int {
 	switch v {
 	case VerdictReject:
@@ -1466,31 +1503,4 @@ func recordAggregateHead(agg *Aggregate, r PerspectiveReport) {
 	}
 	agg.Heads[r.Perspective] = append(agg.Heads[r.Perspective], head)
 	sort.Strings(agg.Heads[r.Perspective])
-}
-
-// missingHeadReports names the (perspective, head) pairs an aggregate still
-// lacks, or "" when it lacks none or holds no head reports at all (a hive
-// without review_heads, or reports recorded before heads were configured).
-func missingHeadReports(agg Aggregate, expected []string) string {
-	if len(expected) == 0 || len(agg.Heads) == 0 {
-		return ""
-	}
-	perspectives := make([]string, 0, len(agg.Perspectives))
-	for p := range agg.Perspectives {
-		perspectives = append(perspectives, string(p))
-	}
-	sort.Strings(perspectives)
-	var missing []string
-	for _, p := range perspectives {
-		have := map[string]bool{}
-		for _, h := range agg.Heads[Perspective(p)] {
-			have[h] = true
-		}
-		for _, h := range expected {
-			if !have[h] {
-				missing = append(missing, p+"/"+h)
-			}
-		}
-	}
-	return strings.Join(missing, ", ")
 }
