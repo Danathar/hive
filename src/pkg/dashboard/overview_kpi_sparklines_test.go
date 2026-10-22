@@ -157,6 +157,8 @@ let _overviewKPILocalScope = 'all';
 let _overviewLastRepos = [{name: 'hive', full: 'hivecommons/hive'}];
 global.window = {_lastStatus: {hiveId: 'test'}};
 global.localStorage = { getItem(){ return null; }, setItem(){}, removeItem(){} };
+global.document = { getElementById(){ return null; } };
+function relativeTimeShort(){ return ''; }
 let _overviewKPIHistory = [
   {t: Date.now(), overviewOpenIssues: 58, overviewOpenPrs: 12, overviewActionable: 36, overviewHeld: 6, overviewYourTurn: 3, overviewWaiting: 2, overviewBlocked: 1, overviewOutside: 22}
 ];
@@ -194,7 +196,7 @@ function repoItemNeedsHuman(item){ return ((item && item.labels) || []).some(l =
 		"overviewCoverageInfo", "overviewCoverageState", "overviewCoverageColor", "overviewCoverageInfoHTML", "overviewCoverageBar", "overviewCoverageCard", "renderOverviewCoverageKPI",
 		"overviewProjectFilterSpec", "repoCardParkedIssues", "overviewRepoTrackedIssueEntries", "overviewRepoTrackedPREntries", "overviewProjectBucketCount",
 		"overviewNonActionableMoved", "overviewProjectOutsideIssueCount", "overviewProjectOutsidePRCount", "overviewProjectFilterMatchesEntry", "overviewProjectFilterRepoMatches",
-		"overviewProjectFilterSummary", "renderOverviewKPIs",
+		"overviewProjectFilterSummary", "overviewSidebarPill", "overviewUnlistedCounts", "overviewUnlistedNote", "sidebarPairBadgeText", "setSidebarPairBadge", "renderOverviewKPIs",
 	} {
 		source.WriteString(jsFunc(t, html, name))
 		source.WriteByte('\n')

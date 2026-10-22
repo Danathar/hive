@@ -202,6 +202,7 @@ func (s *Server) statusWithOverviewBands(status *StatusPayload, now time.Time) *
 		}
 	}
 	out.ActionableNow = overviewActionableNow(&out, meta, overviewPartitionOf(status, autoMergeLabel))
+	out.OpenItems = openItemsSummary(&out)
 	out.LabelPresets = labelPresets(fullCfg, status.HiveID)
 	s.attachSLA(&out, now)
 	return &out
@@ -221,8 +222,10 @@ func overviewTotals(status *StatusPayload) FrontendOverviewTotals {
 		totals.PRs.Held += len(repo.HeldPrs)
 		// Every listed row is an open item, so the forge count is at least the
 		// rows the repository lists; the equation relies on it to stay a
-		// partition.
-		listedIssues := len(repo.ActionableIssues) + len(repo.HeldIssues) + len(repo.NonActionableIssues)
+		// partition. The rows are the canonical open-items set (open_items.go),
+		// so an issues-feed echo of a PR is not counted as an issue.
+		listed := countOpenItems(repoOpenItems(repo))
+		listedIssues, listedPRs := listed.Issues, listed.PRs
 		if repo.WorkBreakdown != nil {
 			ib := repo.WorkBreakdown.Issues
 			totals.Issues.Forge += max(ib.Total(), listedIssues)
@@ -240,7 +243,7 @@ func overviewTotals(status *StatusPayload) FrontendOverviewTotals {
 			addOverviewBreakdown(totals.Issues.Breakdown, "other", ib.Other)
 
 			pb := repo.WorkBreakdown.PRs
-			totals.PRs.Forge += max(pb.Total(), len(repo.OpenPrs)+len(repo.HeldPrs))
+			totals.PRs.Forge += max(pb.Total(), listedPRs)
 			addOverviewBreakdown(totals.PRs.Breakdown, "actionable", pb.Actionable)
 			addOverviewBreakdown(totals.PRs.Breakdown, "hold", pb.Hold)
 			addOverviewBreakdown(totals.PRs.Breakdown, "draft", pb.Draft)
@@ -257,7 +260,7 @@ func overviewTotals(status *StatusPayload) FrontendOverviewTotals {
 			prForge = len(repo.OpenPrs) + len(repo.HeldPrs)
 		}
 		totals.Issues.Forge += max(issueForge, listedIssues)
-		totals.PRs.Forge += max(prForge, len(repo.OpenPrs)+len(repo.HeldPrs))
+		totals.PRs.Forge += max(prForge, listedPRs)
 	}
 	totals.Issues.Outside = max(0, totals.Issues.Forge-totals.Issues.Tracked)
 	totals.PRs.Outside = max(0, totals.PRs.Forge-totals.PRs.Tracked)
