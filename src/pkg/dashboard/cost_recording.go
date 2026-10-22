@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/tokens"
@@ -38,26 +37,17 @@ type costRecording struct {
 }
 
 // costRecordingModelKey normalizes a model id for matching agent config
-// models against recorded usage rows ("anthropic/Claude-Opus-4.7" and
-// "claude-opus-4-7" match).
+// models against recorded usage rows. It delegates to the tokens normalizer
+// so both sides agree ("anthropic/claude-sonnet-5.5" and "claude-sonnet-5-5"
+// match).
 func costRecordingModelKey(model string) string {
-	id := strings.ToLower(strings.TrimSpace(model))
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		id = id[i+1:]
-	}
-	if i := strings.Index(id, ":"); i >= 0 {
-		id = id[:i]
-	}
-	id = strings.NewReplacer(".", "-", "_", "-", " ", "-").Replace(id)
-	return strings.Trim(id, "-")
+	return tokens.NormalizeModelID(model)
 }
 
+// costRecordingIsAlias reports whether a normalized key is a routing alias
+// ("auto", "default") rather than a real model; it shares the tokens rule.
 func costRecordingIsAlias(key string) bool {
-	switch key {
-	case "", "auto", "default":
-		return true
-	}
-	return false
+	return tokens.IsRoutingAlias(key)
 }
 
 // costRecording builds the recording block from the current status, the
