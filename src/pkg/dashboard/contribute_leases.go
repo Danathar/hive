@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/agent"
+	"github.com/hivecommons/hive/pkg/agentaudit"
 	"github.com/hivecommons/hive/pkg/celtrigger"
 	"github.com/hivecommons/hive/pkg/config"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
@@ -1642,8 +1643,9 @@ var taskLeasesFile = "/data/contributors/task-leases.json"
 // tests can drive expiry deterministically.
 func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 	type expiredTarget struct {
-		conn *ContributorConnection
-		task WSTaskAssign
+		conn         *ContributorConnection
+		task         WSTaskAssign
+		lastProgress time.Time
 	}
 	var targets []expiredTarget
 	h.mu.RLock()
@@ -1655,6 +1657,7 @@ func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 			now.Sub(c.lastLeaseRenew) > wsTaskTimeout
 		if expired {
 			released := *c.currentTask
+			lastProgress := c.lastLeaseRenew
 			c.currentTask = nil
 			c.currentPrompt = ""
 			c.currentLabels = nil
@@ -1665,7 +1668,7 @@ func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 			c.credentialDelivered = false
 			c.currentTaskGen = h.nextTaskGen()
 			c.lastLeaseRenew = time.Time{}
-			targets = append(targets, expiredTarget{conn: c, task: released})
+			targets = append(targets, expiredTarget{conn: c, task: released, lastProgress: lastProgress})
 		}
 		c.mu.Unlock()
 	}
@@ -1693,6 +1696,8 @@ func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 		h.recordTaskDecision(username, decisionLeaseExpired, &tgt.task,
 			"lease went unrenewed for "+wsTaskTimeout.String()+"; task auto-released and revoked")
 		h.addActivity(username, "lease expired: auto-released", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, tgt.task.TaskID)
+		h.auditRelay(tgt.conn, agentaudit.AuditRelayTaskAbandoned, &tgt.task,
+			"last_progress_at", tgt.lastProgress.UTC().Format(time.RFC3339))
 		if tgt.conn.ws != nil {
 			_ = tgt.conn.send(WSMessage{
 				Type:   "task_revoke",

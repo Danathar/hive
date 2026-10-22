@@ -185,6 +185,7 @@ Top-level YAML keys accepted by `config.Config`:
 | `issues.sha_hold_trusted_label` | `needs-sha`. | Soft label the SHA-hold sweep applies to a `kind/bug` without a commit SHA when the reporter's author association is in `project.issue_filter.reporter_trust.trusted_associations` (default OWNER/MEMBER/COLLABORATOR), instead of the hard `hold` (#12002). The notice is the same; the issue stays actionable. A SHA-hold `hold` already on such an issue is swapped for this label. Set to `hold` to restore the hard hold for every reporter. |
 | `issues.lift_hive_hard_suppress` | `true`. | Runs the hard-suppress reconcile (#12002): a `hold` or `blocked` label on an open issue is lifted when Hive provably applied it (newest label event is a `labeled` by the App bot; for `hold`, paired with the `<!-- hive:sha-hold -->` notice) and a PR cross-referencing the issue merged after it. Hive posts one note carrying `<!-- hive:hard-suppress-lifted -->`. Human-applied labels are never lifted. Skipped with the other unstick steps when the API budget is critical. |
 | `issues.hard_suppress_reconcile_interval` | `30m`. | Minimum time between hard-suppress reconcile passes. |
+| `issues.rfc_existing_check.enabled` | `false`. | Triage existing-coverage check (#13575): new open issues labelled `rfc`, `enhancement` or `kind/feature` get one comment that lists the existing settings that may already cover the request. Each setting links to Settings with the search set to its key. The comment carries `<!-- hive:rfc-existing-coverage -->` and is never posted twice. The check never labels or closes issues. Tuning keys are `post_when_nothing_found`, `labels`, `max_matches` and `max_age`; see [Triage: does this RFC already exist?](settings.md#triage-does-this-rfc-already-exist). |
 | `contribute.help_links` | Defaults to Hive contributor docs and the Hive issue tracker. | Up to 5 `{label, url}` links shown on `/contribute` Onboarding, Operations, and printed once by relays on connect. URLs must be absolute `http://` or `https://`; labels are plain text and length-capped. Prefer the Hive Commons Discord redirect (`https://hivecommons.dev/discord`) over channel URLs for contributors who may not already be server members. |
 | `contribute.max_parallel_fixes` | `2`. | Ceiling on how many stage-072 `fix-pr` sub-sessions one contributor's relay may run beside its primary session ([#12436](https://github.com/hivecommons/hive/issues/12436)). The relay advertises its own count (`max_parallel_fixes`, from `HIVE_MAX_PARALLEL_FIXES`); the hub clamps it to this. A relay that advertises no `parallel_sessions` always has capacity 1 (preempt mode). Fixes beyond capacity queue server-side and are served before new work. Settings → Hub → Fix budget. |
 | `contribute.min_focus_window` | `30m`. | Preempt mode only: after a preempted primary task resumes, the hub does not preempt that contributor again until it has run uninterrupted for this long. Settings → Hub → Fix budget. |
@@ -196,6 +197,17 @@ Top-level YAML keys accepted by `config.Config`:
 | `governor.first_timer_welcome` | First-time contributor welcome: when a human whose GitHub `author_association` is `FIRST_TIME_CONTRIBUTOR`/`FIRST_TIMER` opens a PR, post one comment (per author per repo, marker `<!-- hive:first-timer-welcome -->`) that thanks them and invites them to run their own hive — profile, leaderboard, trust-tier progression, offline review-fix/rebase handling. Bots, `author/clanker`/`author/hive` PRs, drafts and known relay contributors are skipped. | Default ON; `enabled: false` opts out; `template_path` overrides the text. Silent without a public dashboard URL. See [Welcoming first-time contributors](good-first-issue.md#welcoming-first-time-contributors). |
 | `sla` | Delivery SLA targets (`sla.targets.start_to_pr_h`, `pr_to_merge_h`, `open_to_merge_h`, hours; defaults 4 / 24 / 72) the dashboard's Throughput section colours its Delivery SLA spans against. | Metrics are derived from the lifecycle timeline; no extra GitHub calls. Also editable from **Settings → Thresholds**. See [Delivery SLA](#delivery-sla). |
 | `sentinel` | Suspicious-activity alerts: flags open PRs (any author) that touch sensitive files or look like security overrides, privilege escalation, or codebase damage. | Default ON; observe-and-alert only. See [Suspicious-activity alerts](#suspicious-activity-alerts-sentinel). |
+
+### Agent-runtime blocks (`config.AgentRuntimeConfig`)
+
+The keys the agent runtime owns — the part of Hive being carved out as **Crux** ([#13536](https://github.com/hivecommons/hive/issues/13536)) — are grouped in Go into two structs that `config.Config` and `config.GovernorConfig` embed with `yaml:",inline"`. The grouping is a code-organisation boundary only: every key keeps the position it has always had in `hive.yaml`, so no file needs to change and a `Save()` writes the same shape back.
+
+| Struct | Embedded in | YAML keys (unchanged position) |
+|---|---|---|
+| `AgentRuntimeConfig` (`pkg/config/agent_config.go`) | `Config` | `agents` (including the `agents.github_api_hourly_cap` scalar), `backends`, `providers`, `tool_approval`, `agent_sandbox`, `turn` |
+| `AgentRuntimeGovernorConfig` (`pkg/config/agent_config.go`) | `GovernorConfig` | `governor.watchdog`, `governor.litellm`, `governor.vllm`, `governor.llm-d`, `governor.bob`, `governor.trajectory`, `governor.kick_limits`, `governor.gateways`, `governor.rotation`, `governor.provider_budget` |
+
+Go callers keep reading `cfg.Agents`, `cfg.Governor.Gateways` and so on through field promotion; only composite literals name the embedded struct (`config.Config{AgentRuntimeConfig: config.AgentRuntimeConfig{Agents: …}}`). `pkg/config/testdata/agent_runtime_golden.{yaml,json}` pins the parse of a representative file so the boundary cannot drift the schema.
 
 ## Notable fields
 
@@ -223,6 +235,7 @@ Top-level YAML keys accepted by `config.Config`:
 | `project.label_driven_approval_labels` | `["triage/accepted"]` | Labels whose trusted addition approves an issue on every label-driven repo without its own list. Ignored by repos without `label_driven: true`. Dashboard: Settings → Repos → "Default approval labels". |
 | `project.label_driven_trust_org_members` | `true` | Whether a public member of the repo's owning org who applies an approval label is trusted (Prow's own rule). Dashboard: Settings → Repos → "trust public org members". |
 | `project.label_driven_trusted_bots` | `["kubestellar-prow[bot]"]` | Bot logins whose label additions count as a trusted triager (Prow command bots relaying `/triage accepted`). `github-actions[bot]` is not in the default because it is the shared identity of every workflow in the repo, including ones triggered by untrusted events; operators whose Prow emulation runs as `github-actions[bot]` must add it explicitly per deployment. Dashboard: Settings → Repos → "Trusted bots". |
+| `project.label_driven_supersede_park_actors` | `[]` (off) | Automation logins (for example a lifecycle bot running as `github-actions[bot]`) whose park labels a later trusted acceptance supersedes on label-driven repos: Hive removes the label, says so in the release comment, and releases the issue ([#13605](https://github.com/hivecommons/hive/issues/13605)). Park labels added by people, by unlisted bots, or by a listed bot after the acceptance still block; `hold` is never superseded. Per-repo override: `project.repo_policies[].label_driven_supersede_park_actors`. |
 | `auto_merge.allow_unprotected_base` | Deprecated no-op. | Accepted so older configs keep loading. `hive-merge` now merges into any protected or unprotected branch the App can write, subject to the CI-evidence gate and GitHub's own merge rules. |
 | `auto_merge.no_ci_ok` | Empty by default. | Explicit repo list whose zero-CI merge-request verdict may pass; failing or pending CI evidence is still enforced. |
 | `auto_merge.human_merge_paths` | Unset (off). | Per-repo map of `owner/repo` to glob patterns (same syntax as `intent.guardrail_path_patterns`) for paths a person must merge. Applies to every merge lane (App self-merge, trusted-author, label-queued, merge-request relay) whatever the intent tier; a matching PR is held with one comment, and an incomplete changed-file list fails closed. Details in the sweep key table below. |
@@ -281,6 +294,10 @@ behaves exactly as before. With it set:
   `approved-direction`, without requiring a `/hive` comment. Park labels a
   person added, and `hold` / `do-not-merge`, are left alone and keep the issue
   parked; Hive posts one "accepted, but still held by …" note per acceptance.
+  A park label added by a lifecycle bot listed in
+  `label_driven_supersede_park_actors` before the acceptance is removed too
+  ([#13605](https://github.com/hivecommons/hive/issues/13605)); the list is
+  empty by default.
 - `pr_self_authorization` counts that label as human sign-off, the same way it
   counts `approved-direction`.
 - `/hive approve`, `/hive decision` and `/hive done` on such a repo may also be issued by
@@ -837,11 +854,13 @@ logs one `WARN stage engine: mode changed` per transition.
 
 | mode | behaviour |
 |---|---|
-| `shadow` (default) | engine derives alongside the sweep; the sweep's derivation is written; every disagreement is counted and logged once per `(kind, legacy, engine)` |
-| `enforce` | engine's derivation is written; out-of-order transitions are rejected and counted as anomalies |
+| `shadow` | engine derives alongside the sweep; the sweep's derivation is written; every disagreement is counted and logged once per `(kind, legacy, engine)` |
+| `enforce` (default) | engine's derivation is written; out-of-order transitions are rejected and counted as anomalies |
 | `off` | rollback — the sweep's derivation is written verbatim, the engine is inert |
 
-Runbook:
+An unset mode is `enforce`. The runbook below is for a hive that opts back
+into `shadow` (for example to validate a deriver change) before returning to
+`enforce`:
 
 1. Run `shadow` for 48h. Watch `/api/status.stageEngine`
    (`mode`, `derivations`, `mismatches`, `anomalies`,
@@ -1390,7 +1409,13 @@ v5 and v6 spokes) tracking one repo all stay on webhook mode.
   cycle that follows plans against the patched item. No repository is
   re-enumerated. The read goes through the paced REST transport and is
   skipped outright while the API budget is `critical`; it refreshes the PR
-  detail cache, so the following cycle does not pay for it again.
+  detail cache, so the following cycle does not pay for it again. The
+  re-read is also remembered for
+  `dashboard.stage_tracker.webhook_refresh_replay_window_s` (default
+  `1800`) and re-applied to every status snapshot published meanwhile: an
+  eval cycle that enumerated the item *before* the close still publishes
+  from that enumeration minutes later, and without the replay its publish
+  put the closed row back until the next full enumeration.
   `dashboard.stage_tracker.webhook_refresh: false` turns the re-read off
   (deliveries then still invalidate caches and wake the loop, and wake
   cycles fall back to a full enumeration because nothing else patches the
@@ -1553,6 +1578,7 @@ dashboard:
   stage_tracker:
     webhook_refresh: true          # re-read the PR/issue a delivery names
     webhook_refresh_debounce_ms: 2000
+    webhook_refresh_replay_window_s: 1800   # re-apply re-reads to snapshots published meanwhile
 ```
 
 ## `HIVE_GITHUB_TOKEN` permissions

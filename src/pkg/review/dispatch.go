@@ -65,7 +65,9 @@ var ReviewDispatchStatePath = filepath.Join(DefaultDispatchStateDir, ReviewDispa
 var LegacyReviewDispatchStatePath = filepath.Join(outputschema.AgentReportDir, ReviewDispatchStateFile)
 
 type AgentCapability struct {
-	Name           string
+	Name string
+	// ReplicaOf is the base agent a derived replica was expanded from.
+	ReplicaOf      string
 	Enabled        bool
 	Paused         bool
 	OnDemand       bool
@@ -82,6 +84,59 @@ type AgentCapability struct {
 	// ReviewModels is agents.<name>.review_models. The swarm applies it per
 	// perspective kick exactly as the cadence kick applies it per PR line.
 	ReviewModels config.ReviewModelsConfig
+	// ReviewHead is the head key when this agent was derived from a base's
+	// review_heads (config.AgentConfig.ReviewHead), and ReviewHeadOf that
+	// base. HasReviewHeads marks the base itself and its plain replicas: the
+	// agents that declare heads and are kept out of head dispatch
+	// (hivecommons/hive#13542).
+	ReviewHead     string
+	ReviewHeadOf   string
+	HasReviewHeads bool
+}
+
+// CapabilityFromConfig builds the dispatcher's view of one configured lane
+// from its agents.<name> entry. Every site that hands an agent to the review
+// package goes through here so a field added to AgentCapability is populated
+// everywhere at once. Callers layer runtime state (an agent-manager pause) on
+// top of the result.
+func CapabilityFromConfig(name string, ac config.AgentConfig) AgentCapability {
+	return AgentCapability{
+		Name:           name,
+		ReplicaOf:      ac.ReplicaOf,
+		Enabled:        ac.Enabled,
+		Paused:         ac.Paused,
+		OnDemand:       ac.OnDemand,
+		UsesKick:       ac.UsesGovernorKick(),
+		Role:           ac.Role,
+		LaneKeywords:   ac.LaneKeywords,
+		DetectKeywords: ac.DetectKeywords,
+		Aliases:        ac.Aliases,
+		Backend:        ac.Backend,
+		Model:          ac.Model,
+		ReviewModels:   ac.ReviewModels,
+		ReviewHead:     ac.ReviewHead,
+		ReviewHeadOf:   reviewHeadBase(ac),
+		HasReviewHeads: len(ac.ReviewHeads) > 0 && !ac.IsReviewHead(),
+	}
+}
+
+// reviewHeadBase is the base agent a review head was derived from, so that
+// review.reviewer_agents naming the base admits its heads
+// (hivecommons/hive#13542). Empty for every other agent.
+func reviewHeadBase(ac config.AgentConfig) string {
+	if ac.IsReviewHead() {
+		return ac.ReplicaOf
+	}
+	return ""
+}
+
+// baseOf is the lane an agent's reviewer identity resolves to: the base agent
+// for a replica, otherwise the agent itself (config.AgentConfig.BaseName).
+func baseOf(a AgentCapability) string {
+	if a.ReplicaOf != "" {
+		return a.ReplicaOf
+	}
+	return a.Name
 }
 
 type DispatchOptions struct {
@@ -163,8 +218,12 @@ type DispatchOptions struct {
 	// before the PR is held for a human instead of re-kicked. Zero means
 	// DefaultMaxRedispatch.
 	MaxRedispatch int
-	Agents        []AgentCapability
-	Now           time.Time
+	// HeadMaxRetries caps how many times one review head's expired review of a
+	// perspective is re-sent (review.head_max_retries). Zero means
+	// MaxRedispatch.
+	HeadMaxRetries int
+	Agents         []AgentCapability
+	Now            time.Time
 }
 
 type DispatchState struct {
@@ -184,6 +243,14 @@ type DispatchState struct {
 	// bounded number of retries and then a human hold, rather than either an
 	// indefinite stall or an endless re-kick.
 	Redispatches []RedispatchCount `json:"redispatches,omitempty"`
+	// Review heads (hivecommons/hive#13542). HeadRetries counts each
+	// (PR head, perspective, head)'s expiries against review.head_max_retries;
+	// MissingHeads are the heads that ran out while another head answered,
+	// which the decision step proceeds without; Acknowledged are the PR heads
+	// whose no-findings acknowledgement was already posted under the skip rule.
+	HeadRetries  []HeadRetryCount   `json:"head_retries,omitempty"`
+	MissingHeads []MissingHead      `json:"missing_heads,omitempty"`
+	Acknowledged []AcknowledgedHead `json:"acknowledged,omitempty"`
 }
 
 // RedispatchCount is the per-head expiry counter behind review.max_redispatch.
@@ -238,7 +305,13 @@ type PendingReview struct {
 	BodyDigest  string      `json:"body_digest,omitempty"`
 	Perspective Perspective `json:"perspective"`
 	Agent       string      `json:"agent"`
-	AuthorAgent string      `json:"author_agent,omitempty"`
+	// Head is the review head key this perspective was dispatched to, empty
+	// outside review_heads (hivecommons/hive#13542).
+	Head string `json:"head,omitempty"`
+	// Decision marks the decision step's dispatch: the base reviewer
+	// reconciling the heads' reports for this perspective.
+	Decision    bool   `json:"decision,omitempty"`
+	AuthorAgent string `json:"author_agent,omitempty"`
 	// AuthorModel/ReviewModel are what the planner knew when it dispatched:
 	// the PR's attribution-trailer model, and the model the kick told the
 	// reviewer to run with (empty when no pool applied). Collect uses them
@@ -255,6 +328,8 @@ type RecentReview struct {
 	BodyDigest  string      `json:"body_digest,omitempty"`
 	Perspective Perspective `json:"perspective"`
 	Agent       string      `json:"agent"`
+	Head        string      `json:"head,omitempty"`
+	Decision    bool        `json:"decision,omitempty"`
 	AuthorAgent string      `json:"author_agent,omitempty"`
 	AuthorModel string      `json:"author_model,omitempty"`
 	ReviewModel string      `json:"review_model,omitempty"`
@@ -299,6 +374,10 @@ type DispatchKick struct {
 	BodyDigest  string
 	Perspective Perspective
 	AuthorAgent string
+	// Head is the review head key for a head kick (hivecommons/hive#13542).
+	Head string
+	// Decision marks the decision kick that reconciles the heads' reports.
+	Decision bool
 	// Perspectives is every perspective this kick covers. It is set only by
 	// combined dispatch; Perspective stays populated with the first of them so
 	// existing consumers (logging, metrics, kick dedup) keep working unchanged
@@ -349,7 +428,11 @@ type DispatchPlan struct {
 	// Exhausted are the heads that hit MaxRedispatch this cycle and were
 	// held for a human instead of re-kicked.
 	Exhausted []HumanReviewHold
-	State     DispatchState
+	// Acknowledgements are the no-findings comments to post this cycle for PR
+	// heads the review-heads skip rule settled (every head clean), when
+	// review.acknowledge_no_findings is on. The caller posts them.
+	Acknowledgements []ReviewAcknowledgement
+	State            DispatchState
 }
 
 type FixDispatchExclusion struct {
@@ -429,7 +512,9 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 	if !opts.RequireApproval || !opts.FanOut {
 		return plan
 	}
-	reviewers := reviewCapableAgents(opts)
+	capable := reviewCapableAgents(opts)
+	heads, reviewers := dispatchReviewers(capable, opts.CombinedPerspectives)
+	headsMode := len(heads) > 0
 	maxParallel := opts.MaxParallelReviews
 	if maxParallel <= 0 {
 		maxParallel = DefaultMaxParallelReviews
@@ -447,6 +532,8 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		// the verdict: fixPushAllowed and the merge lanes, not this loop.
 		revisiting := false
 		var delivered map[Perspective]Verdict
+		var deliveredHeads map[Perspective][]string
+		var awaiting *Aggregate
 		if req := pr.HumanChangeRequest; req != nil && SameHeadSHA(req.HeadSHA, pr.HeadSHA) {
 			// A trusted maintainer answered this head — a changes_requested
 			// review or `/hive decision <text>` — so whatever the swarm said
@@ -477,14 +564,25 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 					// (their reports exist) and let the normal missing-
 					// perspective path below re-ask only for the rest, under
 					// the same TTL and max_redispatch budget as any head.
-					plan.State.Pending = removePendingForPerspectives(plan.State.Pending, pr, agg.Perspectives)
+					plan.State.Pending = removePendingForPerspectivesAndHeads(plan.State.Pending, pr, agg.Perspectives, agg.Heads)
 					delivered = agg.Perspectives
+					deliveredHeads = agg.Heads
+					if agg.AwaitingDecision {
+						a := agg
+						awaiting = &a
+					}
 					if plan.redispatchExhausted(pr) {
 						continue
+					}
+					if headsMode {
+						plan.expireHeadPending(pr, opts, deliveredHeads, now)
 					}
 					plan.expirePending(pr, opts, now)
 				} else {
 					plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
+					if headsMode {
+						plan.acknowledgeSkippedDecision(pr, agg, opts, now)
+					}
 					switch agg.Verdict {
 					case VerdictChangesRequested:
 						if fixPushAllowed(pr, opts) {
@@ -524,9 +622,27 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		} else if plan.redispatchExhausted(pr) {
 			continue
 		} else {
+			if headsMode {
+				plan.expireHeadPending(pr, opts, nil, now)
+			}
 			plan.expirePending(pr, opts, now)
 		}
-		prReviewers := reviewersForPR(reviewers, pr.AuthorAgent)
+		if availableSlots <= 0 {
+			continue
+		}
+		authorBase := prAuthorBase(pr, opts.Agents)
+		if prHeads := reviewersForPR(heads, pr.AuthorAgent, authorBase); len(prHeads) > 0 {
+			availableSlots = plan.dispatchHeads(pr, prHeads, opts, delivered, deliveredHeads, revisiting, availableSlots, now)
+			// Once every head has settled, the base reviews the heads'
+			// reports and records the decided verdict (#13542).
+			if awaiting != nil {
+				availableSlots = plan.dispatchDecision(pr, *awaiting, reviewersForPR(decisionAgents(capable), pr.AuthorAgent, authorBase), opts, revisiting, availableSlots, now)
+			}
+		}
+		// Plain reviewers (none in a hive whose config passed
+		// validateReviewHeads with heads on) take the perspectives the heads
+		// left unasked, on the ordinary path.
+		prReviewers := reviewersForPR(reviewers, pr.AuthorAgent, authorBase)
 		if len(prReviewers) == 0 || availableSlots <= 0 {
 			continue
 		}
@@ -682,14 +798,39 @@ func leastLoadedReviewer(reviewers []AgentCapability, pending []PendingReview) A
 	return best
 }
 
-func reviewersForPR(reviewers []AgentCapability, authorAgent string) []AgentCapability {
+// agentBase resolves an agent's base lane from the full configured set, so an
+// authoring replica that is itself paused, on-demand or not review-capable
+// still maps to its base.
+func agentBase(all []AgentCapability, name string) string {
+	name = strings.TrimSpace(name)
+	for _, a := range all {
+		if a.Name == name {
+			return baseOf(a)
+		}
+	}
+	return name
+}
+
+// prAuthorBase is the PR's author base: the caller-resolved AuthorBase when
+// set, otherwise AuthorAgent resolved against agents.
+func prAuthorBase(pr PullRequest, agents []AgentCapability) string {
+	if base := strings.TrimSpace(pr.AuthorBase); base != "" {
+		return base
+	}
+	return agentBase(agents, pr.AuthorAgent)
+}
+
+func reviewersForPR(reviewers []AgentCapability, authorAgent, authorBase string) []AgentCapability {
 	authorAgent = strings.TrimSpace(authorAgent)
 	if authorAgent == "" {
 		return reviewers
 	}
+	if authorBase == "" {
+		authorBase = authorAgent
+	}
 	out := make([]AgentCapability, 0, len(reviewers))
 	for _, reviewer := range reviewers {
-		if reviewer.Name != authorAgent {
+		if reviewer.Name != authorAgent && baseOf(reviewer) != authorBase {
 			out = append(out, reviewer)
 		}
 	}
@@ -1040,7 +1181,7 @@ func ConfirmDelivered(state DispatchState, planned, delivered []DispatchKick) Di
 			// first perspective alone would leave every other verdict in the
 			// array with nothing to bind to once its pending entry is gone.
 			for _, p := range kickPerspectives(k) {
-				state.Recent = upsertRecentReview(state.Recent, RecentReview{Repo: k.Repo, Number: k.Number, HeadSHA: k.HeadSHA, BodyDigest: k.BodyDigest, Perspective: p, Agent: k.Agent, AuthorAgent: k.AuthorAgent, AuthorModel: k.AuthorModel, ReviewModel: k.ReviewModel, Confirmed: now})
+				state.Recent = upsertRecentReview(state.Recent, RecentReview{Repo: k.Repo, Number: k.Number, HeadSHA: k.HeadSHA, BodyDigest: k.BodyDigest, Perspective: p, Agent: k.Agent, Head: k.Head, Decision: k.Decision, AuthorAgent: k.AuthorAgent, AuthorModel: k.AuthorModel, ReviewModel: k.ReviewModel, Confirmed: now})
 			}
 		}
 	}
@@ -1260,10 +1401,14 @@ func reviewCapableAgents(opts DispatchOptions) []AgentCapability {
 // the dispatcher uses to hand out review kicks: when review.reviewer_agents
 // names lanes, membership in that set decides; otherwise the agent's name,
 // role, aliases or keywords must carry the review token. The relay uses it to
-// decide whose dispatch-less verdicts may be recorded.
+// decide whose dispatch-less verdicts may be recorded. A replica is review-
+// capable when its base agent is a listed reviewer.
 func ReviewCapable(a AgentCapability, reviewerAgents map[string]bool) bool {
 	if len(reviewerAgents) > 0 {
-		return reviewerAgents[a.Name]
+		// Naming a base admits its replicas and the heads derived from its
+		// review_heads.
+		return reviewerAgents[a.Name] || reviewerAgents[baseOf(a)] ||
+			(a.ReviewHeadOf != "" && reviewerAgents[a.ReviewHeadOf])
 	}
 	return hasReviewCapability(a)
 }
@@ -1409,6 +1554,7 @@ func pruneState(state DispatchState, prs []PullRequest, org string) DispatchStat
 		}
 	}
 	state.Redispatches = redispatches
+	state = pruneReviewHeadState(state, openHeads)
 	return state
 }
 

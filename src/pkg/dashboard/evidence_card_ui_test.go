@@ -67,7 +67,7 @@ func TestEvidenceCardInThroughputSection(t *testing.T) {
 		".ev-svg .ev-bar.sr",
 		// Panel 1 (#12364): outcome by author kind.
 		"dto.outcomes_by_author_kind || {}",
-		"evPanel('outcome-by-author', 'Outcome by author kind', outcomeN, evOutcomesSvg(outcomes),",
+		"evPanel('outcome-by-author', 'Outcome by author kind', outcomeN, evOutcomesSvg(outcomes) + evControlArmHtml(dto.control_arm),",
 		"const EV_AUTHOR_KINDS = ['human', 'agent', 'bot'];",
 		"const reverted = Number(o.reverted_14d) || 0, reopened = Number(o.issue_reopened_14d) || 0;",
 		"reverted, reopened, failed: reverted + reopened };",
@@ -246,7 +246,7 @@ func TestEvidenceMaintainabilityRendering(t *testing.T) {
 	html := indexHTML(t)
 	var source strings.Builder
 	source.WriteString("const EV_PALETTE_SIZE = 6, EV_SVG_W = 320, EV_TOP_REASONS = 3;\nconst EV_WRITE_TIERS = ['ADVISORY', 'ISSUES_ONLY', 'ISSUES_AND_PRS', 'ISSUES_PRS_MERGE'];\nlet evLast = null;\nlet evConfidenceSeries = 'self-reported';\nconst evWindowLabel = () => 'all time';\nconst evWindowControls = () => '';\nconst evExplainerHtml = () => ({ button: '', body: '' });\nconst EV_CALIB_MIN_BUCKET_N = 5, EV_GRADE_MIN_N = 20;\nconst evDetails = {};\n")
-	for _, name := range []string{"escapeHtml", "evRate", "evPanel", "evServerCard", "evCalibrationSeries", "evCalibrationControls", "evSelectConfidence", "evOutcomesSvg", "evCalibrationSvg", "evAccuracySvg", "evShadowGateSvg", "evClaimVsVerdictSvg", "evWriteActivitySvg", "evCIGateHtml", "evCIRecoveryHtml", "evGateGrade", "evConvergenceGrade", "evConvergenceSvg", "evPct", "evWindowHint", "evSentinelSparkline", "evWorkBalanceSvg", "evMaintainabilityRows", "evMaintainabilitySvg", "evGradeLine", "renderEvidenceSummary"} {
+	for _, name := range []string{"escapeHtml", "evRate", "evPanel", "evServerCard", "evCalibrationSeries", "evCalibrationControls", "evSelectConfidence", "evOutcomesSvg", "evControlArmHtml", "evCalibrationSvg", "evAccuracySvg", "evShadowGateSvg", "evClaimVsVerdictSvg", "evWriteActivitySvg", "evCIGateHtml", "evCIRecoveryHtml", "evGateGrade", "evConvergenceGrade", "evConvergenceSvg", "evPct", "evWindowHint", "evSentinelSparkline", "evWorkBalanceSvg", "evMaintainabilityRows", "evMaintainabilitySvg", "evGradeLine", "evIssueReopenRatesHtml", "renderEvidenceSummary"} {
 		source.WriteString(jsFunc(t, html, name))
 		source.WriteByte('\n')
 	}
@@ -315,6 +315,14 @@ assert.doesNotMatch(card.innerHTML, /Report-only; Go-only cyclomatic complexity.
 renderEvidenceSummary(null);
 assert.match(card.innerHTML, /data-ev-panel="maintainability" open><summary>Maintainability trend<span[^>]*>n=0/);
 assert.match(card.innerHTML, /no monthly complexity snapshots/);
+assert.match(card.innerHTML, /No captured issue closures in the last 30 days/);
+renderEvidenceSummary({issue_reopen_rates_30d: [
+  {repo: 'o/<repo>', clarity_gate: true, reopened: 1, closed: 4, rate: 0.25},
+  {repo: 'o/empty', clarity_gate: false, reopened: 0, closed: 0, rate: null}
+]});
+assert.match(card.innerHTML, /o\/&lt;repo&gt;<\/td><td>Passed through<\/td><td>1 \/ 4<\/td><td>25%<\/td>/);
+assert.match(card.innerHTML, /o\/empty<\/td><td>No marker<\/td><td>0 \/ 0<\/td><td>—<\/td>/);
+assert.doesNotMatch(card.innerHTML, /<repo>|NaN|undefined/);
 // No server card: a dashed — pill and no plain line; nothing inline says "What this does not show".
 assert.match(card.innerHTML, /<span class="ev-letter ev-band-none" title="Grade not reported by this hive"[^>]*>—<\/span><\/summary>/);
 assert.doesNotMatch(card.innerHTML, /ev-plain|What this does not show/);
@@ -363,6 +371,7 @@ func TestEvidenceCardUIHasNoUndefinedCallees(t *testing.T) {
 		"evPanel",
 		"evRate",
 		"evOutcomesSvg",
+		"evControlArmHtml",
 		"evCalibrationSvg",
 		"evAccuracySvg",
 		"evWriteActivitySvg",

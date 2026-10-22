@@ -158,6 +158,10 @@ type Client struct {
 	appBotLogin         string // "<app-slug>[bot]" when the client authenticates as a GitHub App
 	appBotUserMu        sync.Mutex
 	appBotUserID        int64 // cached GitHub user id of appBotLogin; see AppBotUserID
+	selfLoginMu         sync.Mutex
+	selfLogin           string        // cached login of the authenticated account; see resolveSelfLogin
+	selfLoginFailedAt   time.Time     // last failed GET /user; retried after selfLoginRetryAfter
+	selfLoginPending    chan struct{} // closed when the in-flight GET /user completes
 	additionalBotLogins []string
 	noBotIdentityWarned sync.Once
 	// approvalDesk is the RFC #4000 approval-desk consultation performed per PR
@@ -171,6 +175,10 @@ type Client struct {
 	// Only reviewers may record a verdict that no dispatch row binds; nil falls
 	// back to the dispatcher's name-token rule.
 	reviewerAgent func(agent string) bool
+	// agentBase maps a lane to its base agent (config.AgentConfig.BaseName),
+	// so the self-approval guard treats a base and its replicas as one
+	// author. nil compares exact lane names.
+	agentBase func(agent string) string
 	// confidenceScore gates the Confidence line on review comments.
 	confidenceScore      func() bool
 	reviewBacklog        func() (enabled bool, cap int) // out-of-scope finding filing on/off and per-PR cap
@@ -329,6 +337,10 @@ type Client struct {
 	// forgeState memoizes the advisory issue the attached ForgeState cache
 	// resolved (advisory_forgestate.go, hivecommons/hive#13378).
 	forgeState forgeStateBinding
+	// linkedIssueTitles remembers the title and state of issues PRs close
+	// that no open-items listing carries any more (linked_issue_titles.go).
+	// Zero value is ready to use.
+	linkedIssueTitles linkedIssueTitleCache
 	// reviewWake wakes the review-request watcher between ticks
 	// (review_request_wake.go). Zero value is ready to use.
 	reviewWake reviewRequestWaker
@@ -570,6 +582,28 @@ func (c *Client) isReviewerAgent(agent string) bool {
 		return c.reviewerAgent(agent)
 	}
 	return review.ReviewCapable(review.AgentCapability{Name: agent}, nil)
+}
+
+// SetAgentBaseFunc tells the relay how to resolve a lane to its base agent.
+// A replica is review-capable when its base is a reviewer, so the
+// self-approval guard must refuse a verdict from any lane of the authoring
+// family, not just the authoring lane itself.
+func (c *Client) SetAgentBaseFunc(fn func(agent string) string) {
+	if c == nil {
+		return
+	}
+	c.agentBase = fn
+}
+
+func (c *Client) agentBaseName(agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent == "" || c == nil || c.agentBase == nil {
+		return agent
+	}
+	if base := strings.TrimSpace(c.agentBase(agent)); base != "" {
+		return base
+	}
+	return agent
 }
 
 // SetConfidenceScore turns on the one-line mergeability score the relay
@@ -985,6 +1019,14 @@ type PullRequest struct {
 	// have not been recorded. Display only: the dashboard's your-turn
 	// decision reads it; nothing gates on it.
 	HoldSources []string `json:"hold_sources,omitempty"`
+	// ReferencedIssues are the same-repo issues the PR's own title and body
+	// refer to (PRReferencedIssues: closing keywords GitHub did not derive,
+	// `Refs #N`, `(#N, part 1)` titles, first-paragraph mentions), each
+	// tagged with its Via. Read from the list payload, no extra call. The
+	// activity monitor falls back to them when LinkedIssues is empty so a
+	// PR that works towards an issue still sits on its row, drawn as a
+	// soft link.
+	ReferencedIssues []PRLinkedIssue `json:"referenced_issues,omitempty"`
 }
 
 // PRLinkedIssue is an issue GitHub reports a PR will close on merge
@@ -996,6 +1038,9 @@ type PRLinkedIssue struct {
 	Repo   string `json:"repo,omitempty"`
 	State  string `json:"state,omitempty"`
 	URL    string `json:"url,omitempty"`
+	// Via is how the link was found: "" for GitHub's closing reference,
+	// else one of the PRLinkVia* values (pr_reference_links.go).
+	Via string `json:"via,omitempty"`
 }
 type PRReworkStats struct {
 	ReviewRounds        int       `json:"review_rounds,omitempty"`
@@ -1546,6 +1591,32 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 			breakdown:   RepoWorkBreakdown{Issues: issueBreakdown, PRs: prBreakdown},
 			details:     RepoWorkDetails{Issues: issueDetails, PRs: sidelinedPRs},
 		}
+		// An issue list that came back empty beside a populated PR list is
+		// verified against the repo record before it is published as zero
+		// (hosted hive, 2026-10-22: every repo "0 issues · N PRs"). A list
+		// that under-reports is the issue side failing, not an empty
+		// backlog: the previous enumeration is served when there is one,
+		// else the PRs are kept and the missing issues are reported as an
+		// unlisted, stale remainder so the dashboard never prints 0.
+		if issueTotal == 0 && prTotal > 0 {
+			if missing, verr := c.verifyEmptyIssueList(repoCtx, repo, prTotal); verr != nil || missing > 0 {
+				if verr == nil {
+					verr = fmt.Errorf("%w: %s lists %d open pull requests and no issues while GitHub reports %d more open items", errIssueListIncomplete, repo, prTotal, missing)
+				}
+				if serveLastGood(repo, "issues", verr) {
+					continue
+				}
+				enum.counts.Issues = missing
+				appendRepo(repo, enum)
+				staleRepos = append(staleRepos, repo)
+				if staleSince.IsZero() || now.Before(staleSince) {
+					staleSince = now
+				}
+				c.logger.Warn("issue list came back empty beside open pull requests and could not be confirmed; publishing the repo's issue count as unverified (marked stale)",
+					"repo", repo, "prs", prTotal, "unlisted_issues", missing, "error", verr)
+				continue
+			}
+		}
 		appendRepo(repo, enum)
 		if listing != nil {
 			listing.itemPatches(repo, itemPatches)
@@ -1995,6 +2066,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 					RequestedReviewers:  reqLogins,
 					RequestedTeams:      reqTeams,
 					HoldSources:         prHoldSources,
+					ReferencedIssues:    PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
 				})
 			} else {
 				sidelined = append(sidelined, c.repoWorkPR(repo, pr, labels, hasAttr, workBucketPRDraft, "Held draft"))
@@ -2027,6 +2099,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 					ReviewClass:        ClassifyReviewClass(pr.GetTitle(), labels),
 					RequestedReviewers: reqLogins,
 					RequestedTeams:     reqTeams,
+					ReferencedIssues:   PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
 				})
 			}
 			continue
@@ -2084,6 +2157,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 			BaseRef:            prBaseRef(pr),
 			RequestedReviewers: reqLogins,
 			RequestedTeams:     reqTeams,
+			ReferencedIssues:   PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
 		})
 	}
 
@@ -3706,6 +3780,45 @@ func (c *Client) IssueClosedAt(ctx context.Context, owner, repo string, number i
 	return issue.GetClosedAt().Time, true, nil
 }
 
+// IssueSummary is the display triple of one issue or pull request:
+// what the activity tracker's issue slot needs for a closing reference
+// whose issue is no longer open (closed by an earlier PR, so absent from
+// every open-items listing, with only the number surviving from the PR's
+// closingIssuesReferences). State is lower-cased as on Issue.State.
+type IssueSummary struct {
+	Number int    `json:"number"`
+	Title  string `json:"title,omitempty"`
+	State  string `json:"state,omitempty"`
+	URL    string `json:"url,omitempty"`
+}
+
+// IssueSummary reads one issue (or PR: the endpoint serves both) by number
+// and returns its title, state and URL. A 404 reports (zero, false, nil):
+// the reference names nothing readable, which the caller remembers for its
+// TTL rather than asking again. Any other error is returned.
+func (c *Client) IssueSummary(ctx context.Context, repo string, number int) (IssueSummary, bool, error) {
+	if c == nil {
+		return IssueSummary{}, false, ErrNoGitHubClient
+	}
+	owner, name := c.splitRepo(repo)
+	issue, resp, err := c.client.Issues.Get(ctx, owner, name, number)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return IssueSummary{}, false, nil
+		}
+		return IssueSummary{}, false, fmt.Errorf("reading %s/%s#%d: %w", owner, name, number, err)
+	}
+	if issue == nil {
+		return IssueSummary{}, false, nil
+	}
+	return IssueSummary{
+		Number: issue.GetNumber(),
+		Title:  issue.GetTitle(),
+		State:  strings.ToLower(strings.TrimSpace(issue.GetState())),
+		URL:    issue.GetHTMLURL(),
+	}, true, nil
+}
+
 // SearchPRCount searches GitHub for PRs by author within an org.
 // state is "open" or "merged".
 // NOTE (org transfer): the org qualifier uses the CONFIGURED org verbatim.
@@ -4162,6 +4275,9 @@ type RepoWorkPR struct {
 	// monitor. Stamped by EnrichReviewSignalsAndWorkPRs, not by the
 	// enumeration.
 	LinkedIssues []PRLinkedIssue `json:"linked_issues,omitempty"`
+	// ReferencedIssues mirrors PullRequest.ReferencedIssues; stamped by the
+	// enumeration, which has the body.
+	ReferencedIssues []PRLinkedIssue `json:"referenced_issues,omitempty"`
 }
 
 // Work-detail buckets for sidelined PRs (RepoPRBreakdown field names).
@@ -4186,6 +4302,9 @@ func (c *Client) repoWorkPR(repo string, pr *gh.PullRequest, labels []string, hi
 		URL:            pr.GetHTMLURL(),
 		Bucket:         bucket,
 		Reason:         reason,
+		// The list payload carries the body, so the soft issue links cost
+		// no extra call.
+		ReferencedIssues: PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
 	}
 }
 

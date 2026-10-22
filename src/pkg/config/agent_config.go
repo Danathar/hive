@@ -173,6 +173,80 @@ func ValidateKickTemplateName(v string) error {
 	return nil
 }
 
+// AgentRuntimeConfig is the top-level hive.yaml surface owned by the agent
+// runtime (Crux, hivecommons/hive#13536, stage 1): the agent definitions,
+// the backend allow/deny list, provider status, the tool-approval desk, the
+// credential-free sandbox and the re-entrant turn model. Config embeds it
+// with `yaml:",inline"`, so every key keeps its historical top-level
+// position (`agents:`, `backends:`, `providers:`, `tool_approval:`,
+// `agent_sandbox:`, `turn:`) and existing hive.yaml files parse
+// identically; the struct exists so the runtime's configuration can be
+// named, documented and eventually handed to Crux as one value. Governor-
+// nested runtime keys live in AgentRuntimeGovernorConfig.
+type AgentRuntimeConfig struct {
+	Agents map[string]AgentConfig `yaml:"agents"`
+	// AgentsGitHubAPIHourlyCap is the fleet default for per-agent GitHub API
+	// reads through the proxy. It is encoded under agents.github_api_hourly_cap
+	// by Config's YAML hooks so existing agent-name keys remain unchanged.
+	AgentsGitHubAPIHourlyCap    int `yaml:"-" json:"-"`
+	agentsGitHubAPIHourlyCapSet bool
+	// Backends is the spoke-wide backend allow/deny list (#11310), enforced
+	// at pack apply and by PUT /api/config/agent/{name}/models.
+	Backends BackendsConfig `yaml:"backends,omitempty" json:"backends,omitempty"`
+	// Providers configures the read-only per-provider auth/availability
+	// status (ADR-0024). See ProvidersConfig.
+	Providers ProvidersConfig `yaml:"providers,omitempty" json:"providers,omitempty"`
+	// ToolApproval configures the approval desk (RFC #4000): the single
+	// decision point every approval-shaped request resolves through, plus the
+	// operator rules that steer it. Additive and DEFAULT-OFF — an absent block
+	// leaves every existing gate in charge and behavior byte-identical.
+	ToolApproval ToolApprovalConfig `yaml:"tool_approval,omitempty" json:"tool_approval,omitempty"`
+	// AgentSandbox configures the phase-1 credential-free sandbox runner. It is
+	// disabled by default and agents must opt in individually.
+	AgentSandbox AgentSandboxConfig `yaml:"agent_sandbox,omitempty" json:"agent_sandbox,omitempty"`
+	// Turn gates the re-entrant conversation-as-state rollout (#5799). Default
+	// off leaves every agent on the legacy tmux loop until an operator opts in.
+	Turn TurnConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
+}
+
+// AgentRuntimeGovernorConfig is the slice of `governor:` the agent runtime
+// owns: the per-agent watchdog, the engine and inference-backend credential
+// blocks (LiteLLM, vLLM, llm-d, bob), the named model gateways, trajectory
+// review, kick-prompt limits and provider rotation / spending-limit
+// handling. GovernorConfig embeds it with `yaml:",inline"`, so the keys stay
+// under `governor:` exactly where operators have always written them
+// (hivecommons/hive#13536).
+type AgentRuntimeGovernorConfig struct {
+	// Watchdog configures the per-agent self-healing reconciler (RFC #4665).
+	// Zero value = enabled with the RFC defaults; see pkg/config/watchdog.go
+	// for why defaults resolve lazily instead of via applyDefaults.
+	Watchdog WatchdogConfig      `yaml:"watchdog,omitempty"`
+	LiteLLM  LiteLLMConfig       `yaml:"litellm"`
+	VLLM     InferenceAuthConfig `yaml:"vllm"`
+	LLMD     InferenceAuthConfig `yaml:"llm-d"`
+	// Bob holds the IBM bobshell CLI backend's API-key location. Required for
+	// agents with backend "bob": bobshell's browser SSO flow cannot complete in
+	// a headless pod.
+	Bob        BobConfig        `yaml:"bob"`
+	Trajectory TrajectoryConfig `yaml:"trajectory"`
+	// KickLimits caps the issue and PR lists in every kick prompt
+	// (hivecommons/hive#7368). Absent = defaults (100 issues, 50 PRs).
+	KickLimits KickLimitsConfig `yaml:"kick_limits,omitempty" json:"kick_limits,omitempty"`
+	// Gateways is the list of named model gateways (OpenAI-compatible endpoints
+	// like OpenRouter, a LiteLLM proxy, vLLM, or llm-d). An agent routes through
+	// a gateway by naming it as its backend. When empty, a single implicit
+	// gateway named "litellm" is synthesized from the legacy LiteLLM block above
+	// so existing hives keep working with zero config change. See ResolveGateway.
+	Gateways []GatewayConfig `yaml:"gateways"`
+	// Rotation configures automatic provider failover when a provider's
+	// subscription or credit is exhausted. See RFC #3958.
+	Rotation RotationConfig `yaml:"rotation,omitempty" json:"rotation,omitempty"`
+	// ProviderBudget tunes the response to a PROVIDER spending-limit refusal
+	// (#4294) — the gateway declining to spend more money, as distinct from the
+	// hive's own token Budget above. See ProviderBudgetConfig.
+	ProviderBudget ProviderBudgetConfig `yaml:"provider_budget,omitempty" json:"provider_budget,omitempty"`
+}
+
 type AgentConfig struct {
 	// GitHubAPIHourlyCap overrides agents.github_api_hourly_cap for this agent.
 	// Nil inherits the global value; 0 disables the cap for this agent.
@@ -197,6 +271,16 @@ type AgentConfig struct {
 	ReplicaOf       string `yaml:"-" json:"replicaOf,omitempty"`
 	ReplicaIndex    int    `yaml:"-" json:"replicaIndex,omitempty"`
 	ReplicaCount    int    `yaml:"-" json:"replicaCount,omitempty"`
+	// ReviewHeads derives one reviewer agent per entry and replica from this
+	// (base) agent, each with its own backend/model: the swarm's model
+	// "heads" (hivecommons/hive#13542). With split perspectives every
+	// perspective is reviewed once per head, and the base agent is kept out
+	// of head dispatch. See review_heads.go.
+	ReviewHeads []ReviewHead `yaml:"review_heads,omitempty" json:"review_heads,omitempty"`
+	// ReviewHead is set on an agent derived from a base's review_heads: the
+	// head key (<base>-<alias>) shared by that head's replicas. Runtime only,
+	// like ReplicaOf.
+	ReviewHead string `yaml:"-" json:"reviewHead,omitempty"`
 	// Paused persists an operator pause across restarts/upgrades. Without
 	// this, every pod restart rebuilt agents un-paused (Go zero value), so
 	// an operator pause was silently undone on the next upgrade.

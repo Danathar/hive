@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,49 @@ func (s *Server) handleReviewConfigGet(w http.ResponseWriter, r *http.Request) {
 type reviewSection struct {
 	config.ReviewConfig
 	BuiltinPerspectives []map[string]string `json:"builtin_perspectives"`
+	// ReviewerCandidates lists every configured agent with the engine it runs
+	// on and whether the review gate would dispatch to it, so the Review Gate
+	// section can offer a pick-list for review.reviewer_agents and warn when a
+	// fan-out would run every review on one engine (#13460).
+	ReviewerCandidates []reviewerCandidate `json:"reviewer_candidates"`
+}
+
+// reviewerCandidate is one row of reviewSection.ReviewerCandidates.
+type reviewerCandidate struct {
+	Name    string `json:"name"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Enabled bool   `json:"enabled"`
+	// Available is false for agents the gate never dispatches to regardless
+	// of selection: disabled, paused or on-demand.
+	Available bool `json:"available"`
+	// KeywordMatch reports whether the agent qualifies by the "review"
+	// keyword scan alone, i.e. what runs when reviewer_agents is empty.
+	KeywordMatch bool `json:"keyword_match"`
+	// ReviewCapable is dashboardAgentReviewCapable under the CURRENT
+	// reviewer_agents list: the agents that actually review today.
+	ReviewCapable bool `json:"review_capable"`
+}
+
+// reviewerCandidates builds the pick-list in stable name order.
+func reviewerCandidates(cfg *config.Config) []reviewerCandidate {
+	if cfg == nil {
+		return []reviewerCandidate{}
+	}
+	out := make([]reviewerCandidate, 0, len(cfg.Agents))
+	for name, a := range cfg.Agents {
+		out = append(out, reviewerCandidate{
+			Name:          name,
+			Backend:       a.Backend,
+			Model:         a.Model,
+			Enabled:       a.Enabled,
+			Available:     a.Enabled && !a.Paused && !a.OnDemand,
+			KeywordMatch:  dashboardAgentReviewCapable(name, a, nil),
+			ReviewCapable: dashboardAgentReviewCapable(name, a, cfg.Review.ReviewerAgents),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // reviewSectionResponse is the review block as the dashboard sees it: the
@@ -39,7 +83,7 @@ func reviewSectionResponse(cfg *config.Config) reviewSection {
 	if cfg != nil {
 		rc = cfg.Review
 	}
-	return reviewSection{rc, builtin}
+	return reviewSection{rc, builtin, reviewerCandidates(cfg)}
 }
 
 // handleReviewConfigPut updates the review-swarm merge-gate settings from the
@@ -84,6 +128,7 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 		// negative value disables expiry, exactly as the loader reads it.
 		PendingTTL                 *string `json:"pending_ttl"`
 		MaxRedispatch              *int    `json:"max_redispatch"`
+		HeadMaxRetries             *int    `json:"head_max_retries"`
 		OutOfScopeBacklogDisabled  *bool   `json:"out_of_scope_backlog_disabled"`
 		MaxOutOfScopeBacklogIssues *int    `json:"max_out_of_scope_backlog_issues"`
 		// Perspectives and PerspectivePrompts travel together: a hive-defined
@@ -149,6 +194,7 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 		name string
 	}{
 		{body.MaxRedispatch, "max_redispatch"},
+		{body.HeadMaxRetries, "head_max_retries"},
 		{body.MaxOutOfScopeBacklogIssues, "max_out_of_scope_backlog_issues"},
 	} {
 		if f.v != nil && *f.v < 0 {
@@ -415,6 +461,9 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 	cfg.Review.PendingTTL = dispatch.PendingTTL
 	if body.MaxRedispatch != nil {
 		cfg.Review.MaxRedispatch = *body.MaxRedispatch
+	}
+	if body.HeadMaxRetries != nil {
+		cfg.Review.HeadMaxRetries = *body.HeadMaxRetries
 	}
 	if body.OutOfScopeBacklogDisabled != nil {
 		cfg.Review.OutOfScopeBacklogDisabled = *body.OutOfScopeBacklogDisabled

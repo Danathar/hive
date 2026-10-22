@@ -1782,6 +1782,7 @@ func (b *boot) wireBootClosures() {
 			// Run once at startup rather than waiting a full interval. A spoke that
 			// restarts more often than the interval would otherwise never prune.
 			runSessionPrune(b.logger, dir, maxAge)
+			runAgentSessionTreePrune(b.logger, agentSessionTreesRoot, maxAge)
 			runAgentHomePrune(b.logger, agentHomesRoot, homeMaxAge)
 
 			ticker := time.NewTicker(sessionPruneInterval)
@@ -1792,6 +1793,7 @@ func (b *boot) wireBootClosures() {
 					return
 				case <-ticker.C:
 					runSessionPrune(b.logger, dir, maxAge)
+					runAgentSessionTreePrune(b.logger, agentSessionTreesRoot, maxAge)
 					runAgentHomePrune(b.logger, agentHomesRoot, homeMaxAge)
 				}
 			}
@@ -3163,13 +3165,7 @@ func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 	b.metricsCollector.SetProjectScope(b.cfg.Project.Org, primaryRepo, b.cfg.Project.Repos, b.cfg.EffectiveAIAuthor())
 	b.metricsCollector.SetGitHubClientProvider(b.currentGitHubClient)
 	b.metricsCollector.SetCoverageTargetProvider(func() int { return b.cfg.Governor.EffectiveCoverageTarget() })
-	b.metricsCollector.SetPRIssueWindowStartProvider(func() time.Time {
-		history := b.dashSrv.CostHistory()
-		if len(history) == 0 || history[0].Timestamp <= 0 {
-			return time.Time{}
-		}
-		return time.UnixMilli(history[0].Timestamp).UTC()
-	})
+	b.metricsCollector.SetPRIssueWindowStartProvider(b.dashSrv.CostWindowStart)
 	// Merged / closed counts move on webhook events and the Search API is
 	// asked only hourly; with forgestate.enabled the Overview's open totals
 	// come from the cache the governor already reads (#13376).
@@ -5067,9 +5063,12 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 			if !b.cfg.Hub.Enabled {
 				return nil
 			}
-			govState := b.gov.GetState()
+			// Every sub-collector below is a named TimedSection so that when the
+			// collect exceeds its budget the spoke logs WHICH one ate it (see
+			// collectWithTimeout). Keep new collectors wrapped the same way.
+			govState := spoke.TimedSection("governor_state", b.gov.GetState)
 			currentMode := strings.ToLower(string(govState.Mode))
-			agents := b.heartbeatAgents(govState, currentMode, true)
+			agents := spoke.TimedSection("agents", func() []spoke.AgentSummary { return b.heartbeatAgents(govState, currentMode, true) })
 			acmmLvl := b.heartbeatACMMLevel()
 			prsMerged, prsRejected, cvesClosed, fleetStatsCollectedAt := b.heartbeatFleetStats()
 			repoActivity, repoActivityCollectedAt, repoActivityWindowHours, repoActivityCountWindowHours := b.heartbeatRepoActivity()
@@ -5077,7 +5076,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 			// user-journey stage detection. Always a non-nil pointer from a
 			// spoke new enough to compute it, so the hub can distinguish
 			// "genuinely zero agents configured" from "old spoke, unknown".
-			agentsWithModel := b.agentMgr.CountAgentsWithModel()
+			agentsWithModel := spoke.TimedSection("agents_with_model", b.agentMgr.CountAgentsWithModel)
 
 			// --- Quadrant signals ------------------------------------------
 			// All read from state this spoke already maintains on an existing
@@ -5111,20 +5110,24 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 			// statuses: it feeds only FrontendPlanning.ArchitectPaused, which
 			// this heartbeat does not send, and the resolver is unexported to
 			// pkg/dashboard. Passing false cannot perturb AwaitingReview.
-			var awaitingReview *int
-			if planning := dashboard.BuildPlanning(b.beadStores, false, acmmLvl); planning.Available {
-				n := planning.AwaitingReview
-				awaitingReview = &n
-			}
+			awaitingReview := spoke.TimedSection("planning", func() *int {
+				if planning := dashboard.BuildPlanning(b.beadStores, false, acmmLvl); planning.Available {
+					n := planning.AwaitingReview
+					return &n
+				}
+				return nil
+			})
 
 			// Contributor-relay tasks over the trailing 7d, summed from the
 			// spoke's own 168 hourly buckets. nil until the store exists; a
 			// zero from an existing store is a real "no contributor finished
 			// anything" reading.
-			var tasksCompleted7d *int
-			if n, ok := b.dashSrv.TasksCompleted7d(); ok {
-				tasksCompleted7d = &n
-			}
+			tasksCompleted7d := spoke.TimedSection("tasks_completed_7d", func() *int {
+				if n, ok := b.dashSrv.TasksCompleted7d(); ok {
+					return &n
+				}
+				return nil
+			})
 
 			providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := spoke.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
 			lastWriteKickAt, kickDisposition, kickSkipReason, notWritableQueued :=
@@ -5142,9 +5145,9 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 			// token collector's first bob-recording scan completes ("not
 			// measured", hub carries forward); the other two are always live
 			// measurements and send [] to clear a stale carry-forward.
-			agentErrorStreaks := b.tokenCollector.AgentErrorStreaks()
-			consentWedged := b.agentMgr.ConsentWedgedAgents()
-			noCadenceAgents := b.gov.NoCadenceAgents()
+			agentErrorStreaks := spoke.TimedSection("agent_error_streaks", b.tokenCollector.AgentErrorStreaks)
+			consentWedged := spoke.TimedSection("consent_wedged", b.agentMgr.ConsentWedgedAgents)
+			noCadenceAgents := spoke.TimedSection("no_cadence_agents", b.gov.NoCadenceAgents)
 
 			return &spoke.HeartbeatPayload{
 				AgentsWithModel:      &agentsWithModel,
@@ -5165,7 +5168,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// record only when it sees the gateway named here, so a lost
 				// delivery is re-offered rather than dropped. Names only — the
 				// key never leaves the spoke.
-				GatewayNames: b.dashSrv.ConfiguredGatewayNames(),
+				GatewayNames: spoke.TimedSection("gateway_names", b.dashSrv.ConfiguredGatewayNames),
 				// Hash only, never the raw token: lets the hub verify this
 				// spoke's upgrade-proof credential without reading the
 				// hive-secrets secret from a cluster it may not reach
@@ -5185,7 +5188,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// self-DoSed spokes with nothing surfacing it. Report the count
 				// and its rlimit every beat so the next leak is a climbing
 				// number on the hub, not a manual /proc excavation.
-				OpenFDs:     spoke.OpenFDCount(),
+				OpenFDs:     spoke.TimedSection("open_fds", spoke.OpenFDCount),
 				FDSoftLimit: spoke.FDSoftLimit(),
 				// Reporter names THIS process (the pod) so the hub can tell two
 				// instances reporting as one hive apart — the pod name is the
@@ -5234,13 +5237,13 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				ProviderLimitRebuffs:    providerLimitRebuffs,
 				ProviderLimitHiveWide:   providerLimitHiveWide,
 				ProviderLimitAgents:     providerLimitAgents,
-				Providers:               heartbeatProviders(b.cfg, agents),
+				Providers:               spoke.TimedSection("providers", func() []agent.ProviderStatus { return heartbeatProviders(b.cfg, agents) }),
 				LastWriteCapableKickAt:  lastWriteKickAt,
 				LastKickDisposition:     kickDisposition,
 				LastKickSkipReason:      kickSkipReason,
 				NotWritableQueued:       notWritableQueued,
-				RepoTargetMisconfigured: b.repoTargetMisconfigured(),
-				RepoTargetIssue:         b.repoTargetIssueMessage(),
+				RepoTargetMisconfigured: spoke.TimedSection("repo_target_misconfigured", b.repoTargetMisconfigured),
+				RepoTargetIssue:         spoke.TimedSection("repo_target_issue", b.repoTargetIssueMessage),
 				Repos:                   b.cfg.Project.Repos,
 				PrimaryRepo:             b.cfg.Project.PrimaryRepo,
 				ACMMLevel:               acmmLvl,
@@ -5275,27 +5278,27 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 					reg, active := b.dashSrv.ContributorSummary()
 					return spoke.ContributorSummary{Registered: reg, Active: active}
 				}(),
-				Runs:        b.dashSrv.HeartbeatRunsSummary(),
-				Leaderboard: b.leaderboardForHeartbeat(),
+				Runs:        spoke.TimedSection("runs", b.dashSrv.HeartbeatRunsSummary),
+				Leaderboard: spoke.TimedSection("leaderboard", b.leaderboardForHeartbeat),
 				// Report who has a live dashboard session so the hub can accumulate
 				// per-user "time in hive". Bare usernames only — never session
 				// ids/tokens (ActiveSessionUsernames guarantees this).
-				ActiveSessionUsers: b.dashSrv.ActiveSessionUsernames(),
+				ActiveSessionUsers: spoke.TimedSection("active_session_users", b.dashSrv.ActiveSessionUsernames),
 				// The honest subset of the above: users whose browser reported
 				// focused, recent-input presence (see dashboard/presence.go).
 				// An idle open tab appears in ActiveSessionUsers but not here.
-				EngagedSessionUsers: b.dashSrv.EngagedSessionUsernames(),
+				EngagedSessionUsers: spoke.TimedSection("engaged_session_users", b.dashSrv.EngagedSessionUsernames),
 				// Per-user last audit-logged real action, so the hub can tell
 				// users who DO things from users who merely stay logged in.
-				UserLastActions: b.dashSrv.UserLastActions(),
-				Owner:           b.ownerForHeartbeat(),
+				UserLastActions: spoke.TimedSection("user_last_actions", b.dashSrv.UserLastActions),
+				Owner:           spoke.TimedSection("owner", b.ownerForHeartbeat),
 				// Report the API URL we are actually running against so the hub
 				// can see whether a GitHub Enterprise API URL it delivered has
 				// landed. Resolved (never empty) so the hub can distinguish
 				// "public github.com" from "spoke too old to report this".
 				GitHubAPIURL: b.cfg.GitHub.ResolvedAPIURL(),
-				Health:       b.dashSrv.HealthSummary(),
-				DashboardURL: b.dashboardURLForHeartbeat(),
+				Health:       spoke.TimedSection("health", b.dashSrv.HealthSummary),
+				DashboardURL: spoke.TimedSection("dashboard_url", b.dashboardURLForHeartbeat),
 				SnapshotURL:  b.cfg.Hub.SnapshotURL,
 				HiveType:     b.cfg.Hub.HiveType,
 				ClusterID:    b.cfg.Hub.ClusterID,
@@ -5308,7 +5311,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// is the only way to distinguish a hive pinned to an immutable
 				// SHA tag (which can never receive a rolling upgrade) from one
 				// riding <branch>-latest. Empty off-cluster — never guessed.
-				ImageRef: spoke.SelfDeploymentImage(),
+				ImageRef: spoke.TimedSection("image_ref", spoke.SelfDeploymentImage),
 				// The GitHub instance this spoke actually runs against. Only
 				// the spoke knows this for certain: a hive's GitHub can differ
 				// from its cluster's default, so the hub cannot infer it.
@@ -5328,12 +5331,12 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				PendingGitHubAppInstall:  b.dashSrv.IsPendingGitHubAppInstall(),
 				AutoUpgrade:              b.cfg.Hub.AutoUpgrade,
 				UpgradeDrainUntil:        upgradeDrainUntilForHeartbeat(selfUpgradeDrainNow()),
-				ClusterHealth: func() *spoke.HeartbeatClusterHealthReport {
-					if os.Getenv("HIVE_CLUSTER_ID") == "" {
+				ClusterHealth: spoke.TimedSection("cluster_health", func() *spoke.HeartbeatClusterHealthReport {
+					if !shouldCollectHeartbeatClusterHealth(b.cfg.Hub.ClusterID) {
 						return nil
 					}
 					return spoke.CollectClusterHealth(b.logger)
-				}(),
+				}),
 				PRsMerged90d:                 prsMerged,
 				PRsRejected90d:               prsRejected,
 				CVEsClosed:                   cvesClosed,
@@ -5346,8 +5349,8 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// this against its per-cluster key and pushes a correction only
 				// on a mismatch, so a spoke already holding the right key costs
 				// nothing and a spoke holding the wrong one self-heals.
-				GitHubAppKeyFingerprint: appKeys.ReportedFingerprint(b.cfg.GitHub.KeyFile, b.cfg.GitHub.AppID),
-				GitHubAppKeyPerHive:     appKeys.HasPerHiveKey(b.cfg.GitHub.KeyFile, b.cfg.GitHub.AppID),
+				GitHubAppKeyFingerprint: spoke.TimedSection("app_key_fingerprint", func() string { return appKeys.ReportedFingerprint(b.cfg.GitHub.KeyFile, b.cfg.GitHub.AppID) }),
+				GitHubAppKeyPerHive:     spoke.TimedSection("app_key_per_hive", func() bool { return appKeys.HasPerHiveKey(b.cfg.GitHub.KeyFile, b.cfg.GitHub.AppID) }),
 				// Report the App this hive believes it authenticates as. The hub
 				// pairs it with the fingerprint above to tell a per-hive key that
 				// is WRONG for this App from one that is deliberately for another.
@@ -5363,20 +5366,20 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// Report the fingerprint of every ADDITIONAL per-app-id key already
 				// on the PVC, so the hub delivers the fleet's other App keys once
 				// and then stops re-sending them.
-				GitHubAppKeysHeld: appKeys.HeldFingerprints(),
+				GitHubAppKeysHeld: spoke.TimedSection("app_keys_held", appKeys.HeldFingerprints),
 				// Component reach counters (#3993, phase 2a of #3973): per
 				// (component, running commit) span counts aggregated in-process,
 				// exporter or not (D2) — the heartbeat is the only channel that
 				// reaches every spoke, pull-only ones included (D1). nil until
 				// the first span, which the hub reads as "no data", never as
 				// zero reach. Capped at tracing.MaxReachComponents entries.
-				ComponentReach: tracing.ReachSnapshot(),
+				ComponentReach: spoke.TimedSection("component_reach", tracing.ReachSnapshot),
 				// Compliance profile + latest posture pass/fail (#11083); an
 				// empty block when compliance is not configured.
-				Compliance: b.dashSrv.ComplianceHeartbeat(),
+				Compliance: spoke.TimedSection("compliance", b.dashSrv.ComplianceHeartbeat),
 				// 90-day evidence-pipeline summary + self-authored auto-merge
 				// posture (#12114); nil when bundles are unreadable.
-				Evidence: b.dashSrv.EvidenceHeartbeat(),
+				Evidence: spoke.TimedSection("evidence", b.dashSrv.EvidenceHeartbeat),
 			}
 
 		}, heartbeatSendInterval, b.logger,
@@ -5737,26 +5740,12 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 					// Fingerprint before and after so the key rotation is auditable
 					// from the spoke's own logs. Fingerprints only — the key itself
 					// is never logged.
-					beforeFP, _ := config.AppKeyFingerprintFromFile(keyPath)
-					if err := os.WriteFile(keyPath, []byte(ghCfg.PrivateKey), appKeys.FileMode); err != nil {
-						b.logger.Error("failed to write github app key from heartbeat", "error", err)
+					changed, err := applyDeliveredPrimaryKey(b.logger, keyPath, ghCfg.PrivateKey)
+					if err != nil {
+						b.logger.Error("failed to write github app key from heartbeat", "path", keyPath, "error", err)
 						return
 					}
-					// os.WriteFile does NOT re-apply the mode to a file that already
-					// exists, so a key written by an older build (or restored from a
-					// looser-moded source) would keep its old permissions forever.
-					// Chmod unconditionally so every path converges on 0600.
-					if err := os.Chmod(keyPath, appKeys.FileMode); err != nil {
-						b.logger.Warn("could not tighten github app key permissions", "path", keyPath, "error", err)
-					}
-					afterFP, _ := config.AppKeyFingerprintFromFile(keyPath)
-					keyChanged = afterFP != "" && afterFP != beforeFP
-					b.logger.Info("github app private key written via heartbeat",
-						"path", keyPath,
-						"from_fingerprint", beforeFP,
-						"to_fingerprint", afterFP,
-						"key_changed", keyChanged,
-					)
+					keyChanged = changed
 					if keyChanged {
 						// Invalidate before the new client is built, so nothing can
 						// read the dead token out of the shared on-disk cache in
@@ -7536,6 +7525,11 @@ func runEvalCycle(
 		// (hivecommons/hive#13421); one shared collector keeps the budget at
 		// one query per repo for both.
 		ghClient.EnrichReviewSignalsAndWorkPRs(ctx, actionable.PRs.StaleDrafts, actionable.WorkDetailsByRepo)
+		// A closing reference whose issue is already closed (a superseded
+		// PR's `Fixes #N`) has no open row to borrow a title from; fill it
+		// once per issue, from a long-lived memo, so the activity monitor
+		// never shows a bare "#N".
+		ghClient.EnrichLinkedIssueTitles(ctx, actionable.WorkDetailsByRepo, actionable.PRs.Items, actionable.PRs.Held, actionable.PRs.StaleDrafts)
 	}
 
 	// Publish the human-facing "what should I merge next?" digest. This reads
@@ -7877,6 +7871,9 @@ func runEvalCycle(
 	reviewPlan := planReviewDispatch(cfg, actionable, agentMgr, beadStores, logger)
 	emitReviewHumanEscalations(reviewPlan)
 	auditWithheldReviewFixes(reviewPlan, dashSrv, logger)
+	if ghClient != nil {
+		postReviewAcknowledgements(ctx, ghClient, reviewPlan, logger)
+	}
 	applyHumanDecisionLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	if ghClient != nil {
 		applyReviewPriorityLabels(ctx, cfg, ghClient, reviewQueue, logger)
@@ -9784,6 +9781,65 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 	})
 }
 
+// legacyFleetReportSweepInterval is how often the hive that watches the
+// fleet-report repo looks for standalone "Fleet report:" issues to close.
+const legacyFleetReportSweepInterval = github.LegacyFleetReportSweepInterval
+
+// hiveWatchesRepo reports whether repo is one of project.repos.
+func hiveWatchesRepo(cfg *config.Config, repo string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, r := range cfg.Project.Repos {
+		if strings.EqualFold(strings.TrimSpace(r), strings.TrimSpace(repo)) {
+			return true
+		}
+	}
+	return false
+}
+
+// runLegacyFleetReportSweepIfDue closes standalone "Fleet report:" issues a
+// spoke still on a pre-#13470 build filed directly in the report repo
+// (hivecommons/hive#13567). Only the hive that watches that repo runs it —
+// it is the one with write access there — at most once per
+// legacyFleetReportSweepInterval.
+func runLegacyFleetReportSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil || cfg == nil {
+		return
+	}
+	repo := cfg.Governor.FleetReport.EffectiveRepo()
+	if !hiveWatchesRepo(cfg, repo) {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < legacyFleetReportSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepLegacyFleetReportIssues(ctx, github.LegacyFleetReportSweepOptions{
+		Repo: repo,
+		Audit: func(event github.LegacyFleetReportSweepEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, author=%s, title=%s", event.Repo, event.Number, event.Author, event.Title)
+			dashSrv.AuditLogRecord("system", "legacy-fleet-report-closed", detail, "", event.Repo, event.Number)
+		},
+	})
+	if err != nil {
+		logger.Warn("legacy fleet report sweep failed", "error", err)
+		return
+	}
+	for _, e := range result.Errors {
+		logger.Warn("legacy fleet report sweep: issue skipped", "detail", e)
+	}
+	if len(result.Closed) > 0 {
+		logger.Info("legacy fleet report sweep complete", "scanned", result.Scanned, "closed", len(result.Closed), "skipped", result.Skipped)
+	}
+}
+
 // runTaskListSweepIfDue closes hive-filed issues whose task-list bodies are
 // fully ticked, at most once per taskListSweepInterval. The finding-granularity
 // policy (guidance now in every issue-filing template) tells agents to encode
@@ -10173,6 +10229,13 @@ func runIssueUnparkSweepIfDue(ctx context.Context, ghClient *github.Client, cfg 
 				event.Repo, event.Number, event.Actor, event.Decision)
 			dashSrv.AuditLogRecord("system", "issue-unparked-by-reply", detail, "", event.Repo, event.Number)
 		},
+		ClosedAudit: func(event github.IssueUnparkEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, actor=%s", event.Repo, event.Number, event.Actor)
+			dashSrv.AuditLogRecord("system", "issue-closed-by-fixed", detail, "", event.Repo, event.Number)
+		},
 		// `/hive decision` on a hive-authored PR at 085 (hivecommons/hive#13041)
 		// is routed to the fix lane under the automerge lane's merger trust.
 		HumanChangeRequests: review.DefaultHumanChangeRequests(),
@@ -10193,9 +10256,60 @@ func runIssueUnparkSweepIfDue(ctx context.Context, ghClient *github.Client, cfg 
 	if result == nil {
 		return
 	}
-	if len(result.Unparked) > 0 || result.Replies > 0 || len(result.LabelApproved) > 0 || len(result.PRDecisions) > 0 {
+	if len(result.Unparked) > 0 || len(result.Closed) > 0 || result.Replies > 0 || len(result.LabelApproved) > 0 || len(result.PRDecisions) > 0 {
 		logger.Info("issue un-park sweep complete",
-			"seen", result.Seen, "unparked", len(result.Unparked), "label_approved", len(result.LabelApproved), "pr_decisions", len(result.PRDecisions), "replies", result.Replies, "skipped", result.Skipped)
+			"seen", result.Seen, "unparked", len(result.Unparked), "closed", len(result.Closed), "label_approved", len(result.LabelApproved), "pr_decisions", len(result.PRDecisions), "replies", result.Replies, "skipped", result.Skipped)
+	}
+}
+
+// closedIssueStageSweepInterval spaces the closed-issue clean-up. A closed
+// issue wearing stage/045 is a stale dashboard row, not a person waiting, so
+// this runs at the task-list cadence; each pass is one listing per repo.
+const closedIssueStageSweepInterval = 10 * time.Minute
+
+// closedIssueStageSweepSlack widens each pass's `since` so an issue that
+// closed while the previous pass was running is not missed.
+const closedIssueStageSweepSlack = 10 * time.Minute
+
+// runClosedIssueStageSweepIfDue strips hive stage and park labels from issues
+// that closed while carrying them (hivecommons/homebrew-hive#127): the
+// issue-stage reconciler only visits open issues, so a `Fixes #N` merge or a
+// by-hand close left `stage/045-needs-decision` behind and the tracker kept
+// reading it as a pending decision. Every rule lives in
+// SweepClosedIssueStageLabels; this is the scheduler and audit sink.
+func runClosedIssueStageSweepIfDue(ctx context.Context, ghClient *github.Client, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	now := time.Now()
+	var since time.Time
+	if lastRun != nil && !lastRun.IsZero() {
+		if now.Sub(*lastRun) < closedIssueStageSweepInterval {
+			return
+		}
+		since = lastRun.Add(-closedIssueStageSweepSlack)
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepClosedIssueStageLabels(ctx, github.ClosedIssueStageSweepOptions{
+		Since:      since,
+		MaxActions: github.DefaultClosedIssueStageSweepMaxActions,
+		Audit: func(event github.ClosedIssueStageEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, stage=%s, needs_human=%t",
+				event.Repo, event.Number, strings.Join(event.Stage, ","), event.NeedsHuman)
+			dashSrv.AuditLogRecord("system", "closed-issue-stage-cleared", detail, "", event.Repo, event.Number)
+		},
+	})
+	if err != nil {
+		logger.Warn("closed-issue stage sweep failed", "error", err)
+		return
+	}
+	if result != nil && (len(result.Cleaned) > 0 || result.Skipped > 0) {
+		logger.Info("closed-issue stage sweep complete", "seen", result.Seen, "cleaned", len(result.Cleaned), "skipped", result.Skipped)
 	}
 }
 
@@ -10213,9 +10327,10 @@ func labelApprovalPolicyResolver(cfg *config.Config) func(repo string) (github.L
 			return github.LabelApprovalPolicy{}, false
 		}
 		return github.LabelApprovalPolicy{
-			Labels:          labels,
-			TrustOrgMembers: cfg.LabelDrivenTrustOrgMembers(),
-			TrustedBots:     cfg.LabelDrivenTrustedBots(),
+			Labels:              labels,
+			TrustOrgMembers:     cfg.LabelDrivenTrustOrgMembers(),
+			TrustedBots:         cfg.LabelDrivenTrustedBots(),
+			SupersedeParkActors: cfg.LabelDrivenSupersedeParkActors(repo),
 		}, true
 	}
 }
@@ -10462,17 +10577,35 @@ func fullRepoName(repo, org string) string {
 // dispatcher sees it, so the relay judges reviewer-ness by the same rule.
 // An unknown lane has only its name to go on.
 func reviewAgentCapability(cfg *config.Config, agent string) review.AgentCapability {
-	cap := review.AgentCapability{Name: agent}
-	if cfg == nil {
-		return cap
+	if cfg != nil {
+		if ac, ok := cfg.Agents[agent]; ok {
+			return review.CapabilityFromConfig(agent, ac)
+		}
 	}
-	if ac, ok := cfg.Agents[agent]; ok {
-		cap.Role = ac.Role
-		cap.LaneKeywords = ac.LaneKeywords
-		cap.DetectKeywords = ac.DetectKeywords
-		cap.Aliases = ac.Aliases
+	return review.AgentCapability{Name: agent}
+}
+
+// reviewAuthorBase resolves an authoring lane to its base agent over the full
+// configured agent set, enabled or not. A replica name the current config no
+// longer materialises (its replicas: count was reduced) still maps to the
+// declared base it was derived from, so the base and its remaining replicas
+// stay excluded from reviewing it.
+func reviewAuthorBase(cfg *config.Config, agent string) string {
+	agent = strings.TrimSpace(agent)
+	if cfg == nil || agent == "" {
+		return agent
 	}
-	return cap
+	if _, ok := cfg.Agents[agent]; ok {
+		return cfg.BaseAgentName(agent)
+	}
+	if i := strings.LastIndex(agent, "-"); i > 0 {
+		if n, err := strconv.Atoi(agent[i+1:]); err == nil && n >= 2 {
+			if ac, ok := cfg.Agents[agent[:i]]; ok && ac.ReplicaOf == "" {
+				return agent[:i]
+			}
+		}
+	}
+	return agent
 }
 
 // installReviewRelaySettings gives a (possibly rebuilt) GitHub client the
@@ -10489,6 +10622,9 @@ func installReviewRelaySettings(client *github.Client, cfg *config.Config, logge
 	client.SetPerspectives(reviewPerspectiveSet(cfg, logger))
 	client.SetReviewerAgentFunc(func(agent string) bool {
 		return review.ReviewCapable(reviewAgentCapability(cfg, agent), review.ReviewerAgentSet(cfg.Review.ReviewerAgents))
+	})
+	client.SetAgentBaseFunc(func(agent string) string {
+		return reviewAuthorBase(cfg, agent)
 	})
 	client.SetConfidenceScore(func() bool { return cfg.Review.ConfidenceScore })
 	client.SetReviewBacklog(func() (bool, int) {
@@ -10842,6 +10978,10 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 			// to read rather than being left to infer from the diff.
 			MergeBase:   pr.BaseSHA,
 			AuthorAgent: prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
+			// The author's base over every configured lane, enabled or not,
+			// so a disabled or retired authoring replica still excludes its
+			// family from reviewing it (hivecommons/hive#13552).
+			AuthorBase: reviewAuthorBase(cfg, prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)]),
 			// Run trailers (#8310) and the plan they name, for plan_match
 			// (#8317). Identifiers and planner output only: the PR body
 			// itself still never reaches the prompt.
@@ -10860,20 +11000,9 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 	prs = prioritizeEventPRs(prs, activeReviewEvents.Load())
 	agents := make([]review.AgentCapability, 0, len(cfg.Agents))
 	for name, ac := range cfg.EnabledAgents() {
-		agents = append(agents, review.AgentCapability{
-			Name:           name,
-			Enabled:        true,
-			Paused:         ac.Paused || (agentMgr != nil && agentMgr.IsPaused(name)),
-			OnDemand:       ac.OnDemand,
-			UsesKick:       ac.UsesGovernorKick(),
-			Role:           ac.Role,
-			LaneKeywords:   ac.LaneKeywords,
-			DetectKeywords: ac.DetectKeywords,
-			Aliases:        ac.Aliases,
-			Backend:        ac.Backend,
-			Model:          ac.Model,
-			ReviewModels:   ac.ReviewModels,
-		})
+		cap := review.CapabilityFromConfig(name, ac)
+		cap.Paused = cap.Paused || (agentMgr != nil && agentMgr.IsPaused(name))
+		agents = append(agents, cap)
 	}
 	reviewBotLogins := []string{}
 	if reviewBots.Enabled() {
@@ -10896,6 +11025,7 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		ReviseVerdictsBefore:  parseReviseCutoff(cfg.Review.ReviseVerdictsBefore, logger),
 		PendingTTL:            cfg.Review.PendingReviewTTL(),
 		MaxRedispatch:         cfg.Review.EffectiveMaxRedispatch(),
+		HeadMaxRetries:        cfg.Review.HeadMaxRetries,
 		ProjectOrg:            cfg.Project.Org,
 		AIAuthor:              cfg.EffectiveAIAuthor(),
 		Agents:                agents,
@@ -10930,6 +11060,8 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		Perspectives:               reviewPerspectiveSet(cfg, logger),
 		SelfAuthoredDecisionPolicy: cfg.Review.EffectiveSelfAuthoredDecisionPolicy(),
 		ModelStamps:                reviewModelStamps(logger),
+		ExpectedHeads:              cfg.ExpectedReviewHeads(),
+		MissingHeads:               reviewMissingHeads(),
 	}, time.Now().UTC())
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -11111,6 +11243,40 @@ func auditWithheldReviewFixes(plan review.DispatchPlan, auditor reviewFixAuditor
 		}
 		auditor.AuditLog("governor", "review_fix_withheld",
 			fmt.Sprintf("pr=%s#%d head=%s author=%s setting=%s=%t reason=%s", w.Repo, w.Number, w.HeadSHA, w.Author, w.Setting, w.SettingEnabled, w.Reason), "")
+	}
+}
+
+// reviewMissingHeads reads the review heads that ran out of retries while
+// another head answered (hivecommons/hive#13542), so their perspectives count
+// as settled for the decision step. No state is none.
+func reviewMissingHeads() map[string][]string {
+	state, err := review.LoadDispatchState("")
+	if err != nil {
+		return nil
+	}
+	return review.MissingHeadsFromState(state)
+}
+
+// reviewCommentPoster is the GitHub write postReviewAcknowledgements needs.
+type reviewCommentPoster interface {
+	CreateIssueCommentBudgeted(ctx context.Context, repo string, number int, body string) error
+}
+
+// postReviewAcknowledgements posts the one-line no-findings comment for each
+// PR head the review-heads skip rule settled this cycle: every head approved
+// every perspective with no findings, so no decision session ran to post it
+// (hivecommons/hive#13542). The planner records each head once, so a failed
+// post is logged rather than repeated.
+func postReviewAcknowledgements(ctx context.Context, poster reviewCommentPoster, plan review.DispatchPlan, logger *slog.Logger) {
+	if len(plan.Acknowledgements) == 0 || poster == nil {
+		return
+	}
+	for _, a := range plan.Acknowledgements {
+		if err := poster.CreateIssueCommentBudgeted(ctx, a.Repo, a.Number, a.Body); err != nil {
+			logger.Warn("review heads: could not post the no-findings acknowledgement", "repo", a.Repo, "pr", a.Number, "head_sha", a.HeadSHA, "error", err)
+			continue
+		}
+		logger.Info("review heads: posted the no-findings acknowledgement", "repo", a.Repo, "pr", a.Number, "head_sha", a.HeadSHA)
 	}
 }
 

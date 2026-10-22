@@ -31,6 +31,12 @@ const SchemaVersion = "v1"
 //go:embed schema/v1.json
 var SchemaJSON []byte
 
+// Control-window assignments. These are observations, not dispatch or merge gates.
+const (
+	ControlWindowOn  = "on"
+	ControlWindowOff = "off"
+)
+
 // Author kinds.
 const (
 	AuthorHuman = "human"
@@ -67,15 +73,20 @@ type Bundle struct {
 	RevertedBy       []string          `json:"reverted_by,omitempty"`
 	FollowedUpBy     []string          `json:"followed_up_by,omitempty"`
 	IssueReopens     []IssueReopen     `json:"issue_reopens,omitempty"`
+	IssueClosures    []IssueClosure    `json:"issue_closures,omitempty"`
 	Shadow           *Shadow           `json:"shadow,omitempty"`
-	Backfilled       bool              `json:"backfilled,omitempty"`
-	Backfill         *Backfill         `json:"backfill,omitempty"`
-	Outcome          *Outcome          `json:"outcome,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-	Signed           bool              `json:"signed"`
-	Hash             string            `json:"hash,omitempty"`
-	Signature        string            `json:"signature,omitempty"`
+	// ControlWindow is the prospectively assigned dispatch arm at PR open
+	// time: on = Hive dispatch enabled, off = scheduled control window.
+	// Empty means unassigned/unknown, never an inferred on-arm observation.
+	ControlWindow string    `json:"control_window,omitempty"`
+	Backfilled    bool      `json:"backfilled,omitempty"`
+	Backfill      *Backfill `json:"backfill,omitempty"`
+	Outcome       *Outcome  `json:"outcome,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Signed        bool      `json:"signed"`
+	Hash          string    `json:"hash,omitempty"`
+	Signature     string    `json:"signature,omitempty"`
 }
 
 // Author identifies the PR author. Kind is one of human, agent or bot. For
@@ -297,6 +308,9 @@ func (b *Bundle) Validate() error {
 	if owner, name, ok := strings.Cut(b.Repo, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 		bad("repo %q must be owner/name", b.Repo)
 	}
+	if b.ControlWindow != "" && b.ControlWindow != ControlWindowOn && b.ControlWindow != ControlWindowOff {
+		bad("control_window %q must be on or off", b.ControlWindow)
+	}
 	if b.Number <= 0 {
 		bad("number %d must be positive", b.Number)
 	}
@@ -433,6 +447,11 @@ func (b *Bundle) Validate() error {
 			if id == "" {
 				bad("%s[%d]: bundle id is required", l.name, i)
 			}
+		}
+	}
+	for i, c := range b.IssueClosures {
+		if strings.TrimSpace(c.Repo) == "" || c.Issue <= 0 || c.At.IsZero() {
+			bad("issue_closures[%d]: repo, positive issue and at are required", i)
 		}
 	}
 	for i, r := range b.IssueReopens {

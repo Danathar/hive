@@ -1328,6 +1328,7 @@
     .ham-sound-row-label { color: var(--text); font-weight: 600; flex: 1 1 14rem; }
     .ham-sound-name { color: var(--muted); max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .ham-sound-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-left: auto; }
+    .hv-btn.is-playing { color: var(--accent, var(--text)); font-style: italic; }
     .ham-sound-file { position: relative; overflow: hidden; cursor: pointer; }
     .ham-sound-file input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
     .ham-sound-help { font-size: var(--fs-xs); margin: var(--sp-0); }
@@ -1398,6 +1399,46 @@
     /* Issue slot of a PR row that has no open issue: muted placeholder. */
     .ham-no-issue .ham-kind-ico { opacity: 0.55; }
     .ham-no-issue-t { color: var(--text-faint); font-style: italic; }
+    /* Issue slot naming a closed issue (a superseded PR's `Fixes #N`): muted, struck through, under a "closed" chip. */
+    .ham-issue-closed .ham-kind-ico { opacity: 0.55; }
+    .ham-issue-closed .ham-ref, .ham-issue-closed .ham-title { color: var(--text-faint); text-decoration: line-through; }
+    .ham-issue-closed .ham-no-issue-t { text-decoration: none; }
+    .ham-issue-closed-chip { flex: 0 0 auto; margin-left: var(--sp-1); }
+    /* Issue slot naming an issue the PR only refers to (`Refs #N`, a `(#N, part 1)` title): a muted "refs" chip tells it from a closing link. */
+    .ham-issue-refs-chip { flex: 0 0 auto; margin-left: var(--sp-1); font-style: italic; }
+    /* Repo chip before the number: monospace, tinted per repo from the
+       --ham-repo-tint-N palette (slot = string hash), muted for the primary
+       repo; a button that sets the Repo filter. Owner/repo rides its title. */
+    .ham-repo-chip { flex: 0 0 auto; display: inline-block; font: inherit; font-family: var(--font-mono); font-size: var(--fs-2xs); line-height: 1.5; padding: 0 var(--sp-2); border-radius: var(--r-sm); border: var(--line-width) solid color-mix(in srgb, var(--ham-repo-tint) 45%, transparent); background: color-mix(in srgb, var(--ham-repo-tint) 12%, transparent); color: var(--ham-repo-tint); cursor: pointer; white-space: nowrap; max-width: 9em; overflow: hidden; text-overflow: ellipsis; vertical-align: baseline; }
+    .ham-repo-chip:hover, .ham-repo-chip[aria-pressed="true"] { background: color-mix(in srgb, var(--ham-repo-tint) 26%, transparent); color: var(--text); }
+    .ham-repo-chip:focus-visible { outline: var(--focus-ring-width) solid var(--ham-repo-tint); outline-offset: 1px; }
+    .ham-repo-tint-0 { --ham-repo-tint: var(--ham-repo-tint-0); }
+    .ham-repo-tint-1 { --ham-repo-tint: var(--ham-repo-tint-1); }
+    .ham-repo-tint-2 { --ham-repo-tint: var(--ham-repo-tint-2); }
+    .ham-repo-tint-3 { --ham-repo-tint: var(--ham-repo-tint-3); }
+    .ham-repo-tint-4 { --ham-repo-tint: var(--ham-repo-tint-4); }
+    .ham-repo-tint-5 { --ham-repo-tint: var(--ham-repo-tint-5); }
+    .ham-repo-chip.ham-repo-primary { --ham-repo-tint: var(--text-muted); }
+    .ham-pr-line { display: inline-flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; max-width: 100%; }
+    /* Group-by-repo header row: sticky under the column header while its
+       rows scroll, caret toggle, chip, owner/repo, counts, and a mini
+       per-column distribution (bar height steps ham-gd-1..4 from the group's
+       busiest column). */
+    .ham-group { position: sticky; top: 0; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-2); margin-top: var(--sp-3); border-top: var(--line-width) solid var(--line-subtle); border-bottom: var(--line-width) solid var(--line-subtle); background: var(--panel); font-size: var(--fs-sm); color: var(--text); min-width: 0; }
+    .ham-cols + .ham-group { margin-top: 0; border-top: 0; }
+    .ham-group-toggle { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 1.4em; height: 1.4em; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+    .ham-group-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+    .ham-group-toggle:focus-visible { outline: var(--focus-ring-width) solid var(--line-strong); outline-offset: 1px; }
+    .ham-group-name { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .ham-group-n, .ham-group-attn { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+    .ham-group-attn { color: var(--amber); }
+    .ham-group-collapsed .ham-group-name { color: var(--muted); }
+    .ham-group-dist { flex: 0 0 auto; margin-left: auto; margin-right: calc(4em + var(--sp-3)); display: inline-flex; align-items: flex-end; gap: var(--sp-1); height: 0.9em; }
+    .ham-gd { display: inline-block; width: 0.45em; height: 15%; border-radius: var(--sp-1); background: color-mix(in srgb, var(--text-faint) 35%, transparent); }
+    .ham-gd-1 { height: 35%; background: color-mix(in srgb, var(--amber) 55%, transparent); }
+    .ham-gd-2 { height: 55%; background: color-mix(in srgb, var(--amber) 70%, transparent); }
+    .ham-gd-3 { height: 80%; background: color-mix(in srgb, var(--amber) 85%, transparent); }
+    .ham-gd-4 { height: 100%; background: var(--amber); }
     .ham-badges { position: absolute; right: calc(4em + var(--sp-3)); top: 0; display: inline-flex; gap: var(--sp-2); }
     .ham-badge { display: inline-block; font-size: var(--fs-xs); line-height: 1.4; padding: 0 var(--sp-3); border-radius: var(--r-pill); border: var(--line-width) solid var(--line-subtle); color: var(--text-faint); white-space: nowrap; }
     .ham-badge-mod.ham-mod-stalled, .ham-badge-mod.ham-mod-regressed { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
@@ -1511,6 +1552,25 @@
     @keyframes ham-wash-glow { 0% { filter: brightness(1.45) saturate(1.2); } 100% { filter: brightness(1) saturate(1); } }
     @media (prefers-reduced-motion: reduce) { .ham-anim-layer { display: none; } }
     .ham-rm-preview .ham-anim-layer { display: none; }
+    /* Rows leaving the list (merged, closed, filtered away) collapse and
+       fade over --ham-move-exit-ms from their measured height (--ham-row-h,
+       set by stageTrackerRowExit); new rows fade in over --ham-move-enter-ms.
+       Reduced motion keeps only the fade. */
+    .ham-row.ham-leaving { overflow: hidden; pointer-events: none; animation: ham-row-exit var(--ham-move-exit-ms) var(--ham-move-ease) both; }
+    @keyframes ham-row-exit { 0% { opacity: 1; max-height: var(--ham-row-h); } 55% { opacity: 0; } 100% { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; } }
+    @keyframes ham-row-exit-rm { from { opacity: 1; } to { opacity: 0; } }
+    .ham-row.ham-entering { animation: ham-row-enter var(--ham-move-enter-ms) ease-out both; }
+    @keyframes ham-row-enter { from { opacity: 0; transform: translateY(calc(-1 * var(--sp-1))); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .ham-row.ham-leaving { animation-name: ham-row-exit-rm; } .ham-row.ham-entering { animation: none; } }
+    .ham-rm-preview .ham-row.ham-leaving { animation-name: ham-row-exit-rm; }
+    .ham-rm-preview .ham-row.ham-entering { animation: none; }
+    /* Group-by-repo headers depart and arrive like rows (a header whose
+       last row leaves collapses out beside it). */
+    .ham-group.ham-leaving { overflow: hidden; pointer-events: none; position: static; animation: ham-row-exit var(--ham-move-exit-ms) var(--ham-move-ease) both; }
+    .ham-group.ham-entering { animation: ham-row-enter var(--ham-move-enter-ms) ease-out both; }
+    @media (prefers-reduced-motion: reduce) { .ham-group.ham-leaving { animation-name: ham-row-exit-rm; } .ham-group.ham-entering { animation: none; } }
+    .ham-rm-preview .ham-group.ham-leaving { animation-name: ham-row-exit-rm; }
+    .ham-rm-preview .ham-group.ham-entering { animation: none; }
     /* Settings modal (gear on the card header): the Movement animation
        section reuses the Overview settings section styles and adds a radio
        list with one Preview button each plus a sample row the previews play on. */
@@ -2918,6 +2978,7 @@
     .cost-stat .clabel { font-size: var(--fs-xs); color: var(--muted); }
     .cost-badge { font-size: var(--fs-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: var(--r); margin-left: var(--sp-3); vertical-align: middle; }
     .cost-badge.est { background: rgba(255, 196, 0, 0.15); color: var(--yellow); border: 1px solid rgba(255, 196, 0, 0.4); }
+    .cost-help { display: inline-flex; align-items: center; justify-content: center; width: 1.1em; height: 1.1em; margin-left: var(--sp-2); border-radius: var(--r-pill); border: var(--line-width) solid var(--muted); color: var(--muted); font-size: var(--fs-xs); font-weight: 700; vertical-align: middle; cursor: help; }
     .cost-badge.actual { background: rgba(0, 200, 120, 0.15); color: var(--green); border: 1px solid rgba(0, 200, 120, 0.4); }
     .cost-gateways { display: flex; flex-direction: column; gap: var(--sp-4); margin-bottom: 14px; }
     .cost-gateway { border: 1px solid var(--border); border-radius: 8px; padding: var(--sp-4) var(--sp-5); }
@@ -2945,6 +3006,9 @@
     .cost-session-active { color: var(--green); font-weight: 600; }
     .cost-subtable-title { font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: var(--sp-6) var(--sp-0) var(--sp-2); }
     .cost-disclaimer { font-size: 0.65rem; color: var(--muted); margin-top: 10px; line-height: 1.4; }
+    .cost-recording-notice { border: var(--line-width) solid var(--status-warn); border-radius: var(--r-lg); color: var(--status-warn); font-size: var(--fs-sm); font-weight: var(--fw-bold); line-height: 1.4; margin-bottom: var(--sp-5); padding: var(--sp-4) var(--sp-5); }
+    .cost-recording-notice a { color: inherit; text-decoration: underline; }
+    .cost-recording-incomplete { color: var(--status-warn); font-weight: var(--fw-bold); }
 
     /* Cost spend-over-time: range pills + bucketed bar chart */
     .cost-trend { margin: 6px 0 14px; }
@@ -3505,6 +3569,13 @@
     .am-bot-source { color: var(--muted); font-weight: 400; }
     #am-trusted-authors { margin-top: var(--sp-5); border-top: 1px solid var(--border); }
     .am-trusted-authors-note { font-size: var(--fs-xs); color: var(--muted); margin: var(--sp-2) var(--sp-0) var(--sp-0); }
+    .rv-reviewer-list { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r); }
+    .rv-reviewer-row { display: flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-0); cursor: pointer; }
+    .rv-reviewer-row.rv-reviewer-unavailable { opacity: 0.6; }
+    .rv-reviewer-row .rv-reviewer-engine { color: var(--muted); }
+    .rv-reviewer-row .rv-reviewer-state, .rv-reviewer-list .rv-reviewer-empty { font-size: var(--fs-xs); color: var(--muted); }
+    .rv-reviewer-help { margin: var(--sp-1) var(--sp-0) var(--sp-0); }
+    .rv-reviewer-help-above { margin: var(--sp-0) var(--sp-0) var(--sp-2); }
     .am-trusted-authors-repos { min-height: 72px; }
     .am-bot-empty { color: var(--muted); margin: var(--sp-1) 0; }
     .am-bot-add { display: flex; gap: var(--sp-3); margin-top: var(--sp-4); align-items: center; }
@@ -6923,6 +6994,7 @@
           <datalist id="audit-saved-searches"></datalist>
         </div>
         <button id="audit-sensitive-filter" class="hv-btn btn-secondary btn-sm audit-filter-chip" data-action="toggleAuditSensitiveFilter" data-keydown-action="toggleAuditSensitiveFilter" data-keys="Enter, " data-stop="1" data-prevent="1" aria-pressed="false" title="Show only sensitive audit entries from the last 24h">Sensitive only</button>
+        <button id="audit-relay-filter" class="hv-btn btn-secondary btn-sm audit-filter-chip" data-action="toggleAuditRelayFilter" data-keydown-action="toggleAuditRelayFilter" data-keys="Enter, " data-stop="1" data-prevent="1" aria-pressed="false" title="Show only contributor relay (relay_*) audit entries">relay_</button>
         <button class="hv-btn btn-primary btn-sm" data-action="saveAuditSearch" title="Save this search">💾 Save</button>
         <button class="hv-btn btn-danger btn-sm" data-action="clearAuditSearches" title="Clear saved searches">✕</button>
         <span id="audit-match-count" style="font-size:0.7rem;color:var(--muted);white-space:nowrap"></span>
@@ -7070,6 +7142,7 @@
         <label class="ham-repo-filter"><span>Author</span><select id="activity-monitor-author" class="ham-select" data-change-action="hamFilter" data-arg0="author" data-arg-types="s,v"><option value="any">Any author</option><option value="human">Human</option><option value="clanker">Clanker</option><option value="hive">Hive</option></select></label>
         <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, regressed, held, needs-human, needs-decision, needs-rebase, blocked, or on 045 / 071 / 072 / 085 / 090">Needs attention</button>
         <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Reverse sort direction">↓</button></label>
+        <label class="ham-repo-filter"><span>Group</span><select id="activity-monitor-group" class="ham-select" data-change-action="hamGroup" data-arg-types="v" title="Group rows under one collapsible header per repository"><option value="none">None</option><option value="repo">Repo</option></select></label>
         <label class="ham-repo-filter"><span>Per page</span><select id="activity-monitor-size" class="ham-select" data-change-action="hamFilter" data-arg0="size" data-arg-types="s,v"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
         <button type="button" class="ham-chip ham-reset" id="activity-monitor-reset" data-action="hamFilter" data-arg0="reset" hidden>Clear filters</button>
         <button type="button" class="ham-chip ham-sound" id="activity-monitor-sound" data-action="hamSoundToggle" aria-pressed="false" aria-label="Sound off — turn on (merge zap + new-item buzz; plays a test of each)" title="Sound off — turn on (merge zap + new-item buzz; plays a test of each)">🔇</button>
@@ -7170,9 +7243,9 @@
         <details class="faq-q" id="faq-levels">
           <summary>What do L3, L4, L5, and L6 allow?</summary>
           <ul class="faq-list">
-            <li><strong>L3 — Quality-Gated (Measured):</strong> quality may open hold-gated test/CI PRs; ci-maintainer watches build health.</li>
-            <li><strong>L4 — Security-Aware (Adaptive):</strong> sec-check joins; delivery agents may file issues; only quality, sec-check, and ci-maintainer may open hold-gated PRs.</li>
-            <li><strong>L5 — Semi-Autonomous:</strong> most lanes may open issues and hold-gated PRs; humans batch-review and remove holds. The reviewer agent joins and works the queue every 30 minutes; adjudicator and dedupe recommend, never merge or close.</li>
+            <li><strong>L3 — Quality-Gated (Measured):</strong> quality may open hold-gated test/CI PRs; ci-maintainer watches build health. The reviewer agent works the hold-gated PR queue every 30 minutes and comments for the human who lifts the hold; it never approves or merges.</li>
+            <li><strong>L4 — Security-Aware (Adaptive):</strong> sec-check joins; delivery agents may file issues; only quality, sec-check, and ci-maintainer may open hold-gated PRs. The reviewer agent works the hold-gated PR queue every 30 minutes and comments for the human who lifts the hold; it never approves or merges.</li>
+            <li><strong>L5 — Semi-Autonomous:</strong> most lanes may open issues and hold-gated PRs; humans batch-review and remove holds. The reviewer keeps working the queue every 30 minutes; adjudicator and dedupe join and recommend, never merge or close.</li>
             <li><strong>L6 — Fully Autonomous:</strong> eligible App-authored PRs auto-merge when checks pass. Auto-merge is off below L6; switching to L6 turns it on for all active repos, and owners can toggle individual repos afterward. The reviewer still never merges — and its <code>requires_human</code> / <code>reject</code> verdicts do <em>not</em> stop the App auto-merge sweep; use a <code>hold</code> label or a GitHub branch rule when merging must stop.</li>
           </ul>
           <p>Promotion adds agents and capability; demotion narrows them again. Hive removes only level-owned holds when the level no longer calls for them — a hold you applied is never removed automatically. See the <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/acmm-policy-matrix.md" target="_blank" rel="noopener noreferrer">ACMM policy matrix</a>, <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/running-at-level-6.md#does-the-hive-reviewer-stop-a-merge" target="_blank" rel="noopener noreferrer">Running at Level 6</a>, and <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/hive-open-pr.md" target="_blank" rel="noopener noreferrer">hive-open-pr</a>.</p>
@@ -8258,7 +8331,7 @@
       'review-pipeline-subsection': { title: 'Pipeline', summary: '—' },
       'review-queue-subsection': { title: 'Queue', summary: '—' },
       'nous-section': { title: '🧪 Experiment Lab (nous)', summary: '—', settingsHtml: sectionSettingsGear('Experiment Lab', 'openNousConfig', 'Experiment Lab Configuration') },
-      'inception-section': { title: '💡 Inception', summary: 'ready', badgeHtml: '<a class="dash-card-badge" href="https://github.com/jumppad-labs/spektacular" target="_blank" rel="noopener noreferrer" data-stop="1" title="Spektacular project">⚡ Powered by Spektacular</a>' },
+      'inception-section': { title: '💡 Inception (spektacular)', summary: 'ready', badgeHtml: '<a class="dash-card-badge" href="https://github.com/jumppad-labs/spektacular" target="_blank" rel="noopener noreferrer" data-stop="1" title="Spektacular project">⚡ Powered by Spektacular</a>' },
       'knowledge-section': { title: '📚 Knowledge', summary: '0 facts' },
       'contributors-section': { title: '👥 Contributors', summary: '0 active / 0 registered' },
       'debug-section': { title: '🩺 Diagnostics', summary: 'health' },
@@ -8286,7 +8359,7 @@
       'lifecycle-section': { heading: 'Lifecycle Timeline', help: 'A timeline of recent pull requests, from when they were opened to when they were merged or got stuck.' },
       'pr-throughput-section': { heading: 'Throughput', help: 'How many pull requests were opened, merged and closed over a chosen time window, and who did the work.' },
       'token-panel': { heading: 'Tokens', help: 'How much text the AI models read and wrote for Hive recently, broken down by model and by worker.' },
-      'cost-panel': { heading: 'Cost', help: "An estimate of what Hive's use of AI models has cost so far, based on public list prices." },
+      'cost-panel': { heading: 'Cost', help: "What Hive's use of AI models would cost at public per-token list prices; an estimate, not a bill." },
       'repos-section': { heading: 'Projects', help: 'One card per repository Hive looks after, listing its open issues and pull requests grouped by what each one needs next.' },
       'acmm-eval-section': { heading: 'ACMM Eval', help: 'How ready your repositories are for Hive to work on them alone, scored against a published checklist.' },
       'approvals-section': { heading: 'Approvals', help: 'Actions Hive wants to take that are waiting for you to approve or reject them.' },
@@ -12005,7 +12078,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const total = costAllTimeEstimate(_lastCost && _lastCost.estimated);
       const hist = total.series;
       const title = hist.length
-        ? `Estimated all-time cost over time — ${costRangeTitle(hist[0].timestamp, hist[hist.length - 1].timestamp, 0)}; ${total.resets.length ? `${total.resets.length} lineage reset(s) preserved in the cumulative total` : 'recorded history samples'}`
+        ? `Estimated all-time cost over time — ${costRangeTitle(hist[0].timestamp, hist[hist.length - 1].timestamp, 0)}; ${total.resets.length ? `${total.resets.length} token-summary reset(s) noted; spend on both sides of each is counted once` : 'recorded history samples'}`
         : 'Estimated cost over time (last 30d) — vertical axis: cumulative USD, horizontal axis: date';
       return axisSparkSvg(hist, e => e.usd, e => e.timestamp, v => '$' + fmtSparkVal(v), 'var(--green)',
         title);
@@ -12275,6 +12348,21 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function fmtCostDateTime(ms) {
       return formatDashboardDateTime(ms, { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZoneName:'short' });
     }
+    // Stale-recording notice (#13485): plain text, escaped by the caller.
+    // Empty unless /api/cost reports the running agents' models recorded
+    // nothing for longer than the stale window.
+    function costRecordingNoticeText(recording) {
+      if (!recording || !recording.stale) return '';
+      const models = (recording.agent_models || []).slice(0, 4);
+      const more = (recording.agent_models || []).length > models.length ? ', …' : '';
+      const sinceMs = Number(recording.last_agent_model_growth_at) || Number(recording.last_priced_growth_at) || 0;
+      const since = sinceMs > 0 ? `since ${fmtCostDateTime(sinceMs)}` : 'in the recorded history';
+      const recent = recording.recent_models || [];
+      const reflect = recent.length
+        ? ` The figures below only reflect ${recent.join(', ')}.`
+        : ' No model recorded any usage recently.';
+      return `⚠ No usage recorded from the agents' configured models (${models.join(', ')}${more}) ${since}.${reflect} Live cost recording is likely broken — see`;
+    }
     function fmtCostDuration(ms) {
       const min = Math.round(ms / 60000);
       if (min < 60) return `${Math.max(1, min)} min`;
@@ -12354,32 +12442,156 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return hist;
     }
 
-    function costAllTimeEstimate(est) {
-      const hist = costHistWithCurrent(est);
+    // costLineageResets: the points where the cumulative token-summary
+    // estimate fell by more than COST_LINEAGE_RESET_FLOOR_USD AND to below half
+    // its previous value — a pod roll, a cleared session store, a backend
+    // change. Listed in the headline tooltip so a user can see why the live
+    // token summary restarted; the headline itself no longer depends on them.
+    function costLineageResets(hist) {
       const resets = [];
-      const series = [];
-      let offset = 0, prev = null, linePeak = 0, first = 0;
+      let prev = null;
       for (const e of hist) {
         const cur = Number(e.usd);
         if (!Number.isFinite(cur)) continue;
-        if (!first) first = e.timestamp;
         if (prev != null && prev - cur > COST_LINEAGE_RESET_FLOOR_USD && cur < prev * COST_LINEAGE_RESET_RATIO) {
-          offset += linePeak;
-          resets.push({ timestamp: e.timestamp, previous: prev, next: cur, preserved: offset });
-          linePeak = 0;
+          resets.push({ timestamp: e.timestamp, previous: prev, next: cur });
         }
-        if (cur > linePeak) linePeak = cur;
-        series.push({ ...e, usd: offset + linePeak });
         prev = cur;
       }
+      return resets;
+    }
+
+    // costRollupsBeforeRing: the persisted daily rollups (UTC days, raw from
+    // /api/cost) for days up to and including the UTC day of the first
+    // snapshot still in the ring. Those days were folded while the ring still
+    // covered them fully and are frozen server-side, so they are the
+    // authoritative record of spend the ring has since evicted. Returns the
+    // days ascending plus the instant from which the ring takes over.
+    function costRollupsBeforeRing(hist) {
+      const raw = (_lastCost && Array.isArray(_lastCost.daily_rollup)) ? _lastCost.daily_rollup : [];
+      const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+      const firstDay = hist.length ? utcDay(hist[0].timestamp) : null;
+      const days = [];
+      for (const r of raw) {
+        if (!r || typeof r.day !== 'string' || !(r.samples > 0)) continue;
+        if (firstDay != null && r.day > firstDay) continue;
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(r.day);
+        if (!m) continue;
+        const start = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+        // localStart: the same calendar date at local midnight, for display
+        // (the chart places UTC days on the local calendar day the same way).
+        const localStart = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+        days.push({ day: r.day, start, localStart, end: start + COST_DAY_MS, spend: Number(r.cost_usd) || 0 });
+      }
+      days.sort((a, b) => a.start - b.start);
+      // The ring takes over from the LAST snapshot that still falls on the
+      // last rolled-up day, so the step into the next day is counted once (by
+      // the ring) and the rolled-up day's own steps are not counted twice.
+      let ringFrom = hist.length ? hist[0].timestamp : 0;
+      if (days.length && firstDay != null) {
+        const lastDay = days[days.length - 1].day;
+        for (const e of hist) {
+          if (utcDay(e.timestamp) > lastDay) break;
+          ringFrom = e.timestamp;
+        }
+      }
+      return { days, ringFrom, coversRingStart: days.some(d => firstDay != null && d.day < firstDay) };
+    }
+
+    // costAllTimeEstimate: the headline figure. ONE estimator shared with the
+    // trend chart and the server's daily rollup: persisted rollup days the ring
+    // no longer holds + the sum of positive step-to-step increments inside the
+    // ring (priced per model, discontinuity-guarded, so a restored or re-seeded
+    // counter is not billed as spend). When the ring IS the whole history the
+    // first snapshot's value is the spend accumulated before sampling began
+    // and is counted once as the opening balance.
+    //
+    // Replaces the old "sum of per-lineage peaks", which double counted the
+    // residual that survives a partial reset (a counter falling 13,964 → 5,058
+    // added the 5,058 again inside the next peak), missed spend inside a
+    // lineage that dipped and regrew, and changed whenever the ring evicted a
+    // sample — the "since …" date crept forward hour by hour.
+    function costAllTimeEstimate(est) {
+      const hist = costHistWithCurrent(est);
+      const roll = costRollupsBeforeRing(hist);
+      const series = [];
+      let running = 0;
+      for (const d of roll.days) {
+        running += d.spend;
+        series.push({ timestamp: d.end, usd: running, rollup: true });
+      }
+      const opening = (!roll.coversRingStart && hist.length && Number.isFinite(Number(hist[0].usd))) ? Number(hist[0].usd) : 0;
+      running += opening;
+      const first = roll.days.length ? roll.days[0].localStart : (hist.length ? hist[0].timestamp : 0);
+      // Differenced on the recorded $ (what the server's daily rollup folds
+      // and what "persisted history" means), not on re-priced tokens: the
+      // headline is the one figure that must agree with the persisted record.
+      const ring = hist.filter(e => e.timestamp >= roll.ringFrom && Number.isFinite(Number(e.usd)));
+      const incs = [];
+      for (let i = 1; i < ring.length; i++) {
+        const d = Number(ring[i].usd) - Number(ring[i - 1].usd);
+        if (d > 0) incs.push(d);
+      }
+      const ceiling = costHeadlineCeiling(incs);
+      let peak = -Infinity;
+      for (let i = 0; i < ring.length; i++) {
+        const cur = Number(ring[i].usd);
+        if (i > 0) {
+          const prevVal = Number(ring[i - 1].usd);
+          if (cur > prevVal && !costStepIsRestore(cur - prevVal, prevVal, cur, peak, ceiling)) running += cur - prevVal;
+        }
+        series.push({ timestamp: ring[i].timestamp, usd: running });
+        if (cur > peak) peak = cur;
+      }
       return {
-        usd: series.length ? series[series.length - 1].usd : 0,
+        usd: running,
         firstTimestamp: first,
         currentUSD: Number.isFinite(est && Number(est.total_usd)) ? Number(est.total_usd) : null,
         currentStart: est && est.window_start ? est.window_start : 0,
-        resets,
+        resets: costLineageResets(hist),
+        rollupUSD: roll.days.reduce((s, d) => s + d.spend, 0),
+        openingUSD: opening,
         series,
       };
+    }
+
+    // costHeadlineCeiling: the $ above which a single step is "abnormally
+    // large" — the same rule as the chart's costDiscontinuityCeiling (20× the
+    // median ordinary step, never below $500) applied to the recorded $ steps.
+    // Infinity on thin data so nothing is dropped before a baseline exists.
+    function costHeadlineCeiling(incs) {
+      const normal = incs.filter(v => v < COST_DISCONTINUITY_FLOOR_USD).sort((a, b) => a - b);
+      if (normal.length < 2) return Infinity;
+      const mid = Math.floor(normal.length / 2);
+      const median = normal.length % 2 ? normal[mid] : (normal[mid - 1] + normal[mid]) / 2;
+      if (!(median > 0)) return Infinity;
+      return Math.max(COST_DISCONTINUITY_MULT * median, COST_DISCONTINUITY_FLOOR_USD);
+    }
+
+    // A large step is a RESTORE (a re-seeded counter regaining ground that
+    // was already counted) when it closes at least this fraction of the gap
+    // between the previous value and the highest value the counter has held.
+    const COST_RESTORE_GAP_FRACTION = 0.8;
+
+    // costStepIsRestore: is one positive step a data correction rather than
+    // spend? Only a step that is both abnormally large (above the chart's
+    // discontinuity ceiling) AND lands at or below a level the counter had
+    // already reached, closing most of the gap to it, is a restore — e.g. the
+    // observed 394 → 18,350 jump an hour after a 20,800 → 394 reset. A large
+    // step to a NEW high is spend however big (a day's session flush on an
+    // Opus-class hive, or several days revealed after a sampling gap), and a
+    // normal-sized step always counts.
+    function costStepIsRestore(inc, prev, cur, peak, ceiling) {
+      if (!(typeof ceiling === 'number') || !(inc > ceiling)) return false;
+      return costStepRegainsGround(inc, prev, cur, peak);
+    }
+
+    // costStepRegainsGround: the size-independent half of the restore test —
+    // the step lands at or below a level already reached and closes most of
+    // the gap to it. A step to a new high is never a restore.
+    function costStepRegainsGround(inc, prev, cur, peak) {
+      if (!Number.isFinite(peak) || !(cur <= peak)) return false;
+      return inc >= COST_RESTORE_GAP_FRACTION * (peak - prev);
     }
 
     function costCurrentLineageHist(currentUSD) {
@@ -12464,7 +12676,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       // Ceiling derived once from the full history so every bucket judges a
       // one-time re-seed jump against the same baseline (a bucket holding only
       // the spike has no local typical of its own).
-      const ceiling = costDiscontinuityCeiling(hist, rate);
+      const ceiling = { ceiling: costDiscontinuityCeiling(hist, rate), ratePerMs: costDiscontinuityRate(hist, rate) };
       // Spread each increment across the interval it accrued over rather than
       // billing it to the instant it was observed — otherwise a bucket narrower
       // than the observation cadence (notably every hourly bucket) reads $0 even
@@ -12553,6 +12765,21 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return picks.map(b => `<span>${esc(costBucketAxisLabel(b, win))}</span>`).join('');
     }
 
+    // Bar heights are a percentage of the chart; the tallest bar is 100 %.
+    // A bar with ANY recorded spend is drawn at least COST_BAR_MIN_SPEND_PCT
+    // tall: on a linear scale a $1 day beside a $1,000 day is 0.1 % — under a
+    // pixel at the chart's height — and read as "the day vanished" (observed
+    // the morning real-time Copilot recording started, #13492). A recorded $0
+    // (data, nothing spent) draws the COST_BAR_ZERO_PCT baseline so an
+    // all-zero window reads as "flat at zero" rather than missing.
+    const COST_BAR_MIN_SPEND_PCT = 6;
+    const COST_BAR_ZERO_PCT = 2;
+    function costBarHeightPct(b, max) {
+      if (!(b.spend > 0)) return b.hasData ? COST_BAR_ZERO_PCT : 0;
+      if (!(max > 0)) return COST_BAR_MIN_SPEND_PCT;
+      return Math.max(COST_BAR_MIN_SPEND_PCT, (b.spend / max) * 100);
+    }
+
     // costWindowRunRate: $ per ms = spend inside the window ÷ the part of the
     // window that has elapsed so far. null when nothing was spent or no time
     // has passed (the caller then omits the run-rate).
@@ -12564,7 +12791,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function costRunRateUnit(win) {
       return win.bucket === 'hour' ? { ms: COST_HOUR_MS, label: '/hr' } : { ms: COST_DAY_MS, label: '/day' };
     }
-    // priceMap: current $/token per model from the newest snapshot that has one.
+    // priceMap: $/token per model, each taken from the NEWEST snapshot that
+    // still carries that model. The newest snapshot alone is not enough: the
+    // token summary only lists the models of the sessions currently on disk, so
+    // after a backend or model change the latest snapshot may name only
+    // today's cheap helper model, and every historical model would then be
+    // priced at $0 and vanish from the chart (observed: a $17K history whose
+    // chart summed to $15 because the last snapshot listed only gpt-4o-mini).
     function costPriceMap(hist) {
       const rate = {};
       for (let i = hist.length - 1; i >= 0; i--) {
@@ -12575,7 +12808,6 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           const toks = (m.i || 0) + (m.o || 0);
           if (rate[k] == null && typeof m.usd === 'number' && toks > 0) rate[k] = m.usd / toks;
         }
-        break;
       }
       return rate;
     }
@@ -12587,9 +12819,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // step. The absolute floor below keeps a tiny median from nuking legit spend.
     const COST_DISCONTINUITY_MULT = 20;
     // Absolute-$ floor: an increment is only ever discarded as a discontinuity
-    // if it also exceeds this many dollars in a single step. No plausible run
-    // rate spends this within one snapshot interval (~30s–few min), so real
-    // spend never trips it, while a ~$18k all-time restore obviously does.
+    // if it also exceeds this many dollars in a single step. Real session
+    // flushes DO exceed it (a day's flush on an Opus-class hive runs $600–$18k,
+    // #13497), so the ceiling it anchors applies only to restore-shaped steps —
+    // those that regain ground the counter had already reached
+    // (costStepRegainsGround). A step to a new high is spend however large;
+    // the ~$18k all-time restore it was built to catch lands back at old
+    // ground and still trips it.
     const COST_DISCONTINUITY_FLOOR_USD = 500;
 
     // ── Accrual spreading ──────────────────────────────────────────────────
@@ -12642,58 +12878,171 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         for (const k in models) { const m = models[k]; s += ((m.i || 0) + (m.o || 0)) * (rate[k] || 0); }
         return s;
       };
-      const incs = [];
-      let prev = null, prevKind = null, sawWindow = false;
+      const incs = [], gaps = [], restores = [];
+      // peak is tracked separately from prev/prevKind: pre-window entries
+      // `continue` before prev is updated (they must not seed an increment),
+      // yet they still raise the peak the restore test compares against, so
+      // the peak needs its own kind marker to reset on a measure change.
+      let prev = null, prevKind = null, prevTs = 0, sawWindow = false, peak = -Infinity, peakKind = null;
       for (const e of hist) {
-        if (e.timestamp < t0 || e.timestamp > t1) { if (e.timestamp > t1) break; continue; }
+        if (e.timestamp > t1) break;
         const kind = e.models ? 'm' : (typeof e.usd === 'number' ? 'u' : null);
         if (kind == null) continue;
         const cur = kind === 'm' ? pricedTok(e.models) : e.usd;
+        if (kind !== peakKind) { peak = -Infinity; peakKind = kind; }
+        if (e.timestamp < t0) { if (cur > peak) peak = cur; continue; }
         sawWindow = true;
-        if (prev != null && kind === prevKind && cur > prev) incs.push(cur - prev);
-        prev = cur; prevKind = kind;
+        if (prev != null && kind === prevKind && cur > prev) {
+          incs.push(cur - prev); gaps.push(e.timestamp - prevTs);
+          restores.push(costStepRegainsGround(cur - prev, prev, cur, peak));
+        }
+        if (cur > peak) peak = cur;
+        prev = cur; prevKind = kind; prevTs = e.timestamp;
       }
-      return { incs, sawWindow };
+      return { incs, gaps, restores, sawWindow };
+    }
+
+    // costDiscontinuityRate: the plausible-spend rate ceiling in $/ms —
+    // COST_DISCONTINUITY_MULT × the hive's average rate (ordinary, below-floor
+    // spend ÷ the span the history covers). The fixed ceiling judges every
+    // step as if it arrived at the 5-minute cadence, but the sampler is
+    // view-driven (#13483): a hive nobody looked at for a week reveals a week
+    // of real spend in one step. Such a step is spend, not a correction, when
+    // elapsed time × a plausible rate explains it (#13482). The average, not
+    // the median, is the baseline: spend arrives in lumps between long runs
+    // of near-zero steps, so the median step rate says nothing about how fast
+    // the hive really spends. Infinity (no rate cap) on thin data. Mirrors
+    // costRollupDiscontinuityRate in cost_rollup.go.
+    function costDiscontinuityRate(hist, rate) {
+      if (!hist || hist.length < 2) return Infinity;
+      const { incs, gaps } = costPositiveIncrements(hist, rate, -Infinity, Infinity);
+      let sum = 0, n = 0;
+      for (let i = 0; i < incs.length; i++) {
+        if (incs[i] < COST_DISCONTINUITY_FLOOR_USD && gaps[i] > 0) { sum += incs[i]; n++; }
+      }
+      const span = hist[hist.length - 1].timestamp - hist[0].timestamp;
+      if (n < 2 || !(span > 0) || !(sum > 0)) return Infinity;
+      return COST_DISCONTINUITY_MULT * sum / span;
+    }
+
+    // costStepAllowed: a positive step observed over gapMs is spend when it is
+    // under the fixed ceiling or within what the plausible rate could have
+    // accrued over the gap. `cap` may be a number (fixed ceiling only, legacy
+    // callers) or { ceiling, ratePerMs }. `restore` is the costStepRegainsGround
+    // verdict for the step: false → always spend (a step to a new high is never
+    // a correction, #13497); true → the size tests apply; undefined (legacy
+    // callers without peak tracking) → the size tests apply to every step.
+    // The Go mirror (costFoldDailyRollups) applies the same rule as a
+    // precondition at the call site rather than inside the predicate.
+    function costStepAllowed(amount, gapMs, cap, restore) {
+      if (restore === false) return true;
+      const obj = !!(cap && typeof cap === 'object');
+      const ceiling = obj ? cap.ceiling : cap;
+      const c = (typeof ceiling === 'number') ? ceiling : Infinity;
+      if (amount <= c) return true;
+      if (!obj) return false;
+      const ratePerMs = cap.ratePerMs;
+      if (ratePerMs === Infinity) return true;
+      if (!(gapMs > 0)) return false;
+      return amount <= ratePerMs * gapMs;
     }
 
     // costAccrualSpans: every POSITIVE increment in the WHOLE history, each
-    // tagged with the interval [from, to] it is presumed to have accrued over —
-    // i.e. from the previous observation to the one that revealed it. See the
-    // COST_ACCRUAL_* notes above for why observation time ≠ spend time.
+    // tagged with the interval [from, to] it is presumed to have accrued over.
+    // See the COST_ACCRUAL_* notes above for why observation time ≠ spend time.
+    //
+    // The interval is the stretch over which the counter that rose had been
+    // FLAT while the sampler stayed alive: from the snapshot at which that
+    // same counter last rose (or the first dense snapshot, or 24 h, whichever
+    // is nearest) to the snapshot that revealed the rise. Spend can only have
+    // been hiding while its counter sat still — the stretch before the
+    // previous rise was already accounted for by that rise. Without this
+    // bound every 5-minute increment of a LIVE counter (the proxy records
+    // Copilot usage as it happens, #13492) walked back over the whole dense
+    // 24 h and the first day of real-time recording was billed ~80 % to the
+    // day before it (observed: $860 on a day whose own record was $1.19).
+    //
+    // Flatness is judged per model, not on the summed total: a chatty cheap
+    // helper that moves the total every 5 minutes must not stop an expensive
+    // model's session flush — which arrives as one jump after hours of
+    // silence on ITS counter — from being spread back across those hours.
+    // Each aggregate step is therefore split across the models that rose,
+    // in proportion to their rise, so the total billed is exactly the
+    // aggregate step (what costSpendBetween and the server's rollup count)
+    // and only its placement differs. A model's first appearance has no flat
+    // stretch (it was absent, not still) and is billed to its observation
+    // interval. Snapshots recorded before per-model data existed carry one
+    // '$' counter.
     //
     // Deliberately walks the entire series rather than a window: an increment
     // observed just AFTER a bucket ends may still have accrued largely INSIDE
     // it, and one observed inside a bucket may have started well before it.
     // Windowing first would drop exactly the spans that need splitting.
     function costAccrualSpans(hist, rate) {
+      const priceModel = (k, m) => ((m.i || 0) + (m.o || 0)) * (rate[k] || 0);
       const pricedTok = (models) => {
         let s = 0;
-        for (const k in models) { const m = models[k]; s += ((m.i || 0) + (m.o || 0)) * (rate[k] || 0); }
+        for (const k in models) s += priceModel(k, models[k]);
         return s;
       };
       const spans = [];
       // Timestamps of every usable snapshot, in order, so an increment can walk
       // back over the stretch the sampler was demonstrably alive.
       const stamps = [];
-      let prev = null, prevKind = null;
+      // lastRise: per counter (model name, or '$' for usd-only snapshots), the
+      // snapshot at which it last rose — the start of its current flat stretch.
+      let lastRise = {};
+      let prev = null, prevModels = null, prevKind = null, peak = -Infinity;
       for (const e of (hist || [])) {
         const kind = e.models ? 'm' : (typeof e.usd === 'number' ? 'u' : null);
         if (kind == null) continue;
         const cur = kind === 'm' ? pricedTok(e.models) : e.usd;
+        if (kind !== prevKind) { peak = -Infinity; lastRise = {}; }
+        const prevStamp = stamps.length ? stamps[stamps.length - 1] : e.timestamp;
+        // Per-counter rises at this snapshot, used both to place this step and
+        // to advance each counter's flat-stretch start afterwards.
+        const rises = [];
+        if (prev != null && kind === prevKind) {
+          if (kind === 'u') {
+            if (cur > prev) rises.push({ k: '$', rise: cur - prev });
+          } else {
+            for (const k in e.models) {
+              const now = priceModel(k, e.models[k]);
+              const before = prevModels && prevModels[k] ? priceModel(k, prevModels[k]) : null;
+              if (before == null) { if (now > 0) rises.push({ k, rise: now, first: true }); }
+              else if (now > before) rises.push({ k, rise: now - before });
+            }
+          }
+        }
         if (prev != null && kind === prevKind && cur > prev) {
+          const step = cur - prev;
+          // gap is the observation interval (previous snapshot → this one),
+          // which the discontinuity guard judges the step against; `from` is
+          // the (liveness-bounded) accrual start and may be later.
+          const gap = stamps.length ? e.timestamp - prevStamp : 0;
+          const restore = costStepRegainsGround(step, prev, cur, peak);
           // Walk back while snapshots stayed dense: that is the stretch the hive
           // was up and this spend could have been accruing. Stop at the first
           // long silence (outage/restart) so spend never smears across dead air.
-          let from = e.timestamp;
+          let dense = e.timestamp;
           for (let i = stamps.length - 1; i > 0; i--) {
             if (stamps[i] - stamps[i - 1] > COST_ACCRUAL_LIVENESS_GAP_MS) break;
-            from = stamps[i - 1];
-            if (e.timestamp - from >= COST_ACCRUAL_MAX_SPREAD_MS) break;
+            dense = stamps[i - 1];
+            if (e.timestamp - dense >= COST_ACCRUAL_MAX_SPREAD_MS) break;
           }
-          from = Math.max(from, e.timestamp - COST_ACCRUAL_MAX_SPREAD_MS);
-          spans.push({ amount: cur - prev, from, to: e.timestamp });
+          dense = Math.max(dense, e.timestamp - COST_ACCRUAL_MAX_SPREAD_MS);
+          const riseTotal = rises.reduce((s, r) => s + r.rise, 0);
+          const parts = riseTotal > 0 ? rises : [{ k: '$', rise: step, first: true }];
+          const partTotal = riseTotal > 0 ? riseTotal : step;
+          for (const r of parts) {
+            const since = r.first ? prevStamp : (lastRise[r.k] != null ? lastRise[r.k] : dense);
+            const from = Math.max(dense, since);
+            spans.push({ amount: step * (r.rise / partTotal), step, from, to: e.timestamp, gap, restore });
+          }
         }
-        prev = cur; prevKind = kind;
+        for (const r of rises) lastRise[r.k] = e.timestamp;
+        if (cur > peak) peak = cur;
+        prev = cur; prevModels = kind === 'm' ? e.models : null; prevKind = kind;
         stamps.push(e.timestamp);
       }
       return spans;
@@ -12704,12 +13053,12 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // bucket. An increment whose interval is shorter than
     // COST_ACCRUAL_MIN_SPREAD_MS is treated as a point event at its observation
     // time. Increments above `cap` are dropped as data corrections, exactly as
-    // in costSpendBetween.
+    // in costSpendBetween — judged on the whole aggregate step (`step`), not on
+    // the per-model part of it this span carries.
     function costSpreadSpendBetween(spans, t0, t1, cap) {
-      const ceil = (typeof cap === 'number') ? cap : Infinity;
       let spend = 0;
       for (const s of (spans || [])) {
-        if (s.amount > ceil) continue;
+        if (!costStepAllowed(s.step != null ? s.step : s.amount, s.gap, cap, s.restore)) continue;
         const span = s.to - s.from;
         if (span < COST_ACCRUAL_MIN_SPREAD_MS) {
           // Point event: bill it entirely to the bucket containing it.
@@ -12757,14 +13106,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // ~$394 → ~$18,350 step). That single jump is a data correction, not spend,
     // yet the positive-increment sum would bill it into one hourly bucket,
     // producing a bogus giant bar and an inflated window-spend + run-rate. So an
-    // increment above the discontinuity ceiling (see above) is skipped. `ceiling`
+    // increment above the discontinuity ceiling (see above) is skipped — but
+    // only when the step is restore-shaped, i.e. it regains ground the counter
+    // had already reached (costStepRegainsGround); a step to a new high is
+    // spend however large (#13497). `ceiling`
     // is derived once from the full history and passed in; omit it to disable the
     // guard (kept optional so callers without full history stay correct).
     function costSpendBetween(hist, rate, t0, t1, ceiling) {
-      const cap = (typeof ceiling === 'number') ? ceiling : Infinity;
-      const { incs, sawWindow } = costPositiveIncrements(hist, rate, t0, t1);
+      const { incs, gaps, restores, sawWindow } = costPositiveIncrements(hist, rate, t0, t1);
       let spend = 0;
-      for (const inc of incs) { if (inc <= cap) spend += inc; }
+      for (let i = 0; i < incs.length; i++) { if (costStepAllowed(incs[i], gaps[i], ceiling, restores[i])) spend += incs[i]; }
       return sawWindow ? spend : null;
     }
 
@@ -12817,15 +13168,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         body = `<div class="cost-trend-empty">No cost history recorded for this range — data accrues as agents run.</div>`;
       } else {
         const bars = buckets.map(b => {
-          // All-zero windows still draw a 2% baseline so the chart reads as
-          // "flat at zero" rather than missing (only axis labels visible).
           const span = `${formatDashboardDateTime(b.start)} → ${formatDashboardDateTime(b.end)}`;
           if (!b.hasData && b.start < now) {
             // Hatched full-height placeholder: no history at all here, which is
             // different from a recorded $0.
             return `<div class="cost-bar nodata" title="${esc(`${span}: no cost history recorded`)}"></div>`;
           }
-          const h = max > 0 ? Math.max(1, (b.spend / max) * 100) : (b.hasData ? 2 : 0);
+          const h = costBarHeightPct(b, max);
           const cls = b.spend > 0 ? 'cost-bar' : 'cost-bar zero';
           const tip = `${span}: ${fmtUSD(b.spend)}${b.rollup ? ' (includes daily rollup)' : ''}`;
           return `<div class="${cls}" style="height:${h.toFixed(1)}%" title="${esc(tip)}"></div>`;
@@ -12852,6 +13201,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (rate != null) {
         const unit = costRunRateUnit(win);
         rateStr = ` &nbsp;·&nbsp; run-rate: <b>~${fmtUSD(rate * unit.ms)}${unit.label}</b>`;
+        // The agents' models have recorded nothing lately (#13485): the
+        // run-rate only reflects whatever is still being recorded.
+        if (_lastCost && _lastCost.recording && _lastCost.recording.stale) rateStr += ' <span class="cost-recording-incomplete">(recording incomplete)</span>';
       }
       // When the window reaches past the recorded history, say where history
       // starts so the owner knows the earlier bars are blank, not $0.
@@ -13408,6 +13760,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_MERGE_COLUMN = 80;
     const STAGE_TRACKER_NEEDS_DECISION = 85;
     const STAGE_TRACKER_ISSUE_NEEDS_DECISION = 45;
+    // Issue-slot placeholders for a closing reference whose title the server
+    // could not resolve (the issue is closed and unreadable, or of unknown state).
+    const STAGE_TRACKER_CLOSED_ISSUE_TITLE = '(closed issue)';
+    const STAGE_TRACKER_UNTITLED_ISSUE = '(title unavailable)';
+    // linked_issues[].via values that mark a reference link (`Refs #N`, a
+    // `(#N, part 1)` title, a first-paragraph mention) rather than a
+    // closing one; the issue slot draws these under a "refs" chip.
+    const STAGE_TRACKER_SOFT_LINK_VIAS = ['refs', 'title', 'mention'];
+    const STAGE_TRACKER_SOFT_LINK_TIP = 'Referenced by the PR (Refs #N / title), not closed by it';
     // Where an issue parked on 045 (or a pre-045 085) lights: Actionable, the issue side.
     const STAGE_TRACKER_ISSUE_DECISION_COLUMN = 10;
     // 015 triage-needed: actionable but no maintainer has looked at it yet.
@@ -13438,6 +13799,29 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // labels follow when at least two items carry them.
     const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/', 'hold', 'on-hold', 'do-not-merge', 'hive-pause/'];
     const STAGE_TRACKER_SORTS = ['furthest', 'waiting', 'newest', 'number'];
+    // Repo chip + group-by-repo. The chip before an item's number names its
+    // repo (short name; owner/repo in the tooltip; click = the Repo filter)
+    // and is shown always / only when the payload spans several repos
+    // (default) / never. Group puts rows under one collapsible header per
+    // repo. Both settings and the collapsed set persist per browser.
+    const STAGE_TRACKER_REPO_CHIP_KEY = 'hive.tracker.repochip';
+    const STAGE_TRACKER_REPO_CHIP_MODES = [
+      { id: 'always', label: 'Always' },
+      { id: 'multi', label: 'Only when several repos are listed' },
+      { id: 'never', label: 'Never' },
+    ];
+    const STAGE_TRACKER_REPO_CHIP_DEFAULT = 'multi';
+    const STAGE_TRACKER_GROUP_KEY = 'hive.tracker.group';
+    const STAGE_TRACKER_GROUP_COLLAPSED_KEY = 'hive.tracker.group.collapsed';
+    const STAGE_TRACKER_GROUPS = ['none', 'repo'];
+    const STAGE_TRACKER_GROUP_DEFAULT = 'none';
+    const STAGE_TRACKER_GROUP_KEY_PREFIX = 'group:';
+    // Palette slots --ham-repo-tint-0..N-1 in tokens.css.
+    const STAGE_TRACKER_REPO_TINTS = 6;
+    // Mini stage distribution on a group header: bar height steps.
+    const STAGE_TRACKER_GROUP_DIST_STEPS = 4;
+    var _stageTrackerGroup = STAGE_TRACKER_GROUP_DEFAULT;
+    var _stageTrackerCollapsed = {};
     function stageTrackerDefaultFilter() {
       return { kind: 'all', repo: '', q: '', labels: [], age: 'any', author: 'any', attention: false, sort: 'furthest', dir: 'desc', size: STAGE_TRACKER_DEFAULT_PAGE_SIZE, page: 1 };
     }
@@ -13710,7 +14094,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerSubRowHtml(lp, issue, stages, nowMs, ctx) {
       const pr = { repo: issue.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', author: lp.author || '', author_kind: lp.author_kind || '',
         stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], caption: lp.caption || '', reason: lp.reason || '' };
-      const ref = stageTrackerPRRef(pr.number, pr.url, pr.author_kind, pr.author, pr.title, (pr.title ? pr.title + ' · ' : '') + stageTrackerTooltip(pr, nowMs));
+      let ref = stageTrackerPRRef(pr.number, pr.url, pr.author_kind, pr.author, pr.title, (pr.title ? pr.title + ' · ' : '') + stageTrackerTooltip(pr, nowMs));
+      const chip = ctx && ctx.repoChips ? stageTrackerRepoChipHtml(pr.repo, ctx) : '';
+      if (chip) ref = `<span class="ham-pr-line">${chip}${ref}</span>`;
       return `<div class="ham-sub" data-ham-kind="pr" data-ham-stage="${pr.stage}">
           <div class="ham-row-head">
             ${stageTrackerHeadColsHtml([ref], stageTrackerSinceHtml(pr, nowMs), '', stageTrackerChipsHtml(pr))}
@@ -13739,6 +14125,125 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return { anchor: stageTrackerAnchor(lead.stage, stages, kind), since: Date.parse(lead.stage_since || '') || Infinity };
     }
 
+    /* ---- Repo chip and group-by-repo (pure; run under node by
+       stage_tracker_repo_grouping_test.go) ------------------------------- */
+    // Deterministic palette slot for a repo: the string hash the contributor
+    // tint fallback uses (contribTintFallback), bucketed onto the
+    // --ham-repo-tint-N tokens so the chip CSS names no literal colour.
+    function stageTrackerRepoTint(repo) {
+      const text = String(repo || '');
+      let hash = 0;
+      for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+      return Math.abs(hash) % STAGE_TRACKER_REPO_TINTS;
+    }
+    function stageTrackerRepoShort(repo) {
+      const s = String(repo || '');
+      const i = s.indexOf('/');
+      return i >= 0 ? s.slice(i + 1) : s;
+    }
+    // The configured primary repo may arrive as owner/repo or as the bare
+    // name; an item's repo is owner/repo.
+    function stageTrackerIsPrimary(repo, primary) {
+      if (!repo || !primary) return false;
+      if (repo === primary) return true;
+      return String(primary).indexOf('/') < 0 && stageTrackerRepoShort(repo) === primary;
+    }
+    // Whether rows carry the chip under a setting, given how many repos the
+    // payload spans.
+    function stageTrackerRepoChipOn(mode, repoCount) {
+      if (mode === 'never') return false;
+      if (mode === 'always') return true;
+      return (Number(repoCount) || 0) > 1;
+    }
+    // The chip. ctx.repoChips = { primary, active } turns it on
+    // (renderStageTracker sets it from the setting); absent → ''. The
+    // primary repo's chip is muted; click filters the list to the repo, or
+    // clears the filter when it already is that repo.
+    function stageTrackerRepoChipHtml(repo, ctx) {
+      if (!ctx || !ctx.repoChips || !repo) return '';
+      const primary = stageTrackerIsPrimary(repo, ctx.repoChips.primary);
+      const active = ctx.repoChips.active === repo;
+      const tip = repo + (primary ? ' (primary repo)' : '') + (active ? ' — showing only this repo; click to show all repos' : ' — click to show only this repo');
+      return `<button type="button" class="ham-repo-chip ham-repo-tint-${stageTrackerRepoTint(repo)}${primary ? ' ham-repo-primary' : ''}" data-action="hamRepoChip" data-arg0="${esc(repo)}" data-stop="1" aria-pressed="${active ? 'true' : 'false'}" title="${esc(tip)}">${esc(stageTrackerRepoShort(repo))}</button>`;
+    }
+    // Column name for a group header's distribution tooltip (as the column header draws it).
+    function stageTrackerColName(idx, stages) {
+      if (idx >= STAGE_TRACKER_PATH.length) return 'Merged';
+      const n = STAGE_TRACKER_PATH[idx];
+      const st = (stages || []).find(s => Number(s.number) === n) || {};
+      return n === 0 ? 'Open' : (st.short || st.label || String(n));
+    }
+    // Rows grouped by repo: [{ repo, key, rows, count, attention, cols,
+    // collapsed }], the primary repo first, then by row count (desc), then
+    // by name. cols is the per-column row count (a covered issue rides its
+    // furthest PR, as the strip draws it); needs-attention is counted over
+    // the rows. opts: { primary, collapsed: { repo: true }, stages }.
+    function stageTrackerGroups(rows, opts) {
+      opts = opts || {};
+      const by = {};
+      for (const it of rows || []) {
+        const r = it.repo || '';
+        if (!by[r]) by[r] = { repo: r, key: STAGE_TRACKER_GROUP_KEY_PREFIX + r, rows: [], count: 0, attention: 0, cols: Array.from({ length: STAGE_TRACKER_PATH.length + 1 }, () => 0), collapsed: !!(opts.collapsed && opts.collapsed[r]) };
+        const g = by[r];
+        g.rows.push(it);
+        g.count++;
+        if (stageTrackerNeedsAttention(it)) g.attention++;
+        const anchor = stageTrackerSortKey(it, opts.stages || []).anchor;
+        const col = anchor >= STAGE_TRACKER_TERMINAL ? STAGE_TRACKER_PATH.length : STAGE_TRACKER_PATH.indexOf(anchor);
+        if (col >= 0) g.cols[col]++;
+      }
+      const prim = g => stageTrackerIsPrimary(g.repo, opts.primary) ? 0 : 1;
+      return Object.keys(by).map(r => by[r]).sort((a, b) => (prim(a) - prim(b)) || (b.count - a.count) || a.repo.localeCompare(b.repo));
+    }
+    // One page of grouped entries: { group } headers and { group, item }
+    // rows. Headers do not count toward the page size; a page that opens
+    // mid-group repeats that group's header; a collapsed group is its
+    // header alone. total counts every row (so a collapsed group is not
+    // reported as filtered out); from/to and the pages run over the rows
+    // of expanded groups (shown).
+    function stageTrackerGroupPage(groups, f) {
+      f = stageTrackerNormalizeFilter(f);
+      const flat = [];
+      let total = 0;
+      for (const g of groups || []) { total += g.count; flat.push({ group: g }); if (!g.collapsed) for (const it of g.rows) flat.push({ group: g, item: it }); }
+      const shown = flat.filter(e => e.item).length;
+      const pages = Math.max(1, Math.ceil(shown / f.size));
+      const page = Math.min(f.page, pages);
+      const lo = (page - 1) * f.size, hi = page * f.size;
+      const rows = [];
+      let n = 0, lastHeader = null;
+      for (const e of flat) {
+        if (!e.item) {
+          // A header sits at the row position its rows start; one exactly
+          // at the page end opens the next page unless this is the last.
+          if (n >= lo && (n < hi || page === pages)) { rows.push(e); lastHeader = e.group; }
+          continue;
+        }
+        if (n >= lo && n < hi) {
+          if (lastHeader !== e.group) { rows.push({ group: e.group }); lastHeader = e.group; }
+          rows.push(e);
+        }
+        n++;
+      }
+      return { rows, page, pages, from: shown ? lo + 1 : 0, to: Math.min(shown, hi), total, shown, size: f.size };
+    }
+    // Group header row: caret toggle, repo chip, owner/repo, row count,
+    // needs-attention count and a mini per-column distribution. Keyed
+    // `group:owner/repo` by the render so the reconcile keeps it stable.
+    function stageTrackerGroupHeaderHtml(g, stages, ctx) {
+      const max = Math.max(1, ...g.cols);
+      const dist = g.cols.map((c, i) => `<i class="ham-gd ham-gd-${c ? Math.max(1, Math.ceil(c / max * STAGE_TRACKER_GROUP_DIST_STEPS)) : 0}" title="${esc(stageTrackerColName(i, stages) + ': ' + c)}"></i>`).join('');
+      const attn = g.attention ? `<span class="ham-group-attn">${g.attention} need${g.attention === 1 ? 's' : ''} attention</span>` : '';
+      // The header always carries the chip, whatever the row setting.
+      const chipCtx = { repoChips: Object.assign({}, (ctx && ctx.repoChips) || {}) };
+      return `<div class="ham-group${g.collapsed ? ' ham-group-collapsed' : ''}" data-ham-repo="${esc(g.repo)}" role="row">
+        <button type="button" class="ham-group-toggle" data-action="hamGroupToggle" data-arg0="${esc(g.repo)}" data-stop="1" aria-expanded="${g.collapsed ? 'false' : 'true'}" aria-label="${esc((g.collapsed ? 'Expand ' : 'Collapse ') + g.repo)}"><span class="ham-group-caret" aria-hidden="true">${g.collapsed ? '▸' : '▾'}</span></button>
+        ${stageTrackerRepoChipHtml(g.repo, chipCtx)}<span class="ham-group-name">${esc(g.repo)}</span>
+        <span class="ham-group-n">${g.count} ${g.count === 1 ? 'row' : 'rows'}</span>${attn}
+        <span class="ham-group-dist" role="img" aria-label="${esc(g.cols.map((c, i) => stageTrackerColName(i, stages) + ' ' + c).join(', '))}">${dist}</span>
+      </div>`;
+    }
+
     // Row = title line (number, title, chips, since) + thin strip. Non-active
     // chevrons carry only a grey icon; the active one carries words.
     // Everything else is in the tooltip on the row's own #N link: the issue
@@ -13756,7 +14261,6 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const nowMs = Number(ctx.nowMs) || Date.now();
       const isIssue = item.kind === 'issue';
       const title = item.title || '';
-      const hideRepo = !!ctx.hideRepo || !item.repo;
       let prRefs = [], shown = item, range = null, subs = '';
       if (isIssue) {
         const linked = stageTrackerLinkedSorted(item, stages);
@@ -13779,24 +14283,26 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       // it closes — or a muted "no linked issue" placeholder — on the left
       // and names itself in the PR column, exactly where a covering PR sits
       // on an issue row.
+      // The repo chip (when on) leads the row, before the issue slot's #N.
+      const chip = ctx.repoChips ? stageTrackerRepoChipHtml(item.repo, ctx) : '';
       let leadHtml;
       if (isIssue) {
         leadHtml = `<div class="ham-head-main">
-            ${stageTrackerIcon('issue', 'ham-kind-ico')}
-            ${hideRepo ? '' : `<span class="ham-repo">${esc(item.repo)}</span>`}<a class="ham-ref" href="${esc(item.url || '#')}" target="_blank" rel="noopener" title="${esc(stageTrackerTooltip(shown, nowMs))}">#${Number(item.number) || 0}</a>
+            ${stageTrackerIcon('issue', 'ham-kind-ico')}${chip}
+            <a class="ham-ref" href="${esc(item.url || '#')}" target="_blank" rel="noopener" title="${esc(stageTrackerTooltip(shown, nowMs))}">#${Number(item.number) || 0}</a>
             <span class="ham-title" title="${esc(title)}">${esc(title)}</span>
           </div>`;
       } else {
         const li = stageTrackerPRIssueSlot(item);
         prRefs = [stageTrackerPRRef(item.number, item.url, item.author_kind || '', item.author, title, (title ? title + ' · ' : '') + stageTrackerTooltip(shown, nowMs))];
         leadHtml = li.number
-          ? `<div class="ham-head-main">
-            ${stageTrackerIcon('issue', 'ham-kind-ico')}
-            ${hideRepo ? '' : `<span class="ham-repo">${esc(item.repo)}</span>`}<a class="ham-ref" href="${esc(li.url || '#')}" target="_blank" rel="noopener">#${li.number}</a>
-            <span class="ham-title" title="${esc(li.title)}">${esc(li.title)}</span>
+          ? `<div class="ham-head-main${li.closed ? ' ham-issue-closed' : ''}">
+            ${stageTrackerIcon('issue', 'ham-kind-ico')}${chip}
+            <a class="ham-ref" href="${esc(li.url || '#')}" target="_blank" rel="noopener">#${li.number}</a>
+            ${li.title ? `<span class="ham-title" title="${esc(li.title)}">${esc(li.title)}</span>` : `<span class="ham-title ham-no-issue-t">${esc(li.placeholder)}</span>`}${li.soft ? ` <span class="ham-badge ham-issue-refs-chip" title="${esc(STAGE_TRACKER_SOFT_LINK_TIP)}">refs</span>` : ''}${li.closed ? ' <span class="ham-badge ham-issue-closed-chip">closed</span>' : ''}
           </div>`
           : `<div class="ham-head-main ham-no-issue">
-            ${stageTrackerIcon('issue', 'ham-kind-ico')}
+            ${stageTrackerIcon('issue', 'ham-kind-ico')}${chip}
             <span class="ham-title ham-no-issue-t">${esc(li.text)}</span>
           </div>`;
       }
@@ -13812,14 +14318,18 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     /* ---- Movement animation ------------------------------------------------
-       renderStageTracker() replaces the panel's innerHTML on every changed
-       payload, so there is no DOM continuity to watch; a move is detected from
-       data instead. Each payload is reduced to item key → column index
-       (stageTrackerColMap); keys whose column differs from the previous
-       payload's are moves (stageTrackerColMoves), the first payload never
-       animates. The pure row builder stamps data-ham-prev-col / data-ham-col
-       on the moved strips and stageTrackerAnimateMoves() plays the chosen
-       effect after setIfChanged. Detour stages share a column through
+       A move is detected from data, not DOM: each payload is reduced to item
+       key → column index (stageTrackerColMap); keys whose column differs from
+       the previous payload's are moves (stageTrackerColMoves), the first
+       payload never animates. The pure row builder stamps data-ham-prev-col /
+       data-ham-col on the moved strips and stageTrackerAnimateMoves() plays
+       the chosen effect after the render. renderStageTracker() does not
+       rebuild the panel's innerHTML (the hosted hive refreshes the payload
+       about once a second, which used to wipe a move mid-flight and leave
+       only its opening flash visible): stageTrackerReconcile() keys every
+       row on its item (data-ham-key), keeps unchanged and still-animating
+       rows' nodes, swaps changed ones, fades new rows in and collapses
+       departed rows out. Detour stages share a column through
        stageTrackerAnchor, so 050 → 070 is not a move; 110 (merged) is the
        cap column. */
     const STAGE_TRACKER_MOTION_KEY = 'hiveStageTrackerMotion';
@@ -13842,9 +14352,19 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // A refresh that moves more rows than this is a reconciler sweep, not
     // movement worth following; the state still advances, nothing animates.
     const STAGE_TRACKER_MOTION_MAX_ROWS = 12;
+    // Mirrors --ham-move-exit-ms / --ham-move-enter-ms.
+    const STAGE_TRACKER_EXIT_MS = 300;
+    const STAGE_TRACKER_ENTER_MS = 220;
+    // A row mid-move is kept across refreshes until its plan has landed
+    // (flash + move + landing glow stay under this at 1×); the deferred
+    // refresh runs then.
+    const STAGE_TRACKER_SETTLE_MS = 1200;
+    const STAGE_TRACKER_HEADER_KEY = '__cols';
     const STAGE_TRACKER_CAP_COLUMN = STAGE_TRACKER_PATH.length;
     var _stageTrackerCols = null;
     var _stageTrackerMoves = {};
+    var _stageTrackerRowSrc = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var _stageTrackerSettleTimer = 0;
 
     // Pure: the strip column (0-based; STAGE_TRACKER_PATH.length = merged cap)
     // an item's stage lights, or -1 for an unknown stage.
@@ -14077,26 +14597,141 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // After a render: every strip the row builder flagged as moved plays the
     // effect the setting picks, unless the tab is hidden or too many moved.
     function stageTrackerAnimateMoves(root) {
+      if (!root) return 0;
       const effect = stageTrackerMotionEffect(stageTrackerMotionSetting(), stageTrackerReducedMotion());
-      if (!effect || !root || document.hidden) return 0;
       const strips = Array.from(root.querySelectorAll('.ham-strip[data-ham-prev-col]'));
-      if (!strips.length || strips.length > STAGE_TRACKER_MOTION_MAX_ROWS) return 0;
+      const play = !!effect && !document.hidden && strips.length > 0 && strips.length <= STAGE_TRACKER_MOTION_MAX_ROWS;
       let n = 0;
-      for (const strip of strips) if (stageTrackerAnimateMove(strip, Number(strip.dataset.hamPrevCol), Number(strip.dataset.hamCol), effect)) n++;
+      for (const strip of strips) {
+        if (play && stageTrackerAnimateMove(strip, Number(strip.dataset.hamPrevCol), Number(strip.dataset.hamCol), effect)) n++;
+        // The stamp is one render's worth; a kept node must not replay it.
+        delete strip.dataset.hamPrevCol; delete strip.dataset.hamCol;
+      }
       return n;
     }
 
-    // What a PR row's issue slot shows: the open issue the PR closes (number,
-    // title, url) when one is known, else { text } for the placeholder —
-    // "linked issue #N closed" when GitHub links it to an issue that is no
-    // longer open, "no linked issue" when its body names none.
+    // -- keyed row reconcile ---------------------------------------------
+    // Pure: a row's source with the one-render move stamp removed, so the
+    // render after a move sees the same row and keeps its (animating) node.
+    function stageTrackerRowSrcKey(html) {
+      return String(html || '').replace(/ data-ham-prev-col="\d+" data-ham-col="\d+"/g, '');
+    }
+    // Pure: whether the stamped move attributes name this strip.
+    function stageTrackerRowHasMove(html) { return / data-ham-prev-col="\d+"/.test(String(html || '')); }
+    function stageTrackerRowAnimating(node) {
+      return !!(node && typeof node.querySelector === 'function' && node.querySelector('.ham-strip[data-ham-phase]'));
+    }
+    function stageTrackerRowNode(key, html) {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = html;
+      const node = tpl.content.firstElementChild;
+      node.dataset.hamKey = key;
+      if (_stageTrackerRowSrc) _stageTrackerRowSrc.set(node, stageTrackerRowSrcKey(html));
+      return node;
+    }
+    function stageTrackerRowSrcOf(node) { return _stageTrackerRowSrc ? _stageTrackerRowSrc.get(node) : undefined; }
+    function stageTrackerRaf2(fn) {
+      if (typeof requestAnimationFrame !== 'function') { fn(); return; }
+      requestAnimationFrame(() => requestAnimationFrame(fn));
+    }
+    // Pure: whether departures/arrivals play at all — None and a hidden
+    // tab never do; a sweep that turns over more rows than
+    // STAGE_TRACKER_MOTION_MAX_ROWS is a filter or page change, not movement.
+    function stageTrackerRowMotionOn(effect, hidden, turnover) {
+      return !!effect && !hidden && turnover <= STAGE_TRACKER_MOTION_MAX_ROWS;
+    }
+    // A row leaving the list: collapse + fade from its measured height, then
+    // remove. Without motion it is simply removed.
+    function stageTrackerRowExit(node, animate) {
+      if (!animate) { node.remove(); return; }
+      node.style.setProperty('--ham-row-h', (Number(node.offsetHeight) || 0) + 'px');
+      node.classList.add('ham-leaving');
+      stageTrackerAfter(node, 'animationend', STAGE_TRACKER_EXIT_MS, () => node.remove());
+    }
+    function stageTrackerRowEnter(node) {
+      node.classList.add('ham-entering');
+      stageTrackerAfter(node, 'animationend', STAGE_TRACKER_ENTER_MS, () => node.classList.remove('ham-entering'));
+    }
+    // Reconcile the panel with the rows a render produced ([{ key, html }],
+    // the column header first). Rows are matched on key: an unchanged row
+    // keeps its node (so an in-flight move is never interrupted), a row
+    // mid-move whose only change is incidental (its "since" text ticked)
+    // is kept too and a settle re-render is scheduled, a changed row is
+    // swapped for a fresh node, a new row fades in, a departed row
+    // collapses out. Returns the counts for tests.
+    function stageTrackerReconcile(el, rows, opts) {
+      opts = opts || {};
+      const old = {};
+      let leaving = 0;
+      for (const n of Array.from(el.children)) {
+        if (!n.dataset || !n.dataset.hamKey) { n.remove(); continue; }
+        if (n.classList.contains('ham-leaving')) { leaving++; continue; }
+        old[n.dataset.hamKey] = n;
+      }
+      const initial = !Object.keys(old).length && !leaving;
+      const seen = {};
+      let entering = 0, exiting = 0;
+      for (const r of rows) { seen[r.key] = true; if (!old[r.key]) entering++; }
+      for (const k of Object.keys(old)) if (!seen[k]) exiting++;
+      const animate = !initial && stageTrackerRowMotionOn(opts.effect, opts.hidden, entering + exiting);
+      const out = { kept: 0, replaced: 0, entered: 0, exited: 0, deferred: 0 };
+      // Departures first, so a collapsing row holds its place while the
+      // rows below it are laid out around it.
+      for (const k of Object.keys(old)) if (!seen[k]) { stageTrackerRowExit(old[k], animate && k !== STAGE_TRACKER_HEADER_KEY); out.exited++; }
+      let idx = 0;
+      const place = node => {
+        while (el.children[idx] && el.children[idx] !== node && el.children[idx].classList.contains('ham-leaving')) idx++;
+        if (el.children[idx] !== node) el.insertBefore(node, el.children[idx] || null);
+        idx++;
+      };
+      for (const r of rows) {
+        const prev = old[r.key];
+        const src = stageTrackerRowSrcKey(r.html);
+        const moved = stageTrackerRowHasMove(r.html);
+        if (prev && !moved && stageTrackerRowSrcOf(prev) === src) { place(prev); out.kept++; continue; }
+        if (prev && !moved && stageTrackerRowAnimating(prev)) { place(prev); out.deferred++; continue; }
+        const node = stageTrackerRowNode(r.key, r.html);
+        if (prev) { el.replaceChild(node, prev); out.replaced++; }
+        else { out.entered++; if (animate && r.key !== STAGE_TRACKER_HEADER_KEY) stageTrackerRowEnter(node); }
+        place(node);
+      }
+      return out;
+    }
+    // A refresh that found a row mid-move re-renders once the move has
+    // settled, so the row's incidental changes still land.
+    function stageTrackerScheduleSettle() {
+      if (_stageTrackerSettleTimer) return;
+      _stageTrackerSettleTimer = setTimeout(() => { _stageTrackerSettleTimer = 0; renderStageTracker(); }, STAGE_TRACKER_SETTLE_MS);
+    }
+
+    // What a PR row's issue slot shows: the issue the PR closes (number,
+    // title, url) — an open one first, else the closed one GitHub links
+    // it to, with closed: true so the row draws it struck through under a
+    // "closed" chip (a superseded PR whose body still says `Fixes #N`
+    // pairs with an issue an earlier PR already fixed) — or { text } for
+    // the "no linked issue" placeholder when its body names none. A closed
+    // issue whose title the server could not resolve shows the muted
+    // STAGE_TRACKER_CLOSED_ISSUE_TITLE placeholder, never a blank.
+    // A link the server tagged with a soft `via` (refs / title / mention —
+    // the PR works towards the issue without closing it) carries soft: true
+    // so the row draws a "refs" chip beside it; a closing link never does.
     function stageTrackerPRIssueSlot(item) {
       const linked = (Array.isArray(item.linked_issues) ? item.linked_issues : []).filter(li => li && Number(li.number) > 0);
+      const soft = li => STAGE_TRACKER_SOFT_LINK_VIAS.indexOf(li.via || '') >= 0;
       const open = linked.find(li => Number(li.number) === Number(item.nested_under)) || linked.find(li => li.listed || (li.state || '') === 'open');
-      if (open) return { number: Number(open.number), title: open.title || '', url: open.url || '' };
-      const closed = linked.filter(li => (li.state || '') === 'closed');
-      if (closed.length) return { number: 0, text: 'linked issue ' + closed.map(li => '#' + Number(li.number)).join(', ') + ' closed' };
-      if (linked.length) return { number: Number(linked[0].number), title: linked[0].title || '', url: linked[0].url || '' };
+      if (open) {
+        const slot = { number: Number(open.number), title: open.title || '', url: open.url || '' };
+        if (soft(open)) slot.soft = true;
+        return slot;
+      }
+      const li = linked.find(l => (l.state || '') === 'closed') || linked[0];
+      if (li) {
+        const closed = (li.state || '') === 'closed';
+        const title = li.title || '';
+        const slot = { number: Number(li.number), title: title, url: li.url || '', closed: closed, placeholder: !title && closed ? STAGE_TRACKER_CLOSED_ISSUE_TITLE : (!title ? STAGE_TRACKER_UNTITLED_ISSUE : '') };
+        if (soft(li)) slot.soft = true;
+        return slot;
+      }
       return { number: 0, text: 'no linked issue' };
     }
 
@@ -14285,6 +14920,67 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerSaveFilter() {
       try { const f = Object.assign({}, _stageTrackerFilter); delete f.page; localStorage.setItem(STAGE_TRACKER_FILTER_KEY, JSON.stringify(f)); } catch {}
     }
+    // Repo chip / group settings and the per-repo collapsed set (localStorage).
+    function stageTrackerRepoChipSetting() {
+      let v = '';
+      try { v = localStorage.getItem(STAGE_TRACKER_REPO_CHIP_KEY) || ''; } catch { v = ''; }
+      return STAGE_TRACKER_REPO_CHIP_MODES.some(m => m.id === v) ? v : STAGE_TRACKER_REPO_CHIP_DEFAULT;
+    }
+    function stageTrackerSetRepoChip(id) {
+      const v = STAGE_TRACKER_REPO_CHIP_MODES.some(m => m.id === id) ? id : STAGE_TRACKER_REPO_CHIP_DEFAULT;
+      try { localStorage.setItem(STAGE_TRACKER_REPO_CHIP_KEY, v); } catch {}
+      return v;
+    }
+    function stageTrackerGroupSetting() {
+      let v = '';
+      try { v = localStorage.getItem(STAGE_TRACKER_GROUP_KEY) || ''; } catch { v = ''; }
+      return STAGE_TRACKER_GROUPS.indexOf(v) >= 0 ? v : STAGE_TRACKER_GROUP_DEFAULT;
+    }
+    function stageTrackerSetGroup(id) {
+      const v = STAGE_TRACKER_GROUPS.indexOf(id) >= 0 ? id : STAGE_TRACKER_GROUP_DEFAULT;
+      try { localStorage.setItem(STAGE_TRACKER_GROUP_KEY, v); } catch {}
+      return v;
+    }
+    function stageTrackerLoadCollapsed() {
+      try {
+        const o = JSON.parse(localStorage.getItem(STAGE_TRACKER_GROUP_COLLAPSED_KEY) || '{}');
+        if (!o || typeof o !== 'object' || Array.isArray(o)) return {};
+        const out = {};
+        for (const k of Object.keys(o)) if (o[k]) out[k] = true;
+        return out;
+      } catch { return {}; }
+    }
+    function stageTrackerSaveCollapsed(c) {
+      try { localStorage.setItem(STAGE_TRACKER_GROUP_COLLAPSED_KEY, JSON.stringify(c || {})); } catch {}
+    }
+    // Pure: the collapsed set with one repo toggled.
+    function stageTrackerToggleCollapsed(collapsed, repo) {
+      const out = Object.assign({}, collapsed || {});
+      if (out[repo]) delete out[repo]; else out[repo] = true;
+      return out;
+    }
+    function stageTrackerLoadGrouping() {
+      _stageTrackerGroup = stageTrackerGroupSetting();
+      _stageTrackerCollapsed = stageTrackerLoadCollapsed();
+    }
+    function stageTrackerPrimaryRepo() { return (typeof window !== 'undefined' && window._primaryRepo) || ''; }
+    function hamGroup(value) {
+      _stageTrackerGroup = stageTrackerSetGroup(value);
+      _stageTrackerFilter.page = 1;
+      renderStageTracker();
+      stageTrackerRenderSettings();
+    }
+    function hamGroupToggle(repo) {
+      _stageTrackerCollapsed = stageTrackerToggleCollapsed(_stageTrackerCollapsed, repo);
+      stageTrackerSaveCollapsed(_stageTrackerCollapsed);
+      renderStageTracker();
+    }
+    // A row's repo chip: filter to that repo, or back to all when it already is.
+    function hamRepoChip(repo) { hamFilter('repo', _stageTrackerFilter.repo === repo ? '' : repo); }
+    function stageTrackerRepoChipChange(value) {
+      stageTrackerSetRepoChip(value);
+      renderStageTracker();
+    }
 
     function hamFilter(key, value) {
       const f = _stageTrackerFilter;
@@ -14317,6 +15013,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       setVal('activity-monitor-age', f.age);
       setVal('activity-monitor-author', f.author);
       setVal('activity-monitor-sort', f.sort);
+      setVal('activity-monitor-group', _stageTrackerGroup);
       setVal('activity-monitor-size', f.size);
       const att = document.getElementById('activity-monitor-attention');
       if (att) att.setAttribute('aria-pressed', f.attention ? 'true' : 'false');
@@ -14387,17 +15084,22 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const f = _stageTrackerFilter = stageTrackerNormalizeFilter(_stageTrackerFilter);
       const nowMs = Date.now();
       const stages = d.stages || [];
-      const sel = document.getElementById('activity-monitor-repo');
       const repos = Array.from(new Set(d.items.map(it => it.repo).filter(Boolean))).sort();
+      const sel = document.getElementById('activity-monitor-repo');
       if (sel) {
         const want = '<option value="">All repos</option>' + repos.map(r => `<option value="${esc(r)}"${r === f.repo ? ' selected' : ''}>${esc(r)}</option>`).join('');
         if (sel.innerHTML !== want) sel.innerHTML = want;
       }
       stageTrackerSyncToolbar(f);
       const ctx = { nowMs, stages, moves: _stageTrackerMoves };
+      // Repo chips ride the setting against how many repos the payload spans.
+      if (stageTrackerRepoChipOn(stageTrackerRepoChipSetting(), repos.length)) ctx.repoChips = { primary: stageTrackerPrimaryRepo(), active: f.repo };
       const visible = stageTrackerVisible(d.items, f, ctx);
       const ordered = stageTrackerSort(visible, stages, f);
-      const page = stageTrackerPage(ordered, f);
+      const grouping = _stageTrackerGroup === 'repo';
+      const page = grouping
+        ? stageTrackerGroupPage(stageTrackerGroups(ordered, { primary: stageTrackerPrimaryRepo(), collapsed: _stageTrackerCollapsed, stages }), f)
+        : stageTrackerPage(ordered, f);
       if (page.page !== f.page) f.page = page.page;
       // Attention is counted over the filtered set, nested PRs included.
       const filteredAll = d.items.filter(it => stageTrackerMatches(it, f, ctx));
@@ -14421,14 +15123,27 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (meta) setIfChanged(meta, `<span class="ham-count">${esc(counts.showing)}</span>${stageTrackerEngineHtml(d)}${stageTrackerUpdatedHtml(d, nowMs)}${stageTrackerPagerHtml(page)}`);
       const foot = document.getElementById('activity-monitor-meta-foot');
       if (foot) setIfChanged(foot, page.pages > 1 ? `<span class="ham-count">${esc(counts.showing)}</span>${stageTrackerPagerHtml(page)}` : '');
+      const effect = stageTrackerMotionEffect(stageTrackerMotionSetting(), stageTrackerReducedMotion());
       if (!visible.length) {
-        setIfChanged(el, `<div class="ham-empty">${d.items.length ? 'Nothing matches the current filters.' : 'Nothing open is being tracked right now.'}</div>`);
+        _stageTrackerMoves = {};
+        const emptyHtml = `<div class="ham-empty">${d.items.length ? 'Nothing matches the current filters.' : 'Nothing open is being tracked right now.'}</div>`;
+        if (el.querySelector('[data-ham-key]')) {
+          stageTrackerReconcile(el, [], { effect, hidden: document.hidden });
+          // Departing rows collapse first; the empty line follows them out.
+          if (el.querySelector('.ham-leaving')) { setTimeout(() => { if (!el.querySelector('[data-ham-key]')) setIfChanged(el, emptyHtml); }, STAGE_TRACKER_EXIT_MS * 1.5); return; }
+        }
+        setIfChanged(el, emptyHtml);
         return;
       }
-      // The repo label only helps when rows from several repos can be on screen.
-      ctx.hideRepo = !!f.repo || repos.length < 2;
-      const html = stageTrackerHeaderHtml(stages) + page.rows.map(it => stageTrackerRowHtml(it, stages, ctx)).join('');
-      setIfChanged(el, html);
+      // Grouped: header rows keyed group:owner/repo sit between the item
+      // rows; the reconcile treats them like any keyed row (kept while
+      // unchanged, collapsed out with their last row).
+      const rows = [{ key: STAGE_TRACKER_HEADER_KEY, html: stageTrackerHeaderHtml(stages) }]
+        .concat(page.rows.map(e => grouping && !e.item
+          ? { key: e.group.key, html: stageTrackerGroupHeaderHtml(e.group, stages, ctx) }
+          : { key: stageTrackerItemKey(grouping ? e.item : e), html: stageTrackerRowHtml(grouping ? e.item : e, stages, ctx) }));
+      const rec = stageTrackerReconcile(el, rows, { effect, hidden: document.hidden });
+      if (rec.deferred) stageTrackerScheduleSettle();
       // Moves play once, on the render that follows the payload; a filter
       // or paging re-render of the same payload does not replay them.
       if (Object.keys(_stageTrackerMoves).length) { stageTrackerAnimateMoves(el); _stageTrackerMoves = {}; }
@@ -14447,6 +15162,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // is restored from storage on the first fetch.
     async function fetchStageTracker() {
       try {
+        if (!_stageTrackerSig && !_stageTrackerEtag) stageTrackerLoadGrouping();
         if (!_stageTrackerSig && !_stageTrackerEtag) { stageTrackerLoadFilter(); stageTrackerSoundInit(); }
         const r = await fetch('/api/stage-tracker', _stageTrackerEtag ? { headers: { 'If-None-Match': _stageTrackerEtag } } : undefined);
         if (r.status === 304) { stageTrackerTickClock(); return; }
@@ -14528,6 +15244,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_CLIP_STORE = 'clips';
     const STAGE_TRACKER_CLIP_MAX_BYTES = 4 * 1024 * 1024;
     const STAGE_TRACKER_CLIP_PREVIEW_GAP_S = 0.12;
+    // AudioContext.resume() is asynchronous (and in Safari the context is
+    // 'suspended' or 'interrupted' until it settles): a play inside a user
+    // gesture waits this long for it; an automatic play waits only briefly so
+    // voices never queue up and burst out together on a later gesture.
+    const STAGE_TRACKER_GESTURE_RESUME_MS = 1000;
+    const STAGE_TRACKER_AUTO_RESUME_MS = 250;
+    const STAGE_TRACKER_SOUND_BLOCKED_MSG = 'The browser blocked audio for this page — click ▶ Play again, or allow sound/auto-play for this site in the browser\'s site settings.';
+    const STAGE_TRACKER_SOUND_UNSUPPORTED_MSG = 'This browser has no Web Audio support, so the tracker sounds cannot play.';
+    const STAGE_TRACKER_SOUND_PLAYING_LABEL = 'Playing…';
     const STAGE_TRACKER_SOUND_KINDS = Object.freeze({
       open: { label: 'Open sound', builtin: 'Built-in (bee buzz)', event: 'a new issue or pull request appears' },
       merge: { label: 'Merge sound', builtin: 'Built-in (zapper)', event: 'a pull request merges' },
@@ -14631,25 +15356,66 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (stageTrackerSoundGate()) stageTrackerPlayBuzz(Math.min(fresh.length, STAGE_TRACKER_SOUND_MAX_PLAYS));
     }
 
+    // Creates the context on first use; never resumes it — callers go through
+    // stageTrackerResumeContext so a still-pending resume() is never mistaken
+    // for a blocked one. Clip decoding is best-effort and cannot abort creation.
     function stageTrackerAudioContext() {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return null;
-      if (!_stageTrackerAudioCtx) { try { _stageTrackerAudioCtx = new AC(); } catch { return null; } stageTrackerDecodeClips(); }
-      if (_stageTrackerAudioCtx.state === 'suspended') { try { _stageTrackerAudioCtx.resume(); } catch {} }
+      if (!_stageTrackerAudioCtx) {
+        try { _stageTrackerAudioCtx = new AC(); } catch { return null; }
+        try { stageTrackerDecodeClips(); } catch {}
+      }
       return _stageTrackerAudioCtx;
     }
 
-    // Prime the context on the first gesture after load when sound was left
-    // on in a previous visit, so a merge that lands before the user clicks
-    // anything in the tracker can still play (autoplay policy). Re-armed
-    // whenever a play finds the context still suspended: the gesture that
-    // created it may have been consumed, or it was created outside one.
+    // Resolves with ctx once it is running. Any other state ('suspended',
+    // Safari's 'interrupted', …) gets a resume(); the promise rejects when
+    // resume() throws or rejects, resolves without the context running, or
+    // does not settle within timeoutMs.
+    function stageTrackerResumeContext(ctx, timeoutMs) {
+      if (!ctx) return Promise.reject(new Error('no AudioContext'));
+      if (ctx.state === 'running') return Promise.resolve(ctx);
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (ok, err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (ok) resolve(ctx); else reject(err || new Error('AudioContext did not resume'));
+        };
+        const timer = setTimeout(() => finish(false, new Error('AudioContext resume timed out')), timeoutMs);
+        let p;
+        try { p = ctx.resume(); } catch (e) { p = Promise.reject(e); }
+        Promise.resolve(p).then(() => finish(ctx.state === 'running'), e => finish(false, e));
+      });
+    }
+
+    // Prime the context on a gesture after load when sound was left on in a
+    // previous visit, so a merge that lands before the user clicks anything
+    // in the tracker can still play (autoplay policy). The listeners stay
+    // armed until a resume() actually succeeds — the first gesture may be
+    // one the browser does not count. Re-armed whenever an automatic play
+    // finds the context still blocked.
     function stageTrackerSoundPrime() {
       if (_stageTrackerSoundPrimed) return;
       _stageTrackerSoundPrimed = true;
-      const prime = () => { _stageTrackerSoundPrimed = false; if (_stageTrackerSoundOn) stageTrackerAudioContext(); };
-      document.addEventListener('pointerdown', prime, { once: true, passive: true });
-      document.addEventListener('keydown', prime, { once: true, passive: true });
+      let inFlight = false;
+      const disarm = () => {
+        _stageTrackerSoundPrimed = false;
+        document.removeEventListener('pointerdown', prime);
+        document.removeEventListener('keydown', prime);
+      };
+      const prime = () => {
+        if (!_stageTrackerSoundOn) { disarm(); return; }
+        if (inFlight) return;
+        const ctx = stageTrackerAudioContext();
+        if (!ctx) { disarm(); return; }
+        inFlight = true;
+        stageTrackerResumeContext(ctx, STAGE_TRACKER_GESTURE_RESUME_MS).then(disarm, () => { inFlight = false; });
+      };
+      document.addEventListener('pointerdown', prime, { passive: true });
+      document.addEventListener('keydown', prime, { passive: true });
     }
 
     // Baked sample by sample like the reference render: the snap is a raw
@@ -14710,13 +15476,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     // Schedules count voices (capped) from startOffsetS under one master
-    // gain. A context the autoplay policy still holds suspended gets no
-    // voices — they would all burst out together on the next gesture — and
-    // re-arms the gesture priming instead.
-    function stageTrackerPlayVoices(voice, count, gain, startOffsetS) {
-      const ctx = stageTrackerAudioContext();
+    // gain on a context that is already running.
+    function stageTrackerScheduleVoices(ctx, voice, count, gain, startOffsetS) {
       if (!ctx) return false;
-      if (ctx.state === 'suspended') { stageTrackerSoundPrime(); return false; }
       try {
         const master = ctx.createGain();
         master.gain.value = gain;
@@ -14726,6 +15488,47 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         for (let i = 0; i < n; i++) voice(ctx, master, at + i * STAGE_TRACKER_SOUND_OFFSET_S);
         return true;
       } catch { return false; }
+    }
+
+    // Automatic play (a merge or new item landed): schedules at once on a
+    // running context. A context the autoplay policy still holds gets one
+    // short resume() window; voices that would otherwise burst out together
+    // on the next gesture are dropped and gesture priming is re-armed instead.
+    // Returns true only when the voices were scheduled synchronously.
+    function stageTrackerPlayVoices(voice, count, gain, startOffsetS) {
+      const ctx = stageTrackerAudioContext();
+      if (!ctx) return false;
+      if (ctx.state === 'running') return stageTrackerScheduleVoices(ctx, voice, count, gain, startOffsetS);
+      stageTrackerResumeContext(ctx, STAGE_TRACKER_AUTO_RESUME_MS).then(
+        () => stageTrackerScheduleVoices(ctx, voice, count, gain, startOffsetS),
+        () => stageTrackerSoundPrime());
+      return false;
+    }
+
+    // Gesture play (▶ Play, ▶ Play both, turning sound on): must be called
+    // from the gesture handler itself. Creates the context there, waits for
+    // resume() and then calls schedule(ctx). Resolves true when scheduled;
+    // when the browser refuses, toasts why and resolves false — a preview
+    // never fails silently.
+    function stageTrackerPlayOnGesture(schedule) {
+      const ctx = stageTrackerAudioContext();
+      if (!ctx) { showToast(STAGE_TRACKER_SOUND_UNSUPPORTED_MSG, 'error'); return Promise.resolve(false); }
+      if (ctx.state === 'running') return Promise.resolve(!!schedule(ctx));
+      return stageTrackerResumeContext(ctx, STAGE_TRACKER_GESTURE_RESUME_MS).then(
+        () => !!schedule(ctx),
+        () => { showToast(STAGE_TRACKER_SOUND_BLOCKED_MSG, 'warning'); return false; });
+    }
+
+    // Marks btn as playing for the life of promise plus lengthS of audio,
+    // then restores its label. No btn → promise unchanged.
+    function stageTrackerPlayingState(btn, promise, lengthS) {
+      if (!btn || typeof btn.setAttribute !== 'function') return promise;
+      const label = btn.textContent;
+      btn.textContent = STAGE_TRACKER_SOUND_PLAYING_LABEL;
+      btn.setAttribute('aria-busy', 'true');
+      btn.classList.add('is-playing');
+      const restore = () => { btn.textContent = label; btn.removeAttribute('aria-busy'); btn.classList.remove('is-playing'); };
+      return promise.then(ok => { setTimeout(restore, ok ? Math.ceil((Number(lengthS) || 0) * 1000) : 0); return ok; }, e => { restore(); throw e; });
     }
 
     // Pure: a voice that plays one decoded clip.
@@ -14756,6 +15559,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return (kind === 'merge' ? STAGE_TRACKER_SOUND_MASTER_GAIN : STAGE_TRACKER_BUZZ_MASTER_GAIN) * v;
     }
 
+    function stageTrackerScheduleSound(ctx, kind, count, startOffsetS) {
+      return stageTrackerScheduleVoices(ctx, stageTrackerVoiceFor(kind, _stageTrackerClips), count, stageTrackerGainFor(kind, _stageTrackerClips, _stageTrackerVolume), startOffsetS);
+    }
     function stageTrackerPlaySound(kind, count, startOffsetS) {
       return stageTrackerPlayVoices(stageTrackerVoiceFor(kind, _stageTrackerClips), count, stageTrackerGainFor(kind, _stageTrackerClips, _stageTrackerVolume), startOffsetS);
     }
@@ -14768,9 +15574,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (clip && clip.buffer) return Number(clip.buffer.duration) || 0;
       return kind === 'merge' ? STAGE_TRACKER_ZAP_S : STAGE_TRACKER_BUZZ_S;
     }
-    function stageTrackerPlayTest() {
-      stageTrackerPlayZap(1);
-      stageTrackerPlayBuzz(1, stageTrackerSoundLengthS('merge') + STAGE_TRACKER_CLIP_PREVIEW_GAP_S);
+    // Gesture: the merge sound then the open sound, under one resume().
+    function stageTrackerPlayTest(btn) {
+      const gap = stageTrackerSoundLengthS('merge') + STAGE_TRACKER_CLIP_PREVIEW_GAP_S;
+      const play = stageTrackerPlayOnGesture(ctx => {
+        const zap = stageTrackerScheduleSound(ctx, 'merge', 1);
+        const buzz = stageTrackerScheduleSound(ctx, 'open', 1, gap);
+        return zap || buzz;
+      });
+      return stageTrackerPlayingState(btn, play, gap + stageTrackerSoundLengthS('open'));
     }
 
     /* ---- Clip storage (IndexedDB) ---- */
@@ -14853,7 +15665,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         const custom = !!(state.clips && state.clips[kind]);
         return `<div class="ham-sound-row" data-sound-kind="${esc(kind)}"><span class="ham-sound-row-label">${esc(k.label)}<span class="text-muted"> — ${esc(k.event)}</span></span>`
           + `<span class="ham-sound-name" title="${esc(state.names[kind])}">${esc(state.names[kind])}</span>`
-          + `<span class="ham-sound-actions"><button type="button" class="hv-btn btn-sm" data-action="stageTrackerPreviewSound" data-arg0="${esc(kind)}" data-stop="1">▶ Play</button>`
+          + `<span class="ham-sound-actions"><button type="button" class="hv-btn btn-sm" data-action="stageTrackerPreviewSound" data-arg0="${esc(kind)}" data-arg-types="s,t" data-stop="1">▶ Play</button>`
           + `<label class="hv-btn btn-sm ham-sound-file">Choose WAV…<input type="file" accept="audio/wav,audio/x-wav,audio/*" data-change-action="stageTrackerUploadSound" data-arg0="${esc(kind)}" data-arg-types="s,t" aria-label="${esc(k.label)} file"></label>`
           + `<button type="button" class="hv-btn btn-sm" data-action="stageTrackerResetSound" data-arg0="${esc(kind)}" data-stop="1"${custom ? '' : ' disabled'}>Reset to built-in</button></span></div>`;
       }).join('');
@@ -14862,15 +15674,26 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         + `<label class="overview-settings-field">Volume <span class="ham-sound-volume-value" id="activity-monitor-volume-value">${vol}</span><input type="range" min="0" max="${STAGE_TRACKER_VOLUME_MAX}" step="1" value="${vol}" data-input-action="stageTrackerSetVolume" data-arg-types="N" aria-label="Volume"></label></div>`
         + `<p class="ham-sound-help text-muted">Sounds play for every repo this hive governs when the tab is visible. Replace either with your own WAV (or any audio the browser decodes, up to ${Math.round(STAGE_TRACKER_CLIP_MAX_BYTES / (1024 * 1024))} MB); files stay in this browser.</p>`
         + rows
-        + `<div class="overview-settings-links"><button type="button" class="hv-btn btn-sm" data-action="stageTrackerPlayTest" data-stop="1">▶ Play both</button></div></div>`
+        + `<div class="overview-settings-links"><button type="button" class="hv-btn btn-sm" data-action="stageTrackerPlayTest" data-arg-types="t" data-stop="1">▶ Play both</button></div></div>`
+        + stageTrackerRepoSectionHtml(state.repoChip, state.group)
         + stageTrackerMotionSectionHtml(state.motion, state.stages || []);
+    }
+    // Pure: the Repositories section — repo chip visibility and Group.
+    function stageTrackerRepoSectionHtml(repoChip, group) {
+      const opts = STAGE_TRACKER_REPO_CHIP_MODES.map(m => `<label class="overview-settings-row"><input type="radio" name="sts-repochip" value="${esc(m.id)}"${m.id === repoChip ? ' checked' : ''} data-change-action="stageTrackerRepoChipChange" data-arg-types="v">${esc(m.label)}${m.id === STAGE_TRACKER_REPO_CHIP_DEFAULT ? ' <span class="text-muted">(default)</span>' : ''}</label>`).join('');
+      return `<section class="overview-settings-section" id="sts-repos" aria-labelledby="sts-repos-title">
+          <div class="overview-settings-card-title" id="sts-repos-title">Repositories</div>
+          <p class="sts-hint">Each row can carry a small chip naming its repository before the number (the primary repo's chip is muted; hover for owner/repo, click to filter the list to that repo).</p>
+          <div class="overview-settings-grid" role="radiogroup" aria-label="Show repo chip">${opts}</div>
+          <div class="sts-row"><label class="overview-settings-field">Group rows by <select class="ham-select" id="sts-group" data-change-action="hamGroup" data-arg-types="v"><option value="none"${group === 'repo' ? '' : ' selected'}>None</option><option value="repo"${group === 'repo' ? ' selected' : ''}>Repo</option></select></label></div>
+        </section>`;
     }
     function stageTrackerRenderSettings() {
       const body = document.getElementById('activity-monitor-settings-body');
       if (!body) return;
       const names = {};
       for (const kind of Object.keys(STAGE_TRACKER_SOUND_KINDS)) names[kind] = stageTrackerClipStatusText(kind);
-      setIfChanged(body, stageTrackerSettingsHtml({ on: _stageTrackerSoundOn, volume: _stageTrackerVolume, clips: _stageTrackerClips, names, motion: stageTrackerMotionSetting(), stages: (_stageTracker && _stageTracker.stages) || [] }));
+      setIfChanged(body, stageTrackerSettingsHtml({ on: _stageTrackerSoundOn, volume: _stageTrackerVolume, clips: _stageTrackerClips, names, motion: stageTrackerMotionSetting(), stages: (_stageTracker && _stageTracker.stages) || [], repoChip: stageTrackerRepoChipSetting(), group: _stageTrackerGroup }));
       const rm = document.getElementById('sts-rm-preview');
       if (rm) rm.checked = document.body.classList.contains('ham-rm-preview');
     }
@@ -14934,9 +15757,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (out) out.textContent = String(_stageTrackerVolume);
     }
     // Preview plays regardless of the master toggle: the user is auditioning.
-    function stageTrackerPreviewSound(kind) {
-      if (!STAGE_TRACKER_SOUND_KINDS[kind]) return;
-      stageTrackerPlaySound(kind, 1);
+    // A gesture play: the button shows "Playing…" and a blocked context toasts.
+    function stageTrackerPreviewSound(kind, btn) {
+      if (!STAGE_TRACKER_SOUND_KINDS[kind]) return Promise.resolve(false);
+      return stageTrackerPlayingState(btn, stageTrackerPlayOnGesture(ctx => stageTrackerScheduleSound(ctx, kind, 1)), stageTrackerSoundLengthS(kind));
     }
     function stageTrackerUploadSound(kind, input) {
       if (!STAGE_TRACKER_SOUND_KINDS[kind] || !input || !input.files || !input.files[0]) return;
@@ -14950,9 +15774,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       read.then(bytes => {
         _stageTrackerClips[kind] = { name: file.name, bytes, buffer: null, failed: false };
         stageTrackerRenderSettings();
-        // The upload is a gesture, so the context can be created here and
-        // the clip decoded (and previewed) at once.
+        // Create the context so the clip decodes now (decoding does not
+        // need a running context); ▶ Play auditions it.
         stageTrackerAudioContext();
+        stageTrackerDecodeClips();
         return stageTrackerClipSave(kind, file.name, bytes).then(() => {
           showToast(STAGE_TRACKER_SOUND_KINDS[kind].label + ' set to "' + file.name + '".', 'success');
         }, () => {
@@ -14999,6 +15824,18 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
        Preview that plays it on a sample row inside the modal. */
     const STAGE_TRACKER_PREVIEW_STAGES = [20, 50];
     var _stageTrackerPreviewAt = 0;
+    // Pure: the whole sample — column header plus ONE real tracker row built
+    // by stageTrackerRowHtml so its geometry matches the live rows. The
+    // preview replaces #sts-sample's content with this (never appends).
+    function stageTrackerSampleRowHtml(stage, stages) {
+      const sample = { repo: 'hive/sample', number: 1, kind: 'issue', title: 'Sample item', url: '#', stage, stage_since: '' };
+      return stageTrackerHeaderHtml(stages) + stageTrackerRowHtml(sample, stages, { nowMs: Date.now() });
+    }
+    // A row holds two .ham-strip lists (the title/head columns and the
+    // pipeline chevrons); only the pipeline one is animated.
+    function stageTrackerSampleStrip(sample) {
+      return sample ? sample.querySelector('.ham-row .ham-strip[aria-label="Pipeline progress"]') : null;
+    }
     // Pure: the #sts-motion section. `motion` is the saved choice, `stages`
     // the live stage list for the sample row.
     function stageTrackerMotionSectionHtml(motion, stages) {
@@ -15007,12 +15844,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           <label class="sts-motion-label" for="sts-motion-${esc(m.id)}"><span>${m.key ? `<span class="sts-motion-key">${esc(m.key)}</span>` : ''}${esc(m.label)}${m.id === STAGE_TRACKER_MOTION_DEFAULT ? ' <span class="sts-motion-desc">(default)</span>' : ''}</span><span class="sts-motion-desc">${esc(m.desc)}</span></label>
           ${m.id === STAGE_TRACKER_MOTION_NONE ? '<span></span>' : `<button type="button" class="ham-chip" data-action="stageTrackerPreviewMotion" data-arg0="${esc(m.id)}" data-stop="1" title="Play ${esc(m.label)} on the sample row">Preview</button>`}
         </li>`).join('');
-      const sample = { repo: 'hive/sample', number: 1, kind: 'issue', title: 'Sample item', url: '#', stage: STAGE_TRACKER_PREVIEW_STAGES[0], stage_since: '' };
       return `<section class="overview-settings-section" id="sts-motion" aria-labelledby="sts-motion-title">
           <div class="overview-settings-card-title" id="sts-motion-title">Movement animation</div>
           <p class="sts-hint">Plays once on a row when its lit chevron moves to another column between refreshes, forwards or back: the old chevron flashes twice, the chosen effect travels, and the new chevron lands lit. Under reduced motion every choice becomes one soft flash and a plain crossfade.</p>
           <ol class="sts-motion-list" role="radiogroup" aria-label="Movement animation">${opts}</ol>
-          <div class="sts-sample" id="sts-sample" aria-label="Preview row">${stageTrackerHeaderHtml(stages)}${stageTrackerRowHtml(sample, stages, { nowMs: Date.now() })}</div>
+          <div class="sts-sample" id="sts-sample" aria-label="Preview row">${stageTrackerSampleRowHtml(STAGE_TRACKER_PREVIEW_STAGES[_stageTrackerPreviewAt], stages)}</div>
           <div class="sts-row"><label><input type="checkbox" id="sts-rm-preview" data-change-action="stageTrackerRmPreview" data-arg-types="c"> Preview the reduced-motion fallback</label></div>
         </section>`;
     }
@@ -15026,15 +15862,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // consulted; reduced motion still is).
     function stageTrackerPreviewMotion(id) {
       const sample = document.getElementById('sts-sample');
-      const strip = sample && sample.querySelector('.ham-row .ham-strip');
-      if (!strip) return;
+      if (!sample) return;
       const stages = (_stageTracker && _stageTracker.stages) || [];
       const fromStage = STAGE_TRACKER_PREVIEW_STAGES[_stageTrackerPreviewAt];
       _stageTrackerPreviewAt = (_stageTrackerPreviewAt + 1) % STAGE_TRACKER_PREVIEW_STAGES.length;
       const toStage = STAGE_TRACKER_PREVIEW_STAGES[_stageTrackerPreviewAt];
       const from = stageTrackerColIndex({ kind: 'issue', stage: fromStage }, stages), to = stageTrackerColIndex({ kind: 'issue', stage: toStage }, stages);
-      strip.innerHTML = stageTrackerStripItems({ repo: 'hive/sample', number: 1, kind: 'issue', stage: toStage }, stages, null);
-      stageTrackerAnimateMove(strip, from, to, stageTrackerMotionEffect(id, stageTrackerReducedMotion()));
+      sample.innerHTML = stageTrackerSampleRowHtml(toStage, stages);
+      const strip = stageTrackerSampleStrip(sample);
+      if (strip) stageTrackerAnimateMove(strip, from, to, stageTrackerMotionEffect(id, stageTrackerReducedMotion()));
     }
 
     function parseCadenceMinutes(cadence) {
@@ -20590,7 +21426,12 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (snapshotComplete) overviewKPIRecordLocal(overviewKPICurrentSample(coverageCard ? cards.concat([coverageCard]) : cards));
       const staleBadge = staleSince ? `<span class="overview-kpi-stale" role="status" title="GitHub refused the latest enumeration or count reconcile (rate limit or outage), or this is the snapshot restored at startup. These figures are the last successful read plus webhook updates since, as of ${esc(fmtOverviewStaleSince(staleSince))}; the next enumeration or hourly reconcile clears this.">⚠ stale since ${esc(fmtOverviewStaleSince(staleSince))}${(() => { const ago = relativeTimeShort(staleSince); return ago ? ` (${esc(ago)})` : ''; })()} · serving last-good</span>` : '';
       const unlistedBadge = unlisted.issues + unlisted.prs > 0 ? `<span class="overview-kpi-stale" role="status" title="${esc(overviewUnlistedNote(unlisted))}">+${unlisted.issues + unlisted.prs} not yet listed</span>` : '';
-      return `<div class="overview-headline sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}${staleBadge}${unlistedBadge}<div class="overview-kpis" aria-label="${esc(equationLabel)}">${cards.map((card, i) => {
+      // A repo listing open PRs but no issues while its issue side is
+      // stale or unlisted (repos[].issuesSyncing) is a pending issue fetch,
+      // not an empty backlog: the issue total is a lower bound until the
+      // list comes back (open_items.go markIssuesSyncing).
+      const syncingBadge = unlisted.syncing > 0 ? `<span class="overview-kpi-stale" role="status" title="${esc(overviewSyncingNote(unlisted))}">⏳ issues syncing · ${unlisted.syncing} ${unlisted.syncing === 1 ? 'repo' : 'repos'}</span>` : '';
+      return `<div class="overview-headline sec-headline" data-collapsed-keep>${overviewKPIWindowControls()}${staleBadge}${syncingBadge}${unlistedBadge}<div class="overview-kpis" aria-label="${esc(equationLabel)}">${cards.map((card, i) => {
         const value = card.value;
         const n = Number(card.rawValue);
         const attrs = Number.isFinite(n) ? ` data-overview-kpi-key="${esc(card.key)}" data-overview-kpi-value="${n}" data-overview-kpi-display="${esc(String(value ?? '—'))}"` : '';
@@ -20610,6 +21451,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const prs = Number(openPRs) || 0;
       let title = equationLabel || `${issues} total open issues + ${prs} total open PRs`;
       if (staleSince) title += ` (stale since ${fmtOverviewStaleSince(staleSince)} · serving last-good)`;
+      const syncing = overviewSyncingNote(unlisted);
+      if (syncing) title += ` · ${syncing}`;
       const note = overviewUnlistedNote(unlisted);
       if (note) title += ` · ${note}`;
       return { issues, prs, title };
@@ -20619,9 +21462,17 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
        totals without an item row behind them (repos[].unlistedIssues /
        unlistedPrs). Counted beside the totals, never inside them. */
     function overviewUnlistedCounts(repos) {
-      const out = { issues: 0, prs: 0 };
-      (repos || []).forEach(r => { if (!r) return; out.issues += Number(r.unlistedIssues || 0); out.prs += Number(r.unlistedPrs || 0); });
+      const out = { issues: 0, prs: 0, syncing: 0 };
+      (repos || []).forEach(r => { if (!r) return; out.issues += Number(r.unlistedIssues || 0); out.prs += Number(r.unlistedPrs || 0); if (r.issuesSyncing) out.syncing++; });
       return out;
+    }
+    /* Pure: repos whose issue side has not been listed for real yet
+       (repos[].issuesSyncing): they show open PRs and no issues while
+       stale or unlisted, so their issue count is pending, not zero. */
+    function overviewSyncingNote(unlisted) {
+      const n = Number(unlisted?.syncing || 0);
+      if (n <= 0) return '';
+      return `issues still syncing for ${n} ${n === 1 ? 'repo' : 'repos'} — the issue total is a lower bound until the issue list comes back`;
     }
     function overviewUnlistedNote(unlisted) {
       const issues = Number(unlisted?.issues || 0), prs = Number(unlisted?.prs || 0);
@@ -22777,15 +23628,21 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       '</div>';
     }
 
+    // fmtTokens keeps at least two significant digits at every magnitude, so
+    // 176,372 output tokens read "176K" rather than the "0.000B" the
+    // billions-only scale produced for every sub-million count (#13484).
     function fmtTokens(n) {
+      n = Number(n) || 0;
       if (n === 0) return '0';
-      const b = n / 1e9;
-      if (b >= 100) return b.toFixed(0) + 'B';
-      if (b >= 10) return b.toFixed(1) + 'B';
-      if (b >= 1) return b.toFixed(2) + 'B';
-      if (b >= 0.1) return b.toFixed(2) + 'B';
-      if (b >= 0.01) return b.toFixed(3) + 'B';
-      return b.toFixed(3) + 'B';
+      const scale = (v, unit) => {
+        if (v >= 100) return v.toFixed(0) + unit;
+        if (v >= 10) return v.toFixed(1) + unit;
+        return v.toFixed(2) + unit;
+      };
+      if (n >= 1e9) return scale(n / 1e9, 'B');
+      if (n >= 1e6) return scale(n / 1e6, 'M');
+      if (n >= 1e3) return scale(n / 1e3, 'K');
+      return String(Math.round(n));
     }
     function pillAge(createdAt) {
       if (!createdAt) return '';
@@ -24355,33 +25212,71 @@ function burnAreaChart() {
       return '$' + formatNumber(n, 'en-US', { minimumFractionDigits: frac, maximumFractionDigits: frac });
     }
 
+    // Headline wording (#13484): one plainly-named figure. "lineage" and
+    // "persisted history" were implementation terms; the card now says what
+    // the number is (an estimate at list price), from when, and that it is
+    // not an invoice. The live token summary is shown as a subset of the
+    // headline, dated from its last reset rather than from the oldest
+    // surviving session file.
+    const COST_HEADLINE_LABEL = 'Estimated spend at list price';
+    const COST_NOT_A_BILL = 'tokens × public per-token price · not a bill';
+
     function costTotalLabel(total) {
       if (total && total.firstTimestamp) {
-        return `estimated total — since ${fmtCostDateTime(total.firstTimestamp)} (persisted history × list price)`;
+        return `${COST_HEADLINE_LABEL} — since ${fmtCostDateTime(total.firstTimestamp)} · ${COST_NOT_A_BILL}`;
       }
-      return 'estimated total — persisted history unavailable';
+      return `${COST_HEADLINE_LABEL} — no recorded history yet`;
     }
 
-    function costTotalTooltip(total) {
+    // costLiveSummaryLabel describes the live token summary (what /api/cost
+    // estimated.total_usd holds right now) relative to the headline.
+    function costLiveSummaryLabel(total) {
+      if (!total || total.currentUSD == null) return '';
+      const lastReset = total.resets.length ? total.resets[total.resets.length - 1].timestamp : 0;
+      let since = '';
+      if (lastReset) since = ` since the last reset on ${fmtCostDateTime(lastReset)}`;
+      else if (total.currentStart) since = ` (sessions since ${fmtCostDateTime(total.currentStart)})`;
+      return `of which ${fmtUSD(total.currentUSD)} is in the live token summary${since}`;
+    }
+
+    function costTotalTooltip(total, cost) {
       if (!total || !total.series.length) return 'no cost records yet';
-      const parts = [`Persisted all-time estimate ${fmtUSD(total.usd)} since ${fmtCostDateTime(total.firstTimestamp)}.`];
+      const priceDate = cost && cost.price_table_date ? ` (price table ${cost.price_table_date})` : '';
+      const parts = [
+        `Estimate = recorded tokens × each model's public list price${priceDate}. Not an invoice: Copilot / Claude subscription seats and self-hosted inference are not billed per token, so real spend can be far lower.`,
+        `${fmtUSD(total.usd)} recorded since ${fmtCostDateTime(total.firstTimestamp)}.`,
+      ];
       if (total.currentUSD != null) {
-        const since = total.currentStart ? ` since ${fmtCostDateTime(total.currentStart)}` : '';
-        parts.push(`Current token-summary lineage: ${fmtUSD(total.currentUSD)}${since}.`);
+        const since = total.currentStart ? ` (sessions since ${fmtCostDateTime(total.currentStart)})` : '';
+        parts.push(`The live token summary currently holds ${fmtUSD(total.currentUSD)}${since}.`);
       }
       if (total.resets.length) {
-        parts.push(`Preserved ${total.resets.length} lineage reset(s): ` + total.resets.map(r => `${fmtCostDateTime(r.timestamp)} dropped ${fmtUSD(r.previous)} → ${fmtUSD(r.next)}`).join('; ') + '.');
+        parts.push(`That summary was reset ${total.resets.length} time(s) — ${total.resets.map(r => `${fmtCostDateTime(r.timestamp)}: ${fmtUSD(r.previous)} → ${fmtUSD(r.next)}`).join('; ')} — and the spend before each reset is kept in the headline.`);
       }
       return parts.join(' ');
+    }
+
+    // costCountAsOf renders when the merged / closed counts were last confirmed
+    // (count_updated_at), and — when GitHub has since refused the refresh — how
+    // long they have been stale, so a cached denominator is never presented as
+    // live (#13484).
+    function costCountAsOf(cost) {
+      if (!cost) return '';
+      if (cost.count_stale) {
+        const since = cost.count_stale_since || cost.count_updated_at;
+        const when = since ? ` since ${fmtOverviewStaleSince(since)}` : '';
+        const why = cost.count_status && !/^stale/.test(cost.count_status) ? ` (${cost.count_status})` : (cost.count_status && /rate-limited/.test(cost.count_status) ? ' (GitHub rate-limited)' : '');
+        return `counts stale${when}${why}`;
+      }
+      return cost.count_updated_at ? `counts as of ${fmtOverviewStaleSince(cost.count_updated_at)}` : '';
     }
 
     function costCountLabel(cost, count, unitLabel, outcomeWindow) {
       if (!cost || !cost.count_available) return 'counts unavailable (GitHub rate-limited)';
       const n = Number(count) || 0;
-      const staleSince = cost.count_stale && cost.count_stale_since ? ` since ${fmtOverviewStaleSince(cost.count_stale_since)}` : '';
-      const stale = cost.count_stale ? ` · ${cost.count_status || 'stale'}${staleSince}` : '';
       const window = outcomeWindow ? ` ${outcomeWindow}` : '';
-      return `${formatNumber(n, 'en-US')} ${unitLabel}${window}${stale}`;
+      const asOf = costCountAsOf(cost);
+      return `total ÷ ${formatNumber(n, 'en-US')} ${unitLabel}${window}${asOf ? ` · ${asOf}` : ''}`;
     }
 
     function costPerUnitDisplay(totalUSD, count, unitLabel, countsAvailable = true, countStatus = '') {
@@ -24394,13 +25289,13 @@ function burnAreaChart() {
       const status = countStatus ? ` (${countStatus})` : '';
       return {
         value: fmtUSD(value),
-        title: `${fmtUSD(total)} ÷ ${formatNumber(n, 'en-US')} ${unitLabel} = ${fmtUSD(value)}${status}`,
+        title: `${fmtUSD(total)} ÷ ${formatNumber(n, 'en-US')} ${unitLabel} = ${fmtUSD(value)}${status}. The headline total divided by this count — cost / PR and cost / issue share one total and are not additive.`,
       };
     }
 
     function costOutcomeWindowLabel(cost, fallbackTotal) {
       const start = Number(cost && cost.count_window_start) || 0;
-      return start > 0 ? `since ${fmtCostDateTime(start)}` : 'outcome window pending refresh';
+      return start > 0 ? `since ${fmtCostDateTime(start)}` : 'window pending refresh';
     }
 
     // Last cost payload, so the range pills can re-render the trend chart
@@ -24601,7 +25496,7 @@ function burnAreaChart() {
       if (!el) return;
       _lastCost = cost;
       if (!cost || (!cost.estimated && (!cost.gateways || cost.gateways.length === 0))) {
-        morphInnerHtml(el, sectionCardShell({ id: 'cost-panel', title: '💵 Cost', gripLabel: 'Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: '$0', summaryTitle: 'Estimated all-time total', bodyId: 'cost-panel-body', collapsed: isCostCollapsed() }, '<div class="text-muted">No cost data yet.</div>'));
+        morphInnerHtml(el, sectionCardShell({ id: 'cost-panel', title: '💵 Cost', gripLabel: 'Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: '$0', summaryTitle: COST_HEADLINE_LABEL, bodyId: 'cost-panel-body', collapsed: isCostCollapsed() }, '<div class="text-muted">No cost data yet.</div>'));
         applyCostCollapse();
         return;
       }
@@ -24784,17 +25679,22 @@ function burnAreaChart() {
       // intra-session timing to join against). A repo with no attributable cost
       // shows "—", never "$0.00": those are different facts.
       const repoTable = costRepoTableHtml(lastRepoCost);
+      const recordingText = costRecordingNoticeText(cost.recording);
+      const recordingNotice = recordingText
+        ? `<div class="cost-recording-notice" id="cost-recording-notice" role="alert">${esc(recordingText)} <a href="https://github.com/hivecommons/hive/issues/13487" target="_blank" rel="noopener">#13487</a>.</div>`
+        : '';
       // ── Estimated cost by work item (#12128) ──
       // Spend placed against the issue / PR / head SHA each kick was launched
       // for. Attribution only — never a gate; the governor window budget is
       // the single enforced budget.
       const launchTable = costLaunchTableHtml(lastLaunchCost);
       const allTimeCost = costAllTimeEstimate(est);
-      const prUnit = costPerUnitDisplay(allTimeCost.usd, cost.merged_prs, 'hive-attributed merged PRs', cost.count_available, cost.count_status);
-      const issueUnit = costPerUnitDisplay(allTimeCost.usd, cost.closed_issues, 'hive-attributed closed issues', cost.count_available, cost.count_status);
+      const prUnit = costPerUnitDisplay(allTimeCost.usd, cost.merged_prs, 'PRs merged by hive', cost.count_available, cost.count_status);
+      const issueUnit = costPerUnitDisplay(allTimeCost.usd, cost.closed_issues, 'issues closed by hive', cost.count_available, cost.count_status);
       const outcomeWindow = costOutcomeWindowLabel(cost, allTimeCost);
-      const prCountLabel = costCountLabel(cost, cost.merged_prs, 'hive-attributed merged PRs', outcomeWindow);
-      const issueCountLabel = costCountLabel(cost, cost.closed_issues, 'hive-attributed closed issues', outcomeWindow);
+      const prCountLabel = costCountLabel(cost, cost.merged_prs, 'PRs merged by hive', outcomeWindow);
+      const issueCountLabel = costCountLabel(cost, cost.closed_issues, 'issues closed by hive', outcomeWindow);
+      const countAuthorNote = cost.count_author ? ` Counted for author ${cost.count_author} in the configured repos.` : '';
       const coinLabel = est.coin_label || '';
       const coinEquiv = Number(est.coin_usd) > 0 ? ` ≈ ${fmtUSD(est.coin_usd)}` : '';
       const coinBudgetEquiv = Number(est.coin_budget_usd) > 0 ? ` ≈ ${fmtUSD(est.coin_budget_usd)}` : '';
@@ -24802,21 +25702,25 @@ function burnAreaChart() {
       const coinStat = coinLabel && Number(est.coins) > 0
         ? `<div class="cost-stat"><div class="cval" title="Bob backend coin usage estimated from configured tokens-per-coin conversion">${fmtCoins(est.coins, coinLabel)}${coinEquiv}</div><div class="clabel">Bob coins${est.coin_budget ? ` — ${fmtCoins(est.coins, coinLabel)} of ${fmtCoins(est.coin_budget, coinLabel)}${coinBudgetEquiv}` : ''}${est.usd_budget ? ` · USD cap ${fmtUSD(est.usd_budget)}${usdBudgetEquiv}` : ''}</div></div>`
         : '';
+      const headlineTooltip = costTotalTooltip(allTimeCost, cost);
       const currentLine = allTimeCost.currentUSD != null && allTimeCost.currentUSD !== allTimeCost.usd
-        ? `<div class="clabel" title="${esc(costTotalTooltip(allTimeCost))}">${fmtUSD(allTimeCost.currentUSD)} current lineage${allTimeCost.currentStart ? ` since ${esc(fmtCostDateTime(allTimeCost.currentStart))}` : ''}</div>`
+        ? `<div class="clabel" title="${esc(headlineTooltip)}">${esc(costLiveSummaryLabel(allTimeCost))}</div>`
         : '';
 
       const costBody = `
           <div class="cost-subtitle">Estimated from token counts × list prices (as of ${esc(cost.price_table_date || '')}); models without an exact price use a coarse tier estimate (~). Where a metered gateway reports actual spend it refines the estimate, but the figure is always an estimate.</div>
           <div class="cost-disclaimer" style="margin:4px 0 10px">${esc(cost.disclaimer || '')} vLLM / self-hosted figures are estimated (reflect list price, not your infra cost).</div>
+          ${recordingNotice}
           <div class="cost-grid sec-headline" data-collapsed-keep>
-            <div class="cost-stat"><div class="cval" title="${esc(costTotalTooltip(allTimeCost))}">${fmtUSD(allTimeCost.usd)}<span class="cost-badge est">est.</span></div><div class="clabel">${esc(costTotalLabel(allTimeCost))}</div>${currentLine}${costSparkSvg()}</div>
+            <div class="cost-stat"><div class="cval" title="${esc(headlineTooltip)}">${fmtUSD(allTimeCost.usd)}<span class="cost-badge est" title="${esc(headlineTooltip)}">est.</span><span class="cost-help" role="img" aria-label="What this estimate means" title="${esc(headlineTooltip)}">?</span></div><div class="clabel" title="${esc(headlineTooltip)}">${esc(costTotalLabel(allTimeCost))}</div>${currentLine}${costSparkSvg()}</div>
             ${coinStat}
-            <div class="cost-stat"><div class="cval" title="${esc(prUnit.title)}">${prUnit.value}</div><div class="clabel">cost / PR — ${esc(prCountLabel)}</div></div>
-            <div class="cost-stat"><div class="cval" title="${esc(issueUnit.title)}">${issueUnit.value}</div><div class="clabel">cost / issue — ${esc(issueCountLabel)}</div></div>
+            <div class="cost-stat"><div class="cval" title="${esc(prUnit.title + countAuthorNote)}">${prUnit.value}</div><div class="clabel">cost / merged PR — ${esc(prCountLabel)}</div></div>
+            <div class="cost-stat"><div class="cval" title="${esc(issueUnit.title + countAuthorNote)}">${issueUnit.value}</div><div class="clabel">cost / closed issue — ${esc(issueCountLabel)}</div></div>
           </div>
+          <div class="cost-disclaimer cost-sub-disclaimer">cost / merged PR and cost / closed issue each divide the same headline total — two views of one figure, not two costs to add.</div>
           ${costTrendHtml()}
           ${gwCards ? `<div class="cost-gateways">${gwCards}</div>` : ''}
+          <div class="cost-subtable-title" title="Live token summary only — the sessions currently on disk, priced at list price. Spend recorded before a reset of that summary is in the headline but not in these rows.">usage by model <span class="cost-window-tag">(live token summary · ${esc(usageWindow)})</span></div>
           <div class="cost-table-scroll"><table class="cost-table table-compact">
             <thead><tr>${costSortTh('model', 'name', 'model')}${costSortTh('model', 'running', 'running agents', { align: 'center', title: 'Running agents on this model right now — hover the count for names' })}${costSortTh('model', 'input', 'input', { align: 'right' })}${costSortTh('model', 'output', 'output', { align: 'right' })}${costSortTh('model', 'usd', 'est. $', { align: 'right' })}</tr></thead>
             <tbody>${modelRows || '<tr><td class="text-muted" colspan="5">no usage yet</td></tr>'}</tbody>
@@ -24831,7 +25735,7 @@ function burnAreaChart() {
       // runs on every SSE agent-status tick, and an innerHTML rebuild that
       // inserted the sub-tables open and collapsed them after a forced layout
       // moved the page by their height every tick (#12512).
-      morphInnerHtml(el, sectionCardShell({ id: 'cost-panel', title: '💵 Cost', gripLabel: 'Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: fmtUSD(allTimeCost.usd), summaryTitle: costTotalTooltip(allTimeCost), bodyId: 'cost-panel-body', collapsed: isCostCollapsed() }, costBody));
+      morphInnerHtml(el, sectionCardShell({ id: 'cost-panel', title: '💵 Cost', gripLabel: 'Cost', panelClass: 'cost-panel', bodyClass: 'cost-body', headerClass: 'cost-title cost-toggle', chevronClass: 'cost-chevron', action: 'toggleCostPanel', keyAction: 'costHeaderKey', badgeHtml: '<span class="cost-badge est" title="Estimated from token counts × list prices; subscription/self-hosted billing may differ">est.</span>', summaryClass: 'cost-collapsed-total', summaryHtml: fmtUSD(allTimeCost.usd), summaryTitle: headlineTooltip, bodyId: 'cost-panel-body', collapsed: isCostCollapsed() }, costBody));
       // Re-apply the persisted collapsed state so a poll re-render never resets
       // it. Sub-tables first: applyCostCollapse replays sparklines, which
       // forces a layout, and that layout must never see them open (#12512).
@@ -25134,8 +26038,8 @@ function burnAreaChart() {
         r = r || {};
         const evidence = Array.isArray(r.evidence) ? r.evidence : [];
         const ev = evidence[0] || null;
-        const trigger = r.trigger || (r.criterion ? 'acmm-shortfall' : 'hive-code-defect');
-        const subject = r.criterion || trigger;
+        const trigger = r.trigger || (r.criterion ? 'acmm-shortfall' : 'runtime-error');
+        const subject = r.criterion || r.class || trigger;
         const title = recovered ? 'Recovered: ' : '';
         // A recovery carries no evidence by construction (fleetreport.go
         // RecoveryReport builds it from fingerprint/instance/criterion/trigger
@@ -25147,7 +26051,7 @@ function burnAreaChart() {
         if (recovered) {
           detail = r.criterion
             ? `No longer observing the ACMM shortfall for ${escapeHtml(r.criterion)}.`
-            : 'No longer observing the reported hive-code defect.';
+            : 'No longer observing the reported runtime condition.';
         } else if (ev) {
           const periodic = ev.periodicity ? `; periodic ${escapeHtml(ev.periodicity)}` : '';
           const where = ev.window ? ` in ${escapeHtml(ev.window)}` : '';
@@ -25161,13 +26065,13 @@ function burnAreaChart() {
           <span class="mark">${recovered ? '✓' : i + 1}</span>
           <div class="crit-body"><div class="crit-name">${title}${escapeHtml(subject)}</div>
           ${detail ? `<div class="crit-detail">${detail}</div>` : ''}
-          <div class="crit-cmp">trigger: ${escapeHtml(trigger)}${fp ? `; fingerprint ${escapeHtml(fp.slice(0, 12))}…` : ''}</div></div>
+          <div class="crit-cmp">trigger: ${escapeHtml(trigger)}${r.rollup_of ? '; rolls up onto open self-report' : ''}${fp ? `; fingerprint ${escapeHtml(fp.slice(0, 12))}…` : ''}</div></div>
         </li>`;
       };
       const reportHtml = reports.map((r, i) => mk(r, i, false)).join('');
       const recoveryHtml = recoveries.map((r, i) => mk(r, i, true)).join('');
       section.style.display = '';
-      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge ${dryRun ? 'stay' : 'raise'}">${dryRun ? 'dry-run preview' : 'filing enabled'}</span><span class="reco-rationale">Persistent ACMM shortfalls, hive-code defect symptoms and unusual runtime errors. Reports contain shape-only scrubbed evidence.</span></div>${selfReports.html}<ul class="reco-checklist">${reportHtml}${recoveryHtml}</ul>`;
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge ${dryRun ? 'stay' : 'raise'}">${dryRun ? 'dry-run preview' : 'filing enabled'}</span><span class="reco-rationale">Persistent ACMM shortfalls and hive-owned runtime conditions (stalls, crash loops, kick failures, panics). Reports contain shape-only scrubbed evidence.</span></div>${selfReports.html}<ul class="reco-checklist">${reportHtml}${recoveryHtml}</ul>`;
       applySectionCollapse('fleet-report-section');
     }
 
@@ -26784,6 +27688,35 @@ function burnAreaChart() {
     // viewBox width of every .ev-svg; the stylesheet pins the rendered width
     // to the same px so labels keep the dashboard's font size (1 unit = 1px).
     const EV_SVG_W = 320;
+    // Report-only, within-repo on/off contrasts. The server guards each
+    // metric by its own denominator, not merely the number of tagged PRs.
+    function evControlArmHtml(control) {
+      control = control || {};
+      const repos = Array.isArray(control.by_repo) ? control.by_repo : [];
+      const minN = Math.max(20, Number(control.min_n) || 20);
+      const unassigned = Number(control.unassigned) || 0;
+      const note = `<div class="ev-note">Control arm: Hive dispatch on vs scheduled off, within repo. ${unassigned} PR(s) unassigned or conflicting; excluded, never inferred as on. Δ = on − off; withheld below n=${minN} in either metric denominator. Descriptive, not causal; assignment/collection rollout is not yet enabled.</div>`;
+      if (!repos.length) return note + '<div class="ev-note">No prospectively assigned control-window observations.</div>';
+      const metrics = [
+        ['merged_rate', 'Merged / known outcomes'], ['closed_rate', 'Closed / known outcomes'],
+        ['open_rate', 'Open / known outcomes'], ['reverted_14d_rate', 'Reverted / merged (14 d)'],
+        ['issue_reopened_14d_rate', 'Issue reopened / merged (14 d)'], ['ci_pass_rate', 'CI pass / settled CI'],
+        ['median_time_to_merge_hours', 'Median open → merge (hours)'],
+      ];
+      return note + repos.map((r) => {
+        const on = r.on || {}, off = r.off || {}, deltas = r.delta || {};
+        const rows = metrics.map(([key, label]) => {
+          const a = (on.metrics || {})[key] || {}, b = (off.metrics || {})[key] || {};
+          const hours = key === 'median_time_to_merge_hours';
+          const format = (v) => v == null ? '—' : hours ? Number(v).toFixed(1) : (Number(v) * 100).toFixed(1) + '%';
+          const d = deltas[key];
+          const delta = d == null || Number(a.n) < minN || Number(b.n) < minN ? 'withheld' : (Number(d) > 0 ? '+' : '') + (hours ? Number(d).toFixed(1) + ' h' : (Number(d) * 100).toFixed(1) + ' pp');
+          return `<tr><td>${label}</td><td>${format(a.value)} (n=${Number(a.n) || 0})</td><td>${format(b.value)} (n=${Number(b.n) || 0})</td><td>${delta}</td></tr>`;
+        }).join('');
+        return `<div class="ev-note"><b>${escapeHtml(r.repo || '')}</b> · on: ${Number((on.outcomes || {}).n) || 0} opened · off: ${Number((off.outcomes || {}).n) || 0} opened (unequal exposure; not a throughput comparison)</div><table><thead><tr><th>Control-arm metric</th><th>On</th><th>Off</th><th>Δ on − off</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }).join('');
+    }
+
     function evOutcomesSvg(outcomes) {
       outcomes = outcomes || {};
       const kinds = EV_AUTHOR_KINDS.concat(Object.keys(outcomes).filter((k) => !EV_AUTHOR_KINDS.includes(k)).sort());
@@ -27264,6 +28197,12 @@ function burnAreaChart() {
       return `${headline}<div class="ev-flow"><div><h5>Issues</h5>${issues}</div><div><h5>Pull requests</h5>${prs}</div></div>`;
     }
 
+    function evIssueReopenRatesHtml(dto) {
+      const rows = Array.isArray(dto.issue_reopen_rates_30d) ? dto.issue_reopen_rates_30d : [];
+      const body = rows.length ? `<table><thead><tr><th>Repository</th><th>Clarity gate</th><th>Reopened / closed</th><th>Rate</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(String(r.repo || ''))}</td><td>${r.clarity_gate ? 'Passed through' : 'No marker'}</td><td>${Number(r.reopened) || 0} / ${Number(r.closed) || 0}</td><td>${evPct(r.rate)}</td></tr>`).join('')}</tbody></table>` : '<div class="ev-note">No captured issue closures in the last 30 days.</div>';
+      return `<section class="ev-panel"><h4>Issue reopen rate · rolling 30 days</h4>${body}<p class="ev-note">Distinct issues closed by hive PRs in the last 30 days, split by the clarity-gate marker at closure. Uses closure time, not the selected PR window or author filter. Missing historical clarity status is excluded, not counted as ungated. Recent closures have less time to reopen; this comparison does not prove causality.</p></section>`;
+    }
+
     function renderEvidenceSummary(dto) {
       const card = document.getElementById('evidence-card');
       if (!card) return;
@@ -27304,8 +28243,9 @@ function burnAreaChart() {
       const windowHint = Number(dto.n) > 0 ? '' : evWindowHint(dto);
       card.innerHTML = `<div class="prt-head"><div class="lc-window">🔬 Evidence · ${escapeHtml(scope)}<span class="ev-n" title="PRs (latest evidence bundle per PR) in this window">n=${Number(dto.n) || 0} PRs</span></div>${evWindowControls()}</div>`
         + (windowHint ? `<div class="ev-note ev-window-hint">No PRs opened in this window${escapeHtml(windowHint)}.</div>` : '')
-        + evPanel('outcome-by-author', 'Outcome by author kind', outcomeN, evOutcomesSvg(outcomes),
+        + evPanel('outcome-by-author', 'Outcome by author kind', outcomeN, evOutcomesSvg(outcomes) + evControlArmHtml(dto.control_arm),
           `PRs are placed in the window by their open time, never by when a record was written. Undone counts two change-failure signals, each within 14 d of merge: reverted means a reverted_by link from a later merged PR whose title or body named this PR or its commit (Reverts #N, Revert "…", This reverts commit <sha>) — a revert that names nothing is missed; re-opened means an issue this PR closed was re-opened by a person after the merge, as seen by the issues webhook or the issue listing — an issue closed by hand rather than by a closing keyword is not tracked. A live bundle records a merge only when this hive merged, and never a close-without-merge; PRs reviewed here and then merged by someone else, closed by hand or left open are resolved from the governor's review-outcome ledger instead${outcomeLedger ? ` (${outcomeLedger} PR(s) in this window)` : ''}: ${outcomeElsewhere} merged elsewhere · ${outcomeClosed} closed without merge · ${outcomeOpen} open. A PR the ledger never saw${outcomeUnknown ? ` (${outcomeUnknown} PR(s) in this window)` : ''} is shown as unknown and excluded from every rate, not counted as open or as not merged. Merged is not the same as correct.`)
+        + evIssueReopenRatesHtml(dto)
         + evPanel('calibration', 'Reviewer calibration', calibN, evCalibrationControls() + evCalibrationSvg(calib),
           `The self-reported series includes ${Number(dto.reviewer_calibration_legacy) || 0} legacy verdict(s) using the old verdict-based confidence. The derived series excludes verdicts without a recorded derived score; n counts only the selected series. Slopes pool perspectives and compare the endpoint rise per bin across bins with at least five known outcomes, using each series’ available records. Later CI results never rewrite a recorded derived score. This calibration panel plots merge and block rates. The merged rate counts only verdicts on PRs with a recorded outcome; verdicts on PRs with no recorded outcome are shown as unknown, not as unmerged. Buckets with fewer than ${EV_CALIB_MIN_BUCKET_N} known-outcome verdicts are dashed and not joined. Merged is not the same as correct.`)
         + evPanel('accuracy-by-model', 'Reviewer accuracy × model family', modelN, evAccuracySvg(models),
@@ -31709,6 +32649,7 @@ function burnAreaChart() {
     var _auditSummary = { histogram: [], sensitive_24h: 0, today: 0, last: null };
     var _auditResizeObserver = null;
     var _auditSensitiveOnly = false;
+    var _auditRelayOnly = false;
     var _auditPendingSensitiveScroll = false;
     function auditPanelSavedHeight() {
       const n = Number(localStorage.getItem(AUDIT_PANEL_HEIGHT_KEY));
@@ -31770,7 +32711,7 @@ function burnAreaChart() {
       // scroll offset and the empty/loaded states swap without a rebuild; the
       // panel's height is fixed by --audit-panel-height either way.
       if (!entries.length) {
-        morphInnerHtml(panel, '<div style="color:var(--terminal-muted);font-size:var(--fs-base);padding:var(--sp-4)">' + (_auditSensitiveOnly ? 'No sensitive audit entries in the last 24h' : 'No audit entries yet') + '</div>');
+        morphInnerHtml(panel, '<div style="color:var(--terminal-muted);font-size:var(--fs-base);padding:var(--sp-4)">' + (_auditSensitiveOnly ? 'No sensitive audit entries in the last 24h' : (_auditRelayOnly ? 'No relay_ audit entries loaded' : 'No audit entries yet')) + '</div>');
         return;
       }
       morphInnerHtml(panel, '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +
@@ -31800,22 +32741,29 @@ function burnAreaChart() {
         chip.textContent = _auditSensitiveOnly ? 'Sensitive only ×' : 'Sensitive only';
         chip.title = _auditSensitiveOnly ? 'Clear sensitive-only audit filter' : 'Show only sensitive audit entries from the last 24h';
       }
+      var relayChip = document.getElementById('audit-relay-filter');
+      if (relayChip) {
+        relayChip.setAttribute('aria-pressed', _auditRelayOnly ? 'true' : 'false');
+        relayChip.textContent = _auditRelayOnly ? 'relay_ ×' : 'relay_';
+        relayChip.title = _auditRelayOnly ? 'Clear relay_ audit filter' : 'Show only contributor relay (relay_*) audit entries';
+      }
+      var base = _auditRelayOnly ? _auditEntries.filter(auditEntryIsRelay) : _auditEntries;
       if (!raw) {
-        renderAuditTable(_auditEntries);
-        if (countEl) countEl.textContent = _auditEntries.length ? (_auditSensitiveOnly ? _auditEntries.length + ' sensitive / 24h' : _auditEntries.length + ' entries') : '';
+        renderAuditTable(base);
+        if (countEl) countEl.textContent = base.length ? (_auditSensitiveOnly ? base.length + ' sensitive / 24h' : base.length + (_auditRelayOnly ? ' relay_ entries' : ' entries')) : '';
         scrollPendingAuditSensitiveEntry();
         return;
       }
       var query = parseAuditQuery(raw);
       var terms = typeof query === 'string' ? query.split(/\s+/).filter(Boolean) : [];
-      var filtered = _auditEntries.filter(function(e) {
+      var filtered = base.filter(function(e) {
         var haystack = [e.ts || '', e.user || '', e.action || '', e.agent || '', e.detail || ''].join(' ');
         if (query instanceof RegExp) return query.test(haystack);
         var lower = haystack.toLowerCase();
         return terms.some(function(t) { return lower.includes(t); });
       });
       renderAuditTable(filtered);
-      if (countEl) countEl.textContent = filtered.length + ' / ' + _auditEntries.length + (_auditSensitiveOnly ? ' sensitive / 24h' : '');
+      if (countEl) countEl.textContent = filtered.length + ' / ' + base.length + (_auditSensitiveOnly ? ' sensitive / 24h' : '') + (_auditRelayOnly ? ' relay_' : '');
       scrollPendingAuditSensitiveEntry();
     }
 
@@ -31828,6 +32776,17 @@ function burnAreaChart() {
         _auditPendingSensitiveScroll = false;
         row.scrollIntoView({ block: 'center', behavior: 'smooth' });
       });
+    }
+
+    // Contributor relay rows (relay_connected, relay_task_assigned, ...) share
+    // the relay_ action prefix; the chip narrows the loaded page client-side.
+    function auditEntryIsRelay(e) {
+      return String((e && e.action) || '').indexOf('relay_') === 0;
+    }
+
+    function toggleAuditRelayFilter() {
+      _auditRelayOnly = !_auditRelayOnly;
+      filterAuditLog();
     }
 
     function toggleAuditSensitiveFilter() {
@@ -39932,7 +40891,7 @@ function burnAreaChart() {
       { tab: 'Features', section: 'Agents & tooling', label: 'Re-entrant turns and PR follow-up windows', key: 'turn.reentrant.enabled', text: 'reentrant re-entrant turn envelope background fleet pr follow-up resume window retention turn.reentrant.enabled turn.reentrant.background_fleet_enabled turn.pr_follow_up.max_age turn.pr_follow_up.resume_id_max_age turn.pr_follow_up.retention' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Data directories and session retention', key: 'data.metrics_dir', text: 'data directories metrics logs agent configs claude copilot bob sessions retention prune janitor data.agents_dir data.bob_sessions_dir data.claude_sessions_dir data.copilot_sessions_dir data.logs_dir data.metrics_dir data.session_retention_days' },
       { tab: 'Features', section: 'Integrations & observability', label: 'Standalone deployment upgrades', key: 'deployment.podman_mode', text: 'deployment podman quadlet rootless rootful docker compose upgrade helper request dir deployment.podman_mode deployment.upgrade_helper deployment.upgrade_request_dir' },
-      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label self authored decision policy reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.self_authored_decision_policy review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
+      { tab: 'Features', section: 'Review gate', label: 'Review gate: comments, dispatch and out-of-scope findings', key: 'review.post_comments', text: 'review swarm post comments fan out parallel perspectives combined all authors fix human prs acknowledge no findings confidence score priority labels fixer agent human decision label self authored decision policy reviews per head revise verdicts webhook event driven debounce pending ttl redispatch out of scope backlog issues recommendations review.post_comments review.self_authored_decision_policy review.event_driven review.event_debounce_s review.pending_ttl review.max_redispatch review.head_max_retries review.max_reviews_per_head review.revise_verdicts_before review.out_of_scope_backlog_disabled review.max_out_of_scope_backlog_issues review.recommendations.enabled review.recommendations.min_ready_to_open' },
       { tab: 'Features', section: 'Review gate', label: 'Review evidence bundles', key: 'evidence.enabled', text: 'review evidence bundles audit signing key ed25519 evidence.enabled evidence.signing_key_file' },
       { tab: 'Features', section: 'Integrations & observability', label: 'GitLab and Gitea forges', key: 'gitlab.gitlab_url', text: 'gitlab gitea forgejo codeberg forge instance url token env gitlab.gitlab_url gitlab.token_env gitea.gitea_url gitea.token_env' },
       { tab: 'Features', section: 'Agents & tooling', label: 'Token mint key and TTL', key: 'mint.max_ttl_seconds', text: 'token mint signing key path max ttl lifetime jwt mint.key_path mint.max_ttl_seconds' },
@@ -39988,6 +40947,15 @@ function burnAreaChart() {
         _settingsSearch.bound = true;
       }
       if (c.input.value) applySettingsSearch(c.input.value);
+    }
+
+    // #config/governor/<tab>/<query> opens Settings with the search box
+    // already holding <query> — the link triage comments carry (#13575).
+    function settingsSearchPrefill(query) {
+      const c = settingsSearchControls();
+      if (!c.input) return;
+      c.input.value = query;
+      c.input.dispatchEvent(new Event('input'));
     }
 
     function settingsSearchShortcutHandler(e) {
@@ -40340,13 +41308,13 @@ function burnAreaChart() {
       return true;
     }
 
-    function openConfigDialog(type, agentName, initialTabOverride) {
+    function openConfigDialog(type, agentName, initialTabOverride, initialSearch) {
       const isCreate = type === 'agent' && !agentName;
       _configModalOpen = true;
       // promptTemplateDirty/Value hold the Prompt Template tab's pending edit
       // (it has its own endpoint, so it is not a `dirty` section). Reset on every
       // open and on close, so Cancel/X/Escape discard it like any other field.
-      _configState = { type, agent: agentName || null, tab: null, data: {}, dirty: {}, isCreate, initialTabOverride: initialTabOverride || null, promptTemplateDirty: false, promptTemplateValue: '' };
+      _configState = { type, agent: agentName || null, tab: null, data: {}, dirty: {}, initialSearch: initialSearch || '', isCreate, initialTabOverride: initialTabOverride || null, promptTemplateDirty: false, promptTemplateValue: '' };
       document.getElementById('config-overlay').classList.remove('hidden');
       hiveRememberModalOpen(document.getElementById('config-overlay'));
       const title = type === 'governor' ? 'Settings' : isCreate ? 'Create Agent' : `${agentName || 'Agent'} Configuration`;
@@ -40383,6 +41351,7 @@ function burnAreaChart() {
           }
           try {
             switchConfigTab(initialTab);
+            if (type === 'governor' && _configState.initialSearch) settingsSearchPrefill(_configState.initialSearch);
           } catch (err) {
             document.getElementById('config-body').innerHTML =
               '<div style="text-align:center;padding:40px;color:var(--red)">Failed to render tab: ' + err.message + '</div>';
@@ -40412,7 +41381,7 @@ function burnAreaChart() {
       const target = parts[0];
       const tab = parts[1] || null;
       if (target === 'governor') {
-        openConfigDialog('governor', null, tab);
+        openConfigDialog('governor', null, tab, parts[2] || '');
       } else {
         openConfigDialog('agent', target, tab);
       }
@@ -40995,6 +41964,9 @@ function burnAreaChart() {
         if (tabId === 'Features') loadUpstreamWatch();
         if (tabId === 'Extensions') loadExtensionRelayStatus();
         if (tabId === 'Smart classifier') loadSmartClassifierStats();
+        // Review Gate → Reviewers: the eligibility summary and engine warning
+        // are derived from the rendered rows and the fan-out/combined switches.
+        if (tabId === 'Features') refreshReviewerAgentSummary();
         if (tabId === 'Appearance') loadThemeConfig();
         if (tabId === 'Knowledge') { renderPublicKnowledgeControls(); loadKnowledgeConnectors(); loadKnowledgePipeline(); }
         if (tabId === 'Compliance') loadComplianceStatus();
@@ -46941,8 +47913,8 @@ function burnAreaChart() {
         : (_configState.data.stageStalledRequireQuiet !== false);
       const stageEngineMode = (_configState.dirty.labels && _configState.dirty.labels.stage_engine_mode !== undefined)
         ? _configState.dirty.labels.stage_engine_mode
-        : (_configState.data.stageEngineMode || 'shadow');
-      const stageEngineModeOptions = [['off', 'off — legacy pass-through (rollback)'], ['shadow', 'shadow — engine derives, legacy writes (default)'], ['enforce', 'enforce — engine writes']]
+        : (_configState.data.stageEngineMode || 'enforce');
+      const stageEngineModeOptions = [['off', 'off — legacy pass-through (rollback)'], ['shadow', 'shadow — engine derives, legacy writes'], ['enforce', 'enforce — engine writes (default)']]
         .map(([v, label]) => `<option value="${v}" ${stageEngineMode === v ? 'selected' : ''}>${esc(label)}</option>`).join('');
       const stageGraceOnline = (_configState.dirty.labels && _configState.dirty.labels.stage_grace_online !== undefined)
         ? _configState.dirty.labels.stage_grace_online
@@ -46983,7 +47955,7 @@ function burnAreaChart() {
         <div class="config-toggle"><div class="config-toggle-switch ${stageLabelsOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="labels" data-key="stage_enabled"></div><span class="config-toggle-label">Hive-owned stage/NN labels ${yamlHint('governor.labels.stage.enabled')} ${settingHelpMark('settings', 'labels', 'Stage labels', `Each eval cycle the hive writes exactly one stage/NN-* label per open issue/PR (review-pending, reviewed, fixing, returned-to-contributor, adopted-by-hive, awaiting-merge-admission, needs-decision, ready-for-human-merge, pre-merge-soak, merge-queue), a role/* admission-tier label, an author/* label saying who wrote the PR (human, clanker = a contributor's hive, hive = this hive), and stage/stalled when nobody has touched the item for the stage's dwell. Backward moves are a one-line stage comment and the dashboard's transition history, not a label. Writes happen only on change. See docs/labels-and-control-signals.md.`)}</span></div>
         <div class="config-toggle"><div class="config-toggle-switch ${stageStalledQuietOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="labels" data-key="stage_stalled_require_quiet"></div><span class="config-toggle-label">stage/stalled means no activity ${yamlHint('governor.labels.stage.stalled.require_quiet')} ${settingHelpMark('settings', 'labels', 'Stalled requires quiet', `On (default): stage/stalled is applied only when nobody but the hive has touched the item (head push, comment, review, CI state, label) for the stage's dwell, and never while required checks are running or the reviewer verdict for the current head is pending — those waits are on the hive. Any activity clears it at once. Off: the dwell is measured from entering the stage. See docs/labels-and-control-signals.md.`)}</span></div>
         <div class="config-field">
-          <label for="cfg-stage-engine-mode">Central stage engine mode ${yamlHint('governor.labels.stage.engine.mode')} ${settingHelpMark('settings', 'labels', 'Central stage engine', `ADR-0025: one reconciler derives every stage/NN label through one writer. shadow (default): the engine derives alongside the sweeps' own logic, writes what the sweeps derived, and counts each disagreement (stage_shadow_mismatch_total, Activity tracker strip, /api/status.stageEngine). enforce: the engine's derivation is written and its admission table rejects out-of-order transitions. off: rollback — the sweeps' derivation is written verbatim and the engine is inert. Rollout gate: run shadow for 48h with zero unexplained mismatches before enforce. Takes effect on the next sweep, no restart.`)}</label>
+          <label for="cfg-stage-engine-mode">Central stage engine mode ${yamlHint('governor.labels.stage.engine.mode')} ${settingHelpMark('settings', 'labels', 'Central stage engine', `ADR-0025: one reconciler derives every stage/NN label through one writer. shadow: the engine derives alongside the sweeps' own logic, writes what the sweeps derived, and counts each disagreement (stage_shadow_mismatch_total, Activity tracker strip, /api/status.stageEngine). enforce (default): the engine's derivation is written and its admission table rejects out-of-order transitions. off: rollback — the sweeps' derivation is written verbatim and the engine is inert. Rollout gate: run shadow for 48h with zero unexplained mismatches before enforce. Takes effect on the next sweep, no restart.`)}</label>
           <select id="cfg-stage-engine-mode" data-change-action="markDirty" data-arg0="labels" data-arg1="stage_engine_mode" data-arg-types="s,s,v">${stageEngineModeOptions}</select>
           <div class="config-help">Rollout: <code>shadow</code> for 48h with no unexplained mismatches, then <code>enforce</code>. Rollback: <code>off</code>. No restart needed.</div>
         </div>
@@ -49941,6 +50913,23 @@ function burnAreaChart() {
       const rb = (_configState.data || {}).review_bots;
       const rbLogins = rb && Array.isArray(rb.logins) ? rb.logins : [];
       const rvAgents = Array.isArray(rv.reviewer_agents) ? rv.reviewer_agents : [];
+      const rvCandidates = Array.isArray(rv.reviewer_candidates) ? rv.reviewer_candidates : [];
+      const rvCanEdit = dashboardRoleAtLeast(window._hiveRole || 'read', 'owner');
+      // Names in reviewer_agents that no configured agent carries: still shown
+      // so a stale entry is visible and removable rather than silently kept.
+      const rvUnknownAgents = rvAgents.filter(n => !rvCandidates.some(c => c.name === n));
+      const rvCandidateRow = (c) => {
+        const engine = [c.backend, c.model].filter(Boolean).join(' / ') || 'engine not set';
+        const state = !c.available ? (c.enabled ? 'paused or on-demand' : 'disabled') : (c.keyword_match ? 'review keyword' : '');
+        return `<label class="rv-reviewer-row${c.available ? '' : ' rv-reviewer-unavailable'}" data-reviewer="${esc(c.name)}" data-engine="${esc(c.backend || '')}" data-available="${c.available ? '1' : '0'}" data-keyword="${c.keyword_match ? '1' : '0'}">
+            <input type="checkbox" class="rv-reviewer-on" ${rvAgents.includes(c.name) ? 'checked' : ''}${rvCanEdit ? '' : ' disabled'} data-change-action="gh74">
+            <code>${esc(c.name)}</code><span class="rv-reviewer-engine">&mdash; ${esc(engine)}</span>${state ? `<span class="rv-reviewer-state">(${esc(state)})</span>` : ''}
+          </label>`;
+      };
+      const rvUnknownRow = (n) => `<label class="rv-reviewer-row rv-reviewer-unavailable" data-reviewer="${esc(n)}" data-engine="" data-available="0" data-keyword="0">
+            <input type="checkbox" class="rv-reviewer-on" checked${rvCanEdit ? '' : ' disabled'} data-change-action="gh74">
+            <code>${esc(n)}</code><span class="rv-reviewer-state">(not a configured agent)</span>
+          </label>`;
       const rvBuiltin = Array.isArray(rv.builtin_perspectives) ? rv.builtin_perspectives : [];
       const rvSelected = Array.isArray(rv.perspectives) ? rv.perspectives : [];
       const rvPrompts = (rv.perspective_prompts && typeof rv.perspective_prompts === 'object') ? rv.perspective_prompts : {};
@@ -50129,8 +51118,9 @@ function burnAreaChart() {
           </div>
           <div class="config-toggle" style="margin-top:10px">
             <div class="config-toggle-switch ${rv.fan_out ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="fan_out"></div>
-            <span class="config-toggle-label">Fan out to multiple reviewers in parallel ${yamlHint('review.fan_out')} ${settingHelpMark('review-swarm', 'configuration', 'Fan out to multiple reviewers in parallel', `Runs the configured reviewer agents concurrently instead of one after another, bounded by Max parallel reviews. Faster on PRs with several reviewers, at the cost of more agents running at once.`)}</span>
+            <span class="config-toggle-label">Fan out to multiple reviewers ${yamlHint('review.fan_out')} ${settingHelpMark('review-swarm', 'reviewer-selection', 'Fan out to multiple reviewers', `Send each perspective to every eligible reviewer so PRs get independent reviews from different agents/models, running concurrently and bounded by Max parallel reviews. This is the switch that makes multi-model review happen: pick the reviewers under Reviewers below. Off, one reviewer takes each perspective.`)}</span>
           </div>
+          <p class="config-help rv-reviewer-help">Send each perspective to every eligible reviewer so PRs get independent reviews from different agents/models.</p>
           <div class="config-field" style="margin-top:10px">
             <label>Max parallel reviews ${yamlHint('review.max_parallel_reviews')} ${settingHelpMark('review-swarm', 'configuration', 'Max parallel reviews', `Caps how many reviewer agents run concurrently when fan-out is on. 0 or empty uses the default.`)}</label>
             <input type="number" min="0" step="1" value="${rv.max_parallel_reviews || ''}" placeholder="3" data-change-action="gh73">
@@ -50159,9 +51149,15 @@ function burnAreaChart() {
             <p style="font-size:var(--fs-xs);color:var(--muted);margin:var(--sp-2) var(--sp-0) var(--sp-0)">A new perspective needs focus text before it can be saved. Names: lowercase letters, digits, single dashes.</p>
           </div>
           <div class="config-subgroup">Reviewers</div>
-          <div class="config-field">
-            <label>Reviewer agents ${settingHelpMark('review-swarm', 'configuration', 'Reviewer agents', `Comma-separated agent names that review each PR, e.g. reviewer, security-reviewer.`)}</label>
-            <input type="text" value="${esc(rvAgents.join(', '))}" placeholder="reviewer, security-reviewer" data-change-action="gh74">
+          <div class="config-field" id="rv-reviewer-agents">
+            <label>Reviewer agents ${yamlHint('review.reviewer_agents')} ${settingHelpMark('review-swarm', 'reviewer-selection', 'Reviewer agents', `The agents that review each PR. Empty means any enabled agent whose name, role, aliases or keywords contain &quot;review&quot;. Ticking one or more agents makes this an explicit allow-list and the keyword scan is skipped. Disabled, paused and on-demand agents never review even when ticked. Each agent shows its engine and model: pick agents on different engines for multi-model review.`)}</label>
+            <p class="config-help rv-reviewer-help-above">Empty = any enabled agent whose name, role or keywords contain &quot;review&quot;. Pick agents on different engines for multi-model review.</p>
+            <div class="rv-reviewer-list">
+              ${rvCandidates.length || rvUnknownAgents.length ? rvCandidates.map(rvCandidateRow).join('') + rvUnknownAgents.map(rvUnknownRow).join('') : '<span class="rv-reviewer-empty">No agents are configured on this hive yet.</span>'}
+            </div>
+            <p class="am-trusted-authors-note" id="rv-reviewer-summary"></p>
+            <p class="am-trusted-authors-note" id="rv-reviewer-engine-warn" hidden>⚠️ Only one engine will review &mdash; add a reviewer on a different engine for independent review.</p>
+            <p class="am-trusted-authors-note" id="rv-reviewer-combined-note" hidden>Combined mode (&quot;Review every perspective in one session&quot;) sends the whole review to the <em>first</em> eligible reviewer only, so fan-out does not give you a second opinion while it is on. See <a href="https://github.com/hivecommons/hive/blob/v5/src/docs/review-swarm.md#reviewer-selection" target="_blank" rel="noopener noreferrer">Reviewer selection</a>.</p>
           </div>
           <div class="config-toggle" style="margin-top:10px">
             <div class="config-toggle-switch ${rv.all_authors ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="all_authors"></div>
@@ -50215,6 +51211,7 @@ function burnAreaChart() {
           <div class="config-field-row">
             <div class="config-field"><label>Pending review TTL ${yamlHint('review.pending_ttl')} ${settingHelpMark('review-swarm', 'configuration', 'Pending review TTL', `How long a dispatched review may go without a verdict before it expires and its perspectives are asked again (default 45m). A reviewer turn that dies posts no verdict; without expiry the PR would look covered until the next push. Go duration; empty or 0 uses the default and a negative value disables expiry.`)}</label><input type="text" value="${esc(rv.pending_ttl || '')}" placeholder="45m0s" spellcheck="false" data-change-action="markDirty" data-arg0="review" data-arg1="pending_ttl" data-arg-types="s,s,w"></div>
             <div class="config-field"><label>Max re-dispatches ${yamlHint('review.max_redispatch')} ${settingHelpMark('review-swarm', 'configuration', 'Max re-dispatches', `How many times one PR head's pending reviews may expire before the planner stops re-kicking and holds the PR for a human (default 3). 0 uses the default.`)}</label><input type="number" min="0" step="1" value="${esc(String(rv.max_redispatch || ''))}" placeholder="3" data-change-action="markDirty" data-arg0="review" data-arg1="max_redispatch" data-arg-types="s,s,N"></div>
+            <div class="config-field"><label>Max head retries ${yamlHint('review.head_max_retries')} ${settingHelpMark('review-swarm', 'configuration', 'Max head retries', `With agents.<name>.review_heads, how many times one head's review of a perspective may be re-sent when it posts no verdict. 0 uses Max re-dispatches.`)}</label><input type="number" min="0" step="1" value="${esc(String(rv.head_max_retries || ''))}" placeholder="0" data-change-action="markDirty" data-arg0="review" data-arg1="head_max_retries" data-arg-types="s,s,N"></div>
           </div>
           <div class="config-subgroup">Out-of-scope findings</div>
           <div class="config-toggle">
@@ -52308,6 +53305,7 @@ function burnAreaChart() {
       if (el.hasAttribute('aria-checked')) el.setAttribute('aria-checked', isOn ? 'true' : 'false');
       markDirty(section, key, isOn);
       if (section === 'dashboard' && key === 'experiment_lab') noteExperimentLabToggle(isOn);
+      if (section === 'review' && (key === 'fan_out' || key === 'combined_perspectives')) refreshReviewerAgentSummary();
     }
 
     function markCSVDirty(section, key, value) {
@@ -52317,6 +53315,50 @@ function burnAreaChart() {
 
     function markBoolDirty(section, key, value) {
       markDirty(section, key, value === true || value === 'true');
+    }
+
+    // Reviewer agents pick-list (Settings → Features → Review Gate →
+    // Reviewers, #13460). The checked rows become review.reviewer_agents; an
+    // empty selection means "keyword scan", mirroring the server.
+    function markDirtyReviewerAgents() {
+      const names = Array.from(document.querySelectorAll('#rv-reviewer-agents .rv-reviewer-row'))
+        .filter(row => { const cb = row.querySelector('.rv-reviewer-on'); return cb && cb.checked; })
+        .map(row => row.dataset.reviewer).filter(Boolean);
+      markDirty('review', 'reviewer_agents', names);
+      refreshReviewerAgentSummary();
+    }
+
+    // reviewerAgentEligibility mirrors dashboardAgentReviewCapable: an
+    // available agent is eligible when it is ticked, or when nothing is
+    // ticked and it matches the "review" keyword scan.
+    function reviewerAgentEligibility(rows) {
+      const ticked = rows.filter(r => r.checked);
+      const eligible = (ticked.length ? ticked : rows.filter(r => r.keyword)).filter(r => r.available);
+      const engines = new Set(eligible.map(r => r.engine).filter(Boolean));
+      return { explicit: ticked.length > 0, eligible, engines };
+    }
+
+    function refreshReviewerAgentSummary() {
+      const root = document.getElementById('rv-reviewer-agents');
+      if (!root) return;
+      const rows = Array.from(root.querySelectorAll('.rv-reviewer-row')).map(row => {
+        const cb = row.querySelector('.rv-reviewer-on');
+        return { checked: !!(cb && cb.checked), engine: row.dataset.engine || '', available: row.dataset.available === '1', keyword: row.dataset.keyword === '1' };
+      });
+      const { explicit, eligible, engines } = reviewerAgentEligibility(rows);
+      const isOn = key => { const sw = document.querySelector(`.config-toggle-switch[data-section="review"][data-key="${key}"]`); return !!(sw && sw.classList.contains('on')); };
+      const fanOut = isOn('fan_out');
+      const combined = isOn('combined_perspectives');
+      const summary = root.querySelector('#rv-reviewer-summary');
+      if (summary) {
+        const n = eligible.length;
+        const e = engines.size;
+        summary.textContent = `${n} review-capable agent${n === 1 ? '' : 's'} ${explicit ? 'selected' : 'by keyword'} on ${e} engine${e === 1 ? '' : 's'}.`;
+      }
+      const warn = root.querySelector('#rv-reviewer-engine-warn');
+      if (warn) warn.hidden = !(fanOut && eligible.length > 0 && engines.size < 2);
+      const note = root.querySelector('#rv-reviewer-combined-note');
+      if (note) note.hidden = !(fanOut && combined);
     }
 
     /* Sentinel dirty-tracking: the security PUT takes a nested `sentinel`
@@ -56821,7 +57863,7 @@ function burnAreaChart() {
       gh71: function (event, A) { markDirty('auto-merge','max_merges',Number(this.value)||0); },
       gh72: function (event, A) { markDirty('auto-merge','required_checks',this.value.split(',').map(s=>s.trim()).filter(Boolean)); },
       gh73: function (event, A) { markDirty('review','max_parallel_reviews',Number(this.value)||0); },
-      gh74: function (event, A) { markDirty('review','reviewer_agents',this.value.split(',').map(s=>s.trim()).filter(Boolean)); },
+      gh74: function (event, A) { markDirtyReviewerAgents(); },
       gh81: function (event, A) { markDirty('review','max_perspectives_per_pr',Number(this.value)||0); },
       // Perspectives and their prompts are staged together on every change:
       // the server validates them as a pair (a custom perspective is only

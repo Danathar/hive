@@ -46,6 +46,9 @@ type EvidenceSummary struct {
 	// "all"), so a client can tell "not enough data" from "window too short".
 	AvailableWindows map[string]int              `json:"available_windows"`
 	Outcomes         map[string]EvidenceOutcomes `json:"outcomes_by_author_kind"`
+	// ControlArm is the descriptive within-repo on/off comparison; unassigned
+	// records are disclosed separately and no merge or dispatch gate reads it.
+	ControlArm EvidenceControl `json:"control_arm"`
 	// OutcomesByAuthorFamily is Outcomes keyed by the author's model family
 	// (claude / gpt / gemini / other, "human" for a person's PR, "unknown"
 	// for an agent whose model was not recorded) — hivecommons/hive#13243.
@@ -100,6 +103,9 @@ type EvidenceSummary struct {
 	// plain-English summary shown above each chart (#13204). Derived from the
 	// fields above by evidenceCards; see pkg/evidence/grade.go for the rubrics.
 	Cards map[string]evidence.Card `json:"cards"`
+	// IssueReopenRates always uses the trailing 30 days by closure time,
+	// independent of the PR-open-time window and author filter.
+	IssueReopenRates []evidence.ReopenRate `json:"issue_reopen_rates_30d"`
 }
 
 // EvidenceClaimWeek is one ISO week of agent-authored PRs (latest bundle per
@@ -700,6 +706,7 @@ func (s *Server) handleEvidenceSummary(w http.ResponseWriter, r *http.Request) {
 	ledger, lerr := review.LoadOutcomeLedger("")
 	hints := evidenceOutcomeHints(ledger)
 	resp := buildEvidenceSummaryWindowHints(bundles, hints, win, repo, kind)
+	resp.IssueReopenRates = evidence.IssueReopenRates(bundles, now, repo)
 	resp.AvailableWindows = evidenceAvailableWindows(bundles, now, repo, kind)
 	resp.Missing.RecordsUnreadable = unreadable
 	resp.WriteCounters = loadEvidenceWriteCounters(writeCountersPath)
@@ -903,6 +910,7 @@ func buildEvidenceSummaryWindowHints(bundles []*evidence.Bundle, hints map[strin
 		resp.To = win.To.Format(time.RFC3339)
 	}
 	latest := evidenceLatestPerPR(bundles, hints, win, repo, kind)
+	resp.ControlArm = evidenceControl(latest)
 	keys := make([]string, 0, len(latest))
 	for k := range latest {
 		keys = append(keys, k)

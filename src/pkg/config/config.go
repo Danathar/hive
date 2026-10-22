@@ -45,30 +45,22 @@ func notifySaveObserver() {
 var dashboardAuthTokenFile = "/secrets/dashboard-token"
 
 type Config struct {
-	Project  ProjectConfig          `yaml:"project"`
-	Policies PoliciesConfig         `yaml:"policies"`
-	Agents   map[string]AgentConfig `yaml:"agents"`
-	// AgentsGitHubAPIHourlyCap is the fleet default for per-agent GitHub API
-	// reads through the proxy. It is encoded under agents.github_api_hourly_cap
-	// by Config's YAML hooks so existing agent-name keys remain unchanged.
-	AgentsGitHubAPIHourlyCap    int `yaml:"-" json:"-"`
-	agentsGitHubAPIHourlyCapSet bool
-	Governor                    GovernorConfig      `yaml:"governor"`
-	GitHub                      GitHubConfig        `yaml:"github"`
-	GitLab                      GitLabConfig        `yaml:"gitlab,omitempty"`
-	Gitea                       GiteaConfig         `yaml:"gitea,omitempty"`
-	Notifications               NotificationsConfig `yaml:"notifications"`
-	Dashboard                   DashboardConfig     `yaml:"dashboard"`
-	Data                        DataConfig          `yaml:"data"`
-	Deployment                  DeploymentConfig    `yaml:"deployment,omitempty" json:"deployment,omitempty"`
-	Knowledge                   KnowledgeConfig     `yaml:"knowledge"`
-	Hub                         HubConfig           `yaml:"hub"`
-	// Backends is the spoke-wide backend allow/deny list (#11310), enforced
-	// at pack apply and by PUT /api/config/agent/{name}/models.
-	Backends BackendsConfig `yaml:"backends,omitempty" json:"backends,omitempty"`
-	// Providers configures the read-only per-provider auth/availability
-	// status (ADR-0024). See ProvidersConfig.
-	Providers ProvidersConfig `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Project  ProjectConfig  `yaml:"project"`
+	Policies PoliciesConfig `yaml:"policies"`
+	// AgentRuntimeConfig groups the keys the agent runtime (Crux,
+	// hivecommons/hive#13536) owns. It is inlined so the YAML shape is
+	// unchanged: `agents:`, `backends:`, ... stay top-level.
+	AgentRuntimeConfig `yaml:",inline"`
+	Governor           GovernorConfig      `yaml:"governor"`
+	GitHub             GitHubConfig        `yaml:"github"`
+	GitLab             GitLabConfig        `yaml:"gitlab,omitempty"`
+	Gitea              GiteaConfig         `yaml:"gitea,omitempty"`
+	Notifications      NotificationsConfig `yaml:"notifications"`
+	Dashboard          DashboardConfig     `yaml:"dashboard"`
+	Data               DataConfig          `yaml:"data"`
+	Deployment         DeploymentConfig    `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Knowledge          KnowledgeConfig     `yaml:"knowledge"`
+	Hub                HubConfig           `yaml:"hub"`
 	// Issues tunes issue lifecycle automation. Zero value keeps the safe
 	// defaults: close issues after their fix PR merges, and backfill hourly.
 	Issues     IssuesConfig     `yaml:"issues,omitempty" json:"issues,omitempty"`
@@ -103,19 +95,14 @@ type Config struct {
 	// other config write, and there is deliberately no runtime registration
 	// API. Nothing agent-writable can reach it — an agent able to register
 	// hooks on its own transitions would have an escalation path.
-	Hooks []HookRule `yaml:"hooks,omitempty" json:"hooks,omitempty"`
-	// ToolApproval configures the approval desk (RFC #4000): the single
-	// decision point every approval-shaped request resolves through, plus the
-	// operator rules that steer it. Additive and DEFAULT-OFF — an absent block
-	// leaves every existing gate in charge and behavior byte-identical.
-	ToolApproval ToolApprovalConfig `yaml:"tool_approval,omitempty" json:"tool_approval,omitempty"`
-	Mint         MintConfig         `yaml:"mint,omitempty"`
-	Ioscan       IoscanConfig       `yaml:"ioscan,omitempty" json:"ioscan,omitempty"`
-	Classifier   ClassifierConfig   `yaml:"classifier,omitempty" json:"classifier,omitempty"`
-	Planning     PlanningConfig     `yaml:"planning,omitempty" json:"planning,omitempty"`
-	Quality      QualityConfig      `yaml:"quality,omitempty" json:"quality,omitempty"`
-	Persona      PersonaConfig      `yaml:"persona,omitempty" json:"persona,omitempty"`
-	Intent       IntentConfig       `yaml:"intent,omitempty" json:"intent,omitempty"`
+	Hooks      []HookRule       `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	Mint       MintConfig       `yaml:"mint,omitempty"`
+	Ioscan     IoscanConfig     `yaml:"ioscan,omitempty" json:"ioscan,omitempty"`
+	Classifier ClassifierConfig `yaml:"classifier,omitempty" json:"classifier,omitempty"`
+	Planning   PlanningConfig   `yaml:"planning,omitempty" json:"planning,omitempty"`
+	Quality    QualityConfig    `yaml:"quality,omitempty" json:"quality,omitempty"`
+	Persona    PersonaConfig    `yaml:"persona,omitempty" json:"persona,omitempty"`
+	Intent     IntentConfig     `yaml:"intent,omitempty" json:"intent,omitempty"`
 	// Sentinel flags PRs that look like security overrides, privilege
 	// escalation or codebase damage, from any author. Default on; see
 	// SentinelConfig.
@@ -154,9 +141,6 @@ type Config struct {
 	// UpstreamWatch declares per-repo upstreams and filters for the fork
 	// upstream watch (hivecommons/hive#9966). Default off.
 	UpstreamWatch UpstreamWatchConfig `yaml:"upstream_watch,omitempty" json:"upstream_watch,omitempty"`
-	// AgentSandbox configures the phase-1 credential-free sandbox runner. It is
-	// disabled by default and agents must opt in individually.
-	AgentSandbox AgentSandboxConfig `yaml:"agent_sandbox,omitempty" json:"agent_sandbox,omitempty"`
 	// Convergence toggles the convergence-driven admission surfaces
 	// (kubestellar/hive#3845 follow-ons). Default off → zero behaviour change.
 	Convergence ConvergenceConfig `yaml:"convergence,omitempty" json:"convergence,omitempty"`
@@ -188,9 +172,6 @@ type Config struct {
 	// `classification:` block (currently review_bots, hivecommons/hive#7360).
 	// Default empty → the review-thread reconciler is off.
 	Classification ClassificationConfig `yaml:"classification,omitempty" json:"classification,omitempty"`
-	// Turn gates the re-entrant conversation-as-state rollout (#5799). Default
-	// off leaves every agent on the legacy tmux loop until an operator opts in.
-	Turn TurnConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
 	// TaskMCP configures the task-scoped MCP endpoint. Remote contributor
 	// exposure is opt-in; with remote_enabled false the endpoint remains usable
 	// only through the existing dashboard/contribute auth path.
@@ -291,6 +272,7 @@ func (c *Config) ExpandAgentReplicas() error {
 			delete(c.Agents, name)
 		}
 	}
+	derivedNames := map[string]string{}
 	for name, agent := range baseAgents {
 		replicas := normalizeReplicaCount(agent.Replicas)
 		if replicas < 1 || replicas > MaxAgentReplicas {
@@ -301,6 +283,19 @@ func (c *Config) ExpandAgentReplicas() error {
 			if existing, ok := baseAgents[derived]; ok && existing.ReplicaOf == "" {
 				return fmt.Errorf("agent %s: replicas:%d would create %s, but an agent with that name already exists", name, replicas, derived)
 			}
+			derivedNames[derived] = name
+		}
+	}
+	heads, err := reviewHeadAgentNames(baseAgents)
+	if err != nil {
+		return err
+	}
+	for derived, base := range heads {
+		if _, ok := baseAgents[derived]; ok {
+			return fmt.Errorf("agent %s: review_heads would create %s, but an agent with that name already exists", base, derived)
+		}
+		if other, ok := derivedNames[derived]; ok {
+			return fmt.Errorf("agent %s: review_heads would create %s, which agent %s's replicas also create", base, derived, other)
 		}
 	}
 	for name, agent := range baseAgents {
@@ -322,6 +317,9 @@ func (c *Config) ExpandAgentReplicas() error {
 			derived.ReplicaIndex = i
 			derived.ReplicaCount = replicas
 			c.Agents[derivedName] = derived
+		}
+		for _, h := range expandReviewHeads(name, agent) {
+			c.Agents[h.Name()] = h
 		}
 	}
 	for name, agent := range c.Agents {
