@@ -13404,8 +13404,10 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     // Row = title line (number, title, chips, since) + thin strip. Non-active
     // chevrons carry only a grey icon; the active one carries words.
-    // Everything else is in the tooltip on the item's #N link (the row
-    // container, kind/author icons, chips and the since cell carry none).
+    // Everything else is in the tooltip on the row's own #N link: the issue
+    // ref on the left for an issue row, the ham-pr-ref in the PR column for a
+    // PR row (the row container, kind/author icons, chips, the since cell and
+    // a PR row's issue slot carry none).
     // An issue with no PR yet, or exactly one covering PR, is a single entry
     // (the PR's stage drives the strip and its "[icon] #N title" sits in the
     // PR column). With two or more covering PRs the issue strip stops at

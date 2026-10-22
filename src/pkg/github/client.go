@@ -925,7 +925,8 @@ type PullRequest struct {
 	// reports this PR will close (closingIssuesReferences). All three ride
 	// the one-query-per-repository GraphQL pass that already carries the
 	// review decision (protection_facts.go): no additional request, only a
-	// larger response. EnrichReviewSignals stamps them on stale drafts.
+	// larger response. EnrichReviewSignalsAndWorkPRs stamps them on stale
+	// drafts.
 	// Display only: the 🔗 #N badge on a PR pill mirrors the issue column's
 	// linked-PR badge (#8876); nothing gates on any of them.
 	CommentCount      int             `json:"comment_count,omitempty"`
@@ -938,6 +939,7 @@ type PullRequest struct {
 // GitHub's issue state lower-cased ("open" / "closed"), as on Issue.State.
 type PRLinkedIssue struct {
 	Number int    `json:"number"`
+	Title  string `json:"title,omitempty"`
 	Repo   string `json:"repo,omitempty"`
 	State  string `json:"state,omitempty"`
 	URL    string `json:"url,omitempty"`
@@ -2213,20 +2215,34 @@ func (c *Client) EnrichCIStatus(ctx context.Context, prs []PullRequest) {
 	c.enrichBaseBranchRed(ctx, prs)
 }
 
-// EnrichReviewSignals stamps only the review-decision and repo-card triage
-// signals (protection.review_decision, comment/thread counts, linked
-// issues — hivecommons/hive#8968) onto prs, with at most one GraphQL query
-// per repository and no per-PR REST calls. It exists for the stale-draft
+// EnrichReviewSignalsAndWorkPRs stamps the review-decision and repo-card
+// triage signals (protection.review_decision, comment/thread counts, linked
+// issues — hivecommons/hive#8968) onto prs, and GitHub's closing-issue
+// references onto the sidelined PRs (drafts, exempt-labelled) in details so
+// the activity monitor can pair them with the issue they close just as it
+// does for actionable PRs (hivecommons/hive#13421). Both run over one shared
+// per-cycle collector: at most one GraphQL query per repository even when a
+// repo has both stale drafts and sidelined PRs, none when the PR batch
+// already answered it, and no per-PR REST calls. prs is the stale-draft
 // list, which the dashboard shows beside the actionable PRs but which
 // EnrichCIStatus deliberately never touches: a draft is not a merge
-// candidate, so its mergeability and check runs are never fetched.
-func (c *Client) EnrichReviewSignals(ctx context.Context, prs []PullRequest) {
+// candidate, so its mergeability and check runs are never fetched. Either
+// argument may be nil; the slices are updated in place.
+func (c *Client) EnrichReviewSignalsAndWorkPRs(ctx context.Context, prs []PullRequest, details map[string]RepoWorkDetails) {
 	if c == nil {
 		return
 	}
 	facts := newProtectionCollector(c)
 	for i := range prs {
 		facts.attach(ctx, &prs[i], nil)
+	}
+	for repo, d := range details {
+		for i := range d.PRs {
+			pr := &d.PRs[i]
+			if rs, ok := facts.reviewState(ctx, repo, pr.Number); ok {
+				pr.LinkedIssues = rs.linkedIssues
+			}
+		}
 	}
 }
 
@@ -4032,6 +4048,11 @@ type RepoWorkPR struct {
 	URL            string    `json:"url,omitempty"`
 	Bucket         string    `json:"bucket"`
 	Reason         string    `json:"reason,omitempty"`
+	// LinkedIssues mirrors PullRequest.LinkedIssues so a sidelined PR can
+	// still stand under the issue its `Fixes #N` names in the activity
+	// monitor. Stamped by EnrichReviewSignalsAndWorkPRs, not by the
+	// enumeration.
+	LinkedIssues []PRLinkedIssue `json:"linked_issues,omitempty"`
 }
 
 // Work-detail buckets for sidelined PRs (RepoPRBreakdown field names).
