@@ -38,6 +38,29 @@ It is **not**:
 - A replacement for GitHub branch protection, your identity provider, or
   your organisation's incident-response, vendor-management and HR controls.
 
+## Review status and how to read control IDs
+
+The shipped profiles were checked against the published framework
+numbering and titles in [#13578](https://github.com/hivecommons/hive/issues/13578):
+SOC 2 uses the 2017 Trust Services Criteria (CC6.1–CC9.2), FedRAMP uses
+NIST SP 800-53 Rev 5 identifiers, and ISO 27001 uses the **2022** Annex A
+numbering (A.5.x–A.8.x, not the 2013 A.9–A.18 numbers). Control text on this
+page is a paraphrase for orientation, never the framework's own wording; read
+the cited publication for the authoritative requirement.
+
+- Each profile is a **subset** of its framework, not a full checklist. A
+  control missing from a profile is not "passed": it is simply not mapped.
+  Passing every row here says nothing about the controls that are absent.
+- `AC-2.ELIG` is a Hive-specific row, not a NIST control identifier. It marks
+  the US-persons/location eligibility conditions that FedRAMP assessors ask
+  about under AC-2 and AC-3.
+- The mapping of a setting to a control is a plausibility judgement by the
+  Hive maintainers. It has not been reviewed by a person with audit
+  experience; have your own control owners and auditor confirm it before
+  relying on it.
+- Hive is not certified or assessed under any of these frameworks. Exports are
+  configuration evidence for your own control owners, not an audit opinion.
+
 ## Turning it on
 
 ```yaml
@@ -138,7 +161,7 @@ profile disagree.
 | CC6.8 — Prevention and detection of unauthorized or malicious software | Vulnerability management | `sentinel.disabled_behaviors` | `none` | `empty` |  |
 | CC7.1 — Detection of configuration changes that introduce vulnerabilities | Vulnerability management | `sentinel.enabled` | `true` | `equals` |  |
 | CC7.1 — Detection of configuration changes that introduce vulnerabilities | Vulnerability management | `auto_merge.required_checks` | `non-empty` | `non_empty` |  |
-| CC7.2 — Monitoring of system components for anomalies | Logging & monitoring | `audit.retention_days` | `365` | `at_least` | Audit retention is currently fixed in code (90 days, size-rotated); the configurable audit.retention_days floor is tracked by the Compliance epic (hivecommons/hive#11077), so this control reports a deviation until it lands. |
+| CC7.2 — Monitoring of system components for anomalies | Logging & monitoring | `audit.retention_days` | `365` | `at_least` | Audit retention is currently fixed in code (90 days, size-rotated); the configurable audit.retention_days floor is tracked by the Compliance epic (hivecommons/hive#11077), so this control reports a deviation until it lands. Delegated relay work is covered by the relay_* rows in the audit log and the relay_audit_coverage posture check. |
 | CC7.2 — Monitoring of system components for anomalies | Logging & monitoring | `review.post_comments` | `true` | `equals` |  |
 | CC7.3 — Evaluation of security events | Incident response | `escalation.disabled` | `false` | `equals` |  |
 | CC7.3 — Evaluation of security events | Incident response | `sentinel.enabled` | `true` | `equals` |  |
@@ -186,7 +209,7 @@ not a FedRAMP authorization boundary. Generated from
 | AC-6 — Least privilege | Access control | `auto_merge.trusted_authors.enabled` | `false` | `equals` |  |
 | AC-6 — Least privilege | Access control | `agent_sandbox.enabled` | `true` | `equals` |  |
 | AC-6 — Least privilege | Access control | `env.HIVE_PROXY_INJECT_GH_AUTH` | `true` | `equals` |  |
-| AU-2 — Event logging | Logging & monitoring | `review.post_comments` | `true` | `equals` |  |
+| AU-2 — Event logging | Logging & monitoring | `review.post_comments` | `true` | `equals` | Delegated relay work is covered by the relay_* rows in the audit log and the relay_audit_coverage posture check. |
 | AU-2 — Event logging | Logging & monitoring | `audit.retention_days` | `365` | `at_least` |  |
 | AU-3 — Content of audit records | Logging & monitoring | `review.post_comments` | `true` | `equals` | Review verdicts are published as PR comments with the evidence; the audit log record format is fixed in code. |
 | AU-6 — Audit record review and reporting | Logging & monitoring | `sentinel.enabled` | `true` | `equals` |  |
@@ -262,7 +285,7 @@ from `src/pkg/compliance/profiles/iso27001-annex-a.yaml`; do not edit by hand.
 | A.8.8 — Management of technical vulnerabilities | Vulnerability management | `auto_merge.required_checks` | `non-empty` | `non_empty` |  |
 | A.8.9 — Configuration management | Change management | `sentinel.enabled` | `true` | `equals` |  |
 | A.8.9 — Configuration management | Change management | `acmm_level` | `5` | `at_most` |  |
-| A.8.15 — Logging | Logging & monitoring | `audit.retention_days` | `365` | `at_least` | Audit retention is fixed at 90 days in code today; the configurable floor is tracked by hivecommons/hive#11077, so this reports a deviation until it lands. |
+| A.8.15 — Logging | Logging & monitoring | `audit.retention_days` | `365` | `at_least` | Audit retention is fixed at 90 days in code today; the configurable floor is tracked by hivecommons/hive#11077, so this reports a deviation until it lands. Delegated relay work is covered by the relay_* rows in the audit log and the relay_audit_coverage posture check. |
 | A.8.15 — Logging | Logging & monitoring | `review.post_comments` | `true` | `equals` |  |
 | A.8.16 — Monitoring activities | Logging & monitoring | `sentinel.enabled` | `true` | `equals` |  |
 | A.8.16 — Monitoring activities | Logging & monitoring | `escalation.disabled` | `false` | `equals` |  |
@@ -302,6 +325,7 @@ auditor can follow. Details never echo a secret value.
 | `sentinel_enabled` | `sentinel.enabled` is on with no behaviour disabled and the sentinel label exists on every repo | CC6.8, CC7.1 | `sentinel` config, repo labels |
 | `no_secrets_in_config` | No secret-looking value in `hive.yaml`, the dashboard overlay, the runtime config or the per-agent overlays (the log scrubber's token patterns, PEM blocks, and literal values under credential-named keys such as `*_token`; `$ENV` references and paths are fine) | CC6.1 | Config file scan (file and line only) |
 | `dashboard_auth` | The dashboard is hub-proxied, enforces per-user login (`dashboard.authorized_users`) or requires the shared auth token | CC6.1, CC6.2 | `dashboard` config |
+| `relay_audit_coverage` | At least one `relay_*` row was written to the audit log in the last 24h, or no relay connected in that window; fails only when relays connected but no `relay_*` row was written | CC7.2 | [Audit log](audit-log.md) (`/data/audit.jsonl`), hub relay connections |
 | `hold_labels_exist` | The hive's hold label and the needs-human label exist on every repo, so a human can stop automation | CC8.1, CC7.3 | Repo labels |
 
 Results are appended to `/data/compliance-posture.jsonl`, so the history

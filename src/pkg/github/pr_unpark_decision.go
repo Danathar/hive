@@ -165,9 +165,9 @@ type prNeedsHumanRelease struct {
 // hive-authored PR when a trusted merger answers it with `/hive approve`, and
 // applies the transition the adjudicator's hand-off prescribes:
 // `reviewer-passed` on, `reviewer-handoff` off. It is the PR side of the
-// issue rule (stageengine.DecisionLiftsNeedsHuman, hivecommons/hive#13075):
-// a person's `needs-human`, or one whose applier the timeline cannot name,
-// stays and no label is touched (hivecommons/hive#12680). `hold`-class
+// issue rule (stageengine.DecisionLiftsNeedsHuman, hivecommons/hive#13075,
+// hivecommons/docs#419): the label lifts whoever applied it, and the reply
+// names the applier when a person added it. `hold`-class
 // labels, CI, soak and verdict gates are not touched either. reviewer-passed
 // is added and reviewer-handoff removed before needs-human goes, so a failed
 // write leaves needs-human in place and the next pass retries the whole
@@ -219,21 +219,32 @@ func renderPRApproveReply(head string, release prNeedsHumanRelease) string {
 		fmt.Fprintf(&b, " No `%s` label blocks this PR.", issueNeedsHumanLabel)
 	case release.notHiveAuthored:
 		fmt.Fprintf(&b, " `%s` still blocks this PR: `/hive approve` lifts it only on a PR the hive opened, so a person must remove it.", issueNeedsHumanLabel)
+	case release.outcome.lift && release.outcome.applier == stageengine.NeedsHumanApplierPerson:
+		fmt.Fprintf(&b, " `%s` cleared (added by @%s): your approval is the human input it waited for", issueNeedsHumanLabel, release.outcome.actor)
+		b.WriteString(renderPRApproveReleaseTail(release))
 	case release.outcome.lift:
 		fmt.Fprintf(&b, " `%s` cleared: Hive added it and your approval is the person's answer it asked for", issueNeedsHumanLabel)
-		if len(release.added) > 0 {
-			fmt.Fprintf(&b, "; %s applied", quoteLabelsProse(release.added))
-		}
-		if len(release.removed) > 0 {
-			fmt.Fprintf(&b, "; %s removed", quoteLabelsProse(release.removed))
-		}
-		b.WriteString(". No `needs-human` label still blocks this PR; the lane re-evaluates it on its next pass and it still waits for green CI and soak.")
+		b.WriteString(renderPRApproveReleaseTail(release))
 	case release.outcome.applier == stageengine.NeedsHumanApplierPerson:
 		fmt.Fprintf(&b, " `%s` still blocks this PR (added by @%s): a command never lifts a person's hold, so the PR stays parked until a person removes that label.", issueNeedsHumanLabel, release.outcome.actor)
 	default:
 		fmt.Fprintf(&b, " `%s` still blocks this PR (Hive could not read who added it): it stays parked until a person removes that label.", issueNeedsHumanLabel)
 	}
 	fmt.Fprintf(&b, " See <%s>.", maintainerCommandsDocURL)
+	return b.String()
+}
+
+// renderPRApproveReleaseTail names the labels the release wrote and closes
+// the sentence; shared by both "cleared" attributions.
+func renderPRApproveReleaseTail(release prNeedsHumanRelease) string {
+	var b strings.Builder
+	if len(release.added) > 0 {
+		fmt.Fprintf(&b, "; %s applied", quoteLabelsProse(release.added))
+	}
+	if len(release.removed) > 0 {
+		fmt.Fprintf(&b, "; %s removed", quoteLabelsProse(release.removed))
+	}
+	b.WriteString(". No `needs-human` label still blocks this PR; the lane re-evaluates it on its next pass and it still waits for green CI and soak.")
 	return b.String()
 }
 

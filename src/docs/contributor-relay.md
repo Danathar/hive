@@ -1088,6 +1088,76 @@ Each trust tier can be toggled on/off and given its own rate limits (`0` = unlim
 - **Queue-time vs. connect-time.** Repo, label, title, author, and assignment filters, cooldown, and the hold/priority sets apply when the queue is next built, so tightening them affects the *next* queue build. The Model Filter and the effort floor apply at connect time, so tightening them affects the *next* connection, not agents already mid-task.
 - **Suspending vs. revoking.** Suspension idles everyone and is instant to undo; revocation is per-contributor and blocks reconnection.
 
+### Audit rows and the `sensitive_24h` badge
+
+The hub writes the relay's lifecycle — connect, reject, disconnect, assign,
+accept, decline, token mint, complete, fail, revoke, abandon — to
+`/data/audit.jsonl` as `relay_*` rows attributed to the contributor's GitHub
+login; the row format and detail keys are in
+[audit-log.md](audit-log.md#contributor-relay-rows). Two of them,
+`relay_token_minted` and `relay_task_revoked`, are **sensitive** actions, so on
+a hive with active contributors the Audit Log's `sensitive_24h` risk badge rises
+with relay traffic: one count per installation token handed to a relay (including
+each mid-task refresh) and per task the hub takes back. That is the hub
+accounting for delegated credentials, not an incident; filter on `relay_` in the
+Audit Log to separate it from operator actions. No token value is ever written.
+
+### Sharing your audit record with a hive (`--share-audit`)
+
+Uploading audit rows is a separate, explicit, per-hive opt-in
+([#13458](https://github.com/hivecommons/hive/issues/13458), design
+[#13441](https://github.com/hivecommons/hive/issues/13441) §3 "No upload by
+default"). The relay's leveled local audit stream
+([#13456](https://github.com/hivecommons/hive/issues/13456)) records what your
+machine did for a task, and that record stays on your machine. Nothing in it
+reaches a hive until you opt in for that hive:
+
+```bash
+hivectl hives set <name> --share-audit <lifecycle|commands|reasoning>
+```
+
+> **Availability.** The hub side described here (the `relay_task_attested`
+> row, the per-task store, the `audit_share_requested` advertisement) is in
+> place. The relay-side `--share-audit` flag lands with the v6 follow-up to
+> [#13458](https://github.com/hivecommons/hive/issues/13458); until it ships
+> no relay sends `audit_share`, and the hub simply stands ready for it.
+
+- **Never above capture.** The share level can never exceed the local capture
+  level (`--audit-level`). The relay applies this rule, and the hub also
+  enforces it: it clamps a share above the advertised `capture_level` and
+  records `clamped=true`.
+- **What is sent.** Your local rows for the task, up to the shared level, are
+  attached to the terminal `task_complete` / `task_failed` frame as
+  `audit_share`: `{"level", "capture_level", "local_ref", "rows": [...]}`.
+  `local_ref` is the key of your local record for the task. The rows are the
+  ones already redacted on your machine. The frame stays within the hub's
+  64 KiB frame limit (`max_message_bytes`), and the hub ignores rows above the
+  shared level.
+- **What the hub keeps.** One `relay_task_attested` row in the audit log,
+  which cross-references your local record. At `commands` or `reasoning`,
+  the hub also keeps the shared command rows in
+  `/data/contrib-audit/<login>/<task>.jsonl` (0600, in a 0700 directory) so
+  they don't fill the 500-entry audit ring. `reason`/`reason_source` are kept
+  only at `reasoning`. See
+  [audit-log.md](audit-log.md#contributor-relay-rows) for the row and the
+  retention rules.
+- **What the hive asks for.** A hive can *request* a level with
+  `hub.contribute_audit_share_request` (`lifecycle`, `commands` or
+  `reasoning`; empty, the default, requests nothing). The hub advertises it on
+  `auth_ok` as `audit_share_requested`, and on `/contribute` (and
+  `GET /api/contribute/status`) before setup, so you can see that a hive is
+  asking for `reasoning` before you decide. It is only a request: you are
+  admitted the same whether or not you share. Whether a hive may require a
+  minimum share level is an open governance question and is not implemented.
+- **Compatibility.** `audit_share` and `audit_share_requested` are additive
+  JSON fields. A relay without the consent flag never sends `audit_share`, and
+  an older hub ignores it.
+
+```yaml
+hub:
+  contribute_audit_share_request: commands   # default: "" (request nothing)
+```
+
 ## Steering outside PRs to the relay (`clanker_requested`)
 
 Hives that take outside contributions only through ClankeR can turn on the opt-in `clanker_requested` policy. It is off by default and changes nothing until enabled. Set it in `hive.yaml`, or in the dashboard under **Settings → Labels → Reporter trust** (see [Dashboard](dashboard.md)):

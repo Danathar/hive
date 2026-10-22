@@ -69,7 +69,7 @@ func TestMergeAgentOverrides_HandSetBackendVsPackOverlay(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{Agents: map[string]AgentConfig{"brainstorm": tt.base}}
+			cfg := &Config{AgentRuntimeConfig: AgentRuntimeConfig{Agents: map[string]AgentConfig{"brainstorm": tt.base}}}
 			cfg.MergeAgentOverrides(map[string]AgentConfig{"brainstorm": tt.overlay})
 			got := cfg.Agents["brainstorm"]
 			if got.Backend != tt.wantBackend {

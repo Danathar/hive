@@ -216,7 +216,7 @@ When `block_at` is set and `backlog_below` is on, every cited in-scope finding (
 
 - **Destination.** `github_issue` files an issue in the PR's repo. `github_project` also adds that issue to the `governor.work_source.github_projects` project and sets its Status to `project_column_id`. `linear` files an issue on the Linear team mapped to the repo, in `linear_state` when set (an unknown state is an error naming it; label names the team lacks are skipped). `jira` files a Task in the first `work_source.jira.project_keys` project and moves it to `jira_status` when set. All three use the work-source credentials. If the destination's work source is not active or cannot be built, the item is filed as a GitHub issue with the `agent/reviewer` label added, and the hive logs why.
 - **Item body.** The finding title and summary, the PR link, a `file:line` permalink at the reviewed head SHA, the severity with its P-level, the fingerprint, and the line `filed by Hive review backlog`. `labels` are applied to every item.
-- **Fingerprint dedup.** Each finding is fingerprinted as `sha256(rule | path | snippet)`: the title, the cleaned file path and the summary, lower-cased with whitespace collapsed. Line numbers are left out, so the same nit at a shifted line still matches. `/data/review-backlog-issues.json` keeps a per-repo map of fingerprint → item. When another PR raises a known fingerprint, the hive comments on the existing item with the new PR link and permalink instead of filing a second one. The same PR raising it again changes nothing.
+- **Fingerprint dedup.** Each finding is fingerprinted as `sha256(rule | path | snippet)`: the title, the cleaned file path and the summary, lower-cased with whitespace collapsed. Line numbers are left out, so the same nit at a shifted line still matches. `/data/review-backlog-issues.json` keeps a per-repo map of fingerprint → item. When another PR raises a known fingerprint, the hive comments on the existing item with the new PR link and permalink instead of filing a second one. The same PR raising it again changes nothing. When the destination folds a new finding into an existing open item instead (the `github_issue` sink reuses an open hive-filed issue citing the same files), the item receives the full finding — title, `file:line`, summary, severity, PR link and fingerprint — under an "Additional finding (folded in — same file, possibly a different problem)" heading with an unchecked task-list line, still tagged with the `hive:review-backlog-link` marker; the PR summary lists it as `#T (folded into an existing issue) — <finding title>` ([#13604](https://github.com/hivecommons/hive/issues/13604)).
 - **Cap.** At most `max_per_pr_per_day` items are filed or updated per PR per UTC day. Findings over the cap are retried on the next review. Out-of-scope findings also stay within `review.max_out_of_scope_backlog_issues` per PR.
 - **Audit.** Each filing pass that wrote anything records one `review_backlog_batch_routed` entry on the PR (`destination`, `filed`, `updated`, `capped`). Each new GitHub issue also gets its own `review_backlog_issue_filed` entry. The PR receives one summary comment that lists the items filed.
 
@@ -266,16 +266,27 @@ issue/spec and PR body before asking, and to cite the answer
 
 ## Reviewer selection
 
+**Settings → Features → Review Gate → Reviewers** lists every configured agent with its
+engine and model as a pick-list bound to `review.reviewer_agents`; it shows how many agents
+are review-capable under the current selection and, when **Fan out to multiple reviewers**
+is on, warns if they all run on one engine (multi-model review needs reviewers on at least
+two engines) and notes when **Review every perspective in one session** is also on, since
+combined mode dispatches only the first eligible reviewer. The same section carries the
+fan-out toggle and **Max parallel reviews**.
+
 An agent is considered review-capable if it is enabled, not paused, and not on-demand,
 **and** one of the following is true:
 
-1. **Explicit list** — `review.reviewer_agents` names the agent exactly. When this list is
-   non-empty, only agents on it qualify; the keyword scan below is skipped entirely.
+1. **Explicit list** — `review.reviewer_agents` names the agent, or the base agent a
+   replica was expanded from (`replicas: N` lanes qualify through their base, so the list
+   never needs each replica spelled out). When this list is non-empty, only agents on it
+   and their replicas qualify; the keyword scan below is skipped entirely.
 2. **Keyword scan** — the string `review` (case-insensitive) appears in any of:
    the agent's name, `role`, `aliases`, `lane_keywords`, or `detect_keywords`.
 
 The dashboard security summary (`GET /api/security`) exposes a `reviewCapableAgents`
-count. If `review.require_approval` is true and that count is zero, the dashboard
+count, and `GET /api/config/review` carries a `reviewer_candidates` list (name, backend,
+model, `available`, `keyword_match`, `review_capable`) that the Reviewers pick-list renders. If `review.require_approval` is true and that count is zero, the dashboard
 shows a warning:
 
 > Review approval is required, but no enabled review-capable agents were detected.
@@ -299,13 +310,54 @@ review:
   reviewer_agents: [my-reviewer, scanner]
 ```
 
-Source: `dashboardAgentReviewCapable` in `src/pkg/dashboard/status_builder.go`.
+Source: `ReviewCapable` in `src/pkg/review/dispatch.go`, which the dashboard
+(`dashboardAgentReviewCapable` in `src/pkg/dashboard/status_builder.go`), the relay and
+the merge-eligibility gate all call.
+
+## Review heads: several models per perspective
+
+`agents.<name>.review_heads` gives one base reviewer several model "heads" ([#13542](https://github.com/hivecommons/hive/issues/13542)). Each head is materialized like `replicas`: `<base>-<alias>-<n>` copies the base agent with only `backend` and `model` replaced, is stripped on save, and is provisioned at boot by the entrypoint. `alias` defaults to a slug of `<backend>-<model>` (without repeating the backend when the model already starts with it).
+
+```yaml
+agents:
+  code-reviewer:                     # the base; not dispatched as a head
+    backend: claude
+    model: claude-sonnet-5-5
+    role: reviewer
+    review_heads:
+      - {backend: claude, model: claude-sonnet-5-5, replicas: 2}   # code-reviewer-claude-sonnet-5-5-1, -2
+      - {backend: codex,  model: gpt-6-sol, alias: sol}            # code-reviewer-sol-1
+review:
+  combined_perspectives: false
+  reviewer_agents: [code-reviewer]   # naming the base admits its heads
+```
+
+With split perspectives, every perspective is dispatched once per head, to that head's least-loaded replica; the base and its plain `replicas` are not dispatched (they are reserved for the decision step). Because head dispatch asks every perspective of every head, a reviewer lane *without* `review_heads` alongside one with them would have nothing left to review, so config load rejects that mix under `combined_perspectives: false`: every admitted reviewer (the `reviewer_agents` list, or every agent carrying the `review` token when the list is empty) must declare `review_heads`, or be left out. Only heads of admitted bases are expected by the aggregate. Each kick costs one `max_parallel_reviews` slot, and `max_perspectives_per_pr` still bounds how many perspectives a PR head receives. A head reviews **blind** (it is told not to read other reviews of this head) and **records only**: it delivers its verdict with `hive-review --record-verdict` and posts nothing on the PR. The relay stamps each verdict with the head from the dispatch record it bound to (an advisory verdict with no dispatch row carries none) and keeps one report per perspective per head; `review_model` is stamped per head, so each head's report names the model that head ran.
+
+Heads have no `review_models` pool of their own (the head is the model) and are not used under `combined_perspectives: true`, where the base reviews as before.
+
+### The decision step
+
+The heads' raw reports are evidence, never a verdict: while any head report exists without a decision, the PR head aggregates to `incomplete` (`Perspectives` shows the strictest head verdict and `heads` which heads answered, for the queue), so nothing routes on a single head.
+
+1. **Settled.** Once every expected head has reported every perspective, or ran out of retries (below), the aggregate is marked `awaiting_decision` and the planner sends **one decision kick per PR** to the least-loaded base reviewer. It costs one parallel slot and covers every perspective the heads judged; one pending entry per perspective (`decision: true`) binds the reports it records.
+2. **The kick carries every head's full report**: verdict, every finding with its severity, scope, summary and `file:line`, the summary and any decision question, plus any head that never answered. The base reviewer re-reads the code, gives **every** head finding a disposition (`confirmed`, `not_reproducible` or `out_of_scope`) with a reason, de-duplicates findings raised by several heads, sets the **final severity** of each confirmed finding (blocking: correctness, security, data, a broken contract or a missing required test; backlog: docs wording, style, naming, behaviour-neutral refactors), and decides each perspective's verdict.
+3. **One comment.** The base posts the PR's only review comment with `hive-review --comment --verdict-file`: findings under per-perspective headings tagged with the heads that raised them, and a `### Head findings` section listing every head finding with its disposition. The relay stores the reconciled verdicts as **decided** reports (`decided: true`, with `dispositions`), set from the dispatch record, never from the reviewer's JSON, in their own `…-decided` files beside the heads' raw reports.
+4. **Routing is unchanged.** The aggregate is built from the decided reports, so `review.severity.block_at`, `comment_below`, `backlog_below`, `review.backlog`, out-of-scope backlog filing, fix kicks and human holds all run on the decision's final severities exactly as on any review. The aggregate keeps `head_reports`, `dispositions` and `missing_heads` as evidence.
+
+**Skip rule.** When every head approved every perspective with no findings and no decision question, there is nothing to reconcile: the heads' unanimous approval is the decision and no session runs (`decision_skipped`). With `review.acknowledge_no_findings` on, the hive posts one line, once per PR head (`**Reviewed** — no findings from …, all N review heads agreed: …`); with it off, nothing is posted.
+
+**Retries.** A head whose review of a perspective outlives `pending_ttl` is re-sent up to `review.head_max_retries` times (Settings → Review gate; 0 means `max_redispatch`). Past that, if another head answered the perspective, the head is recorded as missing (`missing_heads` in the dispatch state and the aggregate): the decision proceeds without it and the comment says so, e.g. `sol-1: no verdict after 3 attempts; decided on claude-sonnet-5-5 only`. If **no** head answered the perspective, the head SHA's `max_redispatch` budget and human hold apply exactly as before.
+
+**Accuracy.** `GET /api/reviewer/accuracy` gains `review_heads`: per review model, how often its head's verdict agreed with the decided verdict (`missed_blocks` when it approved what the decision blocked, `over_blocks` the reverse), and how many of its findings the decision confirmed or rejected (`confirm_rate`). Only decided and skip-rule aggregates are scored; the decision is the reference, so no merge outcome is needed.
 
 ## Dispatch and prompt construction
 
 `pkg/review` provides prompt builders for one prompt per perspective plus a sequential fallback prompt. These prompts instruct review-capable agents to emit the extended AgentReport JSON shape above.
 
 **Who gets reviewed: every PR, regardless of author.** When review is on (`review.require_approval` and `review.fan_out`), the planner dispatches reviews for every open PR in the hive's repositories — hive-agent PRs, human PRs, clanker PRs at either trust tier, dependabot and any other bot. There is no author-class filter and no opt-out below the review feature switch itself; the only way to stop reviews is to turn review off ([#12974](https://github.com/hivecommons/hive/issues/12974): *"if pr review is selected in hive, then all prs should be reviewed"*). Before this, the swarm reviewed only agent and `[bot]` authors unless `review.all_authors` was set, and human PRs such as hivecommons/hive#12966 reached merge with zero swarm reviews. Author kind still decides what happens *after* the verdict — who may be pushed to (below), which auto-merge lane may act on it ([hive-merge.md](hive-merge.md#self-merge-review-gate)), and whether the hive may approve at all (a contributor-tier clanker's PR is reviewed like any other, then still parks at `090-ready-for-human-merge`; the hive never approves on their behalf).
+
+**Who may review a PR.** A PR's author never reviews it, and neither does any lane in the author's family: when the author is a replica (`replicas: N`), its base agent and sibling replicas are excluded too, and when the author is a base agent, all of its replicas are. The author's base is resolved from the full configured agent set, enabled or not, so an authoring replica that is itself paused, disabled or not review-capable still rules out its siblings; a replica name that a reduced `replicas:` count no longer materialises still maps to its declared base. The verdict relay applies the same family rule: a verdict no dispatch row binds is refused as `author_self_approval` when the submitting lane shares the author's base.
 
 Phase 2 adds dispatch state in `/data/review-dispatch-state.json`. Pending review kicks are scoped by repo, PR number, perspective, and head SHA; when a PR head changes, stale pending entries are pruned and the new head must be reviewed again. Multiple review-capable agents receive perspective prompts in parallel up to `max_parallel_reviews`; a single reviewer receives one perspective per eval round.
 

@@ -87,8 +87,8 @@ func advisorLaneCandidate(cfg *config.Config) *config.Config {
 	candidate := &config.Config{
 		Advisor:    cfg.Advisor,
 		ModelRoles: make(map[string]config.ModelRole, len(cfg.ModelRoles)),
-		Agents:     make(map[string]config.AgentConfig, len(cfg.Agents)),
 	}
+	candidate.Agents = make(map[string]config.AgentConfig, len(cfg.Agents))
 	for name, role := range cfg.ModelRoles {
 		candidate.ModelRoles[name] = role
 	}

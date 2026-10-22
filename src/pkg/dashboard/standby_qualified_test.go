@@ -13,7 +13,9 @@ import (
 
 func standbyTestConfig() *config.Config {
 	return &config.Config{
-		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T2", DailyCapPerContributor: 1}}},
+		AgentRuntimeConfig: config.AgentRuntimeConfig{
+			Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T2", DailyCapPerContributor: 1}}},
+		},
 		Hub: config.HubConfig{
 			StandbyContributors: []string{"alice"},
 			StandbyModelTiers:   []config.StandbyModelTier{{Backend: "claude", Model: "opus", ReasoningEffort: "high", Tier: "T2"}},
@@ -85,7 +87,9 @@ func TestQualifiedStandbyCountsSkipsDisabledLane(t *testing.T) {
 // offered at least one item actually queued on the lane.
 func TestQualifiedStandbyCountsHonourItemTiers(t *testing.T) {
 	cfg := &config.Config{
-		Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T3", DailyCapPerContributor: 1}}},
+		AgentRuntimeConfig: config.AgentRuntimeConfig{
+			Agents: map[string]config.AgentConfig{"quality": {Standby: &config.StandbyConfig{Enabled: true, MinModelCapability: "T3", DailyCapPerContributor: 1}}},
+		},
 		Hub: config.HubConfig{
 			StandbyContributors: []string{"alice"},
 			StandbyModelTiers:   []config.StandbyModelTier{{Backend: "claude", Model: "haiku", ReasoningEffort: "low", Tier: "T3"}},
@@ -218,7 +222,9 @@ func TestStandbyModeCeilingRefusesNonPRLane(t *testing.T) {
 	level := 2
 	cfg := &config.Config{
 		ACMMLevel: &level,
-		Agents:    map[string]config.AgentConfig{"quality": {Mode: "ADVISORY"}},
+		AgentRuntimeConfig: config.AgentRuntimeConfig{
+			Agents: map[string]config.AgentConfig{"quality": {Mode: "ADVISORY"}},
+		},
 	}
 	if got := standbyModeCeilingReason(cfg, "quality"); got == "" {
 		t.Fatal("standbyModeCeilingReason = empty, want refusal")

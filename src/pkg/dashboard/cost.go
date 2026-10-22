@@ -107,6 +107,9 @@ type costResponse struct {
 	// 30-day snapshot ring (/api/cost/history). Empty until the first UTC
 	// day of snapshots has completed.
 	DailyRollup []CostDailyRollup `json:"daily_rollup"`
+	// Recording reports whether the running agents' configured models are
+	// actually being recorded (hivecommons/hive#13485); see cost_recording.go.
+	Recording costRecording `json:"recording"`
 }
 
 // costModelEntry is one row of the estimated per-model / per-agent breakdown.
@@ -232,6 +235,7 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.CountWindowEnd = time.Now().UnixMilli()
 	resp.DailyRollup = s.CostDailyRollups()
+	resp.Recording = s.costRecording(resp.Estimated)
 
 	// --- Native cost per metered gateway ---
 	if s.deps != nil && s.deps.Config != nil {
@@ -250,9 +254,8 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) costCountWindowStart() int64 {
-	history := s.CostHistory()
-	if len(history) > 0 {
-		return history[0].Timestamp
+	if start := s.CostWindowStart(); !start.IsZero() {
+		return start.UnixMilli()
 	}
 	if est := s.estimatedCost(); est.WindowStart > 0 {
 		return est.WindowStart

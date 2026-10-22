@@ -87,6 +87,10 @@ agents.<key>.review_models.exclude_author_model # TODO #11854
 agents.<key>.review_models.fallback # TODO #11854
 agents.<key>.review_models.pool[].backend # TODO #11854
 agents.<key>.review_models.pool[].model # TODO #11854
+agents.<key>.review_heads[].alias # TODO #13542
+agents.<key>.review_heads[].backend # TODO #13542
+agents.<key>.review_heads[].model # TODO #13542
+agents.<key>.review_heads[].replicas # TODO #13542
 agents.<key>.role # TODO #11854
 agents.<key>.sandbox.enabled # TODO #11854
 agents.<key>.sandbox.env_allowlist[] # TODO #11854
@@ -274,6 +278,11 @@ hub.tier_limits.<key>.max_per_day # TODO #11854
 hub.tier_limits.<key>.max_per_hour # TODO #11854
 issues.hard_suppress_reconcile_interval # TODO #11854
 issues.lift_hive_hard_suppress # TODO #11854
+issues.rfc_existing_check.enabled # triage existing-coverage check; yaml-only (#13575)
+issues.rfc_existing_check.labels[] # triage existing-coverage check; yaml-only (#13575)
+issues.rfc_existing_check.max_age # triage existing-coverage check; yaml-only (#13575)
+issues.rfc_existing_check.max_matches # triage existing-coverage check; yaml-only (#13575)
+issues.rfc_existing_check.post_when_nothing_found # triage existing-coverage check; yaml-only (#13575)
 issues.sha_hold_trusted_label # TODO #11854
 knowledge.agent_scopes.<key>.include_states[] # TODO #11854
 knowledge.agent_scopes.<key>.layers[] # TODO #11854
@@ -339,6 +348,7 @@ project.issue_filter.reporter_trust.trusted_logins[] # TODO #11854
 project.issue_filter.reporter_trust.untrusted_require_labels[] # TODO #11854
 project.issue_filter.require_labels[] # TODO #11854
 project.label_driven_approval_labels[] # TODO #11854
+project.label_driven_supersede_park_actors[] # TODO #11854
 project.label_driven_trust_org_members # TODO #11854
 project.label_driven_trusted_bots[] # TODO #11854
 project.open_prs # TODO #11854
@@ -362,6 +372,7 @@ project.repo_policies[].label_driven # TODO #11854
 project.repo_policies[].label_driven_approval_labels[] # TODO #11854
 project.repo_policies[].release_on_approve # TODO #12635
 project.repo_policies[].release_version_source # TODO #12635
+project.repo_policies[].label_driven_supersede_park_actors[] # TODO #11854
 project.repo_policies[].repo # TODO #11854
 project.repo_policies[].reporter_trust_hold # TODO #11854
 project.repo_policies[].self_authorization_hold # TODO #11854

@@ -110,13 +110,21 @@ type Server struct {
 	// the status snapshot, served until its TTL lapses (stage_tracker.go).
 	stageTrackerCache   stageTrackerCache
 	stageTrackerCacheMu sync.Mutex
+	// evidenceHB is the background-refreshed evidence aggregate the hub
+	// heartbeat reads (evidence_heartbeat.go); zero value is ready to use.
+	evidenceHB evidenceHeartbeatCache
 	// stageTrackerServed flips once /api/stage-tracker has been built; it
 	// gates the SSE nudge UpdateStatusIfFresh sends after a publish.
 	stageTrackerServed bool
 	// webhookRefresh re-reads the PR or issue a GitHub webhook named and
 	// patches its tracker row (webhook_tracker_refresh.go); built lazily.
-	webhookRefresh         *webhookTrackerRefresher
-	webhookRefreshOnce     sync.Once
+	webhookRefresh     *webhookTrackerRefresher
+	webhookRefreshOnce sync.Once
+	// webhookPatches remembers the webhook re-reads applied to the status
+	// snapshot so UpdateStatusIfFresh can re-apply them to a snapshot the
+	// governor built from an older enumeration (webhook_tracker_refresh.go).
+	// Guarded by statusMu.
+	webhookPatches         map[string]webhookPatchEntry
 	sidebar                interface{}
 	sidebarMu              sync.RWMutex
 	actionsJWKSMu          sync.Mutex
@@ -1093,10 +1101,15 @@ type FrontendRepo struct {
 	// forgestate cache reported in its totals but could not list as item
 	// rows. Issues/PRs count only listed items (the canonical open-items set,
 	// open_items.go), so these are shown beside the total, not inside it.
-	UnlistedIssues int                       `json:"unlistedIssues,omitempty"`
-	UnlistedPRs    int                       `json:"unlistedPrs,omitempty"`
-	WorkBreakdown  *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
-	SLA            *timeline.SLARepoReport   `json:"sla,omitempty"`
+	UnlistedIssues int `json:"unlistedIssues,omitempty"`
+	UnlistedPRs    int `json:"unlistedPrs,omitempty"`
+	// IssuesSyncing means the repo lists open pull requests but no open
+	// issues while its issue side is stale or unlisted: the issue list has
+	// not come back for real yet, so the printed 0 is a pending fetch, not
+	// an empty backlog (hosted hive, 2026-10-22). Set by markIssuesSyncing.
+	IssuesSyncing bool                      `json:"issuesSyncing,omitempty"`
+	WorkBreakdown *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
+	SLA           *timeline.SLARepoReport   `json:"sla,omitempty"`
 	// ActionableIssues and OpenPrs are the items the agents may act on: the
 	// enumeration's actionable sets, minus anything held or exempt. Every
 	// automated consumer — the contribute queue, the mergeable counter, the
@@ -1632,6 +1645,11 @@ func (s *Server) Start() error {
 		// answer even when a saturated node is slow to build the static cache.
 		go idx.Precompress()
 	}
+	// Viewer-independent cost sampling (#13483); the ring's throttle is the
+	// same interval, so this is exactly one snapshot per period.
+	costTicker := time.NewTicker(costHistoryMinIntervalMs * time.Millisecond)
+	defer costTicker.Stop()
+	go s.runCostSampler(costTicker.C)
 	return srv.Serve(ln)
 }
 
@@ -2684,6 +2702,10 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	}
 	version, commit := fleetReportBuildInfo()
 	s.AttachFleetReport(status, version, commit, !s.FleetReportFilesUpstream())
+	// The governor built this snapshot from the enumeration its cycle began
+	// with; webhook re-reads that landed since (a PR closed mid-cycle) are
+	// re-applied so the publish cannot bring a gone row back.
+	s.replayWebhookPatchesLocked(status, time.Now())
 	s.statusSeq++
 	status.StatusSeq = s.statusSeq
 	status.StatusStaleDrops = s.statusStaleDrops
@@ -3997,6 +4019,61 @@ func (s *Server) AppendCostHistoryFull(usd float64, agents map[string]float64, m
 	}
 	if s.costSeries().Append(entry) {
 		s.foldCostRollups(time.UnixMilli(entry.Timestamp))
+	}
+}
+
+// sampleCostHistory records one estimated-cost snapshot — the same all-time
+// cumulative estimate GET /api/cost returns, with the per-agent map that feeds
+// the agent cards' spend-over-window display and the per-model map that feeds
+// the cost table's mini sparklines (unpriced models included — tokens still
+// trend). The ring's own 5-minute throttle makes extra calls no-ops, so it is
+// safe to call from both the ticker and a viewer's poll. Returns true when a
+// snapshot was actually appended.
+func (s *Server) sampleCostHistory() bool {
+	// Nothing scanned yet (startup, or no collector): do not record a $0 point
+	// that the lineage detector would read as a reset to zero.
+	if s.deps == nil || s.deps.Tokens == nil || s.deps.Tokens.Summary() == nil {
+		return false
+	}
+	est := s.estimatedCost()
+	perAgent := make(map[string]float64, len(est.ByAgent))
+	for _, row := range est.ByAgent {
+		if row.USD > 0 {
+			perAgent[row.Name] = row.USD
+		}
+	}
+	perModel := make(map[string]CostModelSnap, len(est.ByModel))
+	for _, row := range est.ByModel {
+		if row.Input > 0 || row.Output > 0 || row.USD > 0 {
+			perModel[row.Name] = CostModelSnap{Input: row.Input, Output: row.Output, USD: row.USD}
+		}
+	}
+	entry := CostHistoryEntry{
+		Timestamp: collect.NowMillis(),
+		USD:       est.TotalUSD,
+	}
+	if len(perAgent) > 0 {
+		entry.Agents = perAgent
+	}
+	if len(perModel) > 0 {
+		entry.Models = perModel
+	}
+	if !s.costSeries().Append(entry) {
+		return false
+	}
+	s.foldCostRollups(time.UnixMilli(entry.Timestamp))
+	return true
+}
+
+// runCostSampler takes a cost snapshot on every tick until ticks is closed.
+// Before #13483 the only sampler was GET /api/knowledge/stats, i.e. a browser
+// polling the dashboard: with no viewer the history had multi-day holes (296 h
+// on one spoke) that the trend chart drew as "$0 spent" and whose spend then
+// landed as one step the moment someone opened the page. Start() drives this
+// from a real ticker; tests feed the channel directly.
+func (s *Server) runCostSampler(ticks <-chan time.Time) {
+	for range ticks {
+		s.sampleCostHistory()
 	}
 }
 

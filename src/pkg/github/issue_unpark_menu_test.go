@@ -322,18 +322,18 @@ func TestSweepIssueUnparkHonoursRenamedParkingLabels(t *testing.T) {
 	if len(result.Unparked) != 1 || result.Unparked[0].Number != 61 {
 		t.Fatalf("expected the renamed needs-human issue un-parked, got %+v", result.Unparked)
 	}
-	// A decision never lifts a hold for a person (hivecommons/hive#12680):
-	// the renamed needs-human label stays, like the built-in one, and hold is
-	// never touched.
-	if len(rec.removed[61]) != 0 {
-		t.Fatalf("expected no label removed (renamed needs-human stays, never hold), got %v", rec.removed[61])
+	// The command lifts needs-human whoever added it (hivecommons/docs#419):
+	// the renamed label goes like the built-in one would, and hold is never
+	// touched.
+	if len(rec.removed[61]) != 1 || rec.removed[61][0] != "owner-input" {
+		t.Fatalf("expected only the renamed needs-human label removed (never hold), got %v", rec.removed[61])
 	}
 	posted := strings.Join(rec.posted[61], "\n")
 	if !strings.Contains(posted, unparkNoticeMarker) {
 		t.Fatalf("a renamed parking label must get the notice, got %v", rec.posted[61])
 	}
-	if !strings.Contains(posted, "stays") {
-		t.Fatalf("accepted reply must say the needs-human label stays, got %v", rec.posted[61])
+	if !strings.Contains(posted, "cleared") {
+		t.Fatalf("accepted reply must say the needs-human label cleared, got %v", rec.posted[61])
 	}
 	if len(rec.posted[62]) != 0 || len(rec.removed[62]) != 0 {
 		t.Fatalf("needs-spec stays outside the un-park commands, got posted=%v removed=%v", rec.posted[62], rec.removed[62])

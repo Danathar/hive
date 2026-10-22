@@ -39,7 +39,8 @@ const (
 // pkg/dashboard/api_*.go (config_* and approval decisions),
 // pkg/dashboard/{api_auth,copilot_auth,claude_auth,backup_key,gateways}.go
 // (auth/key/gateway changes), pkg/agentaudit/agentaudit.go (agent, token and
-// lease actions), pkg/github/write_surface*.go (write refusals and signed
+// lease actions, plus the relay_token_minted / relay_task_revoked credential
+// boundaries of the contributor relay), pkg/github/write_surface*.go (write refusals and signed
 // commit reauthorship), and pkg/convergence/publish/publisher.go (publication
 // refusals). Keep it explicit so the collapsed Audit Log risk chip changes
 // only when a real audit action name is added or reclassified.
@@ -117,6 +118,8 @@ var auditSensitiveActions = map[string]bool{
 	"model_discovery_failed":                true,
 	"plan_approve":                          true,
 	"plan_reject":                           true,
+	"relay_task_revoked":                    true,
+	"relay_token_minted":                    true,
 	"run_stage_reset":                       true,
 	"signed_commit_reauthored":              true,
 	"tool_approval":                         true,
@@ -584,6 +587,28 @@ func auditRequestSensitiveOnly(r *http.Request) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
+// auditRequestContributor returns the ?contributor=<login> filter, or "" when
+// the request does not narrow the page to one contributor.
+func auditRequestContributor(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("contributor"))
+}
+
+// auditContributorEntries keeps the entries whose user is login (GitHub logins
+// are case-insensitive), newest first as given, capped at limit.
+func auditContributorEntries(entries []AuditEntry, login string, limit int) []AuditEntry {
+	filtered := make([]AuditEntry, 0)
+	for i := range entries {
+		if !strings.EqualFold(entries[i].User, login) {
+			continue
+		}
+		filtered = append(filtered, entries[i])
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered
+}
+
 func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Hive-Role")
 	if !config.RoleAtLeast(role, config.RoleReadWrite) {
@@ -606,10 +631,20 @@ func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	summary := auditLogSummary(summaryEntries, now)
-	if auditRequestSensitiveOnly(r) {
+	contributor := auditRequestContributor(r)
+	switch {
+	case auditRequestSensitiveOnly(r):
 		entries = auditSensitiveWindowEntries(summaryEntries, now)
-	} else {
+	case contributor != "":
+		// Scan the whole ring, like ?sensitive=1, so a contributor's rows
+		// older than the default 200-row page can still be found.
+		entries = append([]AuditEntry(nil), summaryEntries...)
 		auditMarkSensitiveEntries(entries)
+	default:
+		auditMarkSensitiveEntries(entries)
+	}
+	if contributor != "" {
+		entries = auditContributorEntries(entries, contributor, auditMaxEntries)
 	}
 	if summary.Last != nil {
 		summary.Last.Sensitive = auditEntryIsSensitive(*summary.Last)

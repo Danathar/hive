@@ -296,7 +296,7 @@ func TestRestoreAgentAdvisor(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{Agents: tc.agents}
+			cfg := &config.Config{AgentRuntimeConfig: config.AgentRuntimeConfig{Agents: tc.agents}}
 			restoreAgentAdvisor(cfg, "scanner", old)
 			got, ok := cfg.Agents["scanner"]
 			if ok != tc.wantExists {

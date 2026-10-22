@@ -57,10 +57,12 @@ func reviewSwarmConfig() *config.Config {
 			ReviewerAgents:  []string{"reviewer"},
 			FixerAgent:      "scanner",
 		},
-		Agents: map[string]config.AgentConfig{
-			"reviewer": {Enabled: true, Role: "review specialist"},
-			"scanner":  {Enabled: true, Role: "scanner"},
-			"disabled": {Enabled: false, Role: "review"},
+		AgentRuntimeConfig: config.AgentRuntimeConfig{
+			Agents: map[string]config.AgentConfig{
+				"reviewer": {Enabled: true, Role: "review specialist"},
+				"scanner":  {Enabled: true, Role: "scanner"},
+				"disabled": {Enabled: false, Role: "review"},
+			},
 		},
 	}
 }
@@ -420,5 +422,38 @@ func TestPlanReviewDispatch_PlanMatchCarriesPlanWave(t *testing.T) {
 	}
 	if planWaveFor(cfg, stores, epic.ID, "") != "" {
 		t.Fatal("planWaveFor rendered a wave with plan_match off")
+	}
+}
+
+// The author's base is resolved over every configured lane: a PR opened by a
+// replica that is now disabled, or one a reduced replicas: count no longer
+// materialises, still maps to its base so the family stays excluded
+// (hivecommons/hive#13552).
+func TestReviewAuthorBaseUsesFullConfiguredAgentSet(t *testing.T) {
+	cfg := &config.Config{AgentRuntimeConfig: config.AgentRuntimeConfig{
+		Agents: map[string]config.AgentConfig{
+			"alpha":   {Enabled: true},
+			"alpha-2": {Enabled: true, ReplicaOf: "alpha"},
+			"alpha-3": {Enabled: false, ReplicaOf: "alpha"},
+			"beta":    {Enabled: true},
+		},
+	}}
+	if _, ok := cfg.EnabledAgents()["alpha-3"]; ok {
+		t.Fatal("fixture: alpha-3 should be disabled")
+	}
+	tests := map[string]string{
+		"alpha-3": "alpha",   // disabled replica
+		"alpha-4": "alpha",   // replica retired by a reduced replicas: count
+		"alpha-2": "alpha",   // enabled replica
+		"alpha":   "alpha",   // base
+		"beta":    "beta",    // ordinary lane
+		"gamma-2": "gamma-2", // unknown lane, no configured base
+		"alpha-x": "alpha-x", // not a replica suffix
+		"":        "",
+	}
+	for author, want := range tests {
+		if got := reviewAuthorBase(cfg, author); got != want {
+			t.Errorf("reviewAuthorBase(%q) = %q, want %q", author, got, want)
+		}
 	}
 }

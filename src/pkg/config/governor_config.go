@@ -36,36 +36,19 @@ type GovernorConfig struct {
 	ExplainMode string        `yaml:"explain_mode,omitempty"`
 	Labels      LabelsConfig  `yaml:"labels"`
 	Sensing     SensingConfig `yaml:"sensing"`
-	// Watchdog configures the per-agent self-healing reconciler (RFC #4665).
-	// Zero value = enabled with the RFC defaults; see pkg/config/watchdog.go
-	// for why defaults resolve lazily instead of via applyDefaults.
-	Watchdog WatchdogConfig      `yaml:"watchdog,omitempty"`
-	Health   HealthConfig        `yaml:"health"`
-	Budget   BudgetConfig        `yaml:"budget"`
-	Logging  LoggingConfig       `yaml:"logging"`
-	LiteLLM  LiteLLMConfig       `yaml:"litellm"`
-	VLLM     InferenceAuthConfig `yaml:"vllm"`
-	LLMD     InferenceAuthConfig `yaml:"llm-d"`
-	// Bob holds the IBM bobshell CLI backend's API-key location. Required for
-	// agents with backend "bob": bobshell's browser SSO flow cannot complete in
-	// a headless pod.
-	Bob BobConfig `yaml:"bob"`
+	// AgentRuntimeGovernorConfig groups the governor-nested keys the agent
+	// runtime owns (watchdog, engines, gateways, trajectory, rotation).
+	// Inlined so the YAML shape is unchanged (hivecommons/hive#13536).
+	AgentRuntimeGovernorConfig `yaml:",inline"`
+	Health                     HealthConfig  `yaml:"health"`
+	Budget                     BudgetConfig  `yaml:"budget"`
+	Logging                    LoggingConfig `yaml:"logging"`
 	// Backup holds the location of the self-service backup encryption key.
 	// It records a PATH only, never the key value: hosted spoke owners have no
 	// deployment-env access, so the key has to be settable through this
 	// (governor) config surface rather than only through HIVE_BACKUP_KEY.
-	Backup     BackupConfig     `yaml:"backup,omitempty" json:"backup,omitempty"`
-	Trajectory TrajectoryConfig `yaml:"trajectory"`
-	Replan     ReplanConfig     `yaml:"replan"`
-	// KickLimits caps the issue and PR lists in every kick prompt
-	// (hivecommons/hive#7368). Absent = defaults (100 issues, 50 PRs).
-	KickLimits KickLimitsConfig `yaml:"kick_limits,omitempty" json:"kick_limits,omitempty"`
-	// Gateways is the list of named model gateways (OpenAI-compatible endpoints
-	// like OpenRouter, a LiteLLM proxy, vLLM, or llm-d). An agent routes through
-	// a gateway by naming it as its backend. When empty, a single implicit
-	// gateway named "litellm" is synthesized from the legacy LiteLLM block above
-	// so existing hives keep working with zero config change. See ResolveGateway.
-	Gateways []GatewayConfig `yaml:"gateways"`
+	Backup BackupConfig `yaml:"backup,omitempty" json:"backup,omitempty"`
+	Replan ReplanConfig `yaml:"replan"`
 	// AttributionTrailer controls the VISIBLE invocation-attribution line
 	// ("— hive: agent=… backend=… model=…") appended at creation time to the
 	// body of PRs the hive opens for agents (the PR-request watcher) and issues
@@ -161,15 +144,6 @@ type GovernorConfig struct {
 	// the "Open Issue" buttons file gap issues (GitHub, or the work source).
 	// Zero value = GitHub, the historical behavior. See ACMMConfig.
 	ACMM ACMMConfig `yaml:"acmm,omitempty" json:"acmm,omitempty"`
-
-	// Rotation configures automatic provider failover when a provider's
-	// subscription or credit is exhausted. See RFC #3958.
-	Rotation RotationConfig `yaml:"rotation,omitempty" json:"rotation,omitempty"`
-
-	// ProviderBudget tunes the response to a PROVIDER spending-limit refusal
-	// (#4294) — the gateway declining to spend more money, as distinct from the
-	// hive's own token Budget above. See ProviderBudgetConfig.
-	ProviderBudget ProviderBudgetConfig `yaml:"provider_budget,omitempty" json:"provider_budget,omitempty"`
 
 	// FleetReport controls spoke self-reporting to hivecommons/hive. The default
 	// is dry-run: operators must explicitly set file_upstream=true before any
@@ -407,7 +381,7 @@ type StageLabelsConfig struct {
 
 // StageEngineConfig is governor.labels.stage.engine (ADR-0025).
 type StageEngineConfig struct {
-	// Mode is off, shadow or enforce (default shadow). shadow: the engine
+	// Mode is off, shadow or enforce (default enforce). shadow: the engine
 	// derives every item alongside the sweep's own derivation, writes the
 	// sweep's result and records where the two disagree
 	// (stage_shadow_mismatch_total). enforce: the engine's result is
@@ -418,12 +392,21 @@ type StageEngineConfig struct {
 	Mode string `yaml:"mode,omitempty"`
 }
 
-// EffectiveMode parses Mode; empty and unparsable values yield the default
-// (shadow), so a bad value never silently enforces.
+// DefaultStageEngineMode is what an unset governor.labels.stage.engine.mode
+// yields: enforce, since the ADR-0025 rollout gates held on hive's own spoke
+// (48 h shadow with zero mismatches, then 48 h clean enforce). Set the key to
+// shadow or off to opt out.
+const DefaultStageEngineMode = stageengine.ModeEnforce
+
+// EffectiveMode parses Mode. Unset yields DefaultStageEngineMode; an
+// unparsable value yields shadow, so a typo never silently enforces.
 func (c StageEngineConfig) EffectiveMode() stageengine.Mode {
+	if strings.TrimSpace(c.Mode) == "" {
+		return DefaultStageEngineMode
+	}
 	m, err := stageengine.ParseMode(c.Mode)
 	if err != nil {
-		return stageengine.DefaultMode
+		return stageengine.ModeShadow
 	}
 	return m
 }

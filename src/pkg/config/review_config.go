@@ -311,6 +311,10 @@ type ReviewConfig struct {
 	// hold (reason prefix review-dispatch-exhausted). 0 means
 	// DefaultMaxRedispatch.
 	MaxRedispatch int `yaml:"max_redispatch,omitempty" json:"max_redispatch,omitempty"`
+	// HeadMaxRetries caps how many times one head's review of a perspective
+	// may be re-sent when it posts no verdict (agents.<name>.review_heads,
+	// hivecommons/hive#13542). 0 means max_redispatch applies.
+	HeadMaxRetries int `yaml:"head_max_retries,omitempty" json:"head_max_retries,omitempty"`
 	// HumanDecisionLabel names an EXISTING repo label to apply when the review
 	// swarm holds a PR for a human. The review comment's in-body marker is
 	// always the primary signal and never depends on this: a label makes the

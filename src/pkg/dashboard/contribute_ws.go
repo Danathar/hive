@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hivecommons/hive/pkg/advisory"
+	"github.com/hivecommons/hive/pkg/agentaudit"
 	"github.com/hivecommons/hive/pkg/classify"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/fixqueue"
@@ -239,6 +240,15 @@ type ContributorConnection struct {
 	externalIncarnation      string
 	externalWorkbenchVersion string
 	mu                       sync.Mutex
+	// auditTasks, auditAcceptedTask and auditCloseReason feed the relay_*
+	// audit rows (hivecommons/hive#13441): tasks assigned over this socket,
+	// the last task whose acceptance was audited (a reconnecting relay
+	// re-asserts task_accepted), and why the hub closed the socket (empty
+	// means the client went away). Guarded by mu.
+	auditTasks        int
+	auditAcceptedTask string
+	auditCloseReason  string
+
 	// writeMu serializes ALL writes to this connection's ws. gorilla/websocket
 	// forbids concurrent writes to one connection ("Applications are responsible
 	// for ensuring that no more than one goroutine calls the write methods
@@ -282,6 +292,16 @@ type WSStandbyLane struct {
 	Paused            bool   `json:"paused,omitempty"`
 	QueueDepth        int    `json:"queue_depth,omitempty"`
 	Qualified         bool   `json:"qualified,omitempty"`
+}
+
+// setAuditCloseReason records why the hub is closing this socket, for the
+// relay_disconnected row. The first reason wins; unset means the client left.
+func (c *ContributorConnection) setAuditCloseReason(reason string) {
+	c.mu.Lock()
+	if c.auditCloseReason == "" {
+		c.auditCloseReason = reason
+	}
+	c.mu.Unlock()
 }
 
 // send serializes writes to this connection's websocket with writeMu, satisfying
@@ -784,6 +804,16 @@ type WSMessage struct {
 	Repositories []string `json:"repositories,omitempty"`
 	Accepted     *bool    `json:"accepted,omitempty"`
 	Unknown      []string `json:"unknown,omitempty"`
+	// AuditShareRequested is the relay audit level this hive asks contributors
+	// to share (hub.contribute_audit_share_request, hivecommons/hive#13458),
+	// advertised on auth_ok so a contributor sees it before opting in. Empty
+	// requests nothing. A request only: admission never depends on it.
+	AuditShareRequested string `json:"audit_share_requested,omitempty"`
+	// AuditShare carries the contributor's OPT-IN audit attestation on
+	// task_complete / task_failed (#13458): the local audit rows for the task,
+	// up to the level the contributor consented to share. Additive: old hubs
+	// ignore it and relays without consent never send it.
+	AuditShare *RelayAuditShare `json:"audit_share,omitempty"`
 }
 
 type VerdictEvidence struct {
@@ -971,6 +1001,9 @@ type ContributeWSHub struct {
 	// upgrade path and from deferred cleanup, and must never contend with or
 	// re-enter h.mu.
 	pendingConns atomic.Int64
+	// lastRelayConnectNanos is when a relay last completed authentication;
+	// the relay_audit_coverage posture check reads it.
+	lastRelayConnectNanos atomic.Int64
 	// handlers tracks live HandleWS invocations so a caller (in practice:
 	// tests) can wait for hijacked websocket handlers to fully unwind.
 	// httptest's Server.Close does not wait for hijacked connections, so a
@@ -1885,6 +1918,7 @@ func (h *ContributeWSHub) bookAndRevokeReleased(targets []releaseTarget, reason,
 		// #2568: record the operator's reason in the activity log so the release is
 		// auditable (the reason rides in the Task field alongside the task id).
 		h.addActivity(username, activityVerb+": "+reason, tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, tgt.task.TaskID)
+		h.auditRelay(tgt.conn, agentaudit.AuditRelayTaskRevoked, &tgt.task, "reason", auditRelayText(reason))
 		// Push the EXISTING task_revoke message so the relay stops cleanly and
 		// re-readies. Best-effort: if the socket is already gone the disconnect path
 		// has (or will) release it anyway; the cooldown above is already booked. The
@@ -1928,6 +1962,7 @@ func (h *ContributeWSHub) DisconnectContributor(contributorID, reason string) in
 		if match {
 			// Revoke any server-issued lease so a reconnect cannot re-adopt the task.
 			h.revokeLease(identityOf(c), taskID)
+			c.setAuditCloseReason("revoked")
 			closing = append(closing, c)
 		}
 	}
@@ -2599,6 +2634,14 @@ func (s *wsSession) releaseOnDisconnect() {
 			h.bookAbandonmentAfterGrace(s.contributor, abandonedTask, abandonedTaskAt)
 		}
 		h.logger.Info("[contribute-ws] disconnected", "id", s.connID, "username", s.contributor.profile.GitHubUsername)
+		s.contributor.mu.Lock()
+		closeReason, closedTasks := s.contributor.auditCloseReason, s.contributor.auditTasks
+		s.contributor.mu.Unlock()
+		if closeReason == "" {
+			closeReason = "client"
+		}
+		h.auditRelay(s.contributor, agentaudit.AuditRelayDisconnected, nil,
+			"reason", closeReason, "uptime_s", int(time.Since(s.contributor.connectedAt).Seconds()), "tasks", closedTasks)
 		h.addActivity(s.contributor.profile.GitHubUsername, "left", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, "", s.contributor.advisor())
 	}
 	_ = s.conn.Close()
@@ -2670,6 +2713,7 @@ func (h *ContributeWSHub) bookAbandonmentAfterGrace(c *ContributorConnection, ta
 		}
 		h.addActivity(c.profile.GitHubUsername, "released: connection lost",
 			c.role, c.cliBackend, c.model, c.reasoningEffort, taskDescOf(task))
+		h.auditRelay(c, agentaudit.AuditRelayTaskAbandoned, task)
 		h.appendAbandonedRun(c, task, abandonCauseDisconnect, assignedAt)
 	}
 	grace := disconnectAbandonGrace()
@@ -2717,6 +2761,23 @@ func (h *ContributeWSHub) taskFinishedRecently(taskID string) bool {
 	return ok && time.Since(t) <= recentlyFinishedTTL
 }
 
+// relayTierPermissions is the permission set advertised on auth_ok for a trust
+// tier, and recorded as the scopes of a relay_token_minted audit row.
+func relayTierPermissions(tier string) []string {
+	switch tier {
+	case "newcomer":
+		return []string{"issues:write"}
+	case "contributor":
+		return []string{"issues:write", "contents:write", "pulls:write"}
+	case "trusted", "merger":
+		return []string{"issues:write", "contents:write", "pulls:write", "checks:read"}
+	case "advisor":
+		return []string{"metadata:read", "pulls:read"}
+	default:
+		return []string{"metadata:read"}
+	}
+}
+
 // handleAuthResponse is the handshake phase: it verifies the registration token
 // and challenge signature, admits or refuses the contributor, and registers the
 // connection. It reports stop=true when the socket must close.
@@ -2737,6 +2798,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 	}
 
 	if profile.TrustTier == "revoked" {
+		h.auditRelayAs(profile.GitHubUsername, "", agentaudit.AuditRelayRejected, nil, "reason", "revoked")
 		_ = sendJSON(s.conn, WSMessage{Type: "auth_failed", Reason: "Access has been revoked"})
 		closeWithReason(s.conn, websocket.ClosePolicyViolation, "access has been revoked")
 		return true
@@ -2749,6 +2811,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		}
 		_ = sendJSON(s.conn, WSMessage{Type: "auth_failed", Reason: reason, AcceptedModels: acceptedModels})
 		h.logger.Info("[contribute-ws] model rejected", "username", profile.GitHubUsername, "model", msg.Model)
+		h.auditRelayAs(profile.GitHubUsername, "", agentaudit.AuditRelayRejected, nil, "reason", "model_not_accepted")
 		closeWithReason(s.conn, websocket.ClosePolicyViolation, "model not accepted by this hive")
 		return true
 	}
@@ -2762,6 +2825,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		}
 		_ = sendJSON(s.conn, WSMessage{Type: "auth_failed", Reason: reason, MinReasoningEffort: floor})
 		h.logger.Info("[contribute-ws] reasoning effort rejected", "username", profile.GitHubUsername, "backend", msg.CLIBackend, "effort", msg.ReasoningEffort, "floor", floor)
+		h.auditRelayAs(profile.GitHubUsername, "", agentaudit.AuditRelayRejected, nil, "reason", "effort_below_floor")
 		closeWithReason(s.conn, websocket.ClosePolicyViolation, "reasoning effort below this hive's floor")
 		return true
 	}
@@ -2779,6 +2843,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 			h.logger.Warn("[contribute-ws] agent role claim rejected",
 				"username", profile.GitHubUsername, "tier", profile.TrustTier,
 				"role", requestedRole, "reason", reason)
+			h.auditRelayAs(profile.GitHubUsername, "", agentaudit.AuditRelayRejected, nil, "reason", "role_claim_rejected")
 			closeWithReason(s.conn, websocket.ClosePolicyViolation, "agent role claim rejected")
 			return true
 		}
@@ -2911,21 +2976,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		h.pendingConns.Add(-1)
 	}
 
-	var perms []string
-	switch profile.TrustTier {
-	case "newcomer":
-		perms = []string{"issues:write"}
-	case "contributor":
-		perms = []string{"issues:write", "contents:write", "pulls:write"}
-	case "trusted":
-		perms = []string{"issues:write", "contents:write", "pulls:write", "checks:read"}
-	case "merger":
-		perms = []string{"issues:write", "contents:write", "pulls:write", "checks:read"}
-	case "advisor":
-		perms = []string{"metadata:read", "pulls:read"}
-	default:
-		perms = []string{"metadata:read"}
-	}
+	perms := relayTierPermissions(profile.TrustTier)
 
 	announcement := (*config.ContributeAnnouncement)(nil)
 	needsDecisionLabel := (config.HubConfig{}).ContributeNeedsDecisionLabelOrDefault()
@@ -2953,6 +3004,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		Announcement:                 announcement,
 		ContributeNeedsDecisionLabel: &needsDecisionLabel,
 		HelpLinks:                    h.server.contributeHelpLinks(),
+		AuditShareRequested:          h.server.contributeAuditShareRequest(),
 	}); err != nil {
 		h.logger.Warn("[contribute-ws] failed to send auth_ok", "username", profile.GitHubUsername, "error", err)
 		return true
@@ -2964,6 +3016,11 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 	}
 
 	s.deliverPendingOperatorMessages()
+
+	h.lastRelayConnectNanos.Store(time.Now().UnixNano())
+	h.auditRelay(s.contributor, agentaudit.AuditRelayConnected, nil,
+		"backend", auditRelayText(msg.CLIBackend), "model", auditRelayText(msg.Model), "tier", profile.TrustTier,
+		"relay_version", auditRelayText(declared.RelayProtocolVersion))
 
 	h.logger.Info("[contribute-ws] authenticated",
 		"id", s.connID,
@@ -3585,6 +3642,12 @@ func (s *wsSession) handleReady(msg WSMessage) (stop bool) {
 		if task.Role != "" {
 			taskDesc = fmt.Sprintf("contributor ran %s task: %s", task.Role, taskDesc)
 		}
+		s.contributor.mu.Lock()
+		s.contributor.auditTasks++
+		s.contributor.mu.Unlock()
+		h.auditRelay(s.contributor, agentaudit.AuditRelayTaskAssigned,
+			&WSTaskAssign{TaskID: task.TaskID, Repo: task.Repo, Number: task.Number},
+			"generation", task.TaskGen, "kind", task.Kind, "mcp", false)
 		h.addActivity(s.contributor.profile.GitHubUsername, "picked up", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, taskDesc, s.contributor.advisor())
 		h.logger.Info("[contribute-ws] task assigned",
 			"username", s.contributor.profile.GitHubUsername,
@@ -3666,9 +3729,27 @@ func (s *wsSession) handleTaskAccepted(msg WSMessage) {
 	// already went out) this is a no-op, and a relay that re-asserts
 	// task_accepted on reconnect cannot re-deliver.
 	if s.contributor != nil {
+		s.auditTaskAccepted(msg.TaskID)
 		h.acceptTaskCredential(s.contributor, msg.TaskID)
 	}
 
+}
+
+// auditTaskAccepted records the relay's first task_accepted for the task this
+// connection holds; a stale task id or a repeat assertion is not audited.
+func (s *wsSession) auditTaskAccepted(taskID string) {
+	c := s.contributor
+	c.mu.Lock()
+	var task *WSTaskAssign
+	if c.currentTask != nil && c.currentTask.TaskID == taskID && c.auditAcceptedTask != taskID {
+		t := *c.currentTask
+		task = &t
+		c.auditAcceptedTask = taskID
+	}
+	c.mu.Unlock()
+	if task != nil {
+		s.h.auditRelay(c, agentaudit.AuditRelayTaskAccepted, task)
+	}
 }
 
 // handleTaskDeclined handles #6833: contributor-local quota preflight may
@@ -3705,6 +3786,7 @@ func (s *wsSession) handleTaskDeclined(msg WSMessage) {
 		contributor.tokenMintedAt = time.Time{}
 		contributor.mu.Unlock()
 		h.revokeLease(identityOf(contributor), msg.TaskID)
+		h.auditRelay(contributor, agentaudit.AuditRelayTaskDeclined, declined, "reason", auditRelayText(msg.Reason))
 		if msg.Reason == taskDeclinedOutOfScope {
 			h.unrecordAssignment(identityOf(contributor), assignedAt)
 		}
@@ -3872,6 +3954,8 @@ func (s *wsSession) handleTaskProgress(msg WSMessage) {
 					"reason", reason,
 				)
 				h.revokeLease(identity, msg.TaskID)
+				h.auditRelay(s.contributor, agentaudit.AuditRelayTaskRevoked,
+					&WSTaskAssign{TaskID: msg.TaskID, Repo: canonRepo, Number: msg.Number}, "reason", auditRelayText(reason))
 				_ = sendJSON(s.conn, WSMessage{Type: "task_revoke", Seq: h.nextSeq(), TaskID: msg.TaskID, Reason: reason})
 				return
 			}
@@ -4411,6 +4495,10 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			if !taskAssignedAt.IsZero() {
 				runRec.DurationS = time.Since(taskAssignedAt).Seconds()
 			}
+			h.auditRelay(s.contributor, agentaudit.AuditRelayTaskCompleted, completedTask,
+				"pr_url", verifiedPR, "verdict", verdict, "duration_s", int(runRec.DurationS),
+				"model", auditRelayText(s.contributor.model))
+			h.attestRelayAudit(s.contributor, completedTask, msg.AuditShare)
 			h.appendTaskRun(runRec)
 			// #6450: a genuine completion proves the runtime works — clear
 			// the contributor's fast-failure streak.
@@ -4639,6 +4727,9 @@ func (s *wsSession) handleTaskFailed(msg WSMessage) {
 			if !taskAssignedAt.IsZero() {
 				runRec.DurationS = time.Since(taskAssignedAt).Seconds()
 			}
+			h.auditRelay(s.contributor, agentaudit.AuditRelayTaskFailed, failedTask,
+				"class", failureKind, "duration_s", int(runRec.DurationS))
+			h.attestRelayAudit(s.contributor, failedTask, msg.AuditShare)
 			h.appendTaskRun(runRec)
 			// #6450: book this failure against the CONTRIBUTOR's fast-failure
 			// streak (hub-measured duration; an unknown/adopted-task duration
@@ -4722,6 +4813,7 @@ func (h *ContributeWSHub) heartbeatLoopWithTicks(c *ContributorConnection, ticks
 				"last_pong_age_ms", time.Since(lastPong).Milliseconds(),
 				"heartbeat_timeout_ms", timeout.Milliseconds(),
 			)
+			c.setAuditCloseReason("heartbeat_timeout")
 			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat timeout: no pong within the heartbeat window")
 			return
 		}
@@ -4983,6 +5075,11 @@ func (h *ContributeWSHub) cleanupLoop() {
 				username := ""
 				if c.profile != nil {
 					username = c.profile.GitHubUsername
+				}
+				// Hub-initiated close: without this the relay_disconnected row falls
+				// back to reason=client. c.mu is already held, so set it inline.
+				if stale && c.auditCloseReason == "" {
+					c.auditCloseReason = "heartbeat_timeout"
 				}
 				c.mu.Unlock()
 				if stale {
@@ -5286,6 +5383,7 @@ func (h *ContributeWSHub) DrainForShutdown() int {
 		// Nil-guard mirrors cleanupLoop: a registered connection may carry no live
 		// socket (test-injected in-flight entry, or one torn down elsewhere).
 		if c != nil && c.ws != nil {
+			c.setAuditCloseReason("server_shutdown")
 			conns = append(conns, c.ws)
 		}
 	}

@@ -1054,6 +1054,20 @@ select.admin-act{min-width:0;max-width:100%%}
 .cc-mine-tile.is-pr .cc-mine-val{color:var(--cc-green)}
 .cc-mine-lbl{font-size:var(--fs-xs);letter-spacing:.03em;text-transform:uppercase;color:var(--text-muted);margin-top:3px}
 .cc-mine-sub{font-size:var(--fs-xs);color:var(--text-faint);margin-top:var(--sp-1)}
+/* Requested relay audit level (#13458): shown before the setup commands; toggled via the hidden attribute. */
+.cc-audit-share{margin-bottom:var(--sp-5);background:var(--surface-2);border:1px solid var(--line-strong);border-left:3px solid var(--cc-accent);border-radius:var(--r);padding:var(--sp-5) var(--sp-6);font-size:var(--fs-base);color:var(--text);line-height:1.5}
+.cc-audit-share strong{color:var(--text)}
+.cc-audit-share a{color:var(--cc-accent)}
+/* Your assignments (#13454): the caller's own relay_* audit rows, read-only. */
+.cc-assign-card{margin-bottom:var(--sp-7)}
+.cc-assign-card[hidden]{display:none}
+.cc-assign-list{list-style:none;margin:0;padding:var(--sp-4) var(--sp-7);max-height:280px;overflow-y:auto}
+.cc-assign-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--sp-3);padding:var(--sp-2) 0;border-bottom:1px solid var(--line-subtle);font-size:var(--fs-base)}
+.cc-assign-note{padding:var(--sp-0) var(--sp-7) var(--sp-5);margin:var(--sp-0)}
+.cc-assign-row:last-child{border-bottom:none}
+.cc-assign-action{font-family:var(--font-mono,monospace);font-weight:600;color:var(--text)}
+.cc-assign-when{color:var(--text-faint);font-size:var(--fs-xs);margin-left:auto}
+.cc-assign-detail{flex-basis:100%%;color:var(--text-muted);font-size:var(--fs-xs);overflow-wrap:anywhere}
 .cc-mine-eligible{grid-column:1/-1;font-size:.78rem;color:var(--status-attention);background:color-mix(in srgb,var(--status-attention) var(--component-tint-soft),transparent);border:var(--line-width) solid color-mix(in srgb,var(--status-attention) var(--component-border),transparent);border-radius:8px;padding:var(--sp-4) 10px}
 /* When the body carries a message instead of tiles (signed out, no profile yet,
    or a load fault — #6937) the tile grid would squeeze that one sentence into a
@@ -1673,6 +1687,7 @@ select.admin-act{min-width:0;max-width:100%%}
 </div>
 <p style="color:var(--text-muted);margin-bottom:var(--sp-4)">Copy and paste these commands to get started:</p>
 <div id="onboarding-announcement" class="announcement-reverse" role="status"></div>
+<div id="onboarding-audit-share" class="cc-audit-share" role="note" hidden><strong>This hive requests relay audit level <code class="level"></code>.</strong> It is a request, not an admission condition: your relay keeps its audit record on your machine and uploads nothing unless you opt in for this hive with <code>hivectl hives set &lt;name&gt; --share-audit <span class="level"></span></code> (never above your <code>--audit-level</code>). The relay-side flag lands with the v6 follow-up to #13458; until then no relay sends an audit record and this hive is simply ready for it. See <a href="https://github.com/hivecommons/hive/blob/{{HIVE_BRANCH}}/src/docs/contributor-relay.md#sharing-your-audit-record-with-a-hive---share-audit" target="_blank" rel="noopener">sharing your audit record</a>.</div>
 <div style="margin-top:var(--sp-6);background:var(--surface-0);border:1px solid var(--line-strong);border-radius:8px;padding:var(--sp-6);position:relative">
 <button id="copy-btn" class="hv-btn btn-primary btn-sm cc-copy-overlay">Copy</button>
 <pre id="copy-cmds" style="color:var(--text);font-size:.85rem;margin:var(--sp-0);overflow-x:auto;white-space:pre"># Default shown: macOS + Claude Code + containerized mode.
@@ -2257,6 +2272,16 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 <div class="cc-mine" id="cc-mine-body"><div class="ops-empty">Loading your stats&hellip;</div></div>
 <p class="ops-note" id="cc-mine-note" style="padding:0 20px 14px;margin:var(--sp-0)"></p>
 </div>
+<!-- Your assignments (#13454): the hub's own record of the signed-in contributor's
+     relay work — the relay_* audit rows (assigned, accepted, token minted, completed,
+     revoked, ...) whose user is the caller's GitHub login, read through
+     GET /api/audit?contributor=<login>. Read-only, and role-gated by that endpoint:
+     the card stays hidden for an anonymous viewer or a role the audit log refuses. -->
+<div class="ops-card cc-assign-card" id="cc-assign-card" data-ops-card="assignments" hidden>
+<div class="ops-card-head"><button type="button" class="ops-grip" data-ops-grip aria-label="Move Your assignments card" aria-pressed="false">⠿</button><h3>Your assignments</h3><span class="ops-card-count" id="cc-assign-count"></span></div>
+<ul class="cc-assign-list" id="cc-assign-body"><li class="ops-empty">Loading your assignments&hellip;</li></ul>
+<p class="ops-note cc-assign-note">The hub's audit trail of your relay sessions and tasks, newest first. Read-only.</p>
+</div>
 <div class="ops-card" id="cc-wall-card" data-ops-card="wall" style="display:none;margin-bottom:var(--sp-7)">
 <div class="ops-card-head"><button type="button" class="ops-grip" data-ops-grip aria-label="Move Contributor wall card" aria-pressed="false">⠿</button><h3>Contributor wall</h3><span class="ops-card-count" id="cc-wall-count"></span></div>
 <form class="runs-lookup" id="cc-wall-form" autocomplete="off" style="display:none;padding:var(--sp-5) var(--sp-7);border-bottom:1px solid var(--line-strong)">
@@ -2723,7 +2748,16 @@ function ccRenderHelpLinks(){
   });
 }
 function ccLoadHelpLinks(){
-  fetch('/api/contribute/status').then(function(r){return r.json();}).then(function(d){if(d)ccSetHelpLinks(d.help_links||[]);}).catch(function(){});
+  fetch('/api/contribute/status').then(function(r){return r.json();}).then(function(d){if(d){ccSetHelpLinks(d.help_links||[]);ccSetAuditShareRequest(d.audit_share_requested||'');}}).catch(function(){});
+}
+// #13458: show the relay audit level this hive requests BEFORE setup, so a
+// contributor sees it before deciding whether to opt in with --share-audit.
+function ccSetAuditShareRequest(level){
+  var box=document.getElementById('onboarding-audit-share');if(!box)return;
+  level=String(level||'');
+  if(['lifecycle','commands','reasoning'].indexOf(level)<0){box.hidden=true;return;}
+  box.querySelectorAll('.level').forEach(function(el){el.textContent=level;});
+  box.hidden=false;
 }
 // Tab switching for the /contribute page. Additive: leaves onboarding intact.
 var tabs=document.querySelectorAll('.page-tab');
@@ -5859,6 +5893,7 @@ async function opsPoll(){
   // calling it on every 4s tick costs one request per half-minute; keeping the
   // call here means the tile row refreshes as the viewer's own tasks land.
   try{ccLoadMine();}catch(e){console.error('contribution stats poll failed',e);}
+  try{ccLoadAssignments();}catch(e){console.error('assignments poll failed',e);}
   var tab=document.getElementById('tab-ops');
   if(tab&&tab.classList.contains('active'))setTimeout(opsPoll,4000);
 }
@@ -6696,7 +6731,7 @@ function ccSetLive(state){ // 'live' | 'poll' | 'connecting'
 var OPS_LAYOUT_KEY='hive.ops.layout';
 var OPS_LAYOUT_VERSION=1;
 var OPS_LAYOUT_REGIONS=['left','main','wide'];
-var OPS_LAYOUT_TEMPLATE={left:['clankers','pipeline'],main:['mine','wall','models','work','runs','decisions','queue','opp','triage'],wide:[]};
+var OPS_LAYOUT_TEMPLATE={left:['clankers','pipeline'],main:['mine','assignments','wall','models','work','runs','decisions','queue','opp','triage'],wide:[]};
 var OPS_LAYOUT_ALLOWED_REGION={triage:'main'};
 var OPS_LAYOUT_GRIP_SELECTOR='[data-ops-grip]';
 var OPS_LAYOUT_CARD_SELECTOR='[data-ops-card]';
@@ -7398,6 +7433,46 @@ function ccLoadMine(force){
     // next ccMetricsPoll picks it up.
     try{ccRenderMineSpark();}catch(e){}
   }).catch(function(e){console.error('contribution stats load failed',e);ccRenderMineError();});
+}
+// ── Your assignments (#13454) ───────────────────────────────────────────────
+// Reads the caller's own relay_* audit rows through GET /api/audit?contributor=,
+// self-throttled like ccLoadMine. The endpoint is role-gated; any non-2xx (an
+// anonymous viewer, a role the audit log refuses) leaves the card hidden rather
+// than advertising a panel the viewer cannot read.
+var ccAssignLast=0;
+var ccAssignMinGap=30000;
+function ccLoadAssignments(force){
+  if(!ccMeUsername){try{ccResolveViewer();}catch(e){}return;}
+  var now=Date.now();
+  if(!force&&ccAssignLast&&(now-ccAssignLast)<ccAssignMinGap)return;
+  ccAssignLast=now;
+  var who=ccMeUsername;
+  fetch('/api/audit?contributor='+encodeURIComponent(who)).then(function(r){
+    if(!r.ok)return null;
+    return r.json();
+  }).then(function(d){
+    if(!d||who!==ccMeUsername)return;
+    var rows=(Array.isArray(d.entries)?d.entries:[]).filter(function(e){return e&&String(e.action||'').indexOf('relay_')===0;});
+    ccRenderAssignments(rows);
+  }).catch(function(e){console.error('assignments load failed',e);});
+}
+function ccRenderAssignments(rows){
+  var card=document.getElementById('cc-assign-card');
+  var body=document.getElementById('cc-assign-body');
+  if(!card||!body)return;
+  var count=document.getElementById('cc-assign-count');
+  if(count)count.textContent=rows.length?String(rows.length):'';
+  if(!rows.length){
+    body.innerHTML='<li class="ops-empty">No relay activity recorded for you on this hive yet.</li>';
+  }else{
+    body.innerHTML=rows.map(function(e){
+      var ref=(e.repo&&e.target)?ccIssueLinkHTML({repo:e.repo,number:e.target},e.repo+'#'+e.target):'';
+      var when=e.ts?('<span class="cc-assign-when" title="'+esc(e.ts)+'">'+esc(rel(e.ts))+'</span>'):'';
+      var detail=e.detail?('<span class="cc-assign-detail">'+esc(e.detail)+'</span>'):'';
+      return '<li class="cc-assign-row"><span class="cc-assign-action">'+esc(e.action)+'</span>'+ref+when+detail+'</li>';
+    }).join('');
+  }
+  card.hidden=false;
 }
 // ccRenderMineMessage reveals the card carrying ONE sentence in place of the
 // tiles. The tier chip, sparkline and PR note are cleared alongside it: each of

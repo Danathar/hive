@@ -344,17 +344,28 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 	// several verdicts, so each element is checked on its own: the dispatch is
 	// recorded per perspective, and a perspective nothing dispatched is refused
 	// here exactly as it would be for a single-object verdict.
-	ok, reason, dispatchHead, dispatchBodyDigest, hiveAuthored := c.verdictDispatchAuthorized(report, req)
-	if !ok {
+	auth := c.verdictDispatchAuthorized(report, req)
+	if !auth.OK {
 		c.logger.Warn("review-request watcher: verdict does not match a review dispatch, discarded",
 			slog.String("reviewed", fmt.Sprintf("%s#%d", req.Repo, req.Number)),
 			slog.String("perspective", string(report.Perspective)),
 			slog.String("agent", req.Agent),
-			slog.String("reason", reason))
+			slog.String("reason", auth.Reason))
 		return report, false
 	}
-	report.HeadSHA = c.canonicalVerdictHead(req, report.HeadSHA, dispatchHead, prHead)
-	report.HiveAuthored = hiveAuthored
+	report.HeadSHA = c.canonicalVerdictHead(req, report.HeadSHA, auth.HeadSHA, prHead)
+	report.HiveAuthored = auth.HiveAuthored
+	// The review head, and whether this is the decision step's reconciled
+	// report, come from the dispatch record this verdict bound to, never the
+	// reviewer's own JSON: a head cannot claim to be another head or to have
+	// decided, and an advisory admission carries neither
+	// (hivecommons/hive#13542). Only a decided report may carry dispositions.
+	report.Head = auth.ReviewHead
+	report.Decided = auth.Decided
+	if !report.Decided {
+		report.Dispositions = nil
+	}
+	dispatchBodyDigest := auth.BodyDigest
 	if review.ConcreteRemediationText(req.Body) {
 		report.ConcreteRemediation = true
 	}
@@ -387,11 +398,20 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 		return report, false
 	}
 
+	// One file per perspective, and per review head when the perspective was
+	// dispatched to several heads, so each head's verdict is kept rather than
+	// the last one overwriting the others.
 	name := review.ReviewReportFilePrefix +
 		verdictSlug(report.Repo) + "-" +
 		strconv.Itoa(report.Number) + "-" +
-		verdictSlug(string(report.Perspective)) +
-		review.ReviewReportFileSuffix
+		verdictSlug(string(report.Perspective))
+	if report.Head != "" {
+		name += "-" + verdictSlug(report.Head)
+	}
+	if report.Decided {
+		name += "-decided"
+	}
+	name += review.ReviewReportFileSuffix
 	path := filepath.Join(dir, name)
 
 	// Write-then-rename: review.Collect scans this dir on its own schedule and
@@ -416,23 +436,45 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 	return report, true
 }
 
-func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req ReviewRequest) (bool, string, string, string, bool) {
+// verdictAuthorization is what admitting a verdict establishes about it:
+// whether it binds (and if not, why), and what the dispatch record it bound
+// to said about the PR head, the review body digest, whether the PR is hive-
+// authored, and the review head the perspective was dispatched to. An
+// advisory admission (no dispatch row) carries only what the report itself
+// claimed, and no review head.
+type verdictAuthorization struct {
+	OK           bool
+	Reason       string
+	HeadSHA      string
+	BodyDigest   string
+	HiveAuthored bool
+	ReviewHead   string
+	// Decided marks a verdict bound to the review-heads decision step's
+	// dispatch: the reconciled report for its perspective (#13542).
+	Decided bool
+}
+
+func verdictRefused(reason string) verdictAuthorization {
+	return verdictAuthorization{Reason: reason}
+}
+
+func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req ReviewRequest) verdictAuthorization {
 	state, err := review.LoadDispatchState("")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return c.advisoryVerdictAuthorized(report, req)
 		}
-		return false, "dispatch_state_unavailable", "", "", false
+		return verdictRefused("dispatch_state_unavailable")
 	}
 	now := time.Now().UTC()
 	for _, p := range state.Pending {
 		if !pendingReviewMatchesVerdict(p, report, req) {
 			continue
 		}
-		if sameVerdictAuthor(verdictAuthorAgent(p.AuthorAgent, report), req.Agent) {
-			return false, "author_self_approval", "", "", false
+		if c.sameVerdictAuthor(verdictAuthorAgent(p.AuthorAgent, report), req.Agent) {
+			return verdictRefused("author_self_approval")
 		}
-		return true, "", p.HeadSHA, p.BodyDigest, strings.TrimSpace(p.AuthorAgent) != ""
+		return verdictAuthorization{OK: true, HeadSHA: p.HeadSHA, BodyDigest: p.BodyDigest, HiveAuthored: strings.TrimSpace(p.AuthorAgent) != "", ReviewHead: strings.TrimSpace(p.Head), Decided: p.Decision}
 	}
 	cutoff := now.Add(-review.RecentDispatchTTL)
 	for _, r := range state.Recent {
@@ -442,10 +484,10 @@ func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req 
 		if !r.Confirmed.IsZero() && r.Confirmed.Before(cutoff) {
 			continue
 		}
-		if sameVerdictAuthor(verdictAuthorAgent(r.AuthorAgent, report), req.Agent) {
-			return false, "author_self_approval", "", "", false
+		if c.sameVerdictAuthor(verdictAuthorAgent(r.AuthorAgent, report), req.Agent) {
+			return verdictRefused("author_self_approval")
 		}
-		return true, "", r.HeadSHA, r.BodyDigest, strings.TrimSpace(r.AuthorAgent) != ""
+		return verdictAuthorization{OK: true, HeadSHA: r.HeadSHA, BodyDigest: r.BodyDigest, HiveAuthored: strings.TrimSpace(r.AuthorAgent) != "", ReviewHead: strings.TrimSpace(r.Head), Decided: r.Decision}
 	}
 	// Queue-mode reviewer prompts can reach the relay through the ordinary
 	// PR-list comment path rather than a review-swarm dispatch. That still is
@@ -463,18 +505,18 @@ func (c *Client) verdictDispatchAuthorized(report review.PerspectiveReport, req 
 // recommends closing a PR, so the submitting lane must be one this hive
 // reviews with: any other lane that can reach the relay could otherwise
 // approve or veto any PR it did not author.
-func (c *Client) advisoryVerdictAuthorized(report review.PerspectiveReport, req ReviewRequest) (bool, string, string, string, bool) {
+func (c *Client) advisoryVerdictAuthorized(report review.PerspectiveReport, req ReviewRequest) verdictAuthorization {
 	head := strings.TrimSpace(report.HeadSHA)
 	if head == "" {
-		return false, "missing_head_sha_without_dispatch", "", "", false
+		return verdictRefused("missing_head_sha_without_dispatch")
 	}
 	if !c.isReviewerAgent(req.Agent) {
-		return false, "non_reviewer_without_dispatch", "", "", false
+		return verdictRefused("non_reviewer_without_dispatch")
 	}
-	if sameVerdictAuthor(verdictAuthorAgent("", report), req.Agent) {
-		return false, "author_self_approval", "", "", false
+	if c.sameVerdictAuthor(verdictAuthorAgent("", report), req.Agent) {
+		return verdictRefused("author_self_approval")
 	}
-	return true, "", head, strings.TrimSpace(report.BodyDigest), false
+	return verdictAuthorization{OK: true, HeadSHA: head, BodyDigest: strings.TrimSpace(report.BodyDigest)}
 }
 
 func pendingReviewMatchesVerdict(p review.PendingReview, report review.PerspectiveReport, req ReviewRequest) bool {
@@ -497,10 +539,15 @@ func reviewDispatchFieldsMatch(repo string, number int, headSHA string, perspect
 	return review.HeadSHAMatchesOrBlank(headSHA, report.HeadSHA)
 }
 
-func sameVerdictAuthor(authorAgent, agent string) bool {
+// sameVerdictAuthor reports whether agent belongs to the authoring lane's
+// family: the author itself, its base, or a sibling replica.
+func (c *Client) sameVerdictAuthor(authorAgent, agent string) bool {
 	authorAgent = strings.TrimSpace(authorAgent)
 	agent = strings.TrimSpace(agent)
-	return authorAgent != "" && agent != "" && authorAgent == agent
+	if authorAgent == "" || agent == "" {
+		return false
+	}
+	return authorAgent == agent || c.agentBaseName(authorAgent) == c.agentBaseName(agent)
 }
 
 func verdictAuthorAgent(stateAuthor string, report review.PerspectiveReport) string {
