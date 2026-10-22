@@ -1981,6 +1981,53 @@ func TestApplyStageLabelsHiveBotSignoffOnClankerHeadReturnsToContributor(t *test
 	}
 }
 
+func TestApplyStageLabelsForwardMergeSkipsSignoffAttribution(t *testing.T) {
+	// hivecommons/hive#13635: a sync top-up carries other people's commits
+	// by design and lands as a merge commit, so no attribution nudge and no
+	// 071 for it.
+	cases := []struct{ name, ref, title string }{
+		{"sync head", "sync/v5-to-v6-2026-10-22", "chore: carry v5"},
+		{"top-up title", "someone/branch", "🌱 top-up: merge v5 into v6 (68 commits)"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := 330 + i
+			api := &stageAPI{labels: map[string]string{}, commitDetails: map[int][]stageCommitFixture{
+				n: {{
+					message:     "Add OWNERS file\n\nSigned-off-by: Andy Anderson <280983584+hivecommons-hive[bot]@users.noreply.github.com>",
+					authorLogin: testHiveAppBotLogin,
+					authorName:  "Andy Anderson",
+					authorEmail: "280983584+hivecommons-hive[bot]@users.noreply.github.com",
+				}},
+			}}
+			srv := newStageAPI(t, api)
+			defer srv.Close()
+			clock := &contributorLaneClock{at: time.Date(2026, 10, 22, 15, 0, 0, 0, time.UTC)}
+			e, _, store := newStageEngine(t, srv.URL, clock)
+			e.stageLabelPolicy = func() StageLabelPolicy { return StageLabelPolicy{Enabled: true, ContributorNudge: true} }
+
+			pr := stagePR(n, "role/trusted")
+			pr.Head.Ref = gh.Ptr(tc.ref)
+			pr.Title = gh.Ptr(tc.title)
+			pr.User = &gh.User{Login: gh.Ptr("clubanderson")}
+			e.recordStage(stageLaneTrusted, "acme/widget", "acme", "widget", pr, autoMergeReasonReviewGatePrefix+ReviewGateOutcomeAwaiting, false, nil)
+			e.noteStageRole("acme", "widget", n, stagelabels.RoleTrusted)
+
+			if _, err := e.ApplyStageLabels(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if rec, ok := store.Get(stageKey("acme", "widget", n)); ok && rec.Reason == stagelabels.LaneReasonHiveSignoffAttribution {
+				t.Fatalf("attribution reason on a forward-merge: %+v", rec)
+			}
+			for _, c := range api.comments {
+				if strings.Contains(c, SignoffAttributionMarkerPrefix) {
+					t.Fatalf("attribution nudge posted: %q", c)
+				}
+			}
+		})
+	}
+}
+
 func TestApplyStageLabelsHiveBotSignoffOnHumanHeadNeedsAuthorWithInstructions(t *testing.T) {
 	// hivecommons/pluk#315 (2026-10-20): a human's OWNERS commit, made in a
 	// hive pod, carried the App's noreply address and sign-off. GitHub
