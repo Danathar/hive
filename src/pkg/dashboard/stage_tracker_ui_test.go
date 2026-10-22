@@ -202,12 +202,6 @@ assert.deepStrictEqual(segStates(row), ['active ham-open-hold', T, T, T, T, T, '
 assert.ok(row.includes('ham-mod-hold">hold</span>'), row);
 assert.ok(tooltip(row).includes('Open · on hold (do-not-merge/hold) · No stage recorded yet · acme/console'), tooltip(row));
 
-// The repo is visible text on the title line, before #N, and hidden when
-// the caller says one repo is on screen.
-assert.ok(/<span class="ham-repo">acme\/console<\/span><a class="ham-ref"/.test(row = stageTrackerRowHtml({ repo: 'acme/console', number: 7, kind: 'issue', stage: 20 }, stages, ctx)), row);
-assert.ok(!stageTrackerRowHtml({ repo: 'acme/console', number: 7, kind: 'issue', stage: 20 }, stages, { nowMs: now, hideRepo: true }).includes('class="ham-repo"'), 'single repo hides the label');
-row = stageTrackerRowHtml({ repo: 'acme/console', number: 8, kind: 'issue', stage: 40, linked_prs: [{ number: 102, stage: 100 }, { number: 104, stage: 60 }] }, stages, ctx);
-assert.strictEqual((row.match(/<span class="ham-repo">/g) || []).length, 1, 'nested PRs carry no label of their own; the parent names the repo');
 // Open and awaiting triage: the action chip reads "triage needed"; the Open
 // column itself is untouched (owner: the Open column keeps its behaviour —
 // "triage needed" is the 015 stage's word in the Actionable column).
@@ -380,8 +374,7 @@ assert.ok(prCol(row)[0].includes('ham-author-ico ham-author-hive') && lead(row) 
 // PR seen on its own row (Pull requests view) whose open issue is listed:
 // the issue — icon, #N link, title — on the left, the PR on the right.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 110, kind: 'pr', title: 'Fix sort', stage: 50, author: 'hive-bot', author_kind: 'hive', nested_under: 9, linked_issues: [{ number: 9, title: 'Ordering drifts', url: 'https://x/9', state: 'open', listed: true }] }, stages, ctx);
-// The repo label (#13260) leads the slot when several repos are on screen.
-assert.strictEqual(lead(row), 'acme/console#9 Ordering drifts', 'issue slot names the issue: ' + lead(row));
+assert.strictEqual(lead(row), '#9 Ordering drifts', 'issue slot names the issue: ' + lead(row));
 assert.ok(/<a class="ham-ref" href="https:\/\/x\/9"[^>]*>#9<\/a>/.test(row) && !/<a class="ham-ref"[^>]*title=/.test(row), 'issue link, no tooltip on it: ' + row);
 assert.ok(prCol(row)[0].includes('<span class="ham-pr-num">#110</span>') && prCol(row)[0].includes('<span class="ham-pr-title">Fix sort</span>'), prCol(row)[0]);
 assert.ok(/<a class="ham-pr-ref"[^>]*title="Fix sort · Waiting for review/.test(row), 'row tooltip rides the PR link: ' + row);

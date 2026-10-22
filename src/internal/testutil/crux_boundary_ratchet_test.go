@@ -42,11 +42,14 @@ import (
 //
 // Re-measured on v5 when the baselines were made exact, with exactly the
 // AST walk below (so a re-measure is `go test ./internal/testutil -run
-// TestCruxBoundaryRatchet -v`, not a grep).
+// TestCruxBoundaryRatchet -v`, not a grep). The v6 line carries more
+// couplings than v5 (the advisor lane, admin MCP and chat surfaces predate
+// the ratchet there); its baselines were re-measured on the v5→v6 top-up
+// of 2026-10-22 and ratchet down from here.
 var cruxSymbolBaseline = map[string]int{
-	"cmd/hive":      37,
-	"pkg/dashboard": 68,
-	"pkg/discord":   1,
+	"cmd/hive":      40,
+	"pkg/chat":      1,
+	"pkg/dashboard": 82,
 	"pkg/hub":       18,
 	"pkg/hub/spoke": 15,
 	"pkg/ioscan":    5,
@@ -62,10 +65,14 @@ var cruxSymbolBaseline = map[string]int{
 // was a grep that also matched local variables named agent; the AST walk
 // here counts only selectors on the pkg/agent import.
 //
-// Empty since the tmux funnel landed: pkg/agent/tmux is the only package
-// outside pkg/agent's manager that names the binary, and it is inside the
-// Crux tree the walk skips. Any new entry here is a regression.
-var cruxTmuxBaseline = map[string]int{}
+// Empty on v5 since the tmux funnel landed: pkg/agent/tmux is the only
+// package outside pkg/agent's manager that names the binary, and it is
+// inside the Crux tree the walk skips. v6's pkg/tui/watch.go (the terminal
+// watcher) still invokes tmux directly and is carried here until it goes
+// through the funnel. Any new entry here is a regression.
+var cruxTmuxBaseline = map[string]int{
+	"pkg/tui": 1,
+}
 
 const (
 	cruxAgentImportPath = "github.com/hivecommons/hive/pkg/agent"
