@@ -637,8 +637,10 @@ func TestBuildFrontendStatusPublishesStandbyPauseFacts(t *testing.T) {
 	cfg := &config.Config{
 		Project:  config.ProjectConfig{Org: "org", Repos: []string{"repo"}},
 		Governor: config.GovernorConfig{Modes: map[string]config.ModeConfig{}},
-		Agents: map[string]config.AgentConfig{
-			"quality": {},
+		AgentRuntimeConfig: config.AgentRuntimeConfig{
+			Agents: map[string]config.AgentConfig{
+				"quality": {},
+			},
 		},
 	}
 	state := governor.State{

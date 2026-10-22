@@ -85,10 +85,12 @@ func TestValidateExperimentEngine(t *testing.T) {
 // catalog metadata; a renamed agent that opts into the role gets the same
 // engine default; the strategist is untouched (RFC 11585 decision: unchanged).
 func TestExperimenterDefaults(t *testing.T) {
-	cfg := &Config{Agents: map[string]AgentConfig{
-		"experimenter": {},
-		"lab":          {Role: RoleExperimenter},
-		"strategist":   {},
+	cfg := &Config{AgentRuntimeConfig: AgentRuntimeConfig{
+		Agents: map[string]AgentConfig{
+			"experimenter": {},
+			"lab":          {Role: RoleExperimenter},
+			"strategist":   {},
+		},
 	}}
 	cfg.applyDefaults()
 
@@ -134,7 +136,9 @@ func TestValidateExperimenterEngineInConfig(t *testing.T) {
 		cfg := &Config{
 			Project: ProjectConfig{Org: "o"},
 			GitHub:  GitHubConfig{Token: "x"},
-			Agents:  map[string]AgentConfig{"experimenter": {Engine: "nous"}},
+			AgentRuntimeConfig: AgentRuntimeConfig{
+				Agents: map[string]AgentConfig{"experimenter": {Engine: "nous"}},
+			},
 		}
 		cfg.applyDefaults()
 		return cfg

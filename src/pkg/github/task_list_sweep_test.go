@@ -852,7 +852,7 @@ func TestSweepNonTaskListRefsRespectsMaintainerAcceptance(t *testing.T) {
 	}
 	server, obs := taskListSweepServer(t, org, repo, fixtures, merged)
 	defer server.Close()
-	accepted := unparkReplyMarkerPrefix + "1 -->\n" + renderUnparkAcceptedReply("maintainer", "approve", true, unparkNeedsHumanOutcome{lift: true})
+	accepted := unparkReplyMarkerPrefix + "1 -->\n" + renderUnparkAcceptedReplyKeeping("maintainer", "approve", nil, true, unparkNeedsHumanOutcome{lift: true})
 	obs.comments[860] = []sweepMockComment{{ID: 1_000_700, Body: accepted, CreatedAt: approvedAt}}
 	obs.comments[861] = []sweepMockComment{{ID: 1_000_701, Body: accepted, CreatedAt: approvedAt}}
 	obs.comments[862] = []sweepMockComment{{ID: 1_000_702, Body: labelApprovalMarker(42) + "\nApproved via `approved`.", CreatedAt: approvedAt}}

@@ -413,7 +413,7 @@ func TestOwnershipAdjudicatorWait11565(t *testing.T) {
 func TestReviewerLaneAvailable11565(t *testing.T) {
 	cfgWith := func(agents map[string]config.AgentConfig) *config.Config {
 		level := 6
-		return &config.Config{ACMMLevel: &level, Agents: agents}
+		return &config.Config{ACMMLevel: &level, AgentRuntimeConfig: config.AgentRuntimeConfig{Agents: agents}}
 	}
 	adjudicator := config.AgentConfig{Enabled: true, Role: "reviewer"}
 	advisory := config.AgentConfig{Enabled: true, Role: "reviewer", KickTemplate: "review the PR queue"}

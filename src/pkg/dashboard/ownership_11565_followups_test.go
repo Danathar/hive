@@ -25,7 +25,7 @@ func useOwnershipTempState(t *testing.T) string {
 }
 
 func ownershipCfg11565(level int, agents map[string]config.AgentConfig, policies ...config.RepoPolicy) *config.Config {
-	cfg := &config.Config{ACMMLevel: &level, Agents: agents}
+	cfg := &config.Config{ACMMLevel: &level, AgentRuntimeConfig: config.AgentRuntimeConfig{Agents: agents}}
 	cfg.Project.Org = "o"
 	cfg.Project.Repos = []string{"r", "x"}
 	cfg.Project.RepoPolicies = policies
