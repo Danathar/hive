@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -1088,7 +1089,7 @@ func renderUnparkHelpFor(menu unparkMenu) string {
 }
 
 func renderUnparkHelpForPolicy(menu unparkMenu, releaseOnApprove bool) string {
-	return "**Maintainer commands**\n" + menu.bulletsFor(releaseOnApprove) + "\n" + maintainerCommandReference()
+	return "**Maintainer commands**\n" + menu.sourceLine() + menu.bulletsFor(releaseOnApprove) + "\n" + maintainerCommandReference()
 }
 
 // unparkNoticeBody is the "What to reply" comment kept on every parked issue.
@@ -1102,7 +1103,7 @@ func renderUnparkNotice(menu unparkMenu) string {
 }
 
 func renderUnparkNoticeForPolicy(menu unparkMenu, releaseOnApprove bool) string {
-	return unparkNoticeMarker + "\n**What to reply**\n" + menu.bulletsFor(releaseOnApprove) +
+	return unparkNoticeMarker + "\n**What to reply**\n" + menu.sourceLine() + menu.bulletsFor(releaseOnApprove) +
 		"\nIf this issue is waiting only for reporter confirmation after a merged fix, the reporter or a maintainer can reply `/fixed` instead.\n\n" +
 		fmt.Sprintf("_Only a maintainer with write access can un-park; everything else is ignored. Full command reference: %s._", maintainerCommandsDocURL)
 }
@@ -1138,6 +1139,69 @@ func unparkOptionLabels(issueBody string) []string {
 		out = append(out, letter)
 	}
 	return out
+}
+
+// unparkOptionTexts maps each option letter to the one-line summary on the
+// line that first defines it. Letters with no summary are left out.
+func unparkOptionTexts(text string) map[string]string {
+	out := map[string]string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		letter := unparkOptionLetter(line)
+		if letter == "" || seen[letter] {
+			continue
+		}
+		seen[letter] = true
+		if summary := unparkOptionSummary(line); summary != "" {
+			out[letter] = summary
+		}
+	}
+	return out
+}
+
+const unparkOptionSummaryMax = 160
+
+// unparkHTMLCommentPattern matches an HTML comment, including an unclosed
+// one running to the end of the line, so a body cannot smuggle a hive marker
+// into the notice.
+var unparkHTMLCommentPattern = regexp.MustCompile(`<!--.*?(-->|$)`)
+
+// unparkOptionSummary returns the text after the option marker on line,
+// whitespace-collapsed and cut to unparkOptionSummaryMax runes. The issue body
+// is untrusted: HTML comments are removed so no hive marker can be laundered
+// into the hive-authored notice, and @mentions are defanged so quoting the
+// option notifies nobody.
+//
+// Invariant: the byte offsets below mirror unparkOptionLetter and
+// unparkBoldOptionLetter, which have already validated the line's shape by
+// the time the guard on the first line passes. "Option X" lines yield a rest
+// starting at the single-byte letter; bold lines are "**X" after trimming
+// list markers, so b[2:] is the letter and rest[1:] skips it. Change those
+// parsers and this slicing together.
+func unparkOptionSummary(line string) string {
+	if unparkOptionLetter(line) == "" {
+		return ""
+	}
+	t := strings.TrimLeft(strings.TrimSpace(line), "-*# \t")
+	t = strings.TrimPrefix(t, "**")
+	var rest string
+	if strings.HasPrefix(strings.ToLower(t), "option ") {
+		rest = strings.TrimSpace(t[len("option "):])
+	} else {
+		b := strings.TrimLeft(strings.TrimSpace(line), "-+ \t")
+		rest = b[2:]
+	}
+	rest = rest[1:]
+	rest = strings.TrimLeftFunc(rest, func(r rune) bool { return strings.ContainsRune(" \t*.:)—–-", r) })
+	rest = strings.TrimSpace(rest)
+	rest = strings.TrimSpace(strings.TrimSuffix(rest, "**"))
+	rest = unparkHTMLCommentPattern.ReplaceAllString(rest, " ")
+	rest = defangMentions(rest)
+	rest = strings.Join(strings.Fields(rest), " ")
+	if r := []rune(rest); len(r) > unparkOptionSummaryMax {
+		rest = strings.TrimSpace(string(r[:unparkOptionSummaryMax-2])) + " …"
+	}
+	return rest
 }
 
 func unparkOptionLetter(line string) string {

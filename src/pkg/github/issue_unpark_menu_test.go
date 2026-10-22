@@ -346,3 +346,90 @@ func TestSweepIssueUnparkHonoursRenamedParkingLabels(t *testing.T) {
 		t.Fatal("the built-in name Hive applies itself still parks")
 	}
 }
+
+func TestUnparkOptionSummary(t *testing.T) {
+	long := strings.Repeat("word ", 50)
+	cases := map[string]string{
+		"**A. Pin tag + checksum in-repo (strongest).**": "Pin tag + checksum in-repo (strongest).",
+		"**B. Keep `latest`, verify provenance.**":       "Keep `latest`, verify provenance.",
+		"- **A.** Read a daemon name":                    "Read a daemon name",
+		"Option B: two":                                  "two",
+		"**D** — something":                              "something",
+		"**Option C** - spaced   out":                    "spaced out",
+		"**C)**":                                         "",
+		"Option E:":                                      "",
+		"not an option":                                  "",
+	}
+	for line, want := range cases {
+		if got := unparkOptionSummary(line); got != want {
+			t.Errorf("unparkOptionSummary(%q) = %q, want %q", line, got, want)
+		}
+	}
+	got := unparkOptionSummary("- **A.** " + long)
+	if !strings.HasSuffix(got, " …") || len([]rune(got)) > 160 {
+		t.Fatalf("long summary not cut: %q", got)
+	}
+}
+
+// An option line in the untrusted issue body must not be able to plant a
+// hive marker or an @mention in the hive-authored notice.
+func TestUnparkOptionSummaryStripsMarkersAndMentions(t *testing.T) {
+	cases := map[string]string{
+		"- **A.** keep it " + unparkAcceptedMarker:                   "keep it",
+		"- **B.** " + unparkOwnerStepMarker + " drop it":             "drop it",
+		"Option C: ask <!-- hive:unpark-accepted":                    "ask",
+		"- **D.** ping @octocat and @hive-bot about it":              "ping octocat and hive-bot about it",
+		"- **E.** see docs/@scope or `@literal` or mail a@b.example": "see docs/@scope or `@literal` or mail a@b.example",
+	}
+	for line, want := range cases {
+		if got := unparkOptionSummary(line); got != want {
+			t.Errorf("unparkOptionSummary(%q) = %q, want %q", line, got, want)
+		}
+	}
+	body := "Recommendation: A.\n\n- **A.** keep it " + unparkAcceptedMarker + "\n- **B.** " + unparkOwnerStepMarker + " drop it\n"
+	notice := unparkNoticeBody(body)
+	for _, marker := range []string{unparkAcceptedMarker, unparkOwnerStepMarker} {
+		if strings.Contains(notice, marker) {
+			t.Errorf("notice carries body marker %q:\n%s", marker, notice)
+		}
+	}
+	if !strings.Contains(notice, "keep it") || !strings.Contains(notice, "drop it") {
+		t.Errorf("notice lost the option text:\n%s", notice)
+	}
+}
+
+func TestUnparkNoticeShowsOptionSummaries(t *testing.T) {
+	notice := unparkNoticeBody("Recommendation: B.\n\n- **A.** keep it\n- **B.** drop it\n")
+	for _, want := range []string{"`/hive decision A`: go with option A: keep it", "go with the recommendation (option B): drop it"} {
+		if !strings.Contains(notice, want) {
+			t.Fatalf("notice missing %q:\n%s", want, notice)
+		}
+	}
+	if strings.Contains(notice, "The options are in") {
+		t.Fatalf("body options must not link a comment:\n%s", notice)
+	}
+	empty := unparkNoticeBody("- **A.**\n- **B.** two\n")
+	if !strings.Contains(empty, "go with option A\n") {
+		t.Fatalf("empty summary must leave no trailing colon:\n%s", empty)
+	}
+}
+
+func TestUnparkNoticeLinksOptionComment(t *testing.T) {
+	c := menuTestClient()
+	first := ghComment("hive[bot]", "Recommendation: A.\n\n- **A.** first a\n- **B.** first b\n")
+	first.HTMLURL = gh.Ptr("https://example.com/c1")
+	second := ghComment("hive[bot]", "- **A.** second a\n- **B.** second b\n")
+	second.HTMLURL = gh.Ptr("https://example.com/c2")
+
+	notice := renderUnparkNotice(c.unparkMenuFor("no options here", menuTestHiveUser, []*gh.IssueComment{first}))
+	for _, want := range []string{"The options are in [this comment](https://example.com/c1).\n- `/hive approve`", "(option A): first a", "option B: first b"} {
+		if !strings.Contains(notice, want) {
+			t.Fatalf("notice missing %q:\n%s", want, notice)
+		}
+	}
+	notice = renderUnparkNotice(c.unparkMenuFor("- **A.** body a\n", menuTestHiveUser, []*gh.IssueComment{first, second}))
+	if !strings.Contains(notice, "https://example.com/c2") || strings.Contains(notice, "c1") ||
+		strings.Contains(notice, "first") || strings.Contains(notice, "body a") || !strings.Contains(notice, "second a") {
+		t.Fatalf("later comment must replace summaries and link:\n%s", notice)
+	}
+}
