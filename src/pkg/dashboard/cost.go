@@ -102,6 +102,11 @@ type costResponse struct {
 	// folded into it: the advisor's cost is the lane's, not the agent's
 	// model's. Windowed figures come from GET /api/advisor/spend.
 	AdvisorByAgent []advisor.AgentSpend `json:"advisor_by_agent"`
+	// DailyRollup is the per-UTC-day spend kept for ~2 years, ascending by
+	// day; the Cost section's chart uses it for buckets older than the
+	// 30-day snapshot ring (/api/cost/history). Empty until the first UTC
+	// day of snapshots has completed.
+	DailyRollup []CostDailyRollup `json:"daily_rollup"`
 }
 
 // costModelEntry is one row of the estimated per-model / per-agent breakdown.
@@ -226,6 +231,7 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 		resp.CountWindowStart = s.costCountWindowStart()
 	}
 	resp.CountWindowEnd = time.Now().UnixMilli()
+	resp.DailyRollup = s.CostDailyRollups()
 
 	// --- Native cost per metered gateway ---
 	if s.deps != nil && s.deps.Config != nil {

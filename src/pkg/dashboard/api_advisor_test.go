@@ -250,22 +250,36 @@ func TestAdvisorSpendParams(t *testing.T) {
 	}
 }
 
-// TestAdvisorSpendRangesMatchCostSelector pins the preset windows to the Cost
-// section's costWindow constants so the two never report different spans.
+// TestAdvisorSpendRangesMatchCostSelector pins the advisor-spend fetch to the
+// Cost section's window: the span is operator-adjustable (a ± stepper per
+// range, #13418), so the frontend always sends the window's exact since/until
+// bounds and the named presets stay a server-side fallback for API callers.
 func TestAdvisorSpendRangesMatchCostSelector(t *testing.T) {
 	html := indexHTML(t)
+	fn := strings.Index(html, "async function fetchAdvisorSpend()")
+	if fn < 0 {
+		t.Fatal("index.html does not define fetchAdvisorSpend")
+	}
+	body := html[fn:]
+	if end := strings.Index(body, "function advisorSpendChip"); end > 0 {
+		body = body[:end]
+	}
 	for _, want := range []string{
-		"const COST_HOURLY_WINDOW_H = 24;",
-		"const COST_DAILY_WINDOW_DAYS = 7;",
-		"const COST_WEEK_DAYS = 7;",
+		"const win = costWindow();",
+		"since=${encodeURIComponent(new Date(win.start).toISOString())}",
+		"until=${encodeURIComponent(new Date(Math.min(win.end, Date.now())).toISOString())}",
 	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("cost window constants changed; update advisorSpendRanges to match: missing %q", want)
+		if !strings.Contains(body, want) {
+			t.Errorf("fetchAdvisorSpend no longer sends the cost window bounds: missing %q", want)
 		}
 	}
-	if advisorSpendRanges["hourly"] != 24*time.Hour || advisorSpendRanges["daily"] != 7*24*time.Hour ||
-		advisorSpendRanges["weekly"] != 7*24*time.Hour || advisorSpendRanges["monthly"] != 30*24*time.Hour {
-		t.Errorf("advisorSpendRanges drifted from costWindow: %v", advisorSpendRanges)
+	if strings.Contains(body, "range=${encodeURIComponent(_costRange)}") {
+		t.Error("fetchAdvisorSpend sends a preset name; the cost window span is adjustable, send since/until")
+	}
+	for _, key := range []string{"hourly", "daily", "weekly", "monthly"} {
+		if advisorSpendRanges[key] <= 0 {
+			t.Errorf("advisorSpendRanges[%q] missing", key)
+		}
 	}
 }
 

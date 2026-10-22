@@ -196,6 +196,10 @@ type Server struct {
 	tokenHist *collect.TimeSeries[TokenSparklineEntry]
 	factHist  *collect.TimeSeries[FactHistoryEntry]
 	costHist  *collect.TimeSeries[CostHistoryEntry]
+	// costRollup holds per-UTC-day spend folded out of costHist so the Cost
+	// section can reach beyond the ring's ~30 days (see cost_rollup.go).
+	costRollupMu sync.Mutex
+	costRollup   map[string]CostDailyRollup
 	// budgetWindowHist records one row per CLOSED budget window (#4298). Lazily
 	// built like the sparkline rings so a zero-value Server works in tests.
 	budgetWindowOnce sync.Once
@@ -488,9 +492,12 @@ type StatusPayload struct {
 	OverviewBands *OverviewBands `json:"overview_bands,omitempty"`
 	// OverviewSlices is the Overview charts' slice taxonomy; each issue and
 	// PR row carries its slice as chart_slice (hivecommons/hive#11507).
-	OverviewSlices   *OverviewSlices           `json:"overview_slices,omitempty"`
-	OverviewTotals   FrontendOverviewTotals    `json:"overviewTotals"`
-	ActionableNow    FrontendActionableNow     `json:"actionableNow"`
+	OverviewSlices *OverviewSlices        `json:"overview_slices,omitempty"`
+	OverviewTotals FrontendOverviewTotals `json:"overviewTotals"`
+	ActionableNow  FrontendActionableNow  `json:"actionableNow"`
+	// OpenItems is the canonical open-items set the Overview tile, its
+	// sidebar pill and the Hive activity monitor all count (open_items.go).
+	OpenItems        FrontendOpenItems         `json:"openItems"`
 	OverviewCoverage *FrontendOverviewCoverage `json:"overviewCoverage,omitempty"`
 	// LabelPresets are the built-in label-filter presets the Projects cards'
 	// faceted filter offers (hivecommons/hive#12172). Served rather than
@@ -1081,9 +1088,15 @@ type FrontendRepo struct {
 	CountsStale bool `json:"countsStale,omitempty"`
 	// CountsStaleSince (RFC 3339) is when the stale figures were last read
 	// for real; set with CountsStale.
-	CountsStaleSince string                    `json:"countsStaleSince,omitempty"`
-	WorkBreakdown    *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
-	SLA              *timeline.SLARepoReport   `json:"sla,omitempty"`
+	CountsStaleSince string `json:"countsStaleSince,omitempty"`
+	// UnlistedIssues / UnlistedPRs are open items the enumeration or the
+	// forgestate cache reported in its totals but could not list as item
+	// rows. Issues/PRs count only listed items (the canonical open-items set,
+	// open_items.go), so these are shown beside the total, not inside it.
+	UnlistedIssues int                       `json:"unlistedIssues,omitempty"`
+	UnlistedPRs    int                       `json:"unlistedPrs,omitempty"`
+	WorkBreakdown  *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
+	SLA            *timeline.SLARepoReport   `json:"sla,omitempty"`
 	// ActionableIssues and OpenPrs are the items the agents may act on: the
 	// enumeration's actionable sets, minus anything held or exempt. Every
 	// automated consumer — the contribute queue, the mergeable counter, the
@@ -3982,7 +3995,9 @@ func (s *Server) AppendCostHistoryFull(usd float64, agents map[string]float64, m
 	if len(models) > 0 {
 		entry.Models = models
 	}
-	s.costSeries().Append(entry)
+	if s.costSeries().Append(entry) {
+		s.foldCostRollups(time.UnixMilli(entry.Timestamp))
+	}
 }
 
 // CostHistory returns a copy of the estimated-cost history.
@@ -3993,6 +4008,7 @@ func (s *Server) CostHistory() []CostHistoryEntry {
 // SeedCostHistory restores persisted cost history on startup.
 func (s *Server) SeedCostHistory(entries []CostHistoryEntry) {
 	s.costSeries().Seed(entries)
+	s.foldCostRollups(time.Now())
 }
 
 // AppendTrendHistory samples the governor / per-repo / beads / system-gauge
