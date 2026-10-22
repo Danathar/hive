@@ -310,6 +310,28 @@ Source: `ReviewCapable` in `src/pkg/review/dispatch.go`, which the dashboard
 (`dashboardAgentReviewCapable` in `src/pkg/dashboard/status_builder.go`), the relay and
 the merge-eligibility gate all call.
 
+## Review heads: several models per perspective
+
+`agents.<name>.review_heads` gives one base reviewer several model "heads" ([#13542](https://github.com/hivecommons/hive/issues/13542)). Each head is materialized like `replicas`: `<base>-<alias>-<n>` copies the base agent with only `backend` and `model` replaced, is stripped on save, and is provisioned at boot by the entrypoint. `alias` defaults to a slug of `<backend>-<model>` (without repeating the backend when the model already starts with it).
+
+```yaml
+agents:
+  code-reviewer:                     # the base; not dispatched as a head
+    backend: claude
+    model: claude-sonnet-5-5
+    role: reviewer
+    review_heads:
+      - {backend: claude, model: claude-sonnet-5-5, replicas: 2}   # code-reviewer-claude-sonnet-5-5-1, -2
+      - {backend: codex,  model: gpt-6-sol, alias: sol}            # code-reviewer-sol-1
+review:
+  combined_perspectives: false
+  reviewer_agents: [code-reviewer]   # naming the base admits its heads
+```
+
+With split perspectives, every perspective is dispatched once per head, to that head's least-loaded replica; the base and its plain `replicas` are not dispatched (they are reserved for the decision step). Because head dispatch asks every perspective of every head, a reviewer lane *without* `review_heads` alongside one with them would have nothing left to review, so config load rejects that mix under `combined_perspectives: false`: every admitted reviewer (the `reviewer_agents` list, or every agent carrying the `review` token when the list is empty) must declare `review_heads`, or be left out. Only heads of admitted bases are expected by the aggregate. Each kick costs one `max_parallel_reviews` slot, and `max_perspectives_per_pr` still bounds how many perspectives a PR head receives. A head reviews **blind** (it is told not to read other reviews of this head) and **records only**: it delivers its verdict with `hive-review --record-verdict` and posts nothing on the PR. The relay stamps each verdict with the head from the dispatch record it bound to (an advisory verdict with no dispatch row carries none) and keeps one report per perspective per head; `review_model` is stamped per head, so each head's report names the model that head ran.
+
+Until the decision step lands (part 2 of #13542), the aggregate folds the heads directly: a perspective's verdict is the strictest any head returned, findings are the union, and an all-approve aggregate stays `incomplete` until every head has reported every perspective. Heads have no `review_models` pool of their own (the head is the model) and are not used under `combined_perspectives: true`, where the base reviews as before. `review.head_max_retries` (Settings → Review gate; 0 means `max_redispatch`) is the per-head retry budget part 2 enforces.
+
 ## Dispatch and prompt construction
 
 `pkg/review` provides prompt builders for one prompt per perspective plus a sequential fallback prompt. These prompts instruct review-capable agents to emit the extended AgentReport JSON shape above.

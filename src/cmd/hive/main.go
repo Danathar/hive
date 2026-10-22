@@ -10505,6 +10505,7 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		Perspectives:               reviewPerspectiveSet(cfg, logger),
 		SelfAuthoredDecisionPolicy: cfg.Review.EffectiveSelfAuthoredDecisionPolicy(),
 		ModelStamps:                reviewModelStamps(logger),
+		ExpectedHeads:              cfg.ExpectedReviewHeads(),
 	}, time.Now().UTC())
 	if err != nil {
 		if !os.IsNotExist(err) {
