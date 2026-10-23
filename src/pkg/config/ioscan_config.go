@@ -2,6 +2,8 @@ package config
 
 import (
 	"strings"
+
+	"github.com/hivecommons/hive/pkg/ioscan"
 )
 
 // IoscanConfig gates the pkg/ioscan input/output security scanner (prompt-
@@ -38,16 +40,33 @@ type IoscanConfig struct {
 	// explicit `canaries: false`. Read via CanariesEnabled(), never dereferenced
 	// raw.
 	Canaries *bool `yaml:"canaries,omitempty" json:"canaries,omitempty"`
-	// Classifier enables the optional LLM-judge semantic prompt-injection
-	// classifier. It defaults off so hives that only use deterministic rules
-	// make no model calls and see zero behavior change.
+	// BlockAt is the per-surface severity at which an injection or dangerous
+	// finding in text by an UNTRUSTED author is withheld from the kick
+	// (hivecommons/hive#6685). Keys are ioscan surfaces (issue_body, comment,
+	// pr_body, review); values are low/medium/high/critical. A surface left
+	// out sits at the default, medium, so any rule that fires withholds the
+	// text. Text by a trusted author (the hive's own identities, repo owners
+	// and members) always uses the high line regardless of this map. Read via
+	// Policy(), which also validates the keys and values.
+	BlockAt map[string]string `yaml:"block_at,omitempty" json:"block_at,omitempty"`
+	// Classifier controls the LLM-judge semantic prompt-injection classifier
+	// that scores text the deterministic rules let through. Its enabled and
+	// fail_mode defaults follow the ACMM level (see IoscanClassifierConfig).
 	Classifier IoscanClassifierConfig `yaml:"classifier,omitempty" json:"classifier,omitempty"`
 }
 
-// IoscanClassifierConfig controls the optional model-based semantic injection
+// IoscanClassifierConfig controls the model-based semantic injection
 // classifier that runs after deterministic ioscan redaction.
+//
+// Enabled is a pointer so an omitted key follows the ACMM pack: on at L4-L6,
+// off at L1-L3 and when no level is set. FailMode ("open" or "closed") says
+// what happens when the classifier cannot answer (endpoint error, timeout,
+// unparseable reply): open passes the rule-cleaned text on, closed withholds
+// it. Omitted, it follows ioscan.fail_mode and so the pack: closed at L5-L6.
+// Read both via EnabledAtLevel / FailClosedAtLevel, never raw.
 type IoscanClassifierConfig struct {
-	Enabled        bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Enabled        *bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	FailMode       string  `yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
 	Model          string  `yaml:"model,omitempty" json:"model,omitempty"`
 	WarnThreshold  float64 `yaml:"warn_threshold,omitempty" json:"warn_threshold,omitempty"`
 	BlockThreshold float64 `yaml:"block_threshold,omitempty" json:"block_threshold,omitempty"`
@@ -98,4 +117,39 @@ func (c IoscanConfig) FailClosedAtLevel(level int) bool {
 // (#6701, #6720); an operator opts out with an explicit `canaries: false`.
 func (c IoscanConfig) CanariesEnabled() bool {
 	return c.Canaries == nil || *c.Canaries
+}
+
+// EnabledAtLevel reports whether the classifier runs for a hive at the given
+// ACMM level. An explicit enabled wins; otherwise the pack decides.
+func (c IoscanClassifierConfig) EnabledAtLevel(level int) bool {
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return IoscanClassifierForLevel(level)
+}
+
+// ClassifierEnabledAtLevel reports whether ioscan as a whole and the
+// classifier are both on for the given ACMM level.
+func (c IoscanConfig) ClassifierEnabledAtLevel(level int) bool {
+	return c.IsEnabled() && c.Classifier.EnabledAtLevel(level)
+}
+
+// ClassifierFailClosedAtLevel reports whether a classifier that cannot
+// answer withholds the text (closed) or passes it on (open). An explicit
+// classifier.fail_mode wins; otherwise it follows FailClosedAtLevel, so an
+// explicit ioscan.fail_mode and then the ACMM pack decide.
+func (c IoscanConfig) ClassifierFailClosedAtLevel(level int) bool {
+	if strings.EqualFold(c.Classifier.FailMode, ioscanFailModeClosed) {
+		return true
+	}
+	if strings.EqualFold(c.Classifier.FailMode, ioscanFailModeOpen) {
+		return false
+	}
+	return c.FailClosedAtLevel(level)
+}
+
+// Policy resolves block_at into the ioscan severity matrix. An empty map is
+// the shipped default (medium on every surface for untrusted authors).
+func (c IoscanConfig) Policy() (ioscan.Policy, error) {
+	return ioscan.ParsePolicy(c.BlockAt)
 }

@@ -211,21 +211,6 @@ type PoliciesConfig struct {
 	LocalDir     string        `yaml:"local_dir"`
 }
 
-// StatsDisplayEntry defines a single metric to show in the agent's sidebar/detail view.
-type StatsDisplayEntry struct {
-	Key        string `yaml:"key" json:"key"`
-	Label      string `yaml:"label" json:"label"`
-	Source     string `yaml:"source" json:"source"`
-	Field      string `yaml:"field" json:"field"`
-	Style      string `yaml:"style" json:"style"`
-	Icon       string `yaml:"icon,omitempty" json:"icon,omitempty"`
-	TrendField string `yaml:"trend_field,omitempty" json:"trendField,omitempty"`
-	Target     int    `yaml:"target,omitempty" json:"target,omitempty"`
-	// Desc is a one-line explanation of what the stat verifies, rendered
-	// as a hover tooltip in the dashboard (health checks especially).
-	Desc string `yaml:"desc,omitempty" json:"desc,omitempty"`
-}
-
 // ProjectObservabilityBackendRef names references an agent may place in managed
 // project configuration. Values are identifiers only: EndpointEnv is an
 // environment-variable NAME and CredentialSecret is a Kubernetes-style

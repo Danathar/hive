@@ -29,14 +29,15 @@ hub read that store and nothing else (`src/pkg/dashboard/stage_tracker.go:584-58
    `SyncIssueStageLabels` (`src/pkg/github/issue_stage_labels.go:145`,
    `src/pkg/github/issue_stage_labels.go:233`) from the enumeration bucket. PRs
    are staged by the automerge engine: each lane calls `recordStage`
-   (`src/pkg/github/automerge/automerge_stage_labels.go:397`), observations are
+   (`src/pkg/github/automerge/automerge_stage_labels.go:365`), observations are
    sorted by `stageLanePrecedence` (self 3 > trusted 2 > contributor 1,
-   `src/pkg/github/automerge/automerge_stage_labels.go:167`), each is classified
-   by `classifyStage` (`src/pkg/github/automerge/automerge_stage_labels.go:806`)
-   into a ranked opinion (`stageRankNone..stageRankOwned`,
-   `src/pkg/github/automerge/automerge_stage_labels.go:619-624`), and
-   `resolveStage` picks the winner
-   (`src/pkg/github/automerge/automerge_stage_labels.go:946`). Shared concepts —
+   `src/pkg/github/automerge/automerge_stage_labels.go:177`), each is classified
+   by `ClassifyStage` (`src/pkg/stageengine/derive_pr_classify.go:252`)
+   into a ranked opinion (`prstage.RankNone..prstage.RankOwned`,
+   `src/pkg/stageengine/prstage/types.go:145-148`), and
+   `ResolveStage` picks the winner
+   (`src/pkg/stageengine/derive_pr_classify.go:445`). These PR helpers now
+   live in the engine (#13779); automerge keeps only gathering-side previews. Shared concepts —
    parking (045/085, `needs-human`, hold labels), author kind (070/071/072),
    adoption (074), terminal states, `origin/*` — are modelled twice with
    different field names, so every taxonomy change lands in both:
@@ -47,7 +48,7 @@ hub read that store and nothing else (`src/pkg/dashboard/stage_tracker.go:584-58
    [#12737](https://github.com/hivecommons/hive/pull/12737) (8),
    [#12856](https://github.com/hivecommons/hive/pull/12856) (44).
 2. *Not one writer.* Automerge writes through its own
-   `engineStageLabeler` (`src/pkg/github/automerge/automerge_stage_labels.go:1428`);
+   `engineStageLabeler` (now retired in favour of `pkg/github/stage_writer.go`);
    the issue path uses `Client.StageLabeler` + `Enforce`
    (`src/pkg/github/stage_labeler.go:63`); the claim relay and ledger hooks
    write `stage/020` / `stage/030` directly as a side effect of a claim
@@ -117,8 +118,9 @@ Package: `src/pkg/stageengine` (imports `stagelabels`, `authorkind`,
 their side). Config: `governor.labels.stage.engine.mode: shadow | enforce`
 (short name `stage_engine.mode` in dashboards/logs; default `enforce` since
 the plan's acceptance metrics held on hive's own spoke — it was `shadow`
-during the rollout; `off` keeps the legacy paths and exists only for
-rollback).
+during the rollout. `shadow` is now a pause: derive and count, write
+nothing. The rollback value `off` kept the legacy paths and was retired
+with them in plan PR-F).
 
 ### Facts
 
@@ -295,9 +297,8 @@ type Reconciler interface {
 type Mode string
 
 const (
-	ModeOff     Mode = "off"
-	ModeShadow  Mode = "shadow"
-	ModeEnforce Mode = "enforce"
+	ModeShadow  Mode = "shadow"  // derive and count, write nothing
+	ModeEnforce Mode = "enforce" // default
 )
 
 type Options struct {
@@ -306,7 +307,7 @@ type Options struct {
 	Writer  StageWriter
 	Issue   Deriver // defaults to DeriveIssue
 	PR      Deriver // defaults to DerivePR
-	Legacy  func(f Facts) (stagelabels.Stage, string) // shadow-mode comparator; nil in enforce
+	// (Legacy, the shadow-mode comparator, existed for the rollout and left with plan PR-F.)
 	Now     func() time.Time
 	Logger  *slog.Logger
 	Metrics Metrics
@@ -366,9 +367,10 @@ writer did not derive.
 
 ### Metrics
 
-`stage_derivations_total{kind,stage}`, `stage_shadow_mismatch_total{kind,legacy,engine}`,
-`stage_transition_anomaly_total{kind,from,to}`, `stage_writer_writes_total{kind,op}`,
-`stage_duplicate_pills_healed_total{kind}`. Exposed on the existing
+`stage_derivations_total{kind,stage}`, `stage_transition_anomaly_total{kind,from,to}`,
+`stage_writer_writes_total{kind,op}`, `stage_duplicate_pills_healed_total{kind}`
+(`stage_shadow_mismatch_total{kind,legacy,engine}` existed for the rollout and
+was retired with the legacy comparator in plan PR-F). Exposed on the existing
 `/metrics` path and summarised on the activity tracker's status strip.
 
 ## Scope and extension points
@@ -391,6 +393,14 @@ gets its own `StageWriter` (Jira status/field, Linear state, Projects status
 field) selected by `Ref.Source`. The current epic (#12999) ships only the
 GitHub adapters and writer; `Ref.Source` is carried from PR-B so later
 sources need no signature change.
+
+**Prior-art park (`stage/017-possible-existing`, #13575).** Added after
+the epic: an issue-only stage between 015 and 020 with no dwell. The label is
+written by the scheduler's prior-art gate (not by the deriver) and read as an
+issue-level hard suppress; `DeriveIssue` reproduces it from the label (or the
+enumerator's filtered-reason) the way it reproduces 045 from `needs-spec`,
+and the resume sweep removes it on `/hive decision proceed` / `exists`.
+Leaving 017 for 010 or closed is never a regression.
 
 ## Consequences
 
@@ -438,12 +448,26 @@ sources need no signature change.
   the pipeline shape (010–045 vs 050–100); forcing one function recreates the
   clamp special-cases that `Stage.For` exists to handle.
 
-## Open question (placeholder)
+## Review-state fold (resolved)
 
-*Review-pending stuck (050 after reviews)* — the concurrent investigation's
-finding goes here as the definition of `ReviewFacts.State` folding
-(`Verdict`, `HumanApprover` at `HeadSHA`, `HumanReviews`); until it lands,
-`DerivePR` reproduces the current behaviour exactly (golden-pinned).
+`ReviewFacts.State` is the one verdict fact the PR deriver routes on; it is
+folded for `HeadSHA` by `verdictStateFrom` in `pkg/github/automerge`:
+
+| Evidence at `HeadSHA` | `State` |
+|---|---|
+| no verdict recorded yet | `VerdictPending` |
+| aggregate verdict approved (merge-eligible) | `VerdictApproved` |
+| no reviewer configured for the repo | `VerdictUnavailable` |
+| `changes_requested` / `reject` / `rejected` / `request_changes` | `VerdictChangesRequested` |
+| `requires_human`, or the reviewer asked for a decision | `VerdictRequiresHuman` |
+| anything else | `VerdictPending` |
+
+`HumanApprover` is set only when the recorded human approval is for
+`HeadSHA`; `HumanReviews` is the review count the stall rule reads. The raw
+verdict string is carried for the reason text (`reviewer-verdict:<verdict>`),
+never for routing. The "review-pending stuck at 050 after reviews" case that
+prompted the placeholder was fixed in hivecommons/hive#13112 (a
+`requires_human` verdict routes 085, not 050), pinned by the PR goldens.
 
 ## References
 

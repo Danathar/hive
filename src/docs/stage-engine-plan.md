@@ -17,14 +17,24 @@ PR-A and PR-B are independent. PR-C and PR-D depend only on PR-B (they can
 be developed against PR-B's branch and rebased). PR-E depends on A, B, C.
 PR-F is a follow-up after 48 h in `enforce`.
 
+PR-F's remaining PR-side relocation (#13779) puts the classifier and pass
+post-steps in `pkg/stageengine/derive_pr*.go`. `pkg/stageengine/prstage`
+owns the lane reason vocabulary and shared observation shapes; automerge
+only gathers facts and previews through engine helpers. Both derivers are
+built in: the temporary `SetDerivers` registry and PR adapter are removed.
+The PR goldens now live in `pkg/stageengine/testdata/stage_goldens`; a thin
+automerge facts-fold parity replay is retained for one release. Review prose
+classification lives in the dependency-free `pkg/review/reviewtext` leaf,
+avoiding the `review` → `config` → `stageengine` import cycle.
+
 ## PR-A — golden fixtures and shadow harness (independent)
 
 Scope: freeze today's behaviour. No production code changes.
 
-- `src/pkg/github/automerge/testdata/stage_goldens/*.json`: one fixture per
+- `src/pkg/stageengine/testdata/stage_goldens/*.json`: one fixture per
   lane × reason × verdict × author-kind × adoption combination reachable in
-  `classifyStage`/`resolveStage` (`src/pkg/github/automerge/automerge_stage_labels.go:806`,
-  `src/pkg/github/automerge/automerge_stage_labels.go:946`), serialised as
+  `ClassifyStage`/`ResolveStage` (`src/pkg/stageengine/derive_pr_classify.go:252`,
+  `src/pkg/stageengine/derive_pr_classify.go:445`), serialised as
   `[]stageObservation` → `{stage, rank, reason, role, terminal}`. Generated
   by a `go test -run TestStageGoldens -update` flag; checked in.
 - `src/pkg/github/testdata/issue_stage_goldens/*.json`: one per bucket ×
@@ -35,7 +45,8 @@ Scope: freeze today's behaviour. No production code changes.
   diff.
 - `src/pkg/stagelabels/shadowdiff/` (tiny): `Diff(legacy, engine Decision) []Mismatch`
   and a `Recorder` that counts `stage_shadow_mismatch_total{kind,legacy,engine}`
-  and logs one line per distinct mismatch. Pure; no engine import.
+  and logs one line per distinct mismatch. Pure; no engine import. (Served
+  the rollout; deleted with the legacy comparator in PR-F.)
 
 Tests: the golden tests themselves; `shadowdiff` unit test.
 Files touched: ~6 new, 0 modified. Depends on: nothing.
@@ -68,9 +79,9 @@ without moving its logic.
     `final_stage` / `final_reason`.
   - `src/pkg/github/issue_stage_facts.go`: `factsFrom(IssueStageInput) stageengine.Facts`
     and `issueDeriverAdapter` wrapping `IssueStageFor`.
-  - Both adapters are what `stageengine.DeriveIssue`/`DerivePR` delegate to
-    until PR-F moves the logic in; the engine package exposes
-    `SetDerivers(issue, pr Deriver)` for the wiring in `cmd/hive`.
+  - Both adapters originally backed `stageengine.DeriveIssue`/`DerivePR`
+    through `SetDerivers(issue, pr Deriver)`. PR-F moved both bodies into
+    the engine and removed that temporary registry (#13778, #13779).
 - Property test `TestReconcileIdempotent`: for random `Facts`, `Reconcile`
   twice with a fake writer → second call writes nothing and the item carries
   exactly one `stage/*` label.
@@ -90,7 +101,7 @@ Scope: one writer, every sweep uses it.
   `src/pkg/github/stage_labeler.go:63`. This is the only implementation.
 - `src/pkg/github/automerge/automerge_stage_labels.go`: `ApplyStageLabels`
   builds `Facts` per PR and calls `Reconciler.ReconcileBatch`; delete
-  `engineStageLabeler` (`src/pkg/github/automerge/automerge_stage_labels.go:1428`).
+  `engineStageLabeler` (replaced by `pkg/github/stage_writer.go`).
   The 072 nudge / 074 adoption hooks read the returned `Transition`s instead
   of the local verdict.
 - `src/pkg/github/issue_stage_labels.go`: `SyncIssueStageLabels` builds
@@ -160,8 +171,8 @@ so the import would cycle; `TestClaimLabelConstantsMatchStages` in
 Landed (hivecommons/hive#13010): `cmd/hive/stage_engine.go` builds the one
 `stageengine.Options`, `Client.StageReconciler` the one reconciler; the mode
 is a runtime switch (`stageengine.ModeSwitch`) re-read before each sweep,
-`off` is legacy pass-through; `/api/status.stageEngine` and the tracker strip
-report mode / mismatches / anomalies. The original scope follows.
+`off` was legacy pass-through (retired by PR-F); `/api/status.stageEngine` and the tracker strip
+report mode / anomalies. The original scope follows.
 
 - `src/pkg/config`: `governor.labels.stage.engine.mode` (`off|shadow|enforce`,
   default `shadow` during the rollout, `enforce` since the default flip); Settings → Labels tab exposes it; `hivectl config`
@@ -188,26 +199,54 @@ Default flip landed (hivecommons/hive#12999): an unset
 `governor.labels.stage.engine.mode` now yields `enforce`
 (`config.DefaultStageEngineMode`) after 48 h clean `enforce` on hive's spoke;
 an unparsable value still falls back to `shadow`, never `enforce`. A hive
-that wants the old behaviour sets `mode: shadow` (or `off` to roll back).
-`stageengine.DefaultMode` stays `shadow`: it is the library default for a
-caller that passes zero `Options` (tests, `Client.StageReconciler(store,
-nil, …)`), not the configured hive's default. ADR-0025 is Accepted.
+that wants to pause stage writes sets `mode: shadow`. ADR-0025 is Accepted.
+(`stageengine.DefaultMode` was `shadow` as the library default until PR-F
+retired the legacy comparator; with nothing else able to write it is
+`enforce` too.)
 
 ## PR-F — move derivation in, delete legacy (follow-up, ≥48 h after enforce default)
 
-- Move `classifyStage`/`resolveStage` bodies into `stageengine.DerivePR`
-  and `IssueStageFor` into `DeriveIssue`; delete the adapters, the legacy
-  `Options.Legacy` comparator and `ModeOff`.
-- Goldens from PR-A move to `src/pkg/stageengine/testdata` and must pass
-  unchanged.
-- Land the review-pending-stuck finding as the `ReviewFacts.State` fold (its
-  own golden update) — the first semantic change, after parity is proven.
+Shipped as three PRs (hivecommons/hive#13011):
+
+- **F1 — retire the legacy comparator** (landed): `Options.Legacy`,
+  `LegacyTable`, `ModeOff`, the shadow-diff recorder
+  (`pkg/stagelabels/shadowdiff`), `stage_shadow_mismatch_total` and the
+  status/strip mismatch fields are gone. `shadow` is now a pure pause
+  (derive, count, write nothing). The sweeps no longer feed their own
+  derivation to the reconciler; each package registers its deriver at
+  init. Retiring the comparator exposed that the PR adapter's enforce-mode
+  Decision dropped the pass's `Stalled` and configured `KindLabels`
+  (`PRPassFacts` now carries both) and kept the role on a terminal PR.
+- **F2 — issue derivation moves in, review-state fold closed** (landed):
+  `IssueStageFor`'s body is `stageengine.deriveIssue` over `IssueFacts`
+  that now carry the resolved label families (`HoldLabel`, `BlockedReason`,
+  `UmbrellaLabel`, `TriageAwaiting`, `NeedsHumanLabel`); `Decision.Covered`
+  replaces the shim's second return. `pkg/github` keeps the one place the
+  hive's configurable label vocabulary meets the engine
+  (`resolveIssueLabelFacts`, used by the sweep's facts builder, the sink's
+  fresh-read enrichment and the `github.IssueDeriver` wrapper), so the
+  issue goldens stay in `pkg/github` and replay through the shim unchanged
+  — the corpus is keyed on labels, and the labels are configuration.
+  `cmd/hive/stageengine_wire.go` is gone: the issue deriver is built in and
+  automerge registers the PR deriver at init. The ADR's open question is
+  closed: `ReviewFacts.State` is the fold `verdictStateFrom` defines
+  (Approved → `VerdictApproved`; unconfigured → `VerdictUnavailable`;
+  `changes_requested`/`reject`/`request_changes` → `VerdictChangesRequested`;
+  `requires_human` or a decision request → `VerdictRequiresHuman`; else
+  `VerdictPending`), the 050-after-reviews stall was fixed in
+  hivecommons/hive#13112, and the PR deriver reads `State` for the
+  verdict's routing while the raw verdict string stays for the reason text.
+- **PR derivation body** (`classifyStage`/`resolveStage`, ~1,200 lines over
+  the lanes' reason vocabulary) stays in `pkg/github/automerge` behind the
+  `PRDeriver` adapter and the PR goldens; moving it is a pure relocation
+  that the goldens pin and is tracked separately (see #13011's close-out
+  comment) rather than held against the epic.
 
 ## Acceptance metrics
 
 | Gate | Metric | Target |
 |---|---|---|
-| shadow → enforce (spoke) | `stage_shadow_mismatch_total` | 0 over 48 h |
+| shadow → enforce (spoke) | `stage_shadow_mismatch_total` (series retired by PR-F; held at 0) | 0 over 48 h |
 | shadow → enforce (spoke) | duplicate-stage pills (`Outcome.Healed`) | 0 over 48 h |
 | enforce → default | `stage_transition_anomaly_total` | only pairs explained by a documented event (merge, close, human label edit) |
 | any | GitHub REST calls per cycle (`hive:issue_stage_labels`, `stageRESTCaller`) | not above the pre-engine baseline |

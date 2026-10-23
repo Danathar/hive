@@ -19,6 +19,7 @@ import (
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/review"
 	"github.com/hivecommons/hive/pkg/stageengine"
+	"github.com/hivecommons/hive/pkg/stageengine/prstage"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -79,6 +80,13 @@ type Options struct {
 	// review pipeline and the dashboard read it too (#12962). nil records
 	// nothing.
 	RecordReviewHoldRelease ReviewHoldReleaseFunc
+	// RequireCurrentBase returns the live auto_merge.require_current_base
+	// switch for an owner/repo (hivecommons/hive#13634). nil means off.
+	RequireCurrentBase func(repo string) bool
+	// MergeForwardTrustedHuman returns the live
+	// auto_merge.merge_forward_trusted_human membership for owner/repo
+	// (hivecommons/hive#13636); nil means off.
+	MergeForwardTrustedHuman func(repo string) bool
 	// SelfAuthorizationHoldEnabled returns the live per-repo #5117 hold switch.
 	// nil preserves the default-on behavior.
 	SelfAuthorizationHoldEnabled      func(repo string) bool
@@ -145,9 +153,9 @@ type Options struct {
 	StageStore *stagelabels.Store
 	// StageEngine configures the ADR-0025 reconciler ApplyStageLabels
 	// routes every stage write through (hivecommons/hive#13008). Nil is the
-	// default: stageengine.DefaultMode (shadow) with this sweep's own
-	// derivation as the legacy comparator, so the labels written are
-	// exactly what the sweep derived. The mode flag arrives with plan PR-E.
+	// default: stageengine.DefaultMode (enforce) over the transport's one
+	// StageWriter; cmd/hive passes the process's shared Options so the mode
+	// follows governor.labels.stage.engine.mode.
 	StageEngine *stageengine.Options
 	// ContributorNudge receives stage-072 nudges (hivecommons/hive#12436);
 	// nil posts the GitHub comment only.
@@ -197,8 +205,10 @@ type Engine struct {
 	humanMergePathsMu sync.RWMutex
 	humanMergePaths   func(repo string) []string
 
-	reviewVerdictHold       ReviewVerdictHoldFunc
-	recordReviewHoldRelease ReviewHoldReleaseFunc
+	reviewVerdictHold        ReviewVerdictHoldFunc
+	recordReviewHoldRelease  ReviewHoldReleaseFunc
+	requireCurrentBase       func(repo string) bool
+	mergeForwardTrustedHuman func(repo string) bool
 
 	selfAuthorizationHoldEnabled      func(repo string) bool
 	selfAuthorizationHoldReleaseLimit int
@@ -230,6 +240,15 @@ type Engine struct {
 	// actual comment across restarts; this clock drives the missing-caller grace.
 	workflowApprovalCommandsMu sync.Mutex
 	workflowApprovalCommands   map[string]time.Time
+	// workflowApprovalScans is the last time this process read a PR's
+	// comments for the hive's own /ok-to-test posts and the merge bot's
+	// rejection reply; workflowApprovalUntrusted remembers PRs whose merge
+	// bot refused the App so no later head posts again (per PR, not head).
+	// workflowApprovalWorkflowChecks caches whether a repository carries
+	// the hive-ok-to-test workflow (automerge_held_runs.go).
+	workflowApprovalScans          map[string]time.Time
+	workflowApprovalUntrusted      map[string]bool
+	workflowApprovalWorkflowChecks map[string]okToTestWorkflowCheck
 	// terminalHoldsLogged remembers PR head+reason pairs already reported as a
 	// terminal held/never-started hold so later ticks only count them.
 	terminalHoldsLogged map[string]bool
@@ -269,6 +288,8 @@ func New(transport Transport, opts Options) *Engine {
 		humanMergePaths:                   opts.HumanMergePaths,
 		reviewVerdictHold:                 opts.ReviewVerdictHold,
 		recordReviewHoldRelease:           opts.RecordReviewHoldRelease,
+		requireCurrentBase:                opts.RequireCurrentBase,
+		mergeForwardTrustedHuman:          opts.MergeForwardTrustedHuman,
 		selfAuthorizationHoldEnabled:      opts.SelfAuthorizationHoldEnabled,
 		selfAuthorizationHoldReleaseLimit: opts.SelfAuthorizationHoldReleaseLimit,
 		repoAutoMergeEnabled:              opts.RepoAutoMergeEnabled,
@@ -504,8 +525,8 @@ func nextSelfAuthoredSweepInterval(repos int, current time.Duration, result *Aut
 
 const (
 	autoMergeReasonNoHiveQueueApproval        = "no-hive-queue-approval"
-	autoMergeReasonHumanChangesRequested      = "human-changes-requested"
-	autoMergeReasonNoAppBotLogin              = "no-app-bot-login"
+	autoMergeReasonHumanChangesRequested      = prstage.AutoMergeReasonHumanChangesRequested
+	autoMergeReasonNoAppBotLogin              = prstage.AutoMergeReasonNoAppBotLogin
 	autoMergeReasonUntrustedQueueApproval     = "untrusted-hive-queue-approval"
 	autoMergeReasonUntrustedMerger            = "untrusted-merger"
 	autoMergeReasonNoMergerAuthz              = "no-merger-authorizer"
@@ -526,13 +547,11 @@ var requiredChecksExpectedRE = regexp.MustCompile(`(?i)(required status check ["
 // keeps the repository's squash convention. The classification (branch, title,
 // and head history) is shared with the hive-merge relay via
 // hgithub.ResolveForwardMergeMethod.
+// A PR wearing `merge-method/merge` (mixed authorship, each commit
+// self-signed; automerge_merge_commit.go) is merged with a merge commit too.
 func (c *Engine) mergeMethodFor(ctx context.Context, owner, repo string, pr *gh.PullRequest) string {
-	var client *gh.Client
-	var logger *slog.Logger
-	if c != nil {
-		client, logger = c.gh, c.logger
-	}
-	return hgithub.ResolveForwardMergeMethod(hgithub.WithRESTCaller(ctx, "hive:automerge_sweep"), client, logger, owner, repo, pr, "squash")
+	method, _ := c.mergeMethodWithReason(ctx, owner, repo, pr)
+	return method
 }
 
 type AutoMergeSweepOptions struct {
@@ -1102,7 +1121,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				"updated_branches", result.UpdatedBranches,
 				"skipped", repoSkipped,
 			}
-			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", "not-mergeable"}
+			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", autoMergeReasonForkNotEditable, "not-mergeable"}
 			if sentinelLabel := c.sentinelLabelName(); sentinelLabel != "" {
 				skipReasonOrder = append([]string{sentinelLabel}, skipReasonOrder...)
 			}
@@ -1606,13 +1625,13 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	if c.humanChangesRequestedForHead(ctx, owner, repo, number, evaluatedHeadSHA) {
 		return AutoMergeSweepEvent{}, autoMergeReasonHumanChangesRequested, nil
 	}
-	method := c.mergeMethodFor(ctx, owner, repo, pr)
+	method, methodReason := c.mergeMethodWithReason(ctx, owner, repo, pr)
 	mergeClaim := effects.Claim{
 		Repo:   owner + "/" + repo,
 		Kind:   effects.KindPullRequestMerge,
 		Target: fmt.Sprintf("%d", number),
 		Actor:  "automerge",
-		Inputs: map[string]string{"method": method, "expect_sha": evaluatedHeadSHA, "lane": lane},
+		Inputs: mergeClaimInputs(method, methodReason, evaluatedHeadSHA, lane),
 	}
 	c.reconcileOpenPRMergeEffect(ctx, mergeClaim, owner, repo, number)
 
@@ -1625,7 +1644,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 			// state and not author work (hivecommons/hive#12607).
 			return AutoMergeSweepEvent{}, autoMergeReasonBehindBudgetExhausted, nil
 		}
-		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "behind")
+		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "behind", c.isForkPR(pr))
 	}
 	if (mergeableState == "dirty" || mergeableState == "conflicting") && !laneBehind {
 		return reject("conflicting")
@@ -1695,6 +1714,15 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, intentReason, err
 	} else if intentReason != "" {
 		return AutoMergeSweepEvent{}, intentReason, nil
+	}
+
+	// Current-base gate (hivecommons/hive#13634). Consulted only once the
+	// head is green and every policy gate above has passed: a red or pending
+	// head is the author's to fix and must not be re-based under them, and a
+	// head policy refuses would be updated for nothing. Sits before the desk
+	// so the desk is only asked about a head that would merge this tick.
+	if ev, reason, stop, err := c.currentBaseGate(ctx, displayRepo, owner, repo, number, baseBranch, evaluatedHeadSHA, branchUpdateAllowed, autoMergeReasonBehindBudgetExhausted, c.isForkPR(pr)); stop {
+		return ev, reason, err
 	}
 
 	// Approval desk (RFC #4000). Consulted AFTER the sweep's own eligibility
@@ -1772,7 +1800,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 			if !branchUpdateAllowed {
 				return AutoMergeSweepEvent{}, "check-pending", nil
 			}
-			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "required-checks-expected")
+			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "required-checks-expected", c.isForkPR(pr))
 		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
@@ -1956,7 +1984,7 @@ func (c *Engine) sweepLaneForAuthor(author string) (string, bool) {
 
 // trustedBotLaneSkipReason is the trusted-author tier's skip reason for a PR
 // it hands off to the self-authored sweep's "trusted-bot" lane.
-const trustedBotLaneSkipReason = "trusted-bot-lane"
+const trustedBotLaneSkipReason = prstage.TrustedBotLaneSkipReason
 
 // isTrustedBotLaneAuthor reports whether author falls in the "trusted-bot"
 // lane of sweepLaneForAuthor.
@@ -2185,10 +2213,10 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 		if headSHA == "" {
 			return AutoMergeSweepEvent{}, "missing-head-sha", nil
 		}
-		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "behind")
+		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "behind", c.isForkPR(pr))
 	}
 	if mergeableState == "dirty" || mergeableState == "conflicting" {
-		return AutoMergeSweepEvent{}, "conflicting", nil
+		return c.mergeForwardOrConflict(ctx, displayRepo, owner, repo, pr, number)
 	}
 	headSHA := ""
 	if pr.GetHead() != nil {
@@ -2197,13 +2225,13 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	if headSHA == "" {
 		return AutoMergeSweepEvent{}, "missing-head-sha", nil
 	}
-	method := c.mergeMethodFor(ctx, owner, repo, pr)
+	method, methodReason := c.mergeMethodWithReason(ctx, owner, repo, pr)
 	mergeClaim := effects.Claim{
 		Repo:   owner + "/" + repo,
 		Kind:   effects.KindPullRequestMerge,
 		Target: fmt.Sprintf("%d", number),
 		Actor:  "automerge",
-		Inputs: map[string]string{"method": method, "expect_sha": headSHA, "lane": "trusted-author"},
+		Inputs: mergeClaimInputs(method, methodReason, headSHA, "trusted-author"),
 	}
 	c.reconcileOpenPRMergeEffect(ctx, mergeClaim, owner, repo, number)
 	baseBranch := ""
@@ -2228,6 +2256,11 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	}
 	if humanReason, err := c.humanMergePathGate(ctx, displayRepo, owner, repo, pr); err != nil || humanReason != "" {
 		return AutoMergeSweepEvent{}, humanReason, err
+	}
+	// Current-base gate (hivecommons/hive#13634): only a green head that
+	// every gate above lets through is worth an update-branch commit.
+	if ev, reason, stop, err := c.currentBaseGate(ctx, displayRepo, owner, repo, number, baseBranch, headSHA, true, "behind", c.isForkPR(pr)); stop {
+		return ev, reason, err
 	}
 	if gateReason, err := c.forgestateMergeGate(ctx, owner, repo, number, headSHA); gateReason != "" || err != nil {
 		return AutoMergeSweepEvent{}, gateReason, err
@@ -2268,7 +2301,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	})
 	if err != nil {
 		if requiredChecksExpectedMergeError(err) {
-			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected")
+			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected", c.isForkPR(pr))
 		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
@@ -2324,9 +2357,15 @@ func (c *Engine) isForkPR(pr *gh.PullRequest) bool {
 	return headRepo != "" && baseRepo != "" && !strings.EqualFold(headRepo, baseRepo)
 }
 
-func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, repo string, number int, headSHA, reason string) (AutoMergeSweepEvent, string, error) {
+func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, repo string, number int, headSHA, reason string, fork bool) (AutoMergeSweepEvent, string, error) {
 	if err := c.executeUpdateBranchEffect(ctx, owner, repo, number, headSHA, reason); err != nil {
-		if isGitHubStatus(err, http.StatusUnprocessableEntity) {
+		switch classifyUpdateBranchError(err, fork) {
+		case updateBranchUpToDate:
+			return AutoMergeSweepEvent{}, "check-pending", nil
+		case updateBranchForkNotEditable:
+			c.info("automerge update-branch skipped: fork head not editable by the app", "repo", displayRepo, "pr", number, "reason", reason)
+			return AutoMergeSweepEvent{}, autoMergeReasonForkNotEditable, nil
+		case updateBranchConflict:
 			return AutoMergeSweepEvent{}, "conflicting", nil
 		}
 		return AutoMergeSweepEvent{}, "update-branch", err
@@ -2335,15 +2374,63 @@ func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, re
 	return AutoMergeSweepEvent{Repo: displayRepo, Number: number, HeadSHA: headSHA, BranchUpdated: true}, "check-pending", nil
 }
 
+const autoMergeReasonForkNotEditable = prstage.AutoMergeReasonForkNotEditable
+
+type updateBranchFailure int
+
+const (
+	updateBranchOther updateBranchFailure = iota
+	updateBranchConflict
+	updateBranchUpToDate
+	updateBranchForkNotEditable
+)
+
+// classifyUpdateBranchError separates the update-branch failures GitHub
+// reports with overlapping statuses: 422 covers conflicts and an already
+// current branch, while a 422 naming maintainer edits (or a 403 on a fork PR)
+// means the app cannot write to the fork head. A 403 on a same-repo branch is
+// a plain permission or rate-limit failure. An unrecognised 422 stays a conflict.
+func classifyUpdateBranchError(err error, fork bool) updateBranchFailure {
+	var ghErr *gh.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil {
+		return updateBranchOther
+	}
+	msg := strings.ToLower(ghErr.Message)
+	switch ghErr.Response.StatusCode {
+	case http.StatusForbidden:
+		if fork {
+			return updateBranchForkNotEditable
+		}
+	case http.StatusUnprocessableEntity:
+		switch {
+		case strings.Contains(msg, "maintainer") || strings.Contains(msg, "permission") || strings.Contains(msg, "not authorized"):
+			return updateBranchForkNotEditable
+		case strings.Contains(msg, "merge conflict"):
+			return updateBranchConflict
+		case strings.Contains(msg, "up to date") || strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no new commits"):
+			return updateBranchUpToDate
+		}
+		return updateBranchConflict
+	}
+	return updateBranchOther
+}
+
 func (c *Engine) executeUpdateBranchEffect(ctx context.Context, owner, repo string, number int, headSHA, reason string) error {
 	inputs := map[string]string{"expected_head_sha": headSHA, "reason": reason}
-	_, err := effects.Execute(ctx, c.mutation, effects.Claim{
+	observe := func(ctx context.Context) (effects.ExternalState, error) {
+		pr, _, getErr := c.gh.PullRequests.Get(hgithub.WithRESTCaller(ctx, "hive:automerge_reconcile_branch_update"), owner, repo, number)
+		if getErr != nil {
+			return effects.ExternalState{}, getErr
+		}
+		return hgithub.BranchUpdateState(pr, headSHA, owner+"/"+repo+"#"+strconv.Itoa(number)), nil
+	}
+	_, err := effects.ExecuteReconciling(ctx, c.mutation, effects.Claim{
 		Repo:   owner + "/" + repo,
 		Kind:   effects.KindBranchUpdate,
 		Target: strconv.Itoa(number),
 		Actor:  "automerge",
 		Inputs: inputs,
-	}, func(ctx context.Context) (effects.Result, error) {
+	}, observe, effects.DefaultUnresolvedTTL, func(ctx context.Context) (effects.Result, error) {
 		var opts *gh.PullRequestBranchUpdateOptions
 		if strings.TrimSpace(headSHA) != "" {
 			opts = &gh.PullRequestBranchUpdateOptions{ExpectedHeadSHA: gh.Ptr(headSHA)}
@@ -2444,13 +2531,13 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 	if headSHA == "" {
 		return AutoMergeSweepEvent{}, "missing-head-sha", nil
 	}
-	method := c.mergeMethodFor(ctx, owner, repo, pr)
+	method, methodReason := c.mergeMethodWithReason(ctx, owner, repo, pr)
 	mergeClaim := effects.Claim{
 		Repo:   owner + "/" + repo,
 		Kind:   effects.KindPullRequestMerge,
 		Target: fmt.Sprintf("%d", number),
 		Actor:  "automerge",
-		Inputs: map[string]string{"method": method, "expect_sha": headSHA, "lane": "queued"},
+		Inputs: mergeClaimInputs(method, methodReason, headSHA, "queued"),
 	}
 	c.reconcileOpenPRMergeEffect(ctx, mergeClaim, owner, repo, number)
 	if strings.TrimSpace(c.transport.AppBotLogin()) == "" {

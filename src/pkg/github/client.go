@@ -197,6 +197,12 @@ type Client struct {
 	// carries no live marker: the 🔒 comment is budgeted and can be
 	// suppressed, and a claim the ledger holds must still read as a claim.
 	issueClaimLedger func(repo string, number int) (issueclaim.Claim, bool)
+	// issueClaimLedgerHive is the hive= this hub writes on its own markers;
+	// a live forge marker carrying it while the ledger holds nothing is a
+	// marker the hub already released (hivecommons/hive#13579).
+	// Resolved per call: the ledger is built after the client, and until it
+	// exists nothing is "released in the ledger".
+	issueClaimLedgerHive func() string
 	// inProgress resolves the hive/in-progress start-signal setting (see
 	// issue_inprogress.go). Nil → the label is not applied or swept.
 	inProgress func() InProgressSetting
@@ -465,7 +471,6 @@ type Client struct {
 	stageEngineMu sync.Mutex
 	stageWriter   *stageWriter
 	stageEngines  map[*stagelabels.Store]stageengine.Reconciler
-	stageLegacy   stageengine.LegacyTable
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {
@@ -772,6 +777,12 @@ type Issue struct {
 	// stage/030-pr-in-progress from stage/020-claimed; the claim's kind
 	// alone never does (hivecommons/hive#13069).
 	ClaimPRStarted bool `json:"claim_pr_started,omitempty"`
+	// ClaimAdvisory is set when the issue carries a live contributor claim
+	// the live-claim filter chose NOT to honour — the issue is in contributor
+	// cool-off, or contributor claims have kept hive agents off it past the
+	// starvation guard (hivecommons/hive#13579). It names the reason; the
+	// issue stays actionable and hive agents may claim it.
+	ClaimAdvisory string `json:"claim_advisory,omitempty"`
 }
 
 // IssueDependency is the transport form of a source-aware work dependency.
@@ -785,15 +796,18 @@ type IssueDependency struct {
 // IssueClaimContext is prompt/API evidence that an actionable issue is related
 // to a PR claim that no longer suppresses the issue.
 type IssueClaimContext struct {
-	PRNumber       int       `json:"pr_number"`
-	PRRepo         string    `json:"pr_repo"`
-	PRURL          string    `json:"pr_url,omitempty"`
-	PRAuthor       string    `json:"pr_author,omitempty"`
-	ExternalAuthor bool      `json:"external_author,omitempty"`
-	Closing        bool      `json:"closing,omitempty"`
-	Reference      bool      `json:"reference,omitempty"`
-	MergedPR       bool      `json:"merged_pr,omitempty"`
-	MergedAt       time.Time `json:"merged_at,omitempty"`
+	PRNumber       int    `json:"pr_number"`
+	PRRepo         string `json:"pr_repo"`
+	PRURL          string `json:"pr_url,omitempty"`
+	PRAuthor       string `json:"pr_author,omitempty"`
+	ExternalAuthor bool   `json:"external_author,omitempty"`
+	Closing        bool   `json:"closing,omitempty"`
+	Reference      bool   `json:"reference,omitempty"`
+	// KeepReference prevents the stage-link safeguard from upgrading a
+	// delegating tracker's Refs link to a closing keyword. Process-local.
+	KeepReference bool      `json:"-"`
+	MergedPR      bool      `json:"merged_pr,omitempty"`
+	MergedAt      time.Time `json:"merged_at,omitempty"`
 	// ReopenedAt is set with Decision ClaimDecisionReopenedAfterMerge: when a
 	// person reopened the issue after the PR named here merged.
 	ReopenedAt time.Time `json:"reopened_at,omitempty"`
@@ -2914,12 +2928,15 @@ func (c *Client) QueuePRAutoMerge(ctx context.Context, repo string, number int, 
 		return fmt.Errorf("ensuring %s label: %w", label, err)
 	}
 	body := fmt.Sprintf("Approved by @%s for Hive auto-merge on green CI.", queuedBy)
-	_, err = effects.Execute(ctx, c.mutationBoundary(), effects.Claim{
+	provenance := owner + "/" + repoName + "#" + strconv.Itoa(number)
+	_, err = effects.ExecuteReconciling(ctx, c.mutationBoundary(), effects.Claim{
 		Repo:   owner + "/" + repoName,
 		Kind:   effects.KindReviewSubmit,
 		Target: strconv.Itoa(number),
 		Inputs: map[string]string{"event": "APPROVE", "head_sha": headSHA, "body": effects.StableDigest(body)},
-	}, func(ctx context.Context) (effects.Result, error) {
+	}, func(ctx context.Context) (effects.ExternalState, error) {
+		return c.observeReviewSubmit(ctx, owner, repoName, number, body, headSHA, provenance)
+	}, effects.DefaultUnresolvedTTL, func(ctx context.Context) (effects.Result, error) {
 		_, _, apiErr := c.client.PullRequests.CreateReview(ctx, owner, repoName, number, &gh.PullRequestReviewRequest{
 			CommitID: gh.Ptr(headSHA),
 			Body:     gh.Ptr(body),
@@ -2939,7 +2956,99 @@ func (c *Client) QueuePRAutoMerge(ctx context.Context, repo string, number int, 
 	if err := c.AddLabels(ctx, owner+"/"+repoName, number, []string{label}); err != nil {
 		return fmt.Errorf("adding %s label: %w", label, err)
 	}
+	if strings.EqualFold(label, prowLgtmLabel) {
+		c.bindProwLgtm(ctx, owner, repoName, number, headSHA, queuedBy)
+	}
 	return nil
+}
+
+// observeReviewSubmit is the authoritative observation of a review submission
+// the mutation journal holds as unresolved: the earlier attempt applied when
+// the PR already carries a review with the same body (and, when commitID is
+// set, on the same commit). Bodies are compared after normalising line endings
+// and surrounding whitespace, which GitHub does not preserve byte-for-byte.
+func (c *Client) observeReviewSubmit(ctx context.Context, owner, repoName string, number int, body, commitID, provenance string) (effects.ExternalState, error) {
+	if c == nil || c.client == nil {
+		return effects.ExternalState{}, ErrNoGitHubClient
+	}
+	want := normalizeReviewBody(body)
+	if want == "" {
+		// Nothing distinguishes an empty-bodied review from anyone else's;
+		// leave the operation to the TTL expiry rather than guess.
+		return effects.ExternalState{}, errors.New("review has no body to match against")
+	}
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		reviews, resp, err := c.client.PullRequests.ListReviews(WithRESTCaller(ctx, "hive:reconcile_review_submit"), owner, repoName, number, opts)
+		if err != nil {
+			return effects.ExternalState{}, err
+		}
+		for _, r := range reviews {
+			if commitID != "" && !strings.EqualFold(r.GetCommitID(), commitID) {
+				continue
+			}
+			if normalizeReviewBody(r.GetBody()) == want {
+				return effects.ExternalState{Applied: true, Provenance: provenance}, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return effects.ExternalState{}, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+func normalizeReviewBody(body string) string {
+	return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
+}
+
+// prowLgtmLabel is Prow's approval label; prowLgtmStatusContext is the
+// commit status Prow's commit-bound `lgtm` (cncf/prow-github-actions v3,
+// bind_to_commit) requires beside the label; without it Prow strips the
+// label and the PR drops out of the queue (hivecommons/hive#13616).
+const (
+	prowLgtmLabel         = "lgtm"
+	prowLgtmStatusContext = "prow/lgtm"
+	prowStatusDescMaxLen  = 140
+)
+
+// bindProwLgtm records the `prow/lgtm` success status on headSHA, the commit
+// the queue review approved. The label and review are already in place, so a
+// failure is logged and surfaced on the PR but never returned.
+func (c *Client) bindProwLgtm(ctx context.Context, owner, repoName string, number int, headSHA, queuedBy string) {
+	sha7 := headSHA
+	if len(sha7) > 7 {
+		sha7 = sha7[:7]
+	}
+	desc := fmt.Sprintf("lgtm by %s at %s", queuedBy, sha7)
+	if len(desc) > prowStatusDescMaxLen {
+		desc = desc[:prowStatusDescMaxLen]
+	}
+	_, err := effects.Execute(ctx, c.mutationBoundary(), effects.Claim{
+		Repo:   owner + "/" + repoName,
+		Kind:   effects.KindStatusCreate,
+		Target: strconv.Itoa(number),
+		Inputs: map[string]string{"context": prowLgtmStatusContext, "state": "success", "head_sha": headSHA, "description": effects.StableDigest(desc)},
+	}, func(ctx context.Context) (effects.Result, error) {
+		_, _, apiErr := c.client.Repositories.CreateStatus(WithRESTCaller(ctx, "hive:queue_pr_automerge_status"), owner, repoName, headSHA, &gh.RepoStatus{
+			Context:     gh.Ptr(prowLgtmStatusContext),
+			State:       gh.Ptr("success"),
+			Description: gh.Ptr(desc),
+		})
+		return effects.Result{Provenance: owner + "/" + repoName + "@" + headSHA}, apiErr
+	})
+	if err == nil {
+		return
+	}
+	if c.logger != nil {
+		c.logger.Warn("could not set the prow/lgtm commit status; the GitHub App likely lacks the statuses: write permission",
+			"repo", owner+"/"+repoName, "number", number, "error", err)
+	}
+	note := "Hive queued this PR but could not set the `prow/lgtm` commit status, so Prow may strip the `lgtm` label and the auto-merge queue may not hold."
+	if cerr := c.CreateIssueComment(ctx, owner+"/"+repoName, number, note); cerr != nil && c.logger != nil {
+		c.logger.Warn("could not post the prow/lgtm status warning comment",
+			"repo", owner+"/"+repoName, "number", number, "error", cerr)
+	}
 }
 
 func (c *Client) ensureLabel(ctx context.Context, owner, repo, name string) error {
@@ -3073,6 +3182,24 @@ func (c *Client) removeLabelObserved(ctx context.Context, repo string, number in
 		c.forgeWriteThrough(repo, number, forgestate.Mutation{Op: forgestate.OpLabelRemove, Labels: []string{label}})
 	}
 	return err
+}
+
+// labelsAllPresent reports whether every wanted label is in current
+// (case-insensitively, as GitHub treats label names).
+func labelsAllPresent(current, wanted []string) bool {
+	for _, w := range wanted {
+		found := false
+		for _, l := range current {
+			if strings.EqualFold(l, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // labelMutationInputs adds the observed item state to a label mutation's
@@ -3791,7 +3918,7 @@ func (c *Client) PathExistsAtRef(ctx context.Context, owner, repo, path, ref str
 // remediation ("Filed issue #208, hold-gated PR #209"), this is the lookup that
 // settles whether that remediation landed.
 //
-// A 404 reports (zero, false, nil): not found is not closed. The caller retires
+// A 404 or 410 (deleted) reports (zero, false, nil): not found is not closed. The caller retires
 // a finding only when EVERY reference it names is closed, so an unreadable
 // reference keeps the finding open, which is the safe direction. Any other error
 // is returned so the caller can distinguish "open" from "could not tell".
@@ -3801,7 +3928,7 @@ func (c *Client) IssueClosedAt(ctx context.Context, owner, repo string, number i
 	}
 	issue, resp, err := c.client.Issues.Get(ctx, owner, repo, number)
 	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
+		if resp != nil && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) {
 			return time.Time{}, false, nil
 		}
 		return time.Time{}, false, fmt.Errorf("reading %s/%s#%d: %w", owner, repo, number, err)
@@ -4302,6 +4429,8 @@ type RepoWorkPR struct {
 	URL            string    `json:"url,omitempty"`
 	Bucket         string    `json:"bucket"`
 	Reason         string    `json:"reason,omitempty"`
+	// BaseRef is the target branch, retained for the covering-PR chip.
+	BaseRef string `json:"base_ref,omitempty"`
 	// LinkedIssues mirrors PullRequest.LinkedIssues so a sidelined PR can
 	// still stand under the issue its `Fixes #N` names in the activity
 	// monitor. Stamped by EnrichReviewSignalsAndWorkPRs, not by the
@@ -4332,6 +4461,7 @@ func (c *Client) repoWorkPR(repo string, pr *gh.PullRequest, labels []string, hi
 		CreatedAt:      pr.GetCreatedAt().Time,
 		UpdatedAt:      pr.GetUpdatedAt().Time,
 		URL:            pr.GetHTMLURL(),
+		BaseRef:        prBaseRef(pr),
 		Bucket:         bucket,
 		Reason:         reason,
 		// The list payload carries the body, so the soft issue links cost
@@ -4371,6 +4501,10 @@ type RepoWorkIssue struct {
 	// github.Issue fields of the same name, copied as-is.
 	LinkedPRs    []IssueLinkedPR    `json:"linked_prs,omitempty"`
 	ClaimContext *IssueClaimContext `json:"claim_context,omitempty"`
+	// Tracker metadata is retained for rows outside the actionable set.
+	IsTracker bool `json:"is_tracker,omitempty"`
+	// TrackerProgress is display-only checklist progress, never a parent-close signal.
+	TrackerProgress *IssueChildren `json:"tracker_progress,omitempty"`
 	// Children is Issue.Children, copied for the issue stage reconciler.
 	Children *IssueChildren `json:"children,omitempty"`
 	// RecheckAfter and OpsTracking are read from a blocked issue's body
@@ -4384,6 +4518,7 @@ type RepoWorkIssue struct {
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
+	progress := TrackerTaskProgress(issue.Body)
 	return RepoWorkIssue{
 		Repo:              issue.Repo,
 		Number:            issue.Number,
@@ -4406,6 +4541,8 @@ func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
 		LinkedPRs:                append([]IssueLinkedPR(nil), issue.LinkedPRs...),
 		ClaimContext:             issue.ClaimContext,
 		Children:                 issue.Children,
+		TrackerProgress:          progress,
+		IsTracker:                RendersAsTracker(issue.IsTracker, issue.Labels, progress),
 	}
 }
 
@@ -4440,19 +4577,22 @@ func (c *Client) repoWorkIssue(repo string, issue *gh.Issue, labels []string, bu
 	if issue == nil {
 		return RepoWorkIssue{Repo: repo, Labels: append([]string(nil), labels...), Bucket: bucket, Reason: reason}
 	}
+	progress := TrackerTaskProgress(issue.GetBody())
 	return RepoWorkIssue{
-		Repo:      repo,
-		Number:    issue.GetNumber(),
-		Title:     issue.GetTitle(),
-		OwnerStep: c.issueOwnerStepForSnapshot(repo, issue),
-		Author:    safeGetLogin(issue.GetUser()),
-		Labels:    append([]string(nil), labels...),
-		Assignees: extractAssignees(issue.Assignees),
-		CreatedAt: issue.GetCreatedAt().Time,
-		UpdatedAt: issue.GetUpdatedAt().Time,
-		URL:       issue.GetHTMLURL(),
-		Bucket:    bucket,
-		Reason:    reason,
+		Repo:            repo,
+		Number:          issue.GetNumber(),
+		Title:           issue.GetTitle(),
+		OwnerStep:       c.issueOwnerStepForSnapshot(repo, issue),
+		Author:          safeGetLogin(issue.GetUser()),
+		Labels:          append([]string(nil), labels...),
+		Assignees:       extractAssignees(issue.Assignees),
+		CreatedAt:       issue.GetCreatedAt().Time,
+		UpdatedAt:       issue.GetUpdatedAt().Time,
+		URL:             issue.GetHTMLURL(),
+		IsTracker:       RendersAsTracker(isTracker(issue.GetTitle(), labels, issue.GetBody()), labels, progress),
+		TrackerProgress: progress,
+		Bucket:          bucket,
+		Reason:          reason,
 	}
 }
 
@@ -4477,8 +4617,11 @@ type RepoIssueBreakdown struct {
 	// NeedsDecision counts issues parked on stage/045-needs-decision (and,
 	// until migrated, the pre-045 stage/085 and the retired needs-decision /
 	// needs-direction labels).
-	NeedsDecision        int `json:"needs_decision,omitempty"`
-	NeedsSpec            int `json:"needs_spec,omitempty"`
+	NeedsDecision int `json:"needs_decision,omitempty"`
+	NeedsSpec     int `json:"needs_spec,omitempty"`
+	// PossiblyExists counts issues parked at stage/017-possible-existing
+	// by the prior-art gate, waiting on their author (hivecommons/hive#13575).
+	PossiblyExists       int `json:"possibly_exists,omitempty"`
 	ReporterConfirmation int `json:"reporter_confirmation,omitempty"`
 	Exempt               int `json:"exempt,omitempty"`
 	// Blocked counts open issues parked on an unmerged PR or other outside
@@ -4505,6 +4648,8 @@ func (b *RepoIssueBreakdown) addHardSuppress(label string) {
 		b.NeedsDecision++
 	case issueNeedsSpecLabel:
 		b.NeedsSpec++
+	case PossiblyExistsStageLabel:
+		b.PossiblyExists++
 	}
 }
 

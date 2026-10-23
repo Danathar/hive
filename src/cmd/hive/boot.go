@@ -240,8 +240,14 @@ type boot struct {
 	lastRedMainSweep       time.Time
 	lastIssueUnparkSweep   time.Time
 	lastClosedIssueSweep   time.Time
-	lastSentinelSweep      time.Time
-	lastGFISweep           time.Time
+	// lastClarityResumeSweep gates runClarityGateResumeSweepIfDue
+	// (hivecommons/hive#13588).
+	lastClarityResumeSweep time.Time
+	// lastPriorArtResumeSweep gates runPriorArtGateResumeSweepIfDue
+	// (hivecommons/hive#13575).
+	lastPriorArtResumeSweep time.Time
+	lastSentinelSweep       time.Time
+	lastGFISweep            time.Time
 	// lastLegacyFleetReportSweep gates runLegacyFleetReportSweepIfDue
 	// (hivecommons/hive#13470).
 	lastLegacyFleetReportSweep time.Time

@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/agentparse"
 	"github.com/hivecommons/hive/pkg/beads"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/governor"
 	"github.com/hivecommons/hive/pkg/knowledge"
 )
@@ -85,7 +85,7 @@ func NewInceptionWatcher(
 	beadStore *beads.Store,
 	inception *knowledge.InceptionEngine,
 	sched SchedulerControl,
-	agentMgr *agent.Manager,
+	agentMgr crux.Runtime,
 	gov *governor.Governor,
 	logger *slog.Logger,
 ) *InceptionWatcher {

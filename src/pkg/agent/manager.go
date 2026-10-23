@@ -10,8 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/crux/types"
+
 	"github.com/hivecommons/hive/pkg/claude"
-	"github.com/hivecommons/hive/pkg/config"
+	hiveconfig "github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/pushbroker"
@@ -20,22 +23,20 @@ import (
 	"github.com/hivecommons/hive/pkg/watchdog"
 )
 
-type ProcessState string
+// ProcessState and the State* values are defined in pkg/crux/types as part
+// of the Crux runtime surface (hivecommons/hive#13536); aliased here.
+type ProcessState = types.ProcessState
 
 const (
-	StateIdle    ProcessState = "idle"
-	StateRunning ProcessState = "running"
-	StateStopped ProcessState = "stopped"
-	StateFailed  ProcessState = "failed"
-	StatePaused  ProcessState = "paused"
+	StateIdle    = types.StateIdle
+	StateRunning = types.StateRunning
+	StateStopped = types.StateStopped
+	StateFailed  = types.StateFailed
+	StatePaused  = types.StatePaused
 )
 
-type KickRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	Agent     string    `json:"agent"`
-	Snippet   string    `json:"snippet"`
-	Source    string    `json:"source,omitempty"`
-}
+// KickRecord is one entry of KickHistory; see types.KickRecord.
+type KickRecord = types.KickRecord
 
 const (
 	outputBufferCapacity = 500
@@ -318,6 +319,9 @@ type AgentProcess struct {
 	// alongside LastError on every (re)launch so a corrected model re-arms
 	// detection.
 	copilotModelFallbackRequested string
+	// copilotModelFallbackWarned is the "requested\x00running" tuple already
+	// logged at Warn; unlike the field above it survives relaunches.
+	copilotModelFallbackWarned string
 	// tokenRestartAttempts counts CONSECUTIVE token-triggered restarts that did
 	// not clear the login prompt. The restart is a falsifiable theory — "a valid
 	// token exists, the agent just has not picked it up yet" — and this is what
@@ -689,7 +693,7 @@ type Manager struct {
 	// advisorRolesResolver returns the live model_roles map the OMP adapter
 	// projects as a --config overlay at launch (#9723). Same discipline as
 	// advisorEnabledResolver.
-	advisorRolesResolver atomic.Pointer[func() map[string]config.ModelRole]
+	advisorRolesResolver atomic.Pointer[func() map[string]hiveconfig.ModelRole]
 	// repoAutoMergeEnabled resolves the live per-repo auto-merge switch used by
 	// the merge relay. Nil preserves the historic default-on behavior.
 	repoAutoMergeEnabled atomic.Pointer[func(repo string) bool]
@@ -788,6 +792,11 @@ type Manager struct {
 	// non-reentrant RWMutex, so reading the callback under a second Lock there
 	// would deadlock the kick path.
 	recordPromptCallback atomic.Pointer[func(agent, trigger, prompt string)]
+	// spanStarter, when set, opens the trace spans the runtime emits
+	// (SendKick's agent.send_kick). Same atomic.Pointer discipline as
+	// recordPromptCallback: read on paths that hold m.mu. Nil falls back to
+	// the OpenTelemetry global tracer; see SetSpanStarter.
+	spanStarter atomic.Pointer[SpanStarter]
 	// deadSessionRecoveryOwnedElsewhere is set when the watchdog reconciler
 	// owns restarting missing-session / bare-pane agents (RFC #4665), so this
 	// manager's crash loop observes those two conditions without restarting
@@ -1243,13 +1252,28 @@ const kickOutcomePollEvery = 5
 // leaving it to notice only once the relaunched CLI shows a prompt. A nil
 // predicate never aborts.
 func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort func() bool) bool {
+	ready, _ := m.waitForInputPromptForAgentReason(agent, abort)
+	return ready
+}
+
+// waitForInputPromptForAgentReason is waitForInputPromptForAgentUnless that
+// also says why the prompt was not reached. A pane parked in a known TUI menu
+// (#13765) gets up to tuiMenuEscapeAttempts Escapes; if the menu survives
+// them the wait gives up at once with a "prompt-not-ready: menu footer"
+// reason instead of running out inputPromptTimeout. Caller must NOT hold m.mu.
+func (m *Manager) waitForInputPromptForAgentReason(agent *AgentProcess, abort func() bool) (bool, string) {
+	m.mu.RLock()
+	backend := effectiveBackend(agent)
+	m.mu.RUnlock()
+
 	deadline := time.After(inputPromptTimeout)
 	ticker := time.NewTicker(inputPromptPollInterval)
 	defer ticker.Stop()
+	menuEscapes := 0
 
 	for {
 		if abort != nil && abort() {
-			return false
+			return false, kickPromptNotReadyReason
 		}
 		select {
 		case <-deadline:
@@ -1267,7 +1291,7 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 				"has_bob_placeholder", strings.Contains(output, bobInputPlaceholder),
 				"has_codex_ready", strings.Contains(output, codexInputPromptMarker),
 				"head_500", truncateHead(output, 500), "tail_500", truncateTail(output, 500))
-			return false
+			return false, kickPromptNotReadyReason
 		case <-ticker.C:
 			// A consent/selection screen also contains "❯" but is NOT a
 			// ready input prompt — sending a kick there feeds the menu.
@@ -1276,6 +1300,19 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 			visible := m.captureVisiblePaneForAgent(agent)
 			if paneShowsCopilotQuestionForm(visible) {
 				m.dismissCopilotQuestionFormForKick(agent)
+				continue
+			}
+			// A Codex menu keeps a "›" selection caret that passes
+			// paneShowsInputPrompt; a kick typed there is lost (#13765).
+			if footer := paneTUIMenuFooter(backend, visible); footer != "" {
+				if menuEscapes >= tuiMenuEscapeAttempts {
+					reason := tuiMenuNotReadyReason(footer)
+					m.logger.Warn("kick undeliverable: TUI menu did not close after Escape",
+						"agent", agent.Name, "reason", reason, "escapes", menuEscapes)
+					return false, reason
+				}
+				menuEscapes++
+				m.dismissTUIMenuForKick(agent, footer, menuEscapes)
 				continue
 			}
 			if paneShowsConsentScreen(visible) {
@@ -1290,7 +1327,7 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 				continue
 			}
 			if paneShowsInputPrompt(visible) {
-				return true
+				return true, ""
 			}
 		}
 	}

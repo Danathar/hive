@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/ioscan"
 )
 
@@ -111,11 +113,75 @@ func (s *Scheduler) ioscanFailClosed() bool {
 	return s.cfg != nil && s.cfg.Ioscan.FailClosedAtLevel(s.cfg.ACMMLevelOrZero())
 }
 
+// classifierFailClosed reports whether a classifier that cannot answer
+// withholds the text (ioscan.classifier.fail_mode, defaulting to the ioscan
+// fail mode and so to closed at ACMM L5-L6).
+func (s *Scheduler) classifierFailClosed() bool {
+	return s.cfg != nil && s.cfg.Ioscan.ClassifierFailClosedAtLevel(s.cfg.ACMMLevelOrZero())
+}
+
+// ioscanPolicy returns the configured severity matrix (ioscan.block_at), or
+// the shipped default when the config is absent or did not validate; config
+// load already rejects a bad map, so the fallback is for tests and nil cfg.
+func (s *Scheduler) ioscanPolicy() ioscan.Policy {
+	if s.cfg == nil {
+		return ioscan.DefaultPolicy()
+	}
+	p, err := s.cfg.Ioscan.Policy()
+	if err != nil {
+		return ioscan.DefaultPolicy()
+	}
+	return p
+}
+
+// issueSource tags an issue's title/labels for the policy. Only positive
+// evidence of a non-human author (the hive's own identities, GitHub Apps and
+// bot accounts, whose issue text is templated) earns the trusted line; a
+// human or unknown author is untrusted.
+func issueSource(issue github.Issue) ioscan.Source {
+	return ioscan.Source{
+		Surface:       ioscan.SurfaceIssueBody,
+		TrustedAuthor: issue.Author != "" && !issue.AuthorIsHuman,
+	}
+}
+
+// prSource tags a PR's title/author/annotation for the policy. Trusted means
+// the hive opened it, a non-human account did, or the author is a repo owner
+// or member; everyone else, including collaborators and contributors, is
+// untrusted.
+func prSource(pr github.PullRequest) ioscan.Source {
+	return ioscan.Source{Surface: ioscan.SurfacePRBody, TrustedAuthor: trustedPRAuthor(pr)}
+}
+
+func trustedPRAuthor(pr github.PullRequest) bool {
+	if pr.AppAuthored || pr.AuthorNonHuman {
+		return true
+	}
+	switch pr.AuthorAssociation {
+	case config.AuthorAssociationOwner, config.AuthorAssociationMember:
+		return true
+	}
+	return false
+}
+
+// reviewSource tags review-bot thread bodies. The bots are external and quote
+// PR text written by anyone, so they are never trusted.
+var reviewSource = ioscan.Source{Surface: ioscan.SurfaceReview}
+
+// enforceIssueTextVerdict scans one untrusted string from an issue surface
+// under the policy's untrusted line. Callers that know the author use
+// enforceTextFrom with issueSource/prSource instead.
 func (s *Scheduler) enforceIssueTextVerdict(text string) (string, ioscan.Verdict) {
+	return s.enforceTextFrom(text, ioscan.Source{Surface: ioscan.SurfaceIssueBody})
+}
+
+// enforceTextFrom scans one untrusted string under the severity matrix for
+// its source, redacts it when the policy trips, and records the block.
+func (s *Scheduler) enforceTextFrom(text string, src ioscan.Source) (string, ioscan.Verdict) {
 	if !s.ioscanEnabled() {
 		return text, ioscan.Verdict{}
 	}
-	sanitized, v := ioscan.EnforceInput(text)
+	sanitized, v := ioscan.EnforceInputFrom(text, src, s.ioscanPolicy())
 	if v.Blocked {
 		s.recordIoscanBlock(v)
 	}
@@ -132,13 +198,22 @@ func (s *Scheduler) enforceIssueTextVerdict(text string) (string, ioscan.Verdict
 	}
 	score, err := classifier.Score(context.Background(), sanitized)
 	if err != nil {
+		if s.classifierFailClosed() {
+			s.recordClassifierSkip("error_fail_closed")
+			if s.logger != nil {
+				s.logger.Warn("ioscan classifier failed closed; text withheld", "error", err)
+			}
+			cv := ioscan.UnavailableVerdict(err.Error())
+			s.recordIoscanFailClosed(cv)
+			return ioscan.UnavailableRedactionMarker("error"), cv
+		}
 		s.recordClassifierSkip("error")
 		if s.logger != nil {
 			s.logger.Warn("ioscan classifier failed open", "error", err)
 		}
 		return sanitized, v
 	}
-	action := ioscan.ActionForScore(score, thresholds, s.ioscanFailClosed())
+	action := ioscan.ActionForScore(score, thresholds, s.classifierFailClosed())
 	s.recordClassifierResult(score, action)
 	switch action {
 	case ioscan.ClassifierActionBlock:
@@ -157,7 +232,44 @@ func (s *Scheduler) enforceIssueTextVerdict(text string) (string, ioscan.Verdict
 	return sanitized, v
 }
 
-func (s *Scheduler) enforceLabelsWithPolicy(labels []string) ([]string, bool) {
+// threadEnforcer scans one issue/PR conversation (title first, then each
+// comment or review body in order) as a unit and returns the segments with
+// withheld ones redacted, plus whether the fail-closed policy tripped. A nil
+// enforcer is a passthrough, used by formatting tests.
+type threadEnforcer func(segments []string) ([]string, bool)
+
+// enforceThread is the kick-path counterpart of enforceIssueTextVerdict for
+// text that arrives as an ordered conversation (hivecommons/hive#6685,
+// split-payload family). Each segment still gets its own scan, and the
+// conversation is scanned once more as a whole so a payload split across two
+// comments is withheld from both halves rather than reaching the agent in
+// pieces. Disabled → strict passthrough.
+func (s *Scheduler) enforceThread(segments []string, src ioscan.Source) ([]string, bool) {
+	if !s.ioscanEnabled() || len(segments) == 0 {
+		return segments, false
+	}
+	out, tv := ioscan.EnforceThreadFrom(segments, src, s.ioscanPolicy())
+	failClosed := false
+	for _, v := range tv.Segments {
+		if v.Blocked {
+			s.recordIoscanBlock(v)
+		}
+		if s.ioscanFailClosed() && v.HasCriticalInjection() {
+			s.recordIoscanFailClosed(v)
+			failClosed = true
+		}
+	}
+	if tv.Thread.Blocked {
+		s.recordIoscanBlock(tv.Thread)
+	}
+	if s.ioscanFailClosed() && tv.Thread.HasCriticalInjection() {
+		s.recordIoscanFailClosed(tv.Thread)
+		failClosed = true
+	}
+	return out, failClosed
+}
+
+func (s *Scheduler) enforceLabelsWithPolicy(labels []string, src ioscan.Source) ([]string, bool) {
 	if !s.ioscanEnabled() || len(labels) == 0 {
 		return labels, false
 	}
@@ -165,7 +277,7 @@ func (s *Scheduler) enforceLabelsWithPolicy(labels []string) ([]string, bool) {
 	failClosed := false
 	for i, l := range labels {
 		var v ioscan.Verdict
-		out[i], v = s.enforceIssueTextVerdict(l)
+		out[i], v = s.enforceTextFrom(l, src)
 		failClosed = failClosed || (s.ioscanFailClosed() && v.HasCriticalInjection())
 	}
 	return out, failClosed

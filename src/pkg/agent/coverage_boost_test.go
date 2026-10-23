@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/internal/testutil"
-	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -1910,16 +1910,6 @@ func TestFixSharedConfigPerms_AlreadyCorrect(t *testing.T) {
 
 	// Should be a no-op
 	m.fixSharedConfigPerms(agent)
-}
-
-func TestAuditFieldsAndFormatWrappers(t *testing.T) {
-	fields := Fields("agent", "scanner", "count", 2)
-	if fields["agent"] != "scanner" || fields["count"] != 2 {
-		t.Fatalf("Fields = %#v, want supplied key/value pairs", fields)
-	}
-	if got := FormatAuditDetail(fields); !strings.Contains(got, "agent=scanner") || !strings.Contains(got, "count=2") {
-		t.Fatalf("FormatAuditDetail = %q, want both fields", got)
-	}
 }
 
 func TestValidateKickUnknownAgent(t *testing.T) {

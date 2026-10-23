@@ -38,7 +38,7 @@ Use ReadWriteMany storage for hosted spoke PVCs. The provisioning template in `p
 | `HIVE_MODE=hub` | Yes | Selects hub mode. |
 | `HIVE_HUB_PORT` | No | Defaults to `3001`. Set to `80` for the published hub image contract if needed. |
 | `HIVE_CONFIG` or `--config` | No | Defaults to `/etc/hive/hive.yaml`; `Dockerfile.hub` passes `--config /etc/hive/hive.yaml`. |
-| `HIVE_HUB_SECRET` | Strongly recommended | Master secret from which heartbeat bearers and per-hive keys derive. If unset, the hub reads `/data/saas/hub-secret.key` when present. The hub additionally maintains a rotation generation set alongside it — see [security-model.md](security-model.md#master-key-rotation); rotate via the admin endpoint, never by swapping the master in place. |
+| `HIVE_HUB_SECRET` | Strongly recommended | Master secret from which heartbeat bearers and per-hive keys derive. If unset, the hub reads `/data/saas/hub-secret.key` when present. The hub additionally maintains a rotation generation set alongside it — see [security-model.md](security-model.md#9-platform-and-supply-chain); rotate via the admin endpoint, never by swapping the master in place. |
 | `HIVE_HUB_OAUTH_CLIENT_ID` / `HIVE_HUB_OAUTH_CLIENT_SECRET` | Enables **GitHub** login | These two enable the GitHub provider specifically. Human login is multi-provider: Google, IBMid, Red Hat, Microsoft Entra ID, and a generic OIDC slot are each enabled independently via `HIVE_HUB_OIDC_<PROVIDER>_CLIENT_ID` (+ `_CLIENT_SECRET`, `_ISSUER`, `_SCOPES`, `_DISPLAY` — see [env-vars.md](env-vars.md#hub-login-providers)). With two or more providers configured the hub shows a provider picker at `/login`; with exactly one it redirects straight into it; with none it logs OAuth disabled and registers no login routes. A provider with a client id but a missing/invalid issuer is silently skipped (check the `hub login enabled providers=` startup log line). |
 | `HIVE_GITHUB_TOKEN` or GitHub App config | Required for operations that call GitHub | Same GitHub auth rules as a spoke. |
 | `HIVE_HUB_SLACK_BOT_TOKEN`, `HIVE_NTFY_SERVER`, `HIVE_NTFY_TOPIC` | No | Optional hub notifications. |
@@ -159,7 +159,7 @@ The hub now compares those lists and reports any repo claimed by more than one s
     "repoOverlaps": [
       {
         "host": "github.com",
-        "repo": "tunaos/docs",
+        "repo": "tuna-os/docs",
         "hives": [
           { "id": "h-hive", "name": "hive" },
           { "id": "h-reef", "name": "reef" }
@@ -175,8 +175,8 @@ Matching is deliberate about what counts as the same repo, because two spokes ar
 
 | Compared | Rule |
 |---|---|
-| `docs`, `tunaos/docs`, `https://github.com/tunaos/docs.git` | the same repo — bare, owner-qualified and URL forms all resolve to `owner/repo` |
-| `TunaOS/Docs` vs `tunaos/docs` | the same repo — GitHub owner/repo names are case-insensitive |
+| `docs`, `tuna-os/docs`, `https://github.com/tuna-os/docs.git` | the same repo — bare, owner-qualified and URL forms all resolve to `owner/repo` |
+| `Tuna-OS/Docs` vs `tuna-os/docs` | the same repo — GitHub owner/repo names are case-insensitive |
 | `acme/ui` on `github.com` vs on `github.ibm.com` | **different** repos — the GitHub host is part of the identity |
 | a spoke listing its own primary repo in `repos[]` | one claim, not a conflict with itself |
 | a repo with no owner (no `org` recorded) | ignored — inventing an owner would invent conflicts between unrelated repos that share a name |

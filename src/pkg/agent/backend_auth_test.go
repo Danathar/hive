@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 )
 
 func TestClassifyBackendAuthStatus(t *testing.T) {
@@ -273,5 +273,12 @@ func TestMarkProviderErrorLockedTransientDoesNotSetBackendAuth(t *testing.T) {
 	m.markProviderErrorLocked(agent, providerErrorMatch{Class: "rate_limit", Line: "API Error: 429"}, time.Now())
 	if agent.BackendAuth.Status != "" {
 		t.Fatalf("transient rate_limit set BackendAuth.Status = %q, want empty", agent.BackendAuth.Status)
+	}
+}
+
+func TestRollUpProviderStatusAliasDelegates(t *testing.T) {
+	got := RollUpProviderStatus([]ProviderAgentEvidence{{Agent: "a", Provider: "copilot", Enabled: true, AuthStatus: BackendAuthUnlicensed}})
+	if len(got) != 1 || got[0].AuthState != ProviderAuthNeedsLogin {
+		t.Fatalf("RollUpProviderStatus = %+v, want one needs-login provider", got)
 	}
 }

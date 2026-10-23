@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/hivectl"
+	"golang.org/x/net/html"
 )
 
 const webTreeRepo = "github/github.com/org/repo"
@@ -420,6 +422,75 @@ func TestCommonsTreePageAccessibilityAndLocalAssets(t *testing.T) {
 	}
 }
 
+// The page script sends this literal as the X-Hive-Commons-Token header. The
+// template is html/template, whose JS context already quotes a string; piping
+// the token through printf "%q" first double-quotes it, the header then
+// carries literal quote characters, and every API call is rejected with 401.
+func TestCommonsPageEmbedsTokenAsSingleJSStringLiteral(t *testing.T) {
+	for _, token := range []string{"local-token", `a"b</script>`} {
+		var page bytes.Buffer
+		if err := commonsWebTemplate.Execute(&page, map[string]string{"Token": token}); err != nil {
+			t.Fatal(err)
+		}
+		line := ""
+		for _, l := range strings.Split(page.String(), "\n") {
+			if strings.HasPrefix(l, "const token = ") {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Fatal("page has no `const token = ` line")
+		}
+		literal := strings.TrimSuffix(strings.TrimPrefix(line, "const token = "), ";")
+		var got string
+		if err := json.Unmarshal([]byte(literal), &got); err != nil || got != token {
+			t.Errorf("token literal %s decodes to %q (err %v), want exactly %q", literal, got, err, token)
+		}
+	}
+}
+
+// "Manage Hives" is a <details>. Its <summary> is natively focusable, so a
+// negative tabindex takes it out of the Tab order and leaves keyboard users
+// with only the skip link. Parse the rendered page and check the element.
+func TestCommonsPageManageDisclosureIsReachableByTab(t *testing.T) {
+	var page bytes.Buffer
+	if err := commonsWebTemplate.Execute(&page, map[string]string{"Token": "local-token"}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := html.Parse(&page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var find func(*html.Node) *html.Node
+	find = func(n *html.Node) *html.Node {
+		if n.Type == html.ElementNode {
+			for _, a := range n.Attr {
+				if a.Key == "id" && a.Val == "profiles-title" {
+					return n
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if f := find(c); f != nil {
+				return f
+			}
+		}
+		return nil
+	}
+	node := find(doc)
+	if node == nil || node.Data != "summary" || node.Parent == nil || node.Parent.Data != "details" {
+		t.Fatalf("#profiles-title must be the <summary> of a <details>, got %+v", node)
+	}
+	for _, a := range node.Attr {
+		if a.Key != "tabindex" {
+			continue
+		}
+		if n, err := strconv.Atoi(a.Val); err != nil || n < 0 {
+			t.Errorf("summary has tabindex=%q, which removes it from the Tab order", a.Val)
+		}
+	}
+}
+
 func TestCommonsTreePublicDiscoveryAndOutage(t *testing.T) {
 	for _, unavailable := range []bool{false, true} {
 		t.Run(map[bool]string{false: "complete", true: "outage"}[unavailable], func(t *testing.T) {
@@ -536,5 +607,42 @@ func TestCommonsTreeDiscoveryDoesNotHoldServerMutex(t *testing.T) {
 	close(release)
 	if got := decode(slowPath, <-slow); got.Session == "" {
 		t.Fatal("missing session from discovered review")
+	}
+}
+
+// Opening the page (discover=1) stages nothing; only the explicit accept=1
+// request stages the new repositories of followed Hives, and neither saves.
+func TestCommonsTreeAcceptStagesNewRepositoriesOnlyOnRequest(t *testing.T) {
+	const added = "github/github.com/org/added"
+	set := twoHives()
+	for i := range set.Profiles {
+		set.Profiles[i].Selection = &hivectl.RepositorySelection{Mode: hivectl.SelectionSelected, Repositories: []string{webTreeRepo}, FollowNewRepositories: i == 0}
+	}
+	repos := map[string]hivectl.TreeRepositorySnapshot{
+		"acme":  {Discovery: hivectl.TreeComplete, Repositories: []string{webTreeRepo, added}},
+		"other": {Discovery: hivectl.TreeComplete, Repositories: []string{webTreeRepo, added}},
+	}
+	store := hivectl.NewProfileStore(t.TempDir())
+	if err := store.Save(set); err != nil {
+		t.Fatal(err)
+	}
+	handler := newCommonsWebServer(&hivesDeps{store: store}, "secret").(*commonsWebServer)
+	handler.discover = func(context.Context, *hivectl.ProfileSet) ([]hivectl.TreeHubSnapshot, map[string]hivectl.TreeRepositorySnapshot) {
+		return nil, repos
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	before := treeFile(t, store.Path())
+
+	opened := treeCall(t, server, "/api/tree?discover=1", nil, commonsTreeEdit{}, http.StatusOK)
+	if len(opened.Diff.Auto) != 0 || !opened.Diff.Empty() {
+		t.Fatalf("opening the page staged %+v", opened.Diff)
+	}
+	accepted := treeCall(t, server, "/api/tree?discover=1&accept=1", nil, commonsTreeEdit{}, http.StatusOK)
+	if len(accepted.Diff.Auto) != 1 || accepted.Diff.Auto[0].Subscription != "acme" || accepted.Diff.Auto[0].Repository != added {
+		t.Fatalf("accept=1 staged %+v, want only %s on the followed Hive acme", accepted.Diff.Auto, added)
+	}
+	if !bytes.Equal(treeFile(t, store.Path()), before) {
+		t.Fatal("staging new repositories wrote to the store")
 	}
 }

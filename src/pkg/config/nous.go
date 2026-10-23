@@ -32,18 +32,6 @@ const (
 // The role is defined by the engine contract in pkg/nousengine, not by Nous;
 // Nous is the default (and, in this part, the only) engine.
 const (
-	// RoleExperimenter is the agent role name. An agent named "experimenter"
-	// gets it by the usual role-defaults-to-name rule; any other name may
-	// opt in with `role: experimenter`.
-	RoleExperimenter = "experimenter"
-
-	// ExperimentEngineNous names the Nous engine.
-	ExperimentEngineNous = "nous"
-
-	// DefaultExperimentEngine is what an experimenter runs when
-	// `engine:` is absent: a hive with no engine configured runs Nous.
-	DefaultExperimentEngine = ExperimentEngineNous
-
 	// NousDispatcherInline runs Nous inside the experimenter agent's own CLI
 	// session. The agent's CLI does the LLM work, so Hive's scheduling,
 	// token budget, scoped tokens, GitHub proxy and cost tracking all apply
@@ -286,24 +274,7 @@ func effectiveRole(name string, agent AgentConfig) string {
 	return name
 }
 
-// IsExperimenter reports whether this agent carries the experimenter role.
-func (a *AgentConfig) IsExperimenter() bool {
-	return a != nil && a.Role == RoleExperimenter
-}
 
-// ExperimentEngine returns the engine this agent runs, or "" when it is not
-// an experimenter. Load-time defaults fill an experimenter's empty Engine
-// with DefaultExperimentEngine; this accessor applies the same fallback for
-// a directly constructed AgentConfig.
-func (a *AgentConfig) ExperimentEngine() string {
-	if !a.IsExperimenter() {
-		return ""
-	}
-	if e := strings.ToLower(strings.TrimSpace(a.Engine)); e != "" {
-		return e
-	}
-	return DefaultExperimentEngine
-}
 
 func sortedKeys(set map[string]bool) string {
 	keys := make([]string, 0, len(set))

@@ -180,6 +180,12 @@ type OpenIssue struct {
 	ClosedAt time.Time `json:"closed_at,omitempty"`
 	// Deferred is the last reason a filing was held back (rate limit etc).
 	Deferred string `json:"deferred,omitempty"`
+	// ClearedAttempts / ClearedNextAttemptAt pace retries of a runtime
+	// "cleared" comment after a transient failure; ClearedNotifyFailed is
+	// the error that made the publisher give up on it (#13827).
+	ClearedAttempts      int       `json:"cleared_attempts,omitempty"`
+	ClearedNextAttemptAt time.Time `json:"cleared_next_attempt_at,omitempty"`
+	ClearedNotifyFailed  string    `json:"cleared_notify_failed,omitempty"`
 }
 
 type Report struct {
@@ -691,16 +697,46 @@ func benignIOTimeout(class, component string) bool {
 	return strings.Contains(class, "i/o timeout") && (strings.Contains(component, "read") || strings.Contains(component, "keepalive"))
 }
 
+// benignSubstrings are lower-case fragments whose presence marks a log line
+// as noise for the generic repeated-error feed (see IsBenignMessage). Keep
+// each entry specific enough that it cannot swallow a real defect.
+var benignSubstrings = []string{
+	// Shutdown and per-request deadlines log cancellation on purpose.
+	"context canceled",
+	"context cancelled",
+	// The permissions watcher's "fixed ..." lines (file/directory/mode
+	// permissions, ownership) record a repair that already succeeded:
+	// self-healing housekeeping, whatever level the producer logs at.
+	"permissions watcher: fixed ",
+	// Self-healing, informational lines: a cached GitHub 404 suppressing
+	// repeat fetches, and a rate-limited Copilot token validation that the
+	// manager retries itself after a cooldown.
+	"cached; suppressing repeated fetches",
+	"token validation rate-limited by github; relaunching after cooldown",
+}
+
 // IsBenignMessage reports whether a raw log message is noise the generic
 // repeated-error feed must not report: the read/keepalive i/o timeout rule
-// above applied to the whole line, plus context cancellation (shutdown and
-// per-request deadlines log it on purpose).
+// above applied to the whole line, every benignSubstrings entry, and the
+// review planner's pending-expiry retry notification.
 func IsBenignMessage(msg string) bool {
 	m := strings.ToLower(msg)
+	// Pending expiry is a bounded retry, logged per perspective/PR. A burst
+	// across unrelated reviews is not a repeated runtime defect (#13850).
+	// Match only the retry notification: "review dispatch exhausted; holding
+	// PR for a human" and failures during expiry must remain reportable.
+	if strings.TrimSpace(m) == "review pending expired" {
+		return true
+	}
 	if benignIOTimeout(m, m) {
 		return true
 	}
-	return strings.Contains(m, "context canceled") || strings.Contains(m, "context cancelled")
+	for _, s := range benignSubstrings {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // openTrigger is the trigger of a persisted entry; entries written before

@@ -429,6 +429,45 @@ func TestResolveStageLanePrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveStageKeepsExistingRoleWhenNoLaneReportsOne(t *testing.T) {
+	cases := []struct {
+		name   string
+		list   []stageObservation
+		author stagelabels.Role
+	}{
+		{
+			name:   "owned stage keeps trusted label",
+			list:   []stageObservation{{Lane: stageLaneTrusted, Reason: "required-check-pending:build", Labels: []string{"role/trusted"}}},
+			author: stagelabels.RoleTrusted,
+		},
+		{
+			name:   "weak stage keeps trusted label",
+			list:   []stageObservation{{Lane: stageLaneTrusted, Reason: "untrusted-author-role", Labels: []string{"role/trusted"}}},
+			author: stagelabels.RoleTrusted,
+		},
+		{
+			name:   "no label and no lane tier is untrusted",
+			list:   []stageObservation{{Lane: stageLaneTrusted, Reason: "untrusted-author-role"}},
+			author: stagelabels.RoleUntrusted,
+		},
+		{
+			// Owned stage: the label is only a fallback, so a lane-reported
+			// tier wins. (On weak stages the label is merged first and a
+			// trusted label is sticky by Role.Merge — pre-existing.)
+			name:   "lane tier overrides the existing label on an owned stage",
+			list:   []stageObservation{{Lane: stageLaneContributor, Reason: "required-check-pending:build", Labels: []string{"role/trusted"}, Detail: stageDetail{Role: stagelabels.RoleContributor}}},
+			author: stagelabels.RoleContributor,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, got, _ := resolveStage(tc.list); got != tc.author {
+				t.Fatalf("role = %v, want %v", got, tc.author)
+			}
+		})
+	}
+}
+
 func TestResolveStageTrustedHumanApprovalClearsRequiresHuman(t *testing.T) {
 	humanApproved := stageDetail{
 		VerdictKnown:      true,
@@ -1978,6 +2017,81 @@ func TestApplyStageLabelsHiveBotSignoffOnClankerHeadReturnsToContributor(t *test
 	}
 	if len(api.comments) != 1 || !strings.Contains(api.comments[0], ContributorNudgeMarkerPrefix) || !strings.Contains(api.comments[0], "git commit --amend --reset-author -s") {
 		t.Fatalf("comments %q", api.comments)
+	}
+}
+
+func TestApplyStageLabelsForwardMergeSkipsSignoffAttribution(t *testing.T) {
+	// hivecommons/hive#13635: a sync top-up carries other people's commits
+	// by design and lands as a merge commit, so no attribution nudge and no
+	// 071 for it. The skip keys on the head ref only; a title anyone can
+	// type ("sync: …", "top-up: …") does not relax the gate, and the skip
+	// leaves no DCO cache entry for the head.
+	cases := []struct {
+		name, ref, title string
+		skip             bool
+	}{
+		{"sync head", "sync/v5-to-v6-2026-10-22", "chore: carry v5", true},
+		{"topup head", "topup/v5-into-v6-20261022", "🌱 top-up: merge v5 into v6 (68 commits)", true},
+		{"top-up title only", "someone/branch", "🌱 top-up: merge v5 into v6 (68 commits)", false},
+		{"sync title only", "someone/branch", "sync: carry v5", false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := 330 + i
+			api := &stageAPI{labels: map[string]string{}, commitDetails: map[int][]stageCommitFixture{
+				n: {{
+					message:     "Add OWNERS file\n\nSigned-off-by: Andy Anderson <280983584+hivecommons-hive[bot]@users.noreply.github.com>",
+					authorLogin: testHiveAppBotLogin,
+					authorName:  "Andy Anderson",
+					authorEmail: "280983584+hivecommons-hive[bot]@users.noreply.github.com",
+				}, {
+					message:     "fix: unsigned",
+					authorLogin: "clubanderson",
+					authorName:  "Andy",
+					authorEmail: "andy@example.com",
+				}},
+			}}
+			srv := newStageAPI(t, api)
+			defer srv.Close()
+			clock := &contributorLaneClock{at: time.Date(2026, 10, 22, 15, 0, 0, 0, time.UTC)}
+			e, _, store := newStageEngine(t, srv.URL, clock)
+			e.stageLabelPolicy = func() StageLabelPolicy {
+				return StageLabelPolicy{Enabled: true, ContributorNudge: true, DCORequired: func(string) (bool, bool) { return true, true }}
+			}
+
+			pr := stagePR(n, "role/trusted")
+			pr.Head.Ref = gh.Ptr(tc.ref)
+			pr.Head.SHA = gh.Ptr("sha")
+			pr.Title = gh.Ptr(tc.title)
+			pr.User = &gh.User{Login: gh.Ptr("clubanderson")}
+			e.recordStage(stageLaneTrusted, "acme/widget", "acme", "widget", pr, autoMergeReasonReviewGatePrefix+ReviewGateOutcomeAwaiting, false, nil)
+			e.noteStageRole("acme", "widget", n, stagelabels.RoleTrusted)
+
+			if _, err := e.ApplyStageLabels(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			rec, ok := store.Get(stageKey("acme", "widget", n))
+			if !ok {
+				t.Fatalf("no record")
+			}
+			if tc.skip {
+				if rec.Reason == stagelabels.LaneReasonHiveSignoffAttribution || rec.Reason == stagelabels.LaneReasonDCOMissing {
+					t.Fatalf("dco reason on a forward-merge head: %+v", rec)
+				}
+				if rec.DCO("sha") != stagelabels.DCOUnknown || rec.DCOTotal != 0 || rec.DCOSquashUnsafeKnown {
+					t.Fatalf("skip cached a dco record: %+v", rec)
+				}
+				for _, c := range api.comments {
+					if strings.Contains(c, SignoffAttributionMarkerPrefix) {
+						t.Fatalf("attribution nudge posted: %q", c)
+					}
+				}
+				return
+			}
+			if rec.Reason != stagelabels.LaneReasonDCOMissing || rec.DCOTotal != 2 || rec.DCOUnsigned != 1 {
+				t.Fatalf("title-only match relaxed the commit check: %+v", rec)
+			}
+		})
 	}
 }
 

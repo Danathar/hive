@@ -139,6 +139,22 @@ func isSharedGroupReadableFile(path string) bool {
 		filepath.Base(geminiDir) == ".gemini"
 }
 
+// isAgyCLILog reports whether path is an Antigravity CLI session log
+// (.gemini/antigravity-cli/log/cli-*.log). agy recreates/rewrites these with
+// its own 0640 mode on every run, so widening them to group-write just made
+// the watcher chmod the same file on every tick (#13653, #13692). Only agy's
+// own process writes its log, so no group access is needed.
+func isAgyCLILog(path string) bool {
+	if ok, _ := filepath.Match("cli-*.log", filepath.Base(path)); !ok {
+		return false
+	}
+	logDir := filepath.Dir(path)
+	agyDir := filepath.Dir(logDir)
+	return filepath.Base(logDir) == "log" &&
+		filepath.Base(agyDir) == "antigravity-cli" &&
+		filepath.Base(filepath.Dir(agyDir)) == ".gemini"
+}
+
 // WatchedHomeDirs are the subdirectories under the shared home and data
 // volume that tools (Copilot, Claude, etc.) or init containers frequently
 // create with root ownership, locking out agent UIDs.
@@ -639,6 +655,10 @@ func fixEntry(path string, fi os.FileInfo, logger *slog.Logger) {
 		return
 	}
 
+	if !fi.IsDir() && isAgyCLILog(path) {
+		return
+	}
+
 	// Only fix permissions on files we own or just chowned.
 	// Skipping files owned by other users avoids "operation not permitted"
 	// spam when agents create files as their own users.
@@ -655,7 +675,7 @@ func fixEntry(path string, fi os.FileInfo, logger *slog.Logger) {
 				warnDeduped(logger, "chmod dir", "permissions watcher: chmod dir failed", path, err)
 			} else {
 				permWarnDedupe.clear(dedupeKey("chmod dir", path))
-				logger.Warn("permissions watcher: fixed directory permissions",
+				logger.Info("permissions watcher: fixed directory permissions",
 					"path", path,
 					"old_mode", mode.Perm().String(),
 					"new_mode", newMode.String(),
@@ -672,7 +692,7 @@ func fixEntry(path string, fi os.FileInfo, logger *slog.Logger) {
 				warnDeduped(logger, "chmod file", "permissions watcher: chmod file failed", path, err)
 			} else {
 				permWarnDedupe.clear(dedupeKey("chmod file", path))
-				logger.Warn("permissions watcher: fixed file permissions",
+				logger.Info("permissions watcher: fixed file permissions",
 					"path", path,
 					"old_mode", mode.Perm().String(),
 					"new_mode", newMode.String(),

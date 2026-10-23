@@ -304,12 +304,12 @@ func (c *Config) ExpandAgentReplicas() error {
 		agent.ReplicaOf = ""
 		agent.ReplicaIndex = 1
 		agent.ReplicaCount = replicas
-		agent.name = name
+		agent.SetLoadState(name, agent.SourceFile())
 		c.Agents[name] = agent
 		for i := 2; i <= replicas; i++ {
 			derivedName := replicaAgentName(name, i)
 			derived := agent
-			derived.name = derivedName
+			derived.SetLoadState(derivedName, derived.SourceFile())
 			derived.ID = derivedName
 			derived.BeadsDir = fmt.Sprintf("/data/beads/%s", derivedName)
 			derived.Role = agent.Role

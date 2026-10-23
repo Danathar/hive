@@ -142,10 +142,13 @@ agents.github_api_hourly_cap # TODO #11854
 auto_merge.allow_unprotected_base[] # TODO #11854
 auto_merge.contributor_tier.auto_promote_after_merged # contributor trust ratchet; yaml-only (#12839)
 auto_merge.human_merge_paths.<key> # TODO #11854
+auto_merge.merge_forward_trusted_human[] # TODO #11854
 auto_merge.no_ci_ok[] # TODO #11854
 auto_merge.queue_on_approve_and_unhold[] # per-repo L5 opt-in; yaml-only (#13629)
 auto_merge.repos.<key>.required_checks[] # TODO #11854
+auto_merge.require_current_base[] # TODO #11854
 auto_merge.required_checks[] # TODO #11854
+auto_merge.squash_only[] # merge-method policy; yaml-only
 auto_merge.trusted_authors.exclude_labels[] # TODO #11854
 auto_merge.trusted_authors.repos[] # TODO #11854
 auto_merge.trusted_bot_authors[] # TODO #11854
@@ -171,6 +174,10 @@ governor.budget.coins.<key>.budget # TODO #11854
 governor.budget.coins.<key>.label # TODO #11854
 governor.budget.coins.<key>.tokens_per_coin # TODO #11854
 governor.budget.coins.<key>.usd_per_coin # TODO #11854
+governor.claims.contributor_flap_threshold # contributor flap cool-off (#13579); yaml-only
+governor.claims.contributor_flap_window_s # contributor flap cool-off (#13579); yaml-only
+governor.claims.contributor_flap_cooloff_s # contributor flap cool-off (#13579); yaml-only
+governor.claims.contributor_starvation_s # contributor starvation guard (#13579); yaml-only
 governor.cadence_owners.<key> # TODO #11854
 governor.gateways[].api_key_env # TODO #11854
 governor.gateways[].api_key_file # TODO #11854
@@ -277,6 +284,8 @@ hub.heartbeat_omit[] # TODO #11854
 hub.tier_limits.<key>.max_concurrent # TODO #11854
 hub.tier_limits.<key>.max_per_day # TODO #11854
 hub.tier_limits.<key>.max_per_hour # TODO #11854
+ioscan.block_at.<key> # per-surface block thresholds; yaml-only (#6685)
+ioscan.classifier.fail_mode # classifier fail mode; yaml-only (#6685)
 issues.hard_suppress_reconcile_interval # TODO #11854
 issues.lift_hive_hard_suppress # TODO #11854
 issues.rfc_existing_check.enabled # triage existing-coverage check; yaml-only (#13575)

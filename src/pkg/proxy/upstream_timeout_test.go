@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -28,6 +32,9 @@ func TestAllTLSUpstreamDialsAreBound(t *testing.T) {
 		t.Fatalf("read github_proxy.go: %v", err)
 	}
 	text := string(body)
+	if got := strings.Count(text, "copilot sniff: client hung up before TLS handshake"); got != 1 {
+		t.Fatalf("copilot sniff handshake hangup demotion sites = %d, want 1", got)
+	}
 	if strings.Contains(text, "tls.DialWithDialer(markDialer(0)") {
 		t.Fatal("TLS upstream dials must not use an unbounded zero-timeout dialer")
 	}
@@ -65,6 +72,9 @@ func TestAllClientTLSHandshakesAreBound(t *testing.T) {
 	}
 	if got := strings.Count(text, "SetDeadline(time.Now().Add(clientTLSHandshakeTimeout))"); got != wantClientTLSHandshakes {
 		t.Fatalf("bounded client TLS handshakes = %d, want %d", got, wantClientTLSHandshakes)
+	}
+	if got := strings.Count(text, "isClientHangup(handshakeErr)"); got < 2 {
+		t.Fatalf("transparent and direct handshakes must demote client hangups; isClientHangup sites = %d", got)
 	}
 	for _, want := range []string{
 		`p.logger.Warn("transparent proxy TLS handshake failed"`,
@@ -108,9 +118,24 @@ func TestHTTPRelayDeadlinesAreBoundAndObservable(t *testing.T) {
 		`p.logTimeout("copilot sniff: upstream response read timed out"`,
 		`p.logTimeout("copilot sniff: response relay timed out"`,
 		`p.logTimeout("inference reroute: client request read timed out"`,
+		`p.logClientRead("copilot sniff: client request read timed out"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("deadline failures must be observable; missing log site %s", want)
 		}
+	}
+}
+
+func TestIsClientHangup(t *testing.T) {
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, os.ErrDeadlineExceeded, net.ErrClosed} {
+		if !isClientHangup(err) {
+			t.Fatalf("isClientHangup(%v) = false, want true", err)
+		}
+	}
+	if !isClientHangup(&net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}) {
+		t.Fatal("net.Error timeouts must count as client hangups")
+	}
+	if isClientHangup(errors.New("tls: failed to verify certificate")) {
+		t.Fatal("certificate errors must stay WARN")
 	}
 }

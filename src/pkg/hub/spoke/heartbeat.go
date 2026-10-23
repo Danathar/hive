@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/hivestate"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
@@ -801,7 +801,7 @@ type HeartbeatPayload struct {
 	// (ADR-0024, #12611): redacted, no credential material. Omitted when the
 	// spoke disables provider status or has no enabled agent naming a
 	// backend; an old hub ignores it.
-	Providers []agent.ProviderStatus `json:"providers,omitempty"`
+	Providers []crux.ProviderStatus `json:"providers,omitempty"`
 	// Output-freshness telemetry is optional and backward compatible: older
 	// spokes omit it, and the hub keeps the pre-existing no-write verdict.
 	LastWriteCapableKickAt string `json:"last_write_capable_kick_at,omitempty"`
@@ -1764,7 +1764,7 @@ func postHeartbeatToHub(ctx context.Context, hubURL string, payload *HeartbeatPa
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		logger.Warn("hub heartbeat rejected", "status", resp.StatusCode, "body", string(respBody))
-		if resp.StatusCode >= http.StatusInternalServerError {
+		if hubHeartbeatStatusIsDefect(resp.StatusCode) {
 			fleetreport.Observe(fleetreport.ClassUnexpectedHub5xx, "heartbeat", fmt.Sprintf("hub heartbeat returned HTTP %d", resp.StatusCode), string(respBody))
 		}
 		return nil
@@ -2939,4 +2939,16 @@ func StartTaskStatusPush(ctx context.Context, hubURL string, collect TaskStatusC
 			}
 		}
 	}
+}
+
+// hubHeartbeatStatusIsDefect reports whether a heartbeat status points at a
+// hub defect worth self-reporting. 502/503/504 are the front proxy saying the
+// hub is restarting or has no backend ("no available server"); the next beat
+// retries on its own interval, so they are logged but never escalated.
+func hubHeartbeatStatusIsDefect(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return status >= http.StatusInternalServerError
 }

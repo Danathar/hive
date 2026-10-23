@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 )
 
 func writeFakeTmux(t *testing.T, script string) string {
@@ -60,6 +60,26 @@ exit 1
 	logs := logBuf.String()
 	if !strings.Contains(logs, "tmux has-session failed") || !strings.Contains(logs, "probe stderr says permission denied") {
 		t.Fatalf("probe failure log missing stderr: %s", logs)
+	}
+}
+
+func TestTmuxSessionExistsMissingServerIsNotWarning(t *testing.T) {
+	writeFakeTmux(t, `#!/bin/sh
+echo "error connecting to /tmp/tmux-2013/hive-supervisor (No such file or directory)" >&2
+exit 1
+`)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	m := NewManager(map[string]config.AgentConfig{"guide": {Backend: "claude"}}, logger, ProjectContext{})
+	m.mu.RLock()
+	agent := m.agents["guide"]
+	m.mu.RUnlock()
+
+	if m.tmuxSessionExistsForAgent(agent) {
+		t.Fatal("tmuxSessionExistsForAgent = true, want false")
+	}
+	if logs := logBuf.String(); strings.Contains(logs, "WARN") {
+		t.Fatalf("missing server logged a warning: %s", logs)
 	}
 }
 

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -27,6 +28,17 @@ type featuresRunsBody struct {
 	RunsTriageEnabled        *bool `json:"runsTriageEnabled"`
 	RunsTriageMinBodyChars   *int  `json:"runsTriageMinBodyChars"`
 	RunsTriageClarifyComment *bool `json:"runsTriageClarifyComment"`
+
+	RunsTriageClarityGateEnabled   *bool `json:"runsTriageClarityGateEnabled"`
+	RunsTriageClarityGateThreshold *int  `json:"runsTriageClarityGateThreshold"`
+
+	RunsTriagePriorArtEnabled   *bool `json:"runsTriagePriorArtEnabled"`
+	RunsTriagePriorArtThreshold *int  `json:"runsTriagePriorArtThreshold"`
+
+	RunsTriagePriorArtKinds            *string `json:"runsTriagePriorArtKinds"`
+	RunsTriagePriorArtMaxFindings      *int    `json:"runsTriagePriorArtMaxFindings"`
+	RunsTriagePriorArtMaxParksPerCycle *int    `json:"runsTriagePriorArtMaxParksPerCycle"`
+	RunsTriagePriorArtBotCloseTTL      *string `json:"runsTriagePriorArtBotCloseTtl"`
 
 	RecheckEnabled         *bool   `json:"spektacularRecheckEnabled"`
 	RecheckDefaultInterval *string `json:"spektacularRecheckDefaultInterval"`
@@ -68,6 +80,7 @@ func (b featuresRunsBody) prepare(cur *config.Config) (func(*config.Config), err
 		{b.RunsCheckpointPlan, func(c *config.Config) **bool { return &c.Runs.Checkpoints.Plan }},
 		{b.RunsCheckpointImplement, func(c *config.Config) **bool { return &c.Runs.Checkpoints.Implement }},
 		{b.RunsTriageClarifyComment, func(c *config.Config) **bool { return &c.Runs.Triage.ClarifyComment }},
+		{b.RunsTriagePriorArtEnabled, func(c *config.Config) **bool { return &c.Runs.Triage.PriorArt.Enabled }},
 	} {
 		if f.v == nil {
 			continue
@@ -81,6 +94,7 @@ func (b featuresRunsBody) prepare(cur *config.Config) (func(*config.Config), err
 		dst func(*config.Config) *bool
 	}{
 		{b.RunsTriageEnabled, func(c *config.Config) *bool { return &c.Runs.Triage.Enabled }},
+		{b.RunsTriageClarityGateEnabled, func(c *config.Config) *bool { return &c.Runs.Triage.ClarityGate.Enabled }},
 		{b.RecheckEnabled, func(c *config.Config) *bool { return &c.Runs.Spektacular.Recheck.Enabled }},
 		{b.DiscoveryEnabled, func(c *config.Config) *bool { return &c.Runs.Spektacular.Recheck.Discovery.Enabled }},
 		{b.ExtVibeKanbanEnabled, func(c *config.Config) *bool { return &c.Runs.External.VibeKanban.Enabled }},
@@ -100,6 +114,8 @@ func (b featuresRunsBody) prepare(cur *config.Config) (func(*config.Config), err
 	}{
 		{b.RunsWaitTimeoutSeconds, "runs wait_timeout_seconds", func(c *config.Config) *int { return &c.Runs.WaitTimeoutSeconds }},
 		{b.RunsTriageMinBodyChars, "runs triage min_body_chars", func(c *config.Config) *int { return &c.Runs.Triage.MinBodyChars }},
+		{b.RunsTriagePriorArtMaxFindings, "runs triage prior_art max_findings", func(c *config.Config) *int { return &c.Runs.Triage.PriorArt.MaxFindings }},
+		{b.RunsTriagePriorArtMaxParksPerCycle, "runs triage prior_art max_parks_per_cycle", func(c *config.Config) *int { return &c.Runs.Triage.PriorArt.MaxParksPerCycle }},
 		{b.RecheckMaxDeltaTasks, "runs spektacular recheck max_delta_tasks", func(c *config.Config) *int { return &c.Runs.Spektacular.Recheck.MaxDeltaTasks }},
 		{b.DiscoveryMaxTotalItems, "runs spektacular recheck discovery max_total_items", func(c *config.Config) *int { return &c.Runs.Spektacular.Recheck.Discovery.MaxTotalItems }},
 	} {
@@ -112,6 +128,47 @@ func (b featuresRunsBody) prepare(cur *config.Config) (func(*config.Config), err
 		v := *f.v
 		dst := f.dst
 		steps = append(steps, func(c *config.Config) { *dst(c) = v })
+	}
+
+	if b.RunsTriageClarityGateThreshold != nil {
+		v := *b.RunsTriageClarityGateThreshold
+		if v < 0 || v > 100 {
+			return nil, fmt.Errorf("runs triage clarity_gate threshold must be 0 (default) to 100")
+		}
+		steps = append(steps, func(c *config.Config) { c.Runs.Triage.ClarityGate.Threshold = v })
+	}
+	if b.RunsTriagePriorArtThreshold != nil {
+		v := *b.RunsTriagePriorArtThreshold
+		if v < 0 || v > 100 {
+			return nil, fmt.Errorf("runs triage prior_art threshold must be 0 (default) to 100")
+		}
+		steps = append(steps, func(c *config.Config) { c.Runs.Triage.PriorArt.Threshold = v })
+	}
+	if b.RunsTriagePriorArtKinds != nil {
+		kinds := []string{}
+		for _, part := range strings.Split(*b.RunsTriagePriorArtKinds, ",") {
+			k := strings.ToLower(strings.TrimSpace(part))
+			if k == "" {
+				continue
+			}
+			if !slices.Contains(config.DefaultPriorArtGateKinds, k) {
+				return nil, fmt.Errorf("runs triage prior_art kinds must be empty (default) or a comma-separated list of %s", strings.Join(config.DefaultPriorArtGateKinds, ", "))
+			}
+			if !slices.Contains(kinds, k) {
+				kinds = append(kinds, k)
+			}
+		}
+		if len(kinds) == 0 {
+			kinds = nil
+		}
+		steps = append(steps, func(c *config.Config) { c.Runs.Triage.PriorArt.Kinds = kinds })
+	}
+	if b.RunsTriagePriorArtBotCloseTTL != nil {
+		d, err := parseSettingsDuration("runs triage prior_art bot_close_ttl", *b.RunsTriagePriorArtBotCloseTTL)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, func(c *config.Config) { c.Runs.Triage.PriorArt.BotCloseTTL = d })
 	}
 
 	if b.RunsWaitSeverity != nil {
@@ -232,6 +289,17 @@ func featuresRunsResponse(cfg *config.Config) map[string]interface{} {
 		"runsTriageMinBodyChars":   r.Triage.MinBodyChars,
 		"runsTriageClarifyComment": r.Triage.ShouldClarifyComment(),
 
+		"runsTriageClarityGateEnabled":   r.Triage.ClarityGate.Enabled,
+		"runsTriageClarityGateThreshold": r.Triage.ClarityGate.Threshold,
+
+		"runsTriagePriorArtEnabled":   r.Triage.PriorArt.IsEnabled(),
+		"runsTriagePriorArtThreshold": r.Triage.PriorArt.Threshold,
+
+		"runsTriagePriorArtKinds":            strings.Join(r.Triage.PriorArt.Kinds, ", "),
+		"runsTriagePriorArtMaxFindings":      r.Triage.PriorArt.MaxFindings,
+		"runsTriagePriorArtMaxParksPerCycle": r.Triage.PriorArt.MaxParksPerCycle,
+		"runsTriagePriorArtBotCloseTtl":      settingsDurationString(r.Triage.PriorArt.BotCloseTTL),
+
 		"spektacularRecheckEnabled":         r.Spektacular.Recheck.Enabled,
 		"spektacularRecheckDefaultInterval": settingsDurationString(r.Spektacular.Recheck.DefaultInterval),
 		"spektacularRecheckMaxDeltaTasks":   r.Spektacular.Recheck.MaxDeltaTasks,
@@ -255,15 +323,21 @@ func featuresRunsResponse(cfg *config.Config) map[string]interface{} {
 		"extVibeKanbanWorkflowVersion": vk.WorkflowVersion,
 
 		"runsDefaults": map[string]interface{}{
-			"runsWaitTimeoutSeconds":            config.DefaultRunsWaitTimeoutSeconds,
-			"runsWaitSeverity":                  config.DefaultRunsWaitSeverity,
-			"runsTriageMinBodyChars":            config.DefaultTriageMinBodyChars,
-			"spektacularRecheckDefaultInterval": config.DefaultSpektacularRecheckInterval.String(),
-			"spektacularRecheckMaxDeltaTasks":   config.DefaultSpektacularMaxDeltaTasks,
-			"spektacularDiscoveryTimeout":       fmt.Sprintf("%ds", config.DefaultSpektacularDiscoveryTimeoutS),
-			"spektacularDiscoveryMaxTotalItems": config.DefaultSpektacularDiscoveryMaxTotalItems,
-			"extFlueMode":                       config.DefaultFlueBindingMode,
-			"implementCheckpointMinAcmm":        config.RunImplementCheckpointMinACMM,
+			"runsWaitTimeoutSeconds":             config.DefaultRunsWaitTimeoutSeconds,
+			"runsWaitSeverity":                   config.DefaultRunsWaitSeverity,
+			"runsTriageMinBodyChars":             config.DefaultTriageMinBodyChars,
+			"runsTriageClarityGateThreshold":     config.DefaultClarityGateThreshold,
+			"runsTriagePriorArtThreshold":        config.DefaultPriorArtGateThreshold,
+			"runsTriagePriorArtKinds":            strings.Join(config.DefaultPriorArtGateKinds, ", "),
+			"runsTriagePriorArtMaxFindings":      config.DefaultPriorArtGateMaxFindings,
+			"runsTriagePriorArtMaxParksPerCycle": config.DefaultPriorArtGateMaxParksPerCycle,
+			"runsTriagePriorArtBotCloseTtl":      config.DefaultPriorArtGateBotCloseTTL.String(),
+			"spektacularRecheckDefaultInterval":  config.DefaultSpektacularRecheckInterval.String(),
+			"spektacularRecheckMaxDeltaTasks":    config.DefaultSpektacularMaxDeltaTasks,
+			"spektacularDiscoveryTimeout":        fmt.Sprintf("%ds", config.DefaultSpektacularDiscoveryTimeoutS),
+			"spektacularDiscoveryMaxTotalItems":  config.DefaultSpektacularDiscoveryMaxTotalItems,
+			"extFlueMode":                        config.DefaultFlueBindingMode,
+			"implementCheckpointMinAcmm":         config.RunImplementCheckpointMinACMM,
 		},
 	}
 }

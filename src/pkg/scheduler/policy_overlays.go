@@ -396,7 +396,7 @@ func (s *Scheduler) addReviewThreadFixFirst(agentName string, message string) st
 	if err != nil {
 		return message
 	}
-	section := formatReviewThreadFixData(data, s.cfg.BaseAgentName(agentName), s.reviewBotsResolveAfterFix())
+	section := formatReviewThreadFixDataScanned(data, s.cfg.BaseAgentName(agentName), s.reviewBotsResolveAfterFix(), s.reviewThreadEnforcer())
 	if section == "" {
 		return message
 	}
@@ -415,10 +415,22 @@ func (s *Scheduler) reviewBotsResolveAfterFix() bool {
 	return s.cfg.Classification.ReviewBots.ResolveAfterFixEnabled()
 }
 
-// formatReviewThreadFixData renders the review-thread fix-before-new section
-// for one agent from raw review-threads.json bytes. Empty result means the
-// agent has no open, non-escalated PR with an actionable bot thread.
+// formatReviewThreadFixData is formatReviewThreadFixDataScanned with no
+// ioscan enforcement, for formatting tests.
 func formatReviewThreadFixData(data []byte, agent string, resolveAfterFix bool) string {
+	return formatReviewThreadFixDataScanned(data, agent, resolveAfterFix, nil)
+}
+
+// formatReviewThreadFixDataScanned renders the review-thread fix-before-new
+// section for one agent from raw review-threads.json bytes. Empty result means
+// the agent has no open, non-escalated PR with an actionable bot thread.
+//
+// Each PR's title and thread bodies are external text about to be injected
+// into a kick, so they go through enforce as ONE conversation (F11,
+// hivecommons/hive#6685): a withheld finding is replaced by the redaction
+// marker, and a PR whose thread trips the fail-closed policy is left out of
+// the section entirely rather than injected in part.
+func formatReviewThreadFixDataScanned(data []byte, agent string, resolveAfterFix bool, enforce threadEnforcer) string {
 	var report github.ReviewThreadsReport
 	if json.Unmarshal(data, &report) != nil || !report.Enabled {
 		return ""
@@ -436,8 +448,12 @@ func formatReviewThreadFixData(data []byte, agent string, resolveAfterFix bool) 
 		if owner != agent {
 			continue
 		}
-		mine = append(mine, pr)
-		threads += len(pr.Threads)
+		scanned, failClosed := scanReviewThreadPR(pr, enforce)
+		if failClosed {
+			continue
+		}
+		mine = append(mine, scanned)
+		threads += len(scanned.Threads)
 	}
 	if len(mine) == 0 {
 		return ""
@@ -506,6 +522,37 @@ func formatReviewThreadFixData(data []byte, agent string, resolveAfterFix bool) 
 	return b.String()
 }
 
+// reviewThreadEnforcer binds enforceThread to the review surface.
+func (s *Scheduler) reviewThreadEnforcer() threadEnforcer {
+	return func(segments []string) ([]string, bool) { return s.enforceThread(segments, reviewSource) }
+}
+
+// scanReviewThreadPR runs one PR's title and thread bodies through enforce as
+// an ordered conversation and returns a copy with withheld text replaced. The
+// input is never mutated: the report is shared with other readers.
+func scanReviewThreadPR(pr github.ReviewThreadPR, enforce threadEnforcer) (github.ReviewThreadPR, bool) {
+	if enforce == nil {
+		return pr, false
+	}
+	segments := make([]string, 0, len(pr.Threads)+1)
+	segments = append(segments, pr.Title)
+	for _, t := range pr.Threads {
+		segments = append(segments, t.Body)
+	}
+	scanned, failClosed := enforce(segments)
+	if failClosed {
+		return pr, true
+	}
+	out := pr
+	out.Title = scanned[0]
+	out.Threads = make([]github.ReviewThread, len(pr.Threads))
+	for i, t := range pr.Threads {
+		t.Body = scanned[i+1]
+		out.Threads[i] = t
+	}
+	return out, false
+}
+
 // maxHeldPRsPerRepoPerKick bounds the held-PR snapshot per repository instead
 // of across the whole kick.
 //
@@ -553,7 +600,7 @@ func (s *Scheduler) formatHeldPRClaimsWithPolicy(actionable *github.ActionableRe
 			limit = maxHeldPRsPerRepoPerKick
 		}
 		for _, item := range items[:limit] {
-			title, verdict := s.enforceIssueTextVerdict(item.Title)
+			title, verdict := s.enforceTextFrom(item.Title, prSource(heldPRs[fmt.Sprintf("%s#%d", item.Repo, item.Number)]))
 			failClosed = failClosed || (s.ioscanFailClosed() && verdict.HasCriticalInjection())
 			const maxHeldPRTitleRunes = 70
 			if runes := []rune(title); len(runes) > maxHeldPRTitleRunes {

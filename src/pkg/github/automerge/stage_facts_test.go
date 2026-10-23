@@ -84,7 +84,7 @@ func TestPRDeriverReproducesResolveStage(t *testing.T) {
 		}},
 		{"author/hive label lifts role", []stageObservation{obs(stageObservation{Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict, Labels: []string{"author/hive"}})}},
 	}
-	deriver := PRDeriver()
+	deriver := stageengine.PRDeriver()
 	if deriver.Kind() != stagelabels.PRItem {
 		t.Fatal("kind")
 	}
@@ -124,7 +124,7 @@ func TestPRDeriverReproducesResolveStage(t *testing.T) {
 }
 
 func TestPRDeriverAbstainsWithoutEvidence(t *testing.T) {
-	d := PRDeriver()
+	d := stageengine.PRDeriver()
 	if got := d.Derive(factsFrom(nil)); !got.Abstain {
 		t.Fatalf("empty list: %+v", got)
 	}
@@ -141,7 +141,7 @@ func TestPRDeriverAbstainsWithoutEvidence(t *testing.T) {
 // the fresh read) sits at 085 on the human route with the role it wears; an
 // un-park or a closed PR still abstains until the lanes speak.
 func TestPRDeriverParksUnobservedPR(t *testing.T) {
-	d := PRDeriver()
+	d := stageengine.PRDeriver()
 	base := stageengine.Facts{Ref: stageengine.Ref{Kind: stagelabels.PRItem}, Open: true, PR: &stageengine.PRFacts{}}
 
 	parked := base
@@ -195,7 +195,7 @@ func TestPRDeriverRequiresHumanBeatsAdmissionReason(t *testing.T) {
 			Cause:     stagelabels.CauseTrust,
 		},
 	}
-	got := PRDeriver().Derive(f)
+	got := stageengine.PRDeriver().Derive(f)
 	if got.Abstain || got.Stage != stagelabels.NeedsDecision {
 		t.Fatalf("engine derived %+v, want stage %v", got, stagelabels.NeedsDecision)
 	}
@@ -212,7 +212,86 @@ func TestPRDeriverRequiresHumanBeatsAdmissionReason(t *testing.T) {
 		f.PR.Lanes[i].Reason = contributorLaneReasonNoVerdict
 	}
 	f.PR.Review = stageengine.ReviewFacts{}
-	if got := PRDeriver().Derive(f); !got.Abstain && got.Stage == stagelabels.NeedsDecision {
+	if got := stageengine.PRDeriver().Derive(f); !got.Abstain && got.Stage == stagelabels.NeedsDecision {
 		t.Fatalf("pending verdict derived %+v, want not 085", got)
+	}
+}
+
+// TestPRDeriverPassCarriesStalledAndKindLabels pins the two Desired fields
+// the pass computes after resolution: the dwell verdict and the configured
+// author/<kind> names. Before PRPassFacts carried them an enforce-mode
+// sweep (the default since hivecommons/hive#13598) never wrote
+// stage/stalled on a PR and ignored custom kind names; the legacy
+// comparator had masked that in shadow. A terminal verdict still zeroes
+// every pipeline label and leaves the author label alone.
+func TestPRDeriverPassCarriesStalledAndKindLabels(t *testing.T) {
+	names := authorkind.Names{Human: "author/person"}
+	list := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "dev", HeadSHA: "sha", Lane: stageLaneContributor, Reason: contributorLaneReasonNoVerdict, Detail: stageDetail{Role: stagelabels.RoleContributor}}}
+	f := factsFrom(list)
+	f.PR.Pass = &stageengine.PRPassFacts{AuthorKind: authorkind.Human, Stalled: true, KindLabels: names}
+	got := stageengine.PRDeriver().Derive(f)
+	if got.Abstain || got.Stage != stagelabels.ReviewPending {
+		t.Fatalf("derived %+v, want 050", got)
+	}
+	if !got.Stalled || got.KindLabels != names || got.Kind != authorkind.Human {
+		t.Fatalf("decision dropped the pass's Desired fields: %+v", got)
+	}
+	want := got.Desired()
+	if !want.Stalled || want.KindLabels.Label(authorkind.Human) != "author/person" {
+		t.Fatalf("desired %+v", want)
+	}
+
+	closed := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "dev", HeadSHA: "sha", Lane: stageLaneContributor, Reason: "closed", Detail: stageDetail{Role: stagelabels.RoleContributor}}}
+	tf := factsFrom(closed)
+	tf.PR.Pass = &stageengine.PRPassFacts{AuthorKind: authorkind.Human, Stalled: true, KindLabels: names}
+	term := stageengine.PRDeriver().Derive(tf)
+	if term.Abstain || !term.Terminal || term.Stage != stagelabels.None {
+		t.Fatalf("closed derived %+v, want terminal", term)
+	}
+	if term.Stalled || term.Role != stagelabels.RoleNone || term.Kind != authorkind.Unknown {
+		t.Fatalf("terminal decision must be a zero Desired: %+v", term)
+	}
+}
+
+// TestVerdictStateFold pins the ReviewFacts.State fold ADR-0025 defines
+// (review-state fold, resolved in plan PR-F): the one verdict fact the PR
+// deriver routes on.
+func TestVerdictStateFold(t *testing.T) {
+	cases := []struct {
+		name string
+		d    stageDetail
+		want stagelabels.VerdictState
+	}{
+		{"unknown", stageDetail{}, stagelabels.VerdictPending},
+		{"approved", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Approved: true}}, stagelabels.VerdictApproved},
+		{"no reviewer", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{}}, stagelabels.VerdictUnavailable},
+		{"changes requested", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "changes_requested"}}, stagelabels.VerdictChangesRequested},
+		{"reject", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "Reject"}}, stagelabels.VerdictChangesRequested},
+		{"requires human", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human"}}, stagelabels.VerdictRequiresHuman},
+		{"decision requested", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "approve", DecisionRequested: true}}, stagelabels.VerdictRequiresHuman},
+		{"pending verdict", stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true}}, stagelabels.VerdictPending},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := verdictStateFrom(tc.d); got != tc.want {
+				t.Fatalf("verdictStateFrom = %v, want %v", got, tc.want)
+			}
+			r := reviewFactsFrom(tc.d, "abc")
+			if r.State != tc.want {
+				t.Fatalf("ReviewFacts.State = %v, want %v", r.State, tc.want)
+			}
+			v := verdictFrom(r)
+			if v.Approved != (tc.want == stagelabels.VerdictApproved) || v.Configured != (tc.want != stagelabels.VerdictUnavailable) {
+				t.Fatalf("verdictFrom(%v) = %+v", tc.want, v)
+			}
+		})
+	}
+	// HumanApprover rides along only for the head it approved.
+	d := stageDetail{HumanApprover: "ann", HumanApprovalHead: "abc"}
+	if r := reviewFactsFrom(d, "abc"); r.HumanApprover != "ann" {
+		t.Fatalf("approver at head: %+v", r)
+	}
+	if r := reviewFactsFrom(d, "def"); r.HumanApprover != "" {
+		t.Fatalf("approver for a stale head kept: %+v", r)
 	}
 }

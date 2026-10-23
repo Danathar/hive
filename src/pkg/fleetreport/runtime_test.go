@@ -345,6 +345,11 @@ func TestEveryRuntimeClassTriggerAndNonTriggerThresholds(t *testing.T) {
 		{class: ClassAgentCrashLoop, message: "agent crash loop: 5 failures within the backoff window"},
 		{class: ClassCIPollNudge, message: "ci-poll nudge: agent polling ci 4 times since last kick"},
 		{class: ClassIssueRequestStuck, message: "issue-request stuck: issue request failed 3 attempts over 7m"},
+		{class: ClassTmuxSessionCheckFailed, message: "tmux has-session failed"},
+		{class: ClassProxyTLSHandshakeFailed, message: "proxy client TLS handshake failed"},
+		{class: ClassAgentDirSetupFailed, message: "failed to create per-agent XDG dir"},
+		{class: ClassReviewEvidenceWriteFail, message: "review evidence: could not write bundle"},
+		{class: ClassFeedbackIssueRefreshFailed, message: "feedback: issue refresh failed"},
 		{class: ClassEffectLedgerOpStuck, message: "effect ledger op stuck: issue_create has been Unknown for 31m; retries refused pending reconciliation"},
 	}
 	seen := map[string]bool{}
@@ -718,6 +723,9 @@ func TestMatchesExplicitClass(t *testing.T) {
 	if !MatchesExplicitClass("Kick FAILED for agent quality") {
 		t.Fatal("kick failed not matched")
 	}
+	if !MatchesExplicitClass("continuous re-kick backed off after failed kick") {
+		t.Fatal("self-healing re-kick backoff not matched")
+	}
 	if !MatchesExplicitClass("issue-request watcher: request exceeded retry horizon") {
 		t.Fatal("issue-request watcher keyword not matched")
 	}
@@ -727,14 +735,31 @@ func TestMatchesExplicitClass(t *testing.T) {
 }
 
 func TestIsBenignMessage(t *testing.T) {
-	for _, m := range []string{"read tcp 1.2.3.4: i/o timeout", "keepalive ping: i/o timeout", "fetch: context canceled"} {
+	for _, m := range []string{"read tcp 1.2.3.4: i/o timeout", "keepalive ping: i/o timeout", "fetch: context canceled", "permissions watcher: fixed file permissions path=/x old_mode=-rw-r----- new_mode=-rw-rw-----", "permissions watcher: fixed ownership path=/x uid=1000"} {
 		if !IsBenignMessage(m) {
 			t.Fatalf("%q not benign", m)
 		}
 	}
-	for _, m := range []string{"write failed: i/o timeout", "request failed: 500"} {
+	for _, m := range []string{"write failed: i/o timeout", "request failed: 500", "permissions watcher: chmod failed path=/x"} {
 		if IsBenignMessage(m) {
 			t.Fatalf("%q wrongly benign", m)
+		}
+	}
+}
+
+func TestIsBenignMessageReviewPendingExpiry(t *testing.T) {
+	for _, msg := range []string{"review pending expired", "  REVIEW PENDING EXPIRED  "} {
+		if !IsBenignMessage(msg) {
+			t.Errorf("retry notification %q not benign", msg)
+		}
+	}
+	for _, msg := range []string{
+		"review dispatch exhausted; holding PR for a human",
+		"review pending expired: redispatch failed",
+		"failed to persist review pending expired state",
+	} {
+		if IsBenignMessage(msg) {
+			t.Errorf("failure %q wrongly benign", msg)
 		}
 	}
 }
@@ -804,5 +829,35 @@ func TestUnclassifiedRepeatedHonoursWindowAndIdleClear(t *testing.T) {
 	_ = tr.Evidence()
 	if cleared := tr.TakeCleared(); len(cleared) != 0 {
 		t.Fatalf("one-off recorded as cleared: %+v", cleared)
+	}
+}
+
+func TestRecurringRuntimeMessagesAreClassified(t *testing.T) {
+	fed := map[string]string{
+		"tmux has-session failed":                 ClassTmuxSessionCheckFailed,
+		"proxy client TLS handshake failed":       ClassProxyTLSHandshakeFailed,
+		"transparent proxy TLS handshake failed":  ClassProxyTLSHandshakeFailed,
+		"failed to restore per-agent dir mode":    ClassAgentDirSetupFailed,
+		"failed to restore interactive home mode": ClassAgentDirSetupFailed,
+		"failed to create per-agent XDG dir":      ClassAgentDirSetupFailed,
+		"review evidence: could not write bundle": ClassReviewEvidenceWriteFail,
+		"feedback: issue refresh failed":          ClassFeedbackIssueRefreshFailed,
+	}
+	for msg, want := range fed {
+		if got := LogFedClass(msg); got != want {
+			t.Errorf("LogFedClass(%q) = %q, want %q", msg, got, want)
+		}
+		if !MatchesExplicitClass(msg) {
+			t.Errorf("%q not matched by an explicit class", msg)
+		}
+	}
+	for _, m := range []string{
+		"github REST 404 cached; suppressing repeated fetches",
+		"copilot token validation rate-limited by GitHub; relaunching after cooldown",
+		"permissions watcher: fixed file permissions",
+	} {
+		if !IsBenignMessage(m) {
+			t.Errorf("%q not benign", m)
+		}
 	}
 }

@@ -129,3 +129,116 @@ func TestHandlerEnabledDefersToWrapped(t *testing.T) {
 		t.Fatal("ERROR not enabled")
 	}
 }
+
+func TestReviewPendingExpiryLogsWithoutFleetReport(t *testing.T) {
+	now := time.Date(2026, 10, 23, 17, 39, 0, 0, time.UTC)
+	tr := fleetreport.NewRuntimeTracker(func() time.Time { return now })
+	var out bytes.Buffer
+	logger := slog.New(NewWithObserver(slog.NewJSONHandler(&out, nil), tr.Observe))
+	// Five unrelated first expiries in one cycle meet the generic feed's
+	// threshold, even when the governor warns only once per PR (#13850).
+	for i := 0; i < 5; i++ {
+		logger.Warn("review pending expired", "repo", "owner/repo", "pr", 90+i,
+			"perspective", "docs-currency", "agent", "reviewer", "age", "49m30s", "expiries", 1)
+	}
+	if ev := tr.Evidence(); len(ev) != 0 {
+		t.Fatalf("bounded review retries produced fleet evidence: %+v", ev)
+	}
+	if n := strings.Count(out.String(), "\n"); n != 5 {
+		t.Fatalf("wrapped handler saw %d expiry records, want 5: %s", n, out.String())
+	}
+	if !strings.Contains(out.String(), `"msg":"review pending expired"`) || !strings.Contains(out.String(), `"expiries":1`) {
+		t.Fatalf("expiry log lost its message or diagnostics: %s", out.String())
+	}
+	// Exhausting the retry budget is still actionable, and must still cross
+	// the report threshold instead of being swallowed by the retry filter.
+	const exhausted = "review dispatch exhausted; holding PR for a human"
+	for i := 0; i < 5; i++ {
+		logger.Warn(exhausted, "repo", "owner/repo", "pr", 90+i)
+	}
+	ev := tr.Evidence()
+	if len(ev) != 1 || ev[0].Class != fleetreport.ClassUnclassifiedRepeated || ev[0].Message != exhausted || ev[0].Count != 5 {
+		t.Fatalf("exhausted reviews should still produce fleet evidence: %+v", ev)
+	}
+}
+
+func TestFeedLogFedPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		level     slog.Level
+		message   string
+		wantClass string
+		wantKey   string
+	}{
+		{
+			name:    "benign message is dropped",
+			level:   slog.LevelWarn,
+			message: "github REST 404 cached; suppressing repeated fetches",
+		},
+		{
+			name:    "message matching no class is dropped by the log-fed path",
+			level:   slog.LevelWarn,
+			message: "advisory post failed: 502",
+		},
+		{
+			name:      "log-fed keyword observes under its class",
+			level:     slog.LevelWarn,
+			message:   "tmux has-session failed for session 42",
+			wantClass: fleetreport.ClassTmuxSessionCheckFailed,
+			wantKey:   fleetreport.NormalizeMessage("tmux has-session failed for session 42"),
+		},
+		{
+			name:      "feedback issue refresh failure observes under its class",
+			level:     slog.LevelWarn,
+			message:   "feedback: issue refresh failed",
+			wantClass: fleetreport.ClassFeedbackIssueRefreshFailed,
+			wantKey:   fleetreport.NormalizeMessage("feedback: issue refresh failed"),
+		},
+		{
+			name:      "surrounding whitespace is trimmed before matching",
+			level:     slog.LevelError,
+			message:   "  tmux has-session failed  ",
+			wantClass: fleetreport.ClassTmuxSessionCheckFailed,
+			wantKey:   fleetreport.NormalizeMessage("tmux has-session failed"),
+		},
+		{
+			name:      "very long log-fed message key is truncated",
+			level:     slog.LevelWarn,
+			message:   "tmux has-session failed " + strings.Repeat("because the socket is gone ", 10*maxKeyBytes),
+			wantClass: fleetreport.ClassTmuxSessionCheckFailed,
+			wantKey:   fleetreport.NormalizeMessage("tmux has-session failed " + strings.Repeat("because the socket is gone ", 10*maxKeyBytes))[:maxKeyBytes],
+		},
+		{
+			name:      "unmatched message still observes as unclassified",
+			level:     slog.LevelWarn,
+			message:   "relay response write failed, will retry with backoff",
+			wantClass: fleetreport.ClassUnclassifiedRepeated,
+			wantKey:   fleetreport.NormalizeMessage("relay response write failed, will retry with backoff"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, seen, _ := newFeed(t)
+			logger.Log(context.Background(), tc.level, tc.message)
+			if tc.wantClass == "" {
+				if len(*seen) != 0 {
+					t.Fatalf("observed = %+v, want none", *seen)
+				}
+				return
+			}
+			if len(*seen) != 1 {
+				t.Fatalf("observed = %+v, want exactly one", *seen)
+			}
+			got := (*seen)[0]
+			if got.class != tc.wantClass {
+				t.Fatalf("class = %q, want %q", got.class, tc.wantClass)
+			}
+			if got.key != tc.wantKey {
+				t.Fatalf("key = %q, want %q", got.key, tc.wantKey)
+			}
+			if len(got.key) > maxKeyBytes {
+				t.Fatalf("key not bounded: %d", len(got.key))
+			}
+		})
+	}
+}

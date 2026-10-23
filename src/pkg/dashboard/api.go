@@ -347,6 +347,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/hold-permission", s.handleRepoHoldPermission)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/hold", s.handleRepoItemHold)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/issues/{number}/release", s.handleRepoIssueRelease)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/decision", s.handleRepoItemDecision)
 
 	s.mux.HandleFunc("GET /api/acmm/evaluation", s.handleACMMEvaluation)
 	s.mux.HandleFunc("POST /api/acmm/issue", s.handleACMMCreateIssue)
@@ -539,6 +540,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.registerAgentVariableRoutes()
 	// Admin MCP diagnostic reads (#11943, api_diag.go).
 	s.registerDiagRoutes()
+	// Activity monitor row menu: Accept triage (api_repo_item_accept_triage.go).
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/accept-triage", s.handleRepoItemAcceptTriage)
 }
 
 var (
@@ -868,7 +871,7 @@ func (s *Server) sentinelLabel() string {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.historyPayload())
+	evalHistoryResponse(w, r, s.historyPayload())
 }
 
 // historyPayload is the /api/history body: the live eval history, prefixed by
@@ -1405,11 +1408,11 @@ func (s *Server) prQueueRepoAllowed(repo string) bool {
 }
 
 func (s *Server) handleFactHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.FactHistory())
+	historyResponse(w, r, s.FactHistory(), func(e FactHistoryEntry) int64 { return e.Timestamp })
 }
 
 func (s *Server) handleCostHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.CostHistory())
+	historyResponse(w, r, s.CostHistory(), func(e CostHistoryEntry) int64 { return e.Timestamp })
 }
 
 func (s *Server) handleTrendHistory(w http.ResponseWriter, r *http.Request) {
@@ -1434,9 +1437,9 @@ func (s *Server) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
 	case "token", "tokens":
 		jsonResponse(w, s.TokenSparklineHistory())
 	case "fact", "facts":
-		jsonResponse(w, s.FactHistory())
+		historyResponse(w, r, s.FactHistory(), func(e FactHistoryEntry) int64 { return e.Timestamp })
 	case "cost":
-		jsonResponse(w, s.CostHistory())
+		historyResponse(w, r, s.CostHistory(), func(e CostHistoryEntry) int64 { return e.Timestamp })
 	default:
 		http.Error(w, `{"error":"unknown series; valid: token, fact, cost"}`, http.StatusBadRequest)
 	}

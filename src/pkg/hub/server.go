@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/auth"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/delegation"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
@@ -232,7 +232,7 @@ type RegistryEntry struct {
 	// provider availability (ADR-0024, #12611) — two separate dimensions, so
 	// "not authenticated" never reads as "provider unavailable" or vice
 	// versa. Nil = old spoke or provider status disabled (no signal).
-	Providers []agent.ProviderStatus `json:"providers,omitempty"`
+	Providers []crux.ProviderStatus `json:"providers,omitempty"`
 	// ProviderLimitReason is the spoke-reported provider spending/quota refusal
 	// banner. It is separate from BudgetExhausted, which is hive-local governor
 	// budget; this means the upstream provider is refusing token purchases.
@@ -988,6 +988,8 @@ type HeartbeatHealthEntry struct {
 }
 
 type HubServer struct {
+	// webhookNoSecretOnce limits the missing-webhook-secret warning to once per process (#13666).
+	webhookNoSecretOnce  sync.Once
 	selfExperimentFlags  sync.Map // hive ID -> nous.SelfFlagAssignment; restart fails closed
 	mux                  *http.ServeMux
 	registry             Registry
@@ -2064,7 +2066,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				payload.Agents[i].StartFailureLastAt = sanitizeHeartbeatTime(payload.Agents[i].StartFailureLastAt)
 				payload.Agents[i].StartFailureSignal = sanitizeHeartbeatField(payload.Agents[i].StartFailureSignal)
 				// BackendAuth (#6558): Status is a closed identifier set
-				// (agent.BackendAuthUnlicensed etc.), Since a timestamp, and
+				// (crux.BackendAuthUnlicensed etc.), Since a timestamp, and
 				// LastError prose from the offending pane line — same
 				// treatment as the other three field kinds beside it.
 				payload.Agents[i].BackendAuthStatus = sanitizeHeartbeatField(payload.Agents[i].BackendAuthStatus)
