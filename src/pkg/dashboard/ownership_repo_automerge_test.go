@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -12,7 +13,7 @@ import (
 // Merge-eligible band ("nothing needed; it merges on its own") — no sweep
 // takes that repo — and it is the operator's turn to merge it, Hive's own PRs
 // included: the self-authored lane skips the repo too.
-func TestHandMergeVerdictIsYourTurnAndNotEligible(t *testing.T) {
+func TestRepoAutoMergeOffHandMerge(t *testing.T) {
 	hand := &github.MergeVerdict{State: github.MergeVerdictOutstanding, Reason: "auto-merge is off for this repo — a person merges it", HandMerge: true}
 	eligible := &github.MergeVerdict{State: github.MergeVerdictEligible}
 	draft := hivePR11565()
@@ -33,13 +34,19 @@ func TestHandMergeVerdictIsYourTurnAndNotEligible(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := ownershipEnv11565(5)
 			env.mergeLaneTakesAuthor = func(string, string) bool { return true }
-			checkOwnership11565(t, decidePROwnershipGated(tc.pr, tc.verdict, false, config.DashboardIssueBandsConfig{}, env), tc.want)
+			got := decidePROwnershipGated(tc.pr, tc.verdict, false, config.DashboardIssueBandsConfig{}, env)
+			checkOwnership11565(t, got, tc.want)
+			if tc.want == handMerge12378 && !strings.Contains(got.Reason, hand.Reason) {
+				t.Errorf("reason %q does not carry the classifier's %q", got.Reason, hand.Reason)
+			}
 		})
 	}
 
 	pr := hivePR11565()
-	if band := prBand(pr, hand, false, config.DashboardIssueBandsConfig{}, ownershipNow11565, github.AutoMergeQueuedLabel, "").Band; band == "eligible" {
-		t.Errorf("hand-merge PR band = %q, want anything but eligible", band)
+	// Not eligible (no sweep takes the repo) and not in-review either: the
+	// verdict is outstanding for a repo switch, not for anyone's review.
+	if band := prBand(pr, hand, false, config.DashboardIssueBandsConfig{}, ownershipNow11565, github.AutoMergeQueuedLabel, "").Band; band != "open" {
+		t.Errorf("hand-merge PR band = %q, want open", band)
 	}
 	queued := hivePR11565(github.AutoMergeQueuedLabel)
 	if band := prBand(queued, hand, false, config.DashboardIssueBandsConfig{}, ownershipNow11565, github.AutoMergeQueuedLabel, "").Band; band == "eligible" {

@@ -98,7 +98,9 @@ func decidePROwnershipGated(pr github.PullRequest, verdict *github.MergeVerdict,
 		return yourTurn(OwnershipReasonReviewDecision, "Waiting on a person's review: "+reason)
 	}
 	if verdict != nil && verdict.HandMerge && !pr.Draft {
-		return yourTurn(OwnershipReasonHandMerge, "Auto-merge is off for this repo, so Hive will not merge this PR; merge it by hand")
+		// The classifier's Reason already explains the repo switch; reuse it
+		// so the two never drift.
+		return yourTurn(OwnershipReasonHandMerge, "Hive will not merge this PR: "+verdict.Reason)
 	}
 	if prNeedsHandMerge(pr, verdict, env) {
 		return yourTurn(OwnershipReasonHandMerge, "Hive will not merge this PR; merge it by hand")

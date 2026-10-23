@@ -349,7 +349,9 @@ func prBandFlags(pr github.PullRequest, verdict *github.MergeVerdict, labels map
 	eligible = (verdict == nil || !verdict.HandMerge) &&
 		((verdict != nil && verdict.State == github.MergeVerdictEligible) || prQueued(labels, autoMergeLabel))
 	blocked = (verdict != nil && verdict.State == github.MergeVerdictBlocked) || pr.Mergeable == github.MergeableNo || prCIFailing(pr)
-	inReview = (verdict != nil && verdict.State == github.MergeVerdictOutstanding) || pr.ReviewURL != "" || review != nil
+	// A hand-merge verdict is outstanding because the repo's switch is off,
+	// not because anyone is reviewing it; it does not earn the in-review band.
+	inReview = (verdict != nil && verdict.State == github.MergeVerdictOutstanding && !verdict.HandMerge) || pr.ReviewURL != "" || review != nil
 	return eligible, blocked, inReview
 }
 

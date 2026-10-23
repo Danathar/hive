@@ -25,7 +25,9 @@ const (
 	// still wants something — a red check with no required-check set to call
 	// it optional, a hold label, a missing review approval, an intent verdict.
 	// Amber, with Reason saying what. This is the honest colour for
-	// "unstable".
+	// "unstable". Also the state of a HandMerge verdict: every per-PR gate
+	// passed, but the repo's auto-merge switch is off, so no sweep will ever
+	// act and a person merges it.
 	MergeVerdictOutstanding MergeVerdictState = "outstanding"
 	// MergeVerdictBlocked: GitHub itself says no (conflicts, a required review
 	// or status missing, draft). Nothing lights; Reason names the state.
