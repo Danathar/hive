@@ -234,6 +234,14 @@ a gate, for example "do not file unasserted-branch findings, they are covered by
 the Stryker mutation-testing gate". When `project.checkouts_dir` is configured,
 every lane honours that statement as a written policy and skips the class.
 
+A ruling on a lane's `Gate proposal:` issue works the same way without editing
+any `AGENTS.md`. Lanes count a class across every repository in `$HIVE_REPOS`
+and keep one proposal per class, and the maintainer's `/hive decision` on it is
+the written policy for that class in every repository the proposal lists. A
+declined proposal ends the class; lanes resume individual findings only when
+the ruling asks for them ([#13679](https://github.com/hivecommons/hive/issues/13679),
+[#13680](https://github.com/hivecommons/hive/issues/13680)).
+
 ## What to read next
 
 - **[Skill registry](skills.md)** — the sibling injection path: file format,
