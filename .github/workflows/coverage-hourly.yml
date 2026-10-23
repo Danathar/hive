@@ -255,6 +255,7 @@ jobs:
             [retro]=82
             [github]=88      # 88.9% on 2026-10-05
             [hivectl]=88
+            [hivectl/commands]=89  # 89.9% after the v5→v6 forward-merge (#13896); the union of both branches' tests sits just under the 90 default
             [knowledge]=89
             [proxy]=89
             [ioscan]=96
