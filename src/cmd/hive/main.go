@@ -44,6 +44,7 @@ import (
 	"github.com/hivecommons/hive/pkg/escalation"
 	"github.com/hivecommons/hive/pkg/extwork"
 	"github.com/hivecommons/hive/pkg/fleetreport"
+	"github.com/hivecommons/hive/pkg/fleetreport/slogfeed"
 	"github.com/hivecommons/hive/pkg/forge"
 	"github.com/hivecommons/hive/pkg/forgestate"
 	"github.com/hivecommons/hive/pkg/github"
@@ -934,9 +935,12 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 		early = deps.earlyOutput(deps.stdout, deps.getenv)
 	}
 	// Every hive log line carries this start's identifier (#11945), so it
-	// can be tied to its line in the starts log source.
+	// can be tied to its line in the starts log source. slogfeed tees WARN+
+	// records into the self-report tracker so a log line that keeps
+	// repeating is noticed even without a hook site (see
+	// fleetreport.ClassUnclassifiedRepeated).
 	b.startID = startrec.NewID()
-	b.logger = withStartID(slog.New(logscrub.NewHandler(slog.NewJSONHandler(early, &slog.HandlerOptions{Level: slog.LevelInfo}))), b.startID)
+	b.logger = withStartID(slog.New(slogfeed.New(logscrub.NewHandler(slog.NewJSONHandler(early, &slog.HandlerOptions{Level: slog.LevelInfo})))), b.startID)
 	slog.SetDefault(b.logger)
 
 	// Process singleton: refuse to become a second hive process in this
@@ -2065,6 +2069,7 @@ func (b *boot) bootAdvisoryWith(deps bootAdvisoryDeps) bool {
 		Stats:    stats,
 		Mode:     b.cfg.ConvergenceMode,
 	}
+	installMutationSelfReportHooks(boundary)
 	b.mutationBoundary = boundary
 	b.applyGitHubClientMutationBoundary(b.ghClient)
 	b.logger.Info("mutation convergence boundary wired", "mode", mode, "state_dir", stateDir)
@@ -11551,7 +11556,7 @@ const logFilename = "hive.log"
 func setupLogger(dir string, maxSizeMB, maxAgeDays, maxBackups int, compress bool, level string) *slog.Logger {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		slog.Warn("failed to create log directory, falling back to stdout only", "dir", dir, "error", err)
-		return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(level)}))
+		return slog.New(slogfeed.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(level)})))
 	}
 
 	lj := &lumberjack.Logger{
@@ -11563,7 +11568,9 @@ func setupLogger(dir string, maxSizeMB, maxAgeDays, maxBackups int, compress boo
 	}
 
 	tee := io.MultiWriter(os.Stdout, lj)
-	return slog.New(slog.NewJSONHandler(tee, &slog.HandlerOptions{Level: parseLogLevel(level)}))
+	// Same self-report tee as the boot logger: the file logger replaces it
+	// as the default, so the feed must be installed here too.
+	return slog.New(slogfeed.New(slog.NewJSONHandler(tee, &slog.HandlerOptions{Level: parseLogLevel(level)})))
 }
 
 func parseLogLevel(s string) slog.Level {
