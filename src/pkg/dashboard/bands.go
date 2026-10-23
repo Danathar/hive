@@ -9,6 +9,7 @@ import (
 	"github.com/hivecommons/hive/pkg/claims"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
 const (
@@ -523,14 +524,13 @@ func issueAgentRole(labels []string) string {
 	return ""
 }
 
-// Stage-family ordinals the band logic needs (hivecommons/hive#12436). The
+// Stage-family ordinals the claimed check needs (hivecommons/hive#12436). The
 // numbers are the `stage/NNN-` prefix of the labels pkg/stagelabels emits;
-// bands_inprogress_test.go pins them to that table so pkg/dashboard does not
-// import the package.
+// bands_inprogress_test.go pins them to that table. Coverage is NOT an ordinal
+// test: see issueStageCovered.
 const (
 	stageNumberClaimed      = 20
 	stageNumberPRInProgress = 30
-	stageNumberCoveredByPR  = 40
 	stageLabelPrefix        = "stage/"
 )
 
@@ -558,14 +558,13 @@ func stageNumber(label string) int {
 // issueStageCovered reports whether the issue carries stage/040-covered-by-pr
 // (or, until the reconciler's next pass, a PR stage an older build mirrored
 // past it) — the stage successor of the retired covered-by-PR labels, so the
-// issue files under "done" the same way.
+// issue files under "done" the same way. The parking stages are numbered past
+// 040 but mean the opposite — 045 needs-decision (and 085, its pre-045 issue
+// spelling) is an issue waiting on a person, not one a PR covers — so this
+// asks the stage table (stagelabels.IssueCoveredByPR) instead of comparing
+// ordinals, which marked every parked issue "already done".
 func issueStageCovered(labels []string) bool {
-	for _, label := range labels {
-		if stageNumber(label) >= stageNumberCoveredByPR {
-			return true
-		}
-	}
-	return false
+	return stagelabels.IssueCoveredByPR(labels)
 }
 
 // issueClaimed reports whether labels say someone holds the issue: the

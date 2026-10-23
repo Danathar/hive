@@ -42,3 +42,24 @@ func TestNeedsDecisionLabelMatchesConfigDefault(t *testing.T) {
 		t.Fatal("StageBySlugFor must resolve the shared slug per kind")
 	}
 }
+
+// CoversIssue is identity, not ordinal: the parking stages sort past 040 but
+// say nobody has a PR yet.
+func TestCoversIssueExcludesParkingStages(t *testing.T) {
+	for _, s := range []stagelabels.Stage{stagelabels.CoveredByPR, stagelabels.ReviewPending, stagelabels.Fixing, stagelabels.ReadyForHumanMerge, stagelabels.MergeQueue} {
+		if !s.CoversIssue() {
+			t.Errorf("%s should cover an issue", s.Label())
+		}
+	}
+	for _, s := range []stagelabels.Stage{stagelabels.None, stagelabels.Actionable, stagelabels.TriageNeeded, stagelabels.Claimed, stagelabels.PRInProgress, stagelabels.IssueNeedsDecision, stagelabels.NeedsDecision} {
+		if s.CoversIssue() {
+			t.Errorf("%s must not cover an issue", s.Label())
+		}
+	}
+	if !stagelabels.IssueCoveredByPR([]string{"bug", " Stage/040-Covered-By-PR "}) {
+		t.Error("040 with stray case/space should read as covered")
+	}
+	if stagelabels.IssueCoveredByPR([]string{stagelabels.IssueNeedsDecision.Label(), "needs-human", "stage/055-not-a-stage"}) {
+		t.Error("a parked issue with an unknown stage label must not read as covered")
+	}
+}
