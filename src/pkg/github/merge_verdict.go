@@ -44,6 +44,12 @@ type MergeVerdict struct {
 	State  MergeVerdictState `json:"state"`
 	Reason string            `json:"reason,omitempty"`
 	Tier   string            `json:"tier,omitempty"`
+	// HandMerge marks a PR that passes every per-PR gate but sits in a repo
+	// whose auto-merge switch is off (config.RepoAutoMergeEnabled: an owner
+	// override, or a hive below ACMM L6). No Hive sweep merges there, so the
+	// verdict is outstanding rather than eligible and only a person can land
+	// it — the dashboard's your-turn decision reads this flag.
+	HandMerge bool `json:"hand_merge,omitempty"`
 }
 
 // MergeVerdictKey is the map key the governor records verdicts under and the
