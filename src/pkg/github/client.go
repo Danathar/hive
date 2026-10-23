@@ -1037,6 +1037,17 @@ type PullRequest struct {
 	// PR that works towards an issue still sits on its row, drawn as a
 	// soft link.
 	ReferencedIssues []PRLinkedIssue `json:"referenced_issues,omitempty"`
+	// DependsOn are the items the PR body declares with `Depends-on: #N`
+	// lines (ParseDependsOn), each with Via DependsOnVia. The author's
+	// declaration is authoritative: the dashboard's your-turn critical path
+	// draws it as a hard "waits on" edge (hivecommons/hive#13646). Read from
+	// the list payload, no extra call.
+	DependsOn []PRLinkedIssue `json:"depends_on,omitempty"`
+	// ChangedPaths are the PR's changed file paths when a pass already
+	// listed them (the base-red check does, for red PRs). Best effort and
+	// never serialized; the dashboard only infers a soft "may conflict
+	// with" hint from them.
+	ChangedPaths []string `json:"-"`
 }
 
 // PRLinkedIssue is an issue GitHub reports a PR will close on merge
@@ -2086,6 +2097,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 					RequestedTeams:      reqTeams,
 					HoldSources:         prHoldSources,
 					ReferencedIssues:    PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
+					DependsOn:           ParseDependsOn(pr.GetBody(), repo),
 				})
 			} else {
 				sidelined = append(sidelined, c.repoWorkPR(repo, pr, labels, hasAttr, workBucketPRDraft, "Held draft"))
@@ -2177,6 +2189,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 			RequestedReviewers: reqLogins,
 			RequestedTeams:     reqTeams,
 			ReferencedIssues:   PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
+			DependsOn:          ParseDependsOn(pr.GetBody(), repo),
 		})
 	}
 
