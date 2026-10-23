@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/celtrigger"
 	"github.com/hivecommons/hive/pkg/claims"
@@ -18,6 +17,7 @@ import (
 	"github.com/hivecommons/hive/pkg/convergence/mutation"
 	"github.com/hivecommons/hive/pkg/convergence/outcome"
 	"github.com/hivecommons/hive/pkg/convergence/proof"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/governor"
@@ -53,8 +53,11 @@ type ChatPoll struct {
 }
 
 type Dependencies struct {
-	Config   *config.Config
-	AgentMgr *agent.Manager
+	Config *config.Config
+	// AgentMgr is the agent runtime (hivecommons/hive#13536). The dashboard
+	// programs against the crux.Runtime surface, not *agent.Manager; tests that
+	// need manager-only seams unwrap it with agentManager.
+	AgentMgr crux.Runtime
 	// TaskMCPActiveLaunches is the optional narrow dashboard seam for the
 	// manager's active hub-launched agent scopes. Nil falls back to AgentMgr.
 	TaskMCPActiveLaunches func() []taskmcp.LaunchScope
@@ -226,7 +229,7 @@ type Dependencies struct {
 	// signal that the feature is off.
 	ApprovalDesk *toolapprove.Desk
 	// ApprovalInbox is the durable operator-lane queue backing the desk. Nil
-	// exactly when ApprovalDesk is nil (both come from DeskFromConfig).
+	// exactly when ApprovalDesk is nil (both come from toolapprove.DeskFromConfig).
 	ApprovalInbox *toolapprove.Inbox
 	// RecordIssueClaim writes one claim into the same ledger IssueClaimed
 	// reads (hivecommons/hive#7871). The contribute hub calls it after
@@ -532,7 +535,7 @@ func (ns *NousState) HiveState() *hivestate.Store {
 	return ns.stateStore
 }
 
-func (ns *NousState) RecordSnapshot(govState governor.State, actionable *ghpkg.ActionableResult, agentsKicked []string, agentStatuses map[string]*agent.AgentProcess, tokenSummary *tokens.AggregateSummary) error {
+func (ns *NousState) RecordSnapshot(govState governor.State, actionable *ghpkg.ActionableResult, agentsKicked []string, agentStatuses map[string]*crux.Process, tokenSummary *tokens.AggregateSummary) error {
 	store := ns.HiveState()
 	if store == nil {
 		return nil

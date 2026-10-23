@@ -12,8 +12,9 @@ import (
 	"strings"
 
 	advisorpkg "github.com/hivecommons/hive/pkg/advisor"
-	"github.com/hivecommons/hive/pkg/config"
-	ghpkg "github.com/hivecommons/hive/pkg/github"
+	hiveconfig "github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
+	"github.com/hivecommons/hive/pkg/crux/types"
 	"github.com/hivecommons/hive/pkg/gitidentity"
 	"github.com/hivecommons/hive/pkg/jev"
 )
@@ -390,7 +391,7 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// per-agent tier-SCOPED App token, and refreshAgentTokens re-pushes it hourly
 	// so it never goes stale.
 	if m.project.AppAuthoredPRs && m.appAuth != nil && agent.UID > 0 && m.agentMode(agent).CanPush() {
-		if data, err := os.ReadFile(ghpkg.AgentTokenCachePath(agent.Name)); err == nil {
+		if data, err := os.ReadFile(types.AgentTokenCachePath(types.DefaultAgentTokenCacheDir, agent.Name)); err == nil {
 			if tok := strings.TrimSpace(string(data)); tok != "" {
 				vars = append(vars, agentEnvPair{"GITHUB_TOKEN", tok, true})
 			}
@@ -491,7 +492,7 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// GIT_SSL_CAINFO only — NOT SSL_CERT_FILE (that breaks Copilot API TLS)
 	vars = append(vars, agentEnvPair{"GIT_SSL_CAINFO", proxyCACertPath, false})
 	if agent.UID > 0 {
-		vars = append(vars, agentEnvPair{"HIVE_AGENT_TOKEN_CACHE", ghpkg.AgentTokenCachePath(agent.Name), false})
+		vars = append(vars, agentEnvPair{"HIVE_AGENT_TOKEN_CACHE", types.AgentTokenCachePath(types.DefaultAgentTokenCacheDir, agent.Name), false})
 	}
 	if agent.UID > 0 {
 		// Per-UID agents get a per-agent HOME (#4596) — AgentHome is the single
@@ -563,7 +564,7 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// Advisor lane (#9724): Copilot CLI has no hooks launch flag, so hive points
 	// COPILOT_HOME at the agent's own hive-provisioned .copilot directory, whose
 	// hooks directory carries the advisor's hook file.
-	if backend == config.AdvisorCopilotBackend && m.advisorHooksActive(agent, backend) {
+	if backend == hiveconfig.AdvisorCopilotBackend && m.advisorHooksActive(agent, backend) {
 		vars = append(vars, agentEnvPair{"COPILOT_HOME", advisorCopilotHome(agent), false})
 	}
 
@@ -588,17 +589,17 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 
 // experimentEnvPairs exports the experimentation-engine settings to an agent
 // carrying the experimenter role, and nothing to any other agent: the
-// agent's own engine (config.NousEngineEnv, from its config) and the hive's
+// agent's own engine (hiveconfig.NousEngineEnv, from its config) and the hive's
 // resolved dispatcher and data root (ProjectContext.ExperimentEnv). Keys are
 // sorted so the launch command is deterministic.
 func (m *Manager) experimentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	if agent == nil || !agent.Config.IsExperimenter() {
 		return nil
 	}
-	pairs := []agentEnvPair{{config.NousEngineEnv, agent.Config.ExperimentEngine(), false}}
+	pairs := []agentEnvPair{{hiveconfig.NousEngineEnv, agent.Config.ExperimentEngine(), false}}
 	keys := make([]string, 0, len(m.project.ExperimentEnv))
 	for k := range m.project.ExperimentEnv {
-		if k == config.NousEngineEnv {
+		if k == hiveconfig.NousEngineEnv {
 			continue
 		}
 		keys = append(keys, k)

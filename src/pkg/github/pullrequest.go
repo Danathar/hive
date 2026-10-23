@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/crux/types"
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/forgestate"
 	"github.com/hivecommons/hive/pkg/logscrub"
@@ -41,6 +42,14 @@ const UpstreamSyncLabel = "upstream-sync"
 // upstreamSyncTitleRe matches the "chore: sync upstream <range>" title the
 // upstream/port kick asks for.
 var upstreamSyncTitleRe = regexp.MustCompile(`(?i)\bsync\s+upstream\b`)
+
+// IsForwardMergeHead reports whether ref is a head branch the forward-merge
+// workflows use (forwardMergeHeadRe). Unlike IsForwardMergePR it ignores the
+// title, which any contributor controls, so gates that relax on a
+// forward-merge key on it (hivecommons/hive#13635).
+func IsForwardMergeHead(ref string) bool {
+	return forwardMergeHeadRe.MatchString(ref)
+}
 
 // IsForwardMergePR reports whether pr is a forward-merge between release
 // lines, which must land as a merge commit rather than a squash. It only
@@ -193,37 +202,11 @@ func IsMergeCommitPR(pr *gh.PullRequest) bool {
 }
 
 // CreatePRResult is what CreatePR returns: the opened (or pre-existing) PR.
-type CreatePRResult struct {
-	Number int
-	URL    string
-	// Author is the login GitHub recorded on the created (or pre-existing) PR —
-	// the App bot the hive relayed as (e.g. "kubestellar-hive[bot]"). Taken from
-	// the API response, not assumed, so the audit log records the true author.
-	Author string
-	// AlreadyExisted is true when an open PR already covers this request, so we
-	// returned it instead of opening a duplicate. Two different findings set it:
-	// an open PR for the same HEAD BRANCH, and (see DuplicateTree) an open PR
-	// carrying the same CONTENT from a different branch.
-	AlreadyExisted bool
-	// DuplicateTree narrows AlreadyExisted to the content case (#5111): the
-	// reuse was decided because an open PR on the same base has an identical
-	// tree SHA, not because the head branch matched. Callers that report the
-	// outcome keep the two apart because they mean different things to whoever
-	// reads the result — "your retry was absorbed" versus "this change is
-	// already proposed as #N, go comment on it".
-	DuplicateTree bool
-	// DuplicateReason is set (with AlreadyExisted) when the PR-side guard
-	// redirected the request to an existing PR: one of the DuplicateReason*
-	// constants. The returned PR is the one to continue on.
-	DuplicateReason string
-}
-
-// IsDuplicate reports whether the returned PR was reused because it already
-// covers this request's content or issue, rather than because it is this
-// request's own earlier PR.
-func (r CreatePRResult) IsDuplicate() bool {
-	return r.DuplicateTree || r.DuplicateReason != ""
-}
+// It is the runtime's PRResult (pkg/crux/types) under this package's name,
+// so a *Client satisfies the agent runtime's PRCreator seam without the
+// runtime importing this package (hivecommons/hive#13536). DuplicateReason,
+// when set, is one of the DuplicateReason* constants below.
+type CreatePRResult = types.PRResult
 
 // CreatePR opens a pull request on behalf of THIS hive's GitHub App — so the PR
 // is authored by the App bot ("<slug>[bot]"), deterministically, regardless of
@@ -578,12 +561,19 @@ func (c *Client) updateBranch(ctx context.Context, repo string, number int, expe
 	if expectedHeadSHA != "" || observedBaseSHA != "" {
 		inputs = map[string]string{"expected_head_sha": expectedHeadSHA, "observed_base_sha": observedBaseSHA}
 	}
-	_, err := effects.Execute(ctx, c.mutationBoundary(), effects.Claim{
+	observe := func(ctx context.Context) (effects.ExternalState, error) {
+		pr, _, getErr := c.client.PullRequests.Get(WithRESTCaller(ctx, "hive:reconcile_branch_update"), owner, repo, number)
+		if getErr != nil {
+			return effects.ExternalState{}, getErr
+		}
+		return BranchUpdateState(pr, expectedHeadSHA, owner+"/"+repo+"#"+strconv.Itoa(number)), nil
+	}
+	_, err := effects.ExecuteReconciling(ctx, c.mutationBoundary(), effects.Claim{
 		Repo:   owner + "/" + repo,
 		Kind:   effects.KindBranchUpdate,
 		Target: strconv.Itoa(number),
 		Inputs: inputs,
-	}, func(ctx context.Context) (effects.Result, error) {
+	}, observe, effects.DefaultUnresolvedTTL, func(ctx context.Context) (effects.Result, error) {
 		var opts *gh.PullRequestBranchUpdateOptions
 		if expectedHeadSHA != "" {
 			opts = &gh.PullRequestBranchUpdateOptions{ExpectedHeadSHA: gh.Ptr(expectedHeadSHA)}
@@ -599,6 +589,22 @@ func (c *Client) updateBranch(ctx context.Context, repo string, number int, expe
 		return fmt.Errorf("updating branch for PR %s/%s#%d: %w", owner, repo, number, err)
 	}
 	return nil
+}
+
+// BranchUpdateState is the authoritative observation of a branch update the
+// mutation journal holds as unresolved. With an expected head, a PR whose head
+// has moved off it is the update having landed (or the branch having moved on,
+// which makes the same guarded update moot either way). With no expected head,
+// or a head still at it, the update is reported not applied: update-branch is
+// safe to repeat — GitHub answers an up-to-date branch with a refusal rather
+// than a second merge commit — so a retry cannot duplicate anything.
+func BranchUpdateState(pr *gh.PullRequest, expectedHeadSHA, provenance string) effects.ExternalState {
+	expected := strings.TrimSpace(expectedHeadSHA)
+	head := strings.TrimSpace(pr.GetHead().GetSHA())
+	if expected != "" && head != "" && !strings.EqualFold(head, expected) {
+		return effects.ExternalState{Applied: true, Provenance: provenance}
+	}
+	return effects.ExternalState{}
 }
 
 // findOpenPRForHead returns the open PR whose head branch matches, or nil. The

@@ -40,12 +40,12 @@ var (
 	// defaultIssueWaitingLabels are the default parking labels (the
 	// stage/045 issue park signal, the pre-045 stage/085 spelling, the
 	// retired needs-direction / needs-decision spellings, needs-human,
-	// needs-spec) plus `blocked`: the waiting band holds parked issues only
+	// needs-spec, the prior-art park stage/017) plus `blocked`: the waiting band holds parked issues only
 	// (hivecommons/hive#11507), and `blocked` is a gate only a person lifts,
 	// which the un-park sweep answers like the needs-* labels
 	// (hivecommons/hive#12376). static/index.html keeps a copy
 	// (REPO_ISSUE_BAND_DEFAULTS.waitingLabels).
-	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, prNeedsDecisionLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
+	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, prNeedsDecisionLabel, config.PossiblyExistsStageLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
 	defaultIssueDoneLabels    = []string{"hive/already-done", "hive/covered-by-pr", "hive/likely-done"}
 	prHumanGateLabels         = []string{"needs-human", prNeedsDecisionLabel, "needs-decision", "2-discussing"}
 	issueBandOrder            = []string{"ready", "in-progress", "agent-filed", "waiting", "done"}

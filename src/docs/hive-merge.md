@@ -114,6 +114,13 @@ reason that says the fork PR workflow runs are awaiting maintainer approval.
 The operator alert links to the repository Actions settings and tells the owner
 to approve the runs manually or relax "Approval for running fork pull request
 workflows". The hive does not call GitHub's workflow-run approval API.
+Two refinements (#13818): a held run whose workflow already has a successful
+run on the same head under another event (a `GITHUB_TOKEN`-opened PR whose
+opener dispatches the same workflows by `workflow_dispatch`) is listed as
+ignored and does not block — the verdict is on the head through the twin's
+check runs; and when the PR is not from a fork the reason says so, because
+GitHub also holds `pull_request` runs for same-repo PRs opened by a bot token
+and the approval setting may already be at its minimum.
 
 "Merge blocked" operator alerts retire themselves. Besides clearing on the next
 successful App merge in that repo, the watcher re-checks live alerts every
@@ -593,11 +600,16 @@ GitHub user id, not the App id) so their fixer pushes
 normally provide the GitHub linkage, while their commit name/sign-off still
 shows the lane. An in-place adoption does not sit at 074 forever: the sweep
 re-evaluates every adopted record each pass, and when the hive cannot finish
-on the contributor branch — a hive commit the squash sign-off gate strips
-(`hive-signoff-attribution`), or a blocking review-swarm finding left on a
-head that sat idle for the 074 dwell — it converts to a supersession
-(`reason=signoff-rehome` / `in-place-stalled`) and the superseding PR takes
-the same red-PR / review-fix route. An adoption with nothing the hive can
+on the contributor branch because a blocking review-swarm finding was left
+on a head that sat idle for the 074 dwell, it converts to a supersession
+(`reason=in-place-stalled`) and the superseding PR takes the same red-PR /
+review-fix route. A hive commit the squash sign-off gate strips
+(`hive-signoff-attribution`) is never re-homed: a supersede would carry the
+same head and fail the same gate, so the PR goes straight to
+`stage/085-needs-decision` as `adoption-stalled:hive-signoff-attribution`
+with one ask — merge it with a merge commit (`--merge`, not squash; every
+commit's sign-off matches its own author) or have the contributor re-author
+the hive's commits (hivecommons/hive#13623). An adoption with nothing the hive can
 push past the dwell goes to `stage/085-needs-decision` as
 `adoption-stalled:<lane reason>` with one comment naming the blocker, so the
 dashboard shows a person's item, not a silent 074; "waiting on maintainer

@@ -29,43 +29,6 @@ func repoListSet(repos []string) map[string]bool {
 	return set
 }
 
-const (
-	ReviewModelsFallbackPinned        = "pinned"
-	ReviewModelsFallbackSkip          = "skip"
-	ReviewModelsFallbackRequiresHuman = "requires_human"
-)
-
-type ReviewModelPoolEntry struct {
-	Backend string `yaml:"backend" json:"backend,omitempty"`
-	Model   string `yaml:"model" json:"model,omitempty"`
-}
-
-type ReviewModelsConfig struct {
-	Pool                []ReviewModelPoolEntry `yaml:"pool,omitempty" json:"pool,omitempty"`
-	ExcludeAuthorModel  *bool                  `yaml:"exclude_author_model,omitempty" json:"exclude_author_model,omitempty"`
-	ExcludeAuthorFamily bool                   `yaml:"exclude_author_family,omitempty" json:"exclude_author_family,omitempty"`
-	Fallback            string                 `yaml:"fallback,omitempty" json:"fallback,omitempty"`
-}
-
-func (r ReviewModelsConfig) Configured() bool {
-	return len(r.Pool) > 0 || r.ExcludeAuthorModel != nil || r.ExcludeAuthorFamily || strings.TrimSpace(r.Fallback) != ""
-}
-
-func (r ReviewModelsConfig) ExcludeAuthorModelEnabled() bool {
-	return r.ExcludeAuthorModel == nil || *r.ExcludeAuthorModel
-}
-
-func (r ReviewModelsConfig) EffectiveFallback() string {
-	switch strings.TrimSpace(r.Fallback) {
-	case "":
-		return ReviewModelsFallbackPinned
-	case ReviewModelsFallbackSkip, ReviewModelsFallbackRequiresHuman:
-		return strings.TrimSpace(r.Fallback)
-	default:
-		return strings.TrimSpace(r.Fallback)
-	}
-}
-
 // ReviewModelSelection is the outcome of ReviewModelsConfig.Select: the
 // backend/model a review should run with, and whether that came from the
 // configured fallback rather than the pool. Skip is the "skip" fallback with
@@ -81,15 +44,19 @@ type ReviewModelSelection struct {
 	RequiresHuman bool
 }
 
-// Select picks the first pool entry that is not excluded against the PR's
-// author model, exactly as the cadence kick's `review_with=` annotation does.
-// pinnedBackend/pinnedModel are the reviewer agent's own launch backend and
-// model, returned under the "pinned" (default) fallback. Author and candidate
-// models are compared normalized (modelfamily.Normalize), and family on the
-// vendor prefix (modelfamily.Family). An empty pool with no exclusions
-// configured still returns the pinned model as a fallback, so a caller that
-// wants "no instruction" must check Configured() first.
-func (r ReviewModelsConfig) Select(authorModel, pinnedBackend, pinnedModel string) ReviewModelSelection {
+// SelectReviewModel picks the first pool entry of r that is not excluded
+// against the PR's author model, exactly as the cadence kick's `review_with=`
+// annotation does. pinnedBackend/pinnedModel are the reviewer agent's own
+// launch backend and model, returned under the "pinned" (default) fallback.
+// Author and candidate models are compared normalized (modelfamily.Normalize),
+// and family on the vendor prefix (modelfamily.Family). An empty pool with no
+// exclusions configured still returns the pinned model as a fallback, so a
+// caller that wants "no instruction" must check Configured() first.
+//
+// A package function rather than a method because ReviewModelsConfig is
+// defined in the stdlib-only pkg/crux/config leaf and the model-family
+// normalizer lives on the Hive side (hivecommons/hive#13536).
+func SelectReviewModel(r ReviewModelsConfig, authorModel, pinnedBackend, pinnedModel string) ReviewModelSelection {
 	author := modelfamily.Normalize(authorModel)
 	authorFamily := modelfamily.Family(author)
 	for _, entry := range r.Pool {
@@ -110,15 +77,6 @@ func (r ReviewModelsConfig) Select(authorModel, pinnedBackend, pinnedModel strin
 	default:
 		return ReviewModelSelection{Backend: strings.TrimSpace(pinnedBackend), Model: strings.TrimSpace(pinnedModel), Fallback: true}
 	}
-}
-
-// WithPool returns a copy whose pool is replaced, keeping the exclusion and
-// fallback settings. The swarm uses it to apply review.perspective_models: a
-// per-perspective entry overrides WHICH models are eligible, not the rule
-// that decides whether one is.
-func (r ReviewModelsConfig) WithPool(pool []ReviewModelPoolEntry) ReviewModelsConfig {
-	r.Pool = append([]ReviewModelPoolEntry(nil), pool...)
-	return r
 }
 
 func ValidateReviewModelsFallback(v string) bool {
@@ -540,6 +498,48 @@ type AutoMergeConfig struct {
 	// means no such paths. This key only declares the paths; enforcement
 	// lives in the merge sweeps.
 	HumanMergePaths map[string][]string `yaml:"human_merge_paths,omitempty" json:"human_merge_paths,omitempty"`
+	// RequireCurrentBase lists owner/repo names whose automerge sweeps only
+	// merge a PR head that already contains the current base branch tip.
+	// A head that is green but was tested against an older base is updated
+	// (GitHub update-branch, a merge commit) and merged once CI is green on
+	// the new head, so a semantic conflict with anything merged since shows
+	// up as red CI instead of a broken base. Empty (the default) keeps the
+	// previous behavior: a green head merges even if the base has moved.
+	RequireCurrentBase []string `yaml:"require_current_base,omitempty" json:"require_current_base,omitempty"`
+	// MergeForwardTrustedHuman lists owner/repo names where a role/trusted
+	// author/human PR that GitHub reports as conflicting ("dirty") gets the
+	// base merged into its same-repo head branch as a new App-authored,
+	// signed-off merge commit; no human commit is rewritten. A real conflict
+	// leaves the branch untouched and posts one note naming the files both
+	// sides changed. Fork heads are never written. Empty (the default) keeps
+	// the PR parked for its author.
+	MergeForwardTrustedHuman []string `yaml:"merge_forward_trusted_human,omitempty" json:"merge_forward_trusted_human,omitempty"`
+	// SquashOnly lists owner/repo names whose policy forbids merge commits.
+	// Elsewhere a role/trusted PR whose head mixes the contributor's commits
+	// with hive commits, each signed off by its own author, is merged with a
+	// merge commit (`merge-method/merge`) instead of being parked for a
+	// person, because a squash would misattribute the hive's sign-off. In a
+	// squash-only repo the lane keeps the squash convention and the PR goes
+	// back to its author (or, adopted, to stage/085 naming this policy).
+	SquashOnly []string `yaml:"squash_only,omitempty" json:"squash_only,omitempty"`
+}
+
+// RequireCurrentBaseFor reports whether repo (owner/repo, matched
+// case-insensitively) is listed in auto_merge.require_current_base.
+func (a AutoMergeConfig) RequireCurrentBaseFor(repo string) bool {
+	return repoListSet(a.RequireCurrentBase)[strings.ToLower(strings.TrimSpace(repo))]
+}
+
+// MergeForwardTrustedHumanFor reports whether repo (owner/repo, matched
+// case-insensitively) is listed in auto_merge.merge_forward_trusted_human.
+func (a AutoMergeConfig) MergeForwardTrustedHumanFor(repo string) bool {
+	return repoListSet(a.MergeForwardTrustedHuman)[strings.ToLower(strings.TrimSpace(repo))]
+}
+
+// SquashOnlyFor reports whether repo (owner/repo, matched case-insensitively)
+// is listed in auto_merge.squash_only.
+func (a AutoMergeConfig) SquashOnlyFor(repo string) bool {
+	return repoListSet(a.SquashOnly)[strings.ToLower(strings.TrimSpace(repo))]
 }
 
 // SupersessionSweepConfig tunes the supersession sweep
@@ -989,18 +989,6 @@ func (c *Config) ACMMLevelOrZero() int {
 	}
 	return *c.ACMMLevel
 }
-
-// SelfMergeMinACMMLevel is the lowest ACMM level at which the App is allowed
-// to self-merge its own PRs. examples/acmm/l5.md is explicit that L5 does NOT
-// grant merge authority ("Merge pull requests — no; L5 PRs remain hold-gated
-// for human review"), and examples/acmm/l4.md is even more explicit ("DO NOT
-// merge pull requests — L4 is not an auto-merge level"). examples/acmm/l6.md
-// is the first level whose Responsibilities include "Merge PRs when CI
-// passes". So the gate sits at L6, not L5: an L4 (or L5) hive must never run
-// the self-authored auto-merge sweep, regardless of the auto_merge.self_authored
-// flag below. This was the root cause of ks/hive (acmm_level: 4) wrongly
-// self-merging its own PR — the sweep previously had no ACMM check at all.
-const SelfMergeMinACMMLevel = 6
 
 // SelfAuthoredAutoMergeAllowed reports whether the App-self-merge sweep may
 // run at all for this hive, given its ACMM level. Both conditions must hold:

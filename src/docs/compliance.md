@@ -51,7 +51,7 @@ the cited publication for the authoritative requirement.
 - Each profile is a **subset** of its framework, not a full checklist. A
   control missing from a profile is not "passed": it is simply not mapped.
   Passing every row here says nothing about the controls that are absent.
-- `AC-2.ELIG` is a Hive-specific row, not a NIST control identifier. It marks
+- `ELIG-1` is a Hive-specific row, not a NIST control identifier. It marks
   the US-persons/location eligibility conditions that FedRAMP assessors ask
   about under AC-2 and AC-3.
 - The mapping of a setting to a control is a plausibility judgement by the
@@ -236,9 +236,10 @@ This page is the reference for what the registry evaluates.
 A **subset** of the NIST SP 800-53 Rev 5 Moderate baseline: the families AC,
 AU, CM, IA, RA, SA and SI. Control text is a short paraphrase, not NIST's
 wording; the authoritative text is NIST SP 800-53 Rev 5 and the FedRAMP
-baseline. PE-3 and PS-3 sit outside the subset and are listed `not_covered`
-so silence is not read as coverage, as are location/citizenship eligibility
-(AC-2.ELIG) and external service providers (SA-9). IA-2 is informational:
+baseline. Relevant controls Hive cannot evidence (for example AC-17, AU-9,
+CM-2, SC-7, SC-8, SC-28, CP-9, SR-*, PE-3 and PS-3) are listed `not_covered`
+so silence is not read as coverage, as are external service providers (SA-9)
+and location/citizenship eligibility (ELIG-1, a non-NIST identifier). IA-2 is informational:
 authentication happens at GitHub or the hub, Hive only holds the allowlist.
 Selecting this profile does not make a hive FedRAMP authorized, and Hive is
 not a FedRAMP authorization boundary. Generated from
@@ -249,7 +250,7 @@ not a FedRAMP authorization boundary. Generated from
 |---|---|---|---|---|---|
 | AC-2 — Account management | Access control | `dashboard.authorized_users` | `non-empty` | `non_empty` | The dashboard allowlist is the account roster; periodic review of it is the operator's process. |
 | AC-2 — Account management | Access control | `dashboard.authorized_users` | `2` | `max_owners` |  |
-| AC-2.ELIG — Personnel eligibility by location or citizenship | Access control | _not covered by Hive_ | — | — | Hive cannot verify where a person is or their citizenship. Enforce eligibility at the identity provider and the hosting region; Hive only records who is on the allowlist. |
+| ELIG-1 — Personnel eligibility by location or citizenship (not a NIST control) | Access control | _not covered by Hive_ | — | — | Hive cannot verify where a person is or their citizenship. Enforce eligibility at the identity provider and the hosting region; Hive only records who is on the allowlist. |
 | AC-3 — Access enforcement | Access control | `dashboard.authorized_users` | `non-empty` | `non_empty` |  |
 | AC-3 — Access enforcement | Access control | `auto_merge.trusted_authors.require_github_permission` | `true` | `equals` |  |
 | AC-5 — Separation of duties | Segregation of duties | `dashboard.authorized_users` | `1` | `min_mergers` |  |
@@ -290,6 +291,25 @@ not a FedRAMP authorization boundary. Generated from
 | SI-7 — Software, firmware and information integrity | Vulnerability management | `agent_sandbox.enabled` | `true` | `equals` |  |
 | PE-3 — Physical access control | Access control | _not covered by Hive_ | — | — | Hive is software on infrastructure the operator chooses; physical security belongs to the hosting provider. |
 | PS-3 — Personnel screening | Access control | _not covered by Hive_ | — | — | Hiring and background screening are HR processes; no Hive setting can evidence them. |
+| AC-8 — System use notification | Access control | _not covered by Hive_ | — | — | The dashboard does not present a configurable use banner; the notice belongs to the operator's identity provider or reverse proxy. |
+| AC-17 — Remote access | Access control | _not covered by Hive_ | — | — | Remote access paths (VPN, bastion, reverse proxy) are operator infrastructure; Hive only exposes its dashboard allowlist. |
+| AU-8 — Time stamps | Logging & monitoring | _not covered by Hive_ | — | — | Clock synchronization is a property of the host; no Hive setting evidences it. |
+| AU-9 — Protection of audit information | Logging & monitoring | _not covered by Hive_ | — | — | Protection of the audit log files depends on host file permissions and backup controls outside Hive's settings. |
+| CM-2 — Baseline configuration | Change management | _not covered by Hive_ | — | — | Baselines of the hosting environment are the operator's; Hive settings are not a full system baseline. |
+| CM-7 — Least functionality | Change management | _not covered by Hive_ | — | — | Host and container hardening are outside what Hive settings can evidence. |
+| CM-8 — System component inventory | Change management | _not covered by Hive_ | — | — | Hive does not maintain an authoritative inventory of host components. |
+| CP-9 — System backup | Risk management | _not covered by Hive_ | — | — | Backup of hive state is an operator process; no Hive setting evidences it. |
+| IA-8 — Identification and authentication (non-organizational users) | Access control | _not covered by Hive_ | — | — | Authentication of outside contributors is performed by GitHub and the operator's identity provider, not Hive. |
+| IR-4 — Incident handling | Incident response | _not covered by Hive_ | — | — | Incident handling is an organisational process; Hive escalation is a signal, not an incident-response program. |
+| IR-6 — Incident reporting | Incident response | _not covered by Hive_ | — | — | Reporting obligations and channels are the operator's. |
+| SC-7 — Boundary protection | Access control | _not covered by Hive_ | — | — | Network boundaries are operator infrastructure outside Hive's settings. |
+| SC-8 — Transmission confidentiality and integrity | Access control | _not covered by Hive_ | — | — | Transport encryption is terminated by operator infrastructure; Hive settings do not evidence it. |
+| SC-28 — Protection of information at rest | Access control | _not covered by Hive_ | — | — | Disk and volume encryption belong to the host and storage provider. |
+| SI-2 — Flaw remediation | Vulnerability management | _not covered by Hive_ | — | — | Patching of the host and dependencies is an operator process; Hive settings do not evidence it. |
+| SI-3 — Malicious code protection | Vulnerability management | _not covered by Hive_ | — | — | Endpoint and malware protection are host-level controls outside Hive. |
+| SR-2 — Supply chain risk management plan | Risk management | _not covered by Hive_ | — | — | Supply chain risk planning is an organisational document; Hive cannot evidence it. |
+| SR-3 — Supply chain controls and processes | Risk management | _not covered by Hive_ | — | — | Supplier selection and controls are organisational processes. |
+| SR-11 — Component authenticity | Risk management | _not covered by Hive_ | — | — | Hive settings do not verify component provenance; use the operator's artifact signing and provenance checks. |
 <!-- END GENERATED: compliance-profile fedramp-moderate -->
 
 ## ISO 27001 Annex A mapping
@@ -349,6 +369,19 @@ from `src/pkg/compliance/profiles/iso27001-annex-a.yaml`; do not edit by hand.
 | A.8.32 — Change management | Change management | `auto_merge.required_checks` | `non-empty` | `non_empty` |  |
 | A.8.32 — Change management | Change management | `auto_merge.human_merge_paths` | `non-empty` | `non_empty` |  |
 | A.8.32 — Change management | Change management | `auto_merge.self_authored` | `false` | `equals` |  |
+| A.5.23 — Information security for use of cloud services | Risk management | _not covered by Hive_ | — | — | Cloud supplier governance is an organisational process. |
+| A.5.28 — Collection of evidence | Incident response | _not covered by Hive_ | — | — | Forensic evidence handling is an organisational process. |
+| A.8.3 — Information access restriction | Access control | _not covered by Hive_ | — | — | Data-level restriction inside the operator's systems is outside Hive's settings. |
+| A.8.5 — Secure authentication | Access control | _not covered by Hive_ | — | — | Authentication is performed by GitHub and the operator's identity provider. |
+| A.8.12 — Data leakage prevention | Access control | _not covered by Hive_ | — | — | Hive settings do not evidence data-loss prevention tooling. |
+| A.8.13 — Information backup | Risk management | _not covered by Hive_ | — | — | Backup of hive state is an operator process. |
+| A.8.20 — Networks security | Access control | _not covered by Hive_ | — | — | Network security is operator infrastructure. |
+| A.8.21 — Security of network services | Access control | _not covered by Hive_ | — | — | Network service agreements are the operator's. |
+| A.8.22 — Segregation of networks | Access control | _not covered by Hive_ | — | — | Network segregation is operator infrastructure. |
+| A.8.23 — Web filtering | Access control | _not covered by Hive_ | — | — | Egress filtering is operator infrastructure. |
+| A.8.24 — Use of cryptography | Access control | _not covered by Hive_ | — | — | Cryptographic key and transport management are outside Hive's settings. |
+| A.8.26 — Application security requirements | Change management | _not covered by Hive_ | — | — | Requirements definition is an organisational process. |
+| A.8.30 — Outsourced development | Change management | _not covered by Hive_ | — | — | Supplier oversight is an organisational process. |
 <!-- END GENERATED: compliance-profile iso27001-annex-a -->
 
 ## Posture checks catalogue
@@ -413,23 +446,44 @@ attachment outside the dashboard. `since` takes an RFC 3339 time, a `YYYY-MM-DD`
 or a look-back such as `720h`; `until` takes an RFC 3339 time or a
 `YYYY-MM-DD` date meaning the end of that day. Without them the range is
 the last 30 days. Every export is written to the
-[audit log](audit-log.md) as `compliance_export` with its kind, format and
-range.
+[audit log](audit-log.md) as `compliance_export` with its kind, format,
+range and the `sha256` of the delivered file.
 
 | `kind` | Formats | Contents |
 |---|---|---|
 | `controls` | `json` (default), `md` | The control-mapping report: the evaluated status above, stamped with the hive id, generation time and each profile's name and version |
-| `posture` | `json` (default), `csv` | Every posture run in the range, plus per-check series in JSON. The CSV has one row per check result |
+| `posture` | `json` (default), `csv` | Every posture run in the range, including its schedule/manual trigger and `triggered_by` identity, plus per-check series in JSON. The CSV has one `evidence` row per check result |
 | `audit` | `json` | The audit log entries in the range, from the current file and rotated backups. Rotation is size-triggered, so `covered_from` reports the oldest entry actually found. If it is later than `since`, the log no longer holds the start of the range |
 | `config` | `json` | The effective config with secrets redacted (the same redaction as the config export) and the `sha256` of exactly the `effective` bytes. Use the hash to tie a report to one configuration |
-| `attestations` | `json` (default), `csv` | Attestations recorded in the range |
+| `attestations` | `json` (default), `csv` | Attestations recorded in the range; CSV names the owner in the `attester` column |
 | `bundle` | `json` | All of the above in one file |
 
-JSON exports carry a `meta` object (`kind`, `disclaimer`, `hive_id`,
-`generated_at`, `since`, `until`). CSV cells that start with `=`, `+`, `-`
-or `@` are prefixed with `'` so a spreadsheet does not run them as formulas.
-PDF output is not offered. Bulk review-evidence bundles depend on the
-per-PR bundles from #11058 and will join the exports when that lands.
+Every format carries export metadata: `kind`, the non-certification
+`disclaimer`, `hive_id`, `source_system`, the authenticated `generated_by`
+owner, `generated_at`, the `[since, until)` period, selected profile ids and
+versions, attester identities found in that period, and source-retention
+statements. `generated_by` records chain of custody for the download; it is
+not itself an attestation.
+
+Every export also carries a SHA-256 manifest. JSON manifests hash the compact
+JSON bytes (no HTML escaping, so `jq -c` reproduces them) of `meta` and each
+included top-level evidence section. Markdown
+appends a JSON metadata block whose manifest hashes the report before that
+block and the compact metadata JSON. CSV starts with a `metadata` row followed
+by `evidence` rows; its manifest hashes the compact metadata JSON and the
+domain-only CSV (the kind-specific header and evidence rows, with LF line
+endings). This excludes the manifest itself and avoids a self-referential
+digest. The manifest travels inside the file it covers, so on its own it only
+detects accidental corruption: anyone editing a row can recompute it. To tie a
+file to what the hive actually handed out, each `compliance_export` audit entry
+records `sha256=` of the exact delivered bytes; compare a file's digest
+(`sha256sum`) against that entry. CSV metadata is also
+available as named columns, including `profile_versions`, `attesters`,
+`retention` and the exact compact `metadata` JSON used for its hash. CSV cells
+that start with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet
+does not run them as formulas. PDF output is not offered. Bulk review-evidence
+bundles depend on the per-PR bundles from #11058 and will join the exports when
+that lands.
 
 **Posture history.** `GET /api/compliance/posture/history?since=&until=`
 returns the posture history for the range as one series per check:
@@ -497,7 +551,7 @@ rather than implying coverage:
   recovery testing, data life-cycle and processing-integrity controls, and the
   privacy programme. The generated table above gives the criterion-specific
   reason instead of allowing an omitted criterion to look covered. FedRAMP
-  AC-2.ELIG, SA-9, PE-3 and PS-3 and ISO 27001 A.5.1, A.5.19, A.5.24, A.5.30,
+  ELIG-1, SA-9, PE-3 and PS-3 and ISO 27001 A.5.1, A.5.19, A.5.24, A.5.30,
   A.6.1 and A.7.2 are likewise explicit.
 
 ## Related

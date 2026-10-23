@@ -78,6 +78,7 @@ type ParkFacts struct {
 	Holds             []string // stagelabels.Holds(labels), lower-cased
 	NeedsHuman        bool
 	DecisionLabel     string // configured issue park label present, or 085 on a PR
+	PossiblyExists    bool   // prior-art gate park: stage/017-possible-existing (#13575)
 	Sentinel          bool
 	HumanOnlyReason   string // lane rule unrelated to trust (workflow edits, tests removed, …)
 	ApprovedDirection bool   // /hive approve|decision recorded; un-park keeps needs-human (#12715)
@@ -128,6 +129,32 @@ type IssueFacts struct {
 	// reports. The sink's enrichment never re-reads it as a still-open
 	// cover (stagelabels.Record.CoveringPR) for the issue.
 	ClosedPR *Ref
+	// OpenChildren is the number of still-open sub-issues of a decomposed
+	// parent (hivecommons/hive#12857). A parent waiting on children keeps
+	// its stage with the wait named in the reason and is never stalled.
+	OpenChildren int
+	// The label-family verdicts below are resolved by the enumeration
+	// (pkg/github reads the hive's configured hold, park, umbrella and
+	// reporter-trust labels); the deriver only reads them, so it stays
+	// free of configuration. Each is "" when the family is absent.
+	//
+	// HoldLabel is the hold-class label that pauses the issue (hold,
+	// on-hold, do-not-merge/*, hive-pause/<id>, …; hivecommons/hive#13012).
+	HoldLabel string
+	// BlockedReason is set when the issue wears `blocked`: the
+	// enumeration's reason ("blocked on owner/repo#N", "blocked until …")
+	// or the bare label (hivecommons/hive#13093).
+	BlockedReason string
+	// NeedsHumanLabel names the needs-human label when Park.NeedsHuman is
+	// set (the reason cites it).
+	NeedsHumanLabel string
+	// UmbrellaLabel is the never-claim label the issue carries
+	// (governor.claims.never_claim_labels, default `epic`).
+	UmbrellaLabel string
+	// TriageAwaiting is why an actionable issue is still untriaged (015):
+	// the reporter-trust awaiting label it carries or the gate's
+	// reporter_triage bucket.
+	TriageAwaiting string
 }
 
 // ClaimFact is the live claim on an issue.
@@ -195,11 +222,26 @@ type PRPassFacts struct {
 	DCORequired      bool
 	SquashUnsafeHive int
 	AuthorIsApp      bool
+	// MergeCommit is the pass's merge-method verdict for the head:
+	// MergeCommitWanted when it elected a merge commit (mixed authorship,
+	// each commit self-signed, role/trusted, repo not squash-only), in
+	// which case the attribution override does not apply and the writer
+	// puts `merge-method/merge` on; NotWanted takes it off; Unknown (commit
+	// check not read) leaves it as found.
+	MergeCommit stagelabels.MergeCommitState
 	// AdoptionLive is prev.AdoptionLive(head): the hive owns the PR, so a
 	// stage that yields to adoption reads 074. EscalationReason is set when
 	// the stalled-adoption escape moved it to 085 instead.
 	AdoptionLive     bool
 	EscalationReason string
+	// Stalled is the pass's dwell verdict (stagelabels.StalledWith over the
+	// store record after this pass's Observe); KindLabels are the
+	// configured author/<kind> names. Both are outputs of the pass the
+	// writer needs on the Desired, so the Decision carries them through;
+	// before they were recorded here an enforce-mode pass never wrote
+	// stage/stalled on a PR and ignored custom author-kind names.
+	Stalled    bool
+	KindLabels authorkind.Names
 }
 
 // PriorStage is the store record a pass started from.

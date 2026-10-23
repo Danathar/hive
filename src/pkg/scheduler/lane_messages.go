@@ -25,7 +25,7 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 		shown := fairShareByRepo(scannerIssues, s.issueCap(), func(issue github.Issue) string { return issue.Repo })
 		for _, issue := range shown {
 			s.enforceIssueTextVerdict(issue.Title)
-			s.enforceLabelsWithPolicy(issue.Labels)
+			s.enforceLabelsWithPolicy(issue.Labels, issueSource(issue))
 			b.WriteString(fmt.Sprintf("  %s\n", issueDisplayRef(issue)))
 		}
 	} else if len(scannerIssues) > 0 {
@@ -83,7 +83,7 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 			if runes := []rune(title); len(runes) > maxPRTitleRunes {
 				title = string(runes[:maxPRTitleRunes])
 			}
-			annotation, _ := s.enforceIssueTextVerdict(prKickAnnotation(pr, "scanner"))
+			annotation, _ := s.enforceTextFrom(prKickAnnotation(pr, "scanner"), prSource(pr))
 			b.WriteString(fmt.Sprintf("  %s#%d by @%s%s %s %s\n", pr.Repo, pr.Number, pr.Author, forkAnnotation(pr), annotation, title))
 		}
 	}

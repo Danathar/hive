@@ -696,7 +696,10 @@
   "jev": {},
   "runs": {
     "checkpoints": {},
-    "triage": {},
+    "triage": {
+      "clarity_gate": {},
+      "prior_art": {}
+    },
     "spektacular": {
       "hub_executor": {},
       "recheck": {

@@ -58,6 +58,9 @@ var standbyFloorScanRoots = []string{"../..", "../../../dashboard"}
 // only writers by design — and this test file names both spellings itself.
 var standbyFloorReaderExceptions = []string{
 	"pkg/config/",
+	// The StandbyConfig type itself lives in the stdlib-only Crux config leaf
+	// and is aliased from pkg/config; its declaration is not a writer.
+	"pkg/crux/config/",
 }
 
 func TestStandbyFloorHasNoWriterOutsideConfig(t *testing.T) {

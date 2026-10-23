@@ -123,7 +123,7 @@ func (c *Config) applyCoinBudgetDefaults() {
 }
 
 func (c *Config) applyDefaults() {
-	if c.AgentsGitHubAPIHourlyCap == 0 && !c.agentsGitHubAPIHourlyCapSet {
+	if c.AgentsGitHubAPIHourlyCap == 0 && !c.AgentsGitHubAPIHourlyCapSet {
 		c.AgentsGitHubAPIHourlyCap = DefaultAgentsGitHubAPIHourlyCap
 	}
 	if c.GitHub.AgentReserveFloor == 0 {
@@ -235,7 +235,7 @@ func (c *Config) applyDefaults() {
 		c.Hub.IsPublic = true
 	}
 	for name, agent := range c.Agents {
-		agent.name = name
+		agent.SetLoadState(name, agent.SourceFile())
 		if agent.ID == "" {
 			agent.ID = name
 		}
@@ -246,10 +246,10 @@ func (c *Config) applyDefaults() {
 			agent.BeadsDir = fmt.Sprintf("/data/beads/%s", name)
 		}
 		// Default to enabled unless the user explicitly set enabled: false.
-		if !agent.Enabled && !agent.enabledSet {
+		if !agent.Enabled && !agent.EnabledExplicitlySet() {
 			agent.Enabled = true
 		}
-		if !agent.clearOnKickSet {
+		if !agent.ClearOnKickExplicitlySet() {
 			agent.ClearOnKick = true
 		}
 		if agent.Role == "" {

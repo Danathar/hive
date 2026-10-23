@@ -15,10 +15,16 @@ type Decision struct {
 	// plans against; zero means the authorkind defaults.
 	KindLabels authorkind.Names
 	DCO        stagelabels.DCOState
-	Stalled    bool
-	Terminal   bool               // Stage == None because the item closed/merged/left
-	Reason     string             // stored on the Record, rendered in comments/tracker
-	Human      *stagelabels.Route // set when the stage is a hand-off (085/090)
+	// MergeCommit is the pass's merge-method verdict (`merge-method/merge`).
+	MergeCommit stagelabels.MergeCommitState
+	Stalled     bool
+	Terminal    bool // Stage == None because the item closed/merged/left
+	// Covered is set on an issue whose stage is 040 because an open PR the
+	// lanes have staged at 040 or later covers it: the dwell clock then
+	// belongs to the PR and the sweep does not judge the issue stalled.
+	Covered bool
+	Reason  string             // stored on the Record, rendered in comments/tracker
+	Human   *stagelabels.Route // set when the stage is a hand-off (085/090)
 	// Abstain means the deriver has no opinion: nothing it saw classifies
 	// the item (today's stageRankNone), so the reconciler leaves the labels
 	// and the Store untouched. It is distinct from Stage == None, which is a
@@ -30,7 +36,7 @@ type Decision struct {
 // Desired renders the Decision as the full hive-owned label set the writer
 // should make the item carry.
 func (d Decision) Desired() stagelabels.Desired {
-	return stagelabels.Desired{Stage: d.Stage, Role: d.Role, Kind: d.Kind, KindLabels: d.KindLabels, Stalled: d.Stalled, DCO: d.DCO}
+	return stagelabels.Desired{Stage: d.Stage, Role: d.Role, Kind: d.Kind, KindLabels: d.KindLabels, Stalled: d.Stalled, DCO: d.DCO, MergeCommit: d.MergeCommit}
 }
 
 // abstain is the Decision for "no opinion" with a reason for the log.

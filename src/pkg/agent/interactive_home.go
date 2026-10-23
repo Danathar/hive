@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -273,6 +275,12 @@ func (m *Manager) setupAgentXDGDirs(agentName, home string, uid int) {
 	}
 	for _, dir := range dirs {
 		if err := mkdirAllNoFollow(sharedAgentHome, dir, interactiveHomeDirMode); err != nil {
+			// Permission errors mean we do not own this per-UID home; expected steady state.
+			if errors.Is(err, fs.ErrPermission) {
+				m.logger.Debug("per-agent XDG dir creation skipped (not owner)",
+					"agent", agentName, "dir", dir, "error", err)
+				return
+			}
 			m.logger.Warn("failed to create per-agent XDG dir",
 				"agent", agentName, "dir", dir, "error", err)
 			return
@@ -443,6 +451,11 @@ func (m *Manager) ownAgentDir(agentName, dir string, uid int) {
 		m.logger.Debug("per-agent dir left world-writable (chown unavailable)",
 			"agent", agentName, "dir", dir, "error", err)
 		if cerr := os.Chmod(dir, interactiveHomeSharedDirMode); cerr != nil {
+			if errors.Is(cerr, fs.ErrPermission) {
+				m.logger.Debug("per-agent dir mode restore skipped (not owner)",
+					"agent", agentName, "dir", dir, "error", cerr)
+				return
+			}
 			m.logger.Warn("failed to restore per-agent dir mode",
 				"agent", agentName, "dir", dir, "error", cerr)
 		}
@@ -560,6 +573,12 @@ func (m *Manager) tightenInteractiveHome(agentName, home string, uid int) {
 		m.logger.Debug("interactive home left world-writable (chown unavailable)",
 			"agent", agentName, "dir", home, "error", err)
 		if cerr := os.Chmod(home, interactiveHomeSharedDirMode); cerr != nil {
+			// EPERM means we do not own the home (per-UID isolation); nothing to restore.
+			if errors.Is(cerr, fs.ErrPermission) {
+				m.logger.Debug("interactive home mode restore skipped (not owner)",
+					"agent", agentName, "dir", home, "error", cerr)
+				return
+			}
 			m.logger.Warn("failed to restore interactive home mode",
 				"agent", agentName, "dir", home, "error", cerr)
 		}

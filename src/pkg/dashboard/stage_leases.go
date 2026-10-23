@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
+	"github.com/hivecommons/hive/pkg/agentaudit"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/planning"
@@ -684,7 +684,7 @@ func (s *Server) RefuseStageLease(taskID string, attrs map[string]string) {
 	for k, v := range attrs {
 		fields = append(fields, k, v)
 	}
-	s.AgentAuditSink().Record("system", agent.AuditLeaseStageRefused, taskID, agent.Fields(fields...))
+	s.AgentAuditSink().Record("system", agentaudit.AuditLeaseStageRefused, taskID, agentaudit.Fields(fields...))
 	eventAttrs := make(map[string]string, len(attrs)+1)
 	for k, v := range attrs {
 		eventAttrs[k] = v
@@ -749,7 +749,7 @@ func (s *Server) escalateStageLease(runKey string, at time.Time, attrs map[strin
 	for k, v := range attrs {
 		fields = append(fields, k, v)
 	}
-	s.AgentAuditSink().Record("system", agent.AuditLeaseStageEscalated, runKey, agent.Fields(fields...))
+	s.AgentAuditSink().Record("system", agentaudit.AuditLeaseStageEscalated, runKey, agentaudit.Fields(fields...))
 	eventAttrs := make(map[string]string, len(attrs))
 	for k, v := range attrs {
 		eventAttrs[k] = v

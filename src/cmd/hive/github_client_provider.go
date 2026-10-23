@@ -138,6 +138,26 @@ func (l liveTriageCommenter) CreateIssueComment(ctx context.Context, repo string
 	return c.CreateIssueComment(ctx, repo, number, body)
 }
 
+// AddLabels lets the clarity gate park an unclear issue
+// (runs.triage.clarity_gate, scheduler.TriageLabeler).
+func (l liveTriageCommenter) AddLabels(ctx context.Context, repo string, number int, labels []string) error {
+	c := l.current()
+	if c == nil {
+		return github.ErrNoGitHubClient
+	}
+	return c.AddLabels(ctx, repo, number, labels)
+}
+
+// IssueLabelEverApplied lets the clarity gate tell a park label that never
+// landed from one a person removed (scheduler.TriageParkHistory).
+func (l liveTriageCommenter) IssueLabelEverApplied(ctx context.Context, repo string, number int, label string) (bool, error) {
+	c := l.current()
+	if c == nil {
+		return false, github.ErrNoGitHubClient
+	}
+	return c.IssueLabelEverApplied(ctx, repo, number, label)
+}
+
 func (l liveTriageCommenter) current() *github.Client {
 	if l.client == nil {
 		return nil

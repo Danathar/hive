@@ -31,6 +31,9 @@ type Scheduler struct {
 	inflight             InflightLookup
 	runAdmitter          RunAdmitter
 	triageCommenter      TriageCommenter
+	clarity              clarityGateState
+	priorArt             priorArtGateState
+	priorArtSearcher     PriorArtSearcher
 	questionAutocloser   QuestionAutocloser
 	lifecycle            timeline.Recorder
 	taskMCPURL           string

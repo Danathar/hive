@@ -9,6 +9,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/ioscan"
 )
 
@@ -205,9 +206,9 @@ func (s *Server) handleKickStatus(w http.ResponseWriter, r *http.Request) {
 // POST's, and so no client can mistake it for a settled outcome.
 func kickPhaseStatus(phase string) string {
 	switch phase {
-	case agent.KickPhaseDelivered:
+	case crux.KickPhaseDelivered:
 		return kickStatusDelivered
-	case agent.KickPhaseFailed:
+	case crux.KickPhaseFailed:
 		return kickStatusFailed
 	default:
 		return kickStatusInFlight
@@ -745,7 +746,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	// the relaunched CLI, and "restarted" alone would leave them expecting
 	// exactly that.
 	resp := map[string]any{"ok": true, "status": "restarted", "agent": name}
-	if d, ok := s.deps.AgentMgr.KickDispatchState(name); ok && d.Phase == agent.KickPhaseFailed && strings.HasPrefix(d.Error, "cancelled:") {
+	if d, ok := s.deps.AgentMgr.KickDispatchState(name); ok && d.Phase == crux.KickPhaseFailed && strings.HasPrefix(d.Error, "cancelled:") {
 		resp["kickCancelled"] = true
 	}
 	jsonResponse(w, resp)

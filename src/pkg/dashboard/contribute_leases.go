@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/agentaudit"
 	"github.com/hivecommons/hive/pkg/celtrigger"
+	"github.com/hivecommons/hive/pkg/claims"
 	"github.com/hivecommons/hive/pkg/config"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/hooks"
@@ -467,7 +467,7 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, mode lea
 	switch mode {
 	case leaseStageRetry:
 		to = l.stage
-		auditAction = agent.AuditLeaseStageRetried
+		auditAction = agentaudit.AuditLeaseStageRetried
 	case leaseStageAdvance:
 		if !validStage(to) {
 			h.leaseMu.Unlock()
@@ -477,7 +477,7 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, mode lea
 			h.leaseMu.Unlock()
 			return taskLease{}, fmt.Errorf("%w: advance from %q to %q", errLeaseStageInvalid, l.stage, to)
 		}
-		auditAction = agent.AuditLeaseStageAdvanced
+		auditAction = agentaudit.AuditLeaseStageAdvanced
 	case leaseStageReset:
 		if !validStage(to) {
 			h.leaseMu.Unlock()
@@ -487,7 +487,7 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, mode lea
 			h.leaseMu.Unlock()
 			return taskLease{}, fmt.Errorf("%w: reset from %q to %q is not a move to an earlier stage", errLeaseStageInvalid, l.stage, to)
 		}
-		auditAction = agent.AuditLeaseStageReset
+		auditAction = agentaudit.AuditLeaseStageReset
 	default:
 		h.leaseMu.Unlock()
 		return taskLease{}, fmt.Errorf("unknown lease stage mutation %d", mode)
@@ -524,7 +524,7 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, mode lea
 }
 
 // recordLeaseStageAudit books a stage move on the agent audit sink. reason is
-// only set for a reset; agent.Fields drops empty strings, so advance and retry
+// only set for a reset; agentaudit.Fields drops empty strings, so advance and retry
 // entries omit reason while still carrying the canonical run key.
 func (h *ContributeWSHub) recordLeaseStageAudit(action, taskID, from, to, reason string, lease taskLease) {
 	if h == nil || h.server == nil {
@@ -533,7 +533,7 @@ func (h *ContributeWSHub) recordLeaseStageAudit(action, taskID, from, to, reason
 	leaseKey := leaseWorkKey(&lease)
 	runKey := h.server.canonicalRunKey(lease.repo, lease.number, runKeyOfLease(leaseKey, lease.repo), leaseKey)
 	h.server.AgentAuditSink().Record("system", action, taskID,
-		agent.Fields("run", runKey, "lease_key", leaseKey, "stage_from", from, "stage_to", to, "reason", reason, "gen", lease.gen))
+		agentaudit.Fields("run", runKey, "lease_key", leaseKey, "stage_from", from, "stage_to", to, "reason", reason, "gen", lease.gen))
 }
 
 // emitLeaseStageTransition records a persisted stage move on the lifecycle
@@ -707,7 +707,7 @@ func (h *ContributeWSHub) completeImplementStage(identity, taskID string, now ti
 	}
 	h.leaseMu.Unlock()
 
-	h.recordLeaseStageAudit(agent.AuditLeaseStageAdvanced, taskID, StageImplement, "completed", "", completed)
+	h.recordLeaseStageAudit(agentaudit.AuditLeaseStageAdvanced, taskID, StageImplement, "completed", "", completed)
 	h.emitLeaseStageTransitionAt(StageImplement, "completed", "", false, completed, now)
 	if err := removeRunStageWorktree(completed.identity, leaseWorkKey(&completed), completed.stage, completed.gen); err != nil {
 		h.logger.Warn("[contribute-ws] completed run-stage worktree cleanup failed",
@@ -1085,6 +1085,28 @@ func (h *ContributeWSHub) setLeaseClaim(identity, taskID string, claim ghpkg.Iss
 	}
 }
 
+// clearLeaseClaim drops the lease's mirror of an issue claim the hub has
+// released while the lease itself stays resumable (a disconnect release,
+// hivecommons/hive#13579), so the runs API stops showing a claim the ledger
+// no longer holds. A lease that is not there is left alone.
+func (h *ContributeWSHub) clearLeaseClaim(identity, taskID string) {
+	if h == nil || identity == "" || taskID == "" {
+		return
+	}
+	h.leaseMu.Lock()
+	defer h.leaseMu.Unlock()
+	l := h.leases[leaseKey(identity, taskID)]
+	if l == nil || (l.claimedBy == "" && l.claimExpiresAt.IsZero()) {
+		return
+	}
+	l.claimedBy = ""
+	l.claimExpiresAt = time.Time{}
+	l.claimPosted = false
+	if err := h.saveLeasesLocked(); err != nil {
+		h.logger.Warn("[contribute-ws] lease claim clear not persisted", "task", taskID, "error", err)
+	}
+}
+
 func (h *ContributeWSHub) taskLeasesPath() string {
 	if h != nil && h.taskLeasesFile != "" {
 		return h.taskLeasesFile
@@ -1444,7 +1466,7 @@ func (h *ContributeWSHub) keepPendingStageLeasesAlive(now time.Time) int {
 // alongside the other stale-state reaping. Returns how many were dropped.
 func (h *ContributeWSHub) pruneExpiredLeases(now time.Time) int {
 	dropped := 0
-	var unknown []taskLease
+	var unknown, expired []taskLease
 	var orphaned []taskLease
 	h.leaseMu.Lock()
 	for k, l := range h.leases {
@@ -1454,6 +1476,9 @@ func (h *ContributeWSHub) pruneExpiredLeases(now time.Time) int {
 			}
 			if l != nil && l.stage != "" && !h.isPendingStageIdentity(l.identity) {
 				orphaned = append(orphaned, *l)
+			}
+			if l != nil {
+				expired = append(expired, *l)
 			}
 			delete(h.leases, k)
 			dropped++
@@ -1473,6 +1498,14 @@ func (h *ContributeWSHub) pruneExpiredLeases(now time.Time) int {
 	h.leaseMu.Unlock()
 	for _, l := range unknown {
 		h.recordWavefrontUnknown(l, now)
+	}
+	// A lease nobody resumed takes its issue claim with it
+	// (hivecommons/hive#13579): the relay is not coming back inside the
+	// re-adoption window, so nothing should keep hive agents off the issue.
+	for _, l := range expired {
+		if l.identity != "" && l.key != "" {
+			h.releaseClaimForLease(l.identity, l.key, claims.ReasonLeaseExpired)
+		}
 	}
 	return dropped
 }

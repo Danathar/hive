@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/agent"
+	"github.com/hivecommons/hive/pkg/agentaudit"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/knowledge"
@@ -274,7 +274,7 @@ func TestContributeMCPLeaseBearerStageMismatchRefusesAndAudits(t *testing.T) {
 	}
 	foundAudit := false
 	for _, entry := range s.audit.Recent(10) {
-		if entry.Action == agent.AuditTaskMCPStageMismatch && strings.Contains(entry.Detail, "reason=stage_mismatch") {
+		if entry.Action == agentaudit.AuditTaskMCPStageMismatch && strings.Contains(entry.Detail, "reason=stage_mismatch") {
 			foundAudit = true
 			break
 		}

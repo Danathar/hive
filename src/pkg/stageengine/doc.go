@@ -9,12 +9,13 @@
 // through, and the expected-transition table (Expected) that turns a
 // surprising from→to hop into a metric rather than a rejected write.
 //
-// It imports stagelabels, authorkind and claims only. pkg/github and
-// pkg/github/automerge import it and register their derivers through
-// SetDerivers; nothing here knows about lanes, buckets or the forge.
+// Both kind-specific derivations are built in: derive_issue.go consumes
+// IssueFacts and derive_pr.go consumes PRFacts, including the lane opinions
+// gathered by automerge. Shared PR observations and reason vocabulary live
+// in the prstage sub-package. Neither derivation imports github or automerge
+// or performs forge I/O; the PR goldens pin the lane precedence unchanged.
 //
-// Until the derivation bodies move in (plan PR-F), DeriveIssue and DerivePR
-// delegate to the adapters registered by those packages, which wrap today's
-// IssueStageFor and resolveStage unchanged. Golden parity is proven under
-// ModeShadow before ModeEnforce writes anything.
+// The engine is the only writer: ModeEnforce writes its Decision, ModeShadow derives and
+// counts without writing (a pause); the legacy comparator that let shadow
+// write the sweep's own derivation during the rollout is gone.
 package stageengine

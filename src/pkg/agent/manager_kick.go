@@ -10,9 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 	"github.com/hivecommons/hive/pkg/fleetreport"
-	"github.com/hivecommons/hive/pkg/tracing"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -116,7 +115,7 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 	// (the default). SendKick has no context parameter, so this span roots at
 	// Background; it still captures the kick leg of the governor→agent
 	// lifecycle. Ended before delivery bookkeeping via defer.
-	_, span := tracing.StartSpan(context.Background(), "agent.send_kick",
+	_, span := m.startSpan(context.Background(), "agent.send_kick",
 		attribute.String("agent.name", name))
 	defer span.End()
 
@@ -192,13 +191,13 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 	// showing a trust prompt or still initializing even though
 	// tmuxPaneHasCLI matched a broad marker like "Copilot".
 	m.mu.Unlock()
-	if !m.waitForInputPromptForAgentUnless(agent, m.kickEpochChangedFn(agent, epoch)) {
+	if ready, reason := m.waitForInputPromptForAgentReason(agent, m.kickEpochChangedFn(agent, epoch)); !ready {
 		m.mu.Lock()
 		if agent.kickEpoch != epoch {
 			return fmt.Errorf("%w: agent %s restarted while the kick was waiting for its input prompt", errKickCancelledByRestart, name)
 		}
-		m.markKickUndeliverableLocked(agent, time.Now(), "CLI did not reach input prompt")
-		return fmt.Errorf("agent %s CLI did not reach input prompt", name)
+		m.markKickUndeliverableLocked(agent, time.Now(), reason)
+		return kickPromptNotReadyErr(name, reason)
 	}
 	m.mu.Lock()
 	agent, ok = m.agents[name]
@@ -286,12 +285,20 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 	defer agent.kickDelivering.Store(false)
 
 	visible := m.captureVisiblePaneForAgent(agent)
-	if !paneShowsInputPrompt(visible) || paneShowsConsentScreen(visible) || paneShowsAgentWorking(visible) || paneShowsCopilotQuestionForm(visible) {
-		m.markKickUndeliverableLocked(agent, time.Now(), "pane not at a ready input prompt")
+	menuFooter := paneTUIMenuFooter(effectiveBackend(agent), visible)
+	if !paneShowsInputPrompt(visible) || paneShowsConsentScreen(visible) || paneShowsAgentWorking(visible) || paneShowsCopilotQuestionForm(visible) || menuFooter != "" {
+		reason := "pane not at a ready input prompt"
+		if menuFooter != "" {
+			reason = tuiMenuNotReadyReason(menuFooter)
+		}
+		m.markKickUndeliverableLocked(agent, time.Now(), reason)
 		m.logger.Warn("kick delivery skipped: CLI is not at a ready prompt; refusing to type kick into shell",
 			"agent", agent.Name, "trigger", trigger, "has_cli_marker", paneHasCLIMarker(visible),
 			"consent_screen", paneShowsConsentScreen(visible), "working", paneShowsAgentWorking(visible),
-			"question_form", paneShowsCopilotQuestionForm(visible))
+			"question_form", paneShowsCopilotQuestionForm(visible), "menu_footer", menuFooter)
+		if menuFooter != "" {
+			return fmt.Errorf("agent %s pane not at a ready input prompt: %s", agent.Name, reason)
+		}
 		return fmt.Errorf("agent %s pane not at a ready input prompt", agent.Name)
 	}
 
@@ -1476,6 +1483,12 @@ const (
 	// pool. Once the kick has run this long AND at least one CI-poll command
 	// has been seen, treat it the same as crossing the count threshold.
 	ciPollNudgeWallClock = 10 * time.Minute
+	// ciPollReportMinPolls is how many CI-poll commands a nudged kick must
+	// have run before the nudge is also self-reported to the fleet (#13863).
+	// A lone poll past the wall clock is a normal post-push check: the agent
+	// is still nudged in-session, but the fleet only hears about repeated
+	// polling.
+	ciPollReportMinPolls = 2
 	ciPollNudgeMessage   = "Stop polling CI. Do not run gh run watch/view, gh pr checks, or gh pr view --json statusCheckRollup again this turn: leave the PR as is and move to the next work-list item. The automerge sweep handles green PRs."
 )
 
@@ -1502,8 +1515,38 @@ func (m *Manager) SendGitHubAPIBudgetNudge(name, message string) {
 // before this pattern was added, since neither contains "run" or "checks".
 var ciPollCommandRe = regexp.MustCompile(`\bgh (?:run (?:watch|view|list)\b|pr checks\b|pr view\b[^` + "\n" + `]*\bstatusCheckRollup\b|pr status\b)`)
 
+// ciPollProhibitionRe matches the tail of text that precedes a command name
+// when the command is being forbidden rather than run ("no `gh run watch`",
+// "do not run gh pr checks"). The kick prompt and policy text quote the
+// polling commands exactly this way.
+var ciPollProhibitionRe = regexp.MustCompile("(?i)\\b(?:no|not|never|don't|avoid|without)\\s+(?:\\w+\\s+)?[`'\"]*$")
+
+// countCIPollCommands counts CI-status commands in pane, skipping mentions
+// that are prohibitions quoted from the kick prompt or policy: those landed
+// in the pane right after the kick and read as poll commands issued 0s in.
 func countCIPollCommands(pane string) int {
-	return len(ciPollCommandRe.FindAllStringIndex(stripExplainLines(pane), -1))
+	pane = stripExplainLines(pane)
+	n := 0
+	for _, loc := range ciPollCommandRe.FindAllStringIndex(pane, -1) {
+		lineStart := strings.LastIndex(pane[:loc[0]], "\n") + 1
+		if ciPollProhibitionRe.MatchString(pane[lineStart:loc[0]]) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// reviewLaneAgent mirrors the review swarm's own admission rule
+// (review.hasReviewCapability): a name or role carrying "review" is a
+// reviewer. pkg/review is not imported here (cycle risk); the token is tiny.
+func reviewLaneAgent(agent *AgentProcess) bool {
+	for _, f := range []string{agent.Name, agent.Config.Role} {
+		if strings.Contains(strings.ToLower(f), "review") {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeIfPollingCI tells an agent that keeps polling CI within one kick to
@@ -1516,8 +1559,14 @@ func countCIPollCommands(pane string) int {
 // command with the kick already running longer than ciPollNudgeWallClock — a
 // single `gh run watch` blocks for the whole wait and would otherwise never
 // cross the count threshold.
+
 func (m *Manager) nudgeIfPollingCI(agent *AgentProcess, scrollback, visible string) {
 	if agent.kickDelivering.Load() || agent.LastKick == nil {
+		return
+	}
+	// Reviewers read CI on the PRs under review as evidence and own no PR to
+	// wait on, so polling checks is not the loop this guard targets (#13860).
+	if reviewLaneAgent(agent) {
 		return
 	}
 	count := countCIPollCommands(scrollback)
@@ -1563,13 +1612,24 @@ func (m *Manager) nudgeIfPollingCI(agent *AgentProcess, scrollback, visible stri
 	// Self-report (#13470, was the hive-code-defect "CI-poll nudge" counter):
 	// the harness caps the nudge at one per kick, so every observation is a
 	// distinct kick the agent spent polling its own CI.
-	fleetreport.Observe(fleetreport.ClassCIPollNudge, agent.Name,
-		fmt.Sprintf("agent kept polling CI on its own PR after the kick: stop-polling nudge sent (%d poll command(s) since the kick, %s after it; %d nudge(s) since boot)", newPolls, roundDurationForHumans(sinceKick), totalCIPollNudges),
-		fmt.Sprintf("agent=%s lane=%s polls_total=%d polls_since_kick=%d threshold=%d wall_clock=%s\n--- pane tail (%d lines) ---\n%s",
-			agent.Name, lane, count, newPolls, ciPollNudgeThreshold, ciPollNudgeWallClock, stallNudgeTailLines, paneTail(visible, stallNudgeTailLines)))
+	// A lone poll past the wall clock is a normal post-push check, so only
+	// repeated polling reaches the fleet; the in-session nudge is unchanged.
+	if ciPollReportWorthy(newPolls) {
+		fleetreport.Observe(fleetreport.ClassCIPollNudge, agent.Name,
+			fmt.Sprintf("agent kept polling CI on its own PR after the kick: stop-polling nudge sent (%d poll command(s) since the kick, %s after it; %d nudge(s) since boot)", newPolls, roundDurationForHumans(sinceKick), totalCIPollNudges),
+			fmt.Sprintf("agent=%s lane=%s polls_total=%d polls_since_kick=%d threshold=%d wall_clock=%s report_min_polls=%d\n--- pane tail (%d lines) ---\n%s",
+				agent.Name, lane, count, newPolls, ciPollNudgeThreshold, ciPollNudgeWallClock, ciPollReportMinPolls, stallNudgeTailLines, paneTail(visible, stallNudgeTailLines)))
+	}
 
 	m.logger.Warn("agent is polling CI, sending stop-polling nudge", "name", agent.Name, "polls", count)
 	m.tmuxSendLiteralForAgent(agent, ciPollNudgeMessage)
 	time.Sleep(textToEnterDelay)
 	m.tmuxSendEntersForAgent(agent)
+}
+
+// ciPollReportWorthy reports whether a CI-poll nudge is repeated polling
+// (at least ciPollReportMinPolls commands since the kick) rather than a
+// single check.
+func ciPollReportWorthy(newPolls int) bool {
+	return newPolls >= ciPollReportMinPolls
 }

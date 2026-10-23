@@ -24,7 +24,12 @@ func TestStageTrackerSectionWiring(t *testing.T) {
 		`'activity-monitor-section': { heading: 'Hive activity monitor'`,
 		`'activity-monitor-section', 'agents-section', 'agent-activity-section', 'faq-section'`,
 		`fetch('/api/stage-tracker', _stageTrackerEtag ? { headers: { 'If-None-Match': _stageTrackerEtag } } : undefined)`,
-		`if (r.status === 304) { stageTrackerTickClock(); return; }`,
+		// A 304 carries no body: generated_at/source come from the headers so the
+		// "updated" chip stays truthful on a quiet hive.
+		`if (r.status === 304) {`,
+		`const at = r.headers.get('X-Hive-Stage-Tracker-Generated-At');`,
+		`if (at) _stageTracker.generated_at = at;`,
+		`stageTrackerTickClock();`,
 		`dashboardSetInterval('stage-tracker', fetchStageTracker, STAGE_TRACKER_POLL_MS)`,
 		`dashboardSetInterval('stage-tracker-clock', stageTrackerTickClock, STAGE_TRACKER_CLOCK_MS)`,
 		`id="activity-monitor-q" class="ham-input" type="search"`,
@@ -40,7 +45,15 @@ func TestStageTrackerSectionWiring(t *testing.T) {
 		`function stageTrackerHeaderHtml(stages)`,
 		`const STAGE_TRACKER_ICONS = {`,
 		`@keyframes ham-pulse`,
-		`animation: ham-pulse 1.6s ease-in-out infinite;`,
+		// The bare lit rule carries no animation: Open, Open · hold and Claimed are steady.
+		`.ham-seg.active { background: var(--amber); color: var(--surface-0); }`,
+		`.ham-seg.active[data-motion="active"]::before { background: white; animation: ham-pulse 1.6s ease-in-out infinite;`,
+		`.ham-seg.active[data-motion="needs-human"]::before { background: var(--red); animation: ham-breathe-human`,
+		// Compositor-safe (#13764): the infinite pulses animate only opacity on an overlay.
+		`@keyframes ham-pulse { 0%, 100% { opacity: 0; } 50% { opacity: 0.3; } }`,
+		`@keyframes ham-breathe-human { 0%, 100% { opacity: 0; } 50% { opacity: 0.55; } }`,
+		`@keyframes ham-breathe-human`,
+		`function stageTrackerMotion(item)`,
 		`.ham-seg.active.ham-open-hold`,
 		`@media (prefers-reduced-motion: reduce) { .ham-seg.active { animation: none;`,
 	} {
@@ -83,12 +96,14 @@ func TestStageTrackerRows(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_SOFT_LINK_VIAS"),
 		jsConstLine(t, html, "STAGE_TRACKER_SOFT_LINK_TIP"),
 		jsConstLine(t, html, "STAGE_TRACKER_TRIAGE_NEEDED"),
+		jsConstLine(t, html, "STAGE_TRACKER_POSSIBLY_EXISTS"),
 		jsConstLine(t, html, "STAGE_TRACKER_ISSUE_DECISION_COLUMN"),
 		jsConstLine(t, html, "STAGE_TRACKER_PRE_MERGE_SOAK"),
 		jsConstLine(t, html, "STAGE_TRACKER_ACTIVE_WORD"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOD_TEXT"),
 		jsConstLine(t, html, "STAGE_TRACKER_ACTOR"),
 		jsConstLine(t, html, "STAGE_TRACKER_TERMINAL"),
+		stageTrackerSentinelJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_TRAIL_HOPS"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOD_PRIORITY"),
 		jsConstBlock(t, html, "STAGE_TRACKER_ICONS"),
@@ -103,6 +118,11 @@ func TestStageTrackerRows(t *testing.T) {
 		"var _stageTrackerFilter = stageTrackerDefaultFilter();",
 		jsFunc(t, html, "stageTrackerWaitSince"),
 		jsFunc(t, html, "stageTrackerLabelFamily"),
+		jsFunc(t, html, "stageTrackerNeedsHumanLabels"),
+		jsFunc(t, html, "stageTrackerLabelNeedsHuman"),
+		jsFunc(t, html, "stageTrackerItemNeedsHuman"),
+		jsFunc(t, html, "stageTrackerLabelCompare"),
+		jsFunc(t, html, "stageTrackerLabelDialogData"),
 		jsFunc(t, html, "stageTrackerNormalizeFilter"),
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
@@ -113,6 +133,13 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerIcon"),
 		jsFunc(t, html, "stageTrackerPRRef"),
 		jsFunc(t, html, "stageTrackerActorKind"),
+		jsConstLine(t, html, "STAGE_TRACKER_MOTION_STATIC"),
+		jsConstLine(t, html, "STAGE_TRACKER_MOTION_ACTIVE"),
+		jsConstLine(t, html, "STAGE_TRACKER_MOTION_HUMAN"),
+		jsConstBlock(t, html, "STAGE_TRACKER_MOTION_BY_STAGE"),
+		jsConstLine(t, html, "STAGE_TRACKER_MOTION_AUTHOR_STAGES"),
+		jsConstLine(t, html, "STAGE_TRACKER_MOTION_HUMAN_MODS"),
+		jsFunc(t, html, "stageTrackerMotion"),
 		jsFunc(t, html, "stageTrackerHeaderHtml"),
 		jsFunc(t, html, "stageTrackerHoldLabels"),
 		jsFunc(t, html, "stageTrackerSoakLeft"),
@@ -134,6 +161,8 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerAnchor"),
 		jsFunc(t, html, "stageTrackerSegments"),
 		jsFunc(t, html, "stageTrackerShortAgo"),
+		jsFunc(t, html, "stageTrackerRefOf"),
+		jsFunc(t, html, "stageTrackerRowToolsHtml"),
 		jsFunc(t, html, "stageTrackerRowHtml"),
 		jsFunc(t, html, "stageTrackerPRIssueSlot"),
 		jsFunc(t, html, "stageTrackerItemKey"),
@@ -412,6 +441,12 @@ assert.deepStrictEqual(stageTrackerPRIssueSlot({ linked_issues: [{ number: 6, st
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 113, kind: 'pr', title: 'Fix', stage: 50, linked_issues: [{ number: 77, state: 'open', title: 'Closed by it' }] }, stages, ctx);
 assert.ok(!row.includes('ham-issue-refs-chip'), 'closing link draws no refs chip: ' + row);
 
+// Refs-only issue coverage shows tracker progress and the covering PR's base.
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 9, kind: 'issue', title: 'Tracker', stage: 40, claim_reference: true, is_tracker: true, children: { total: 3, completed: 1 }, linked_prs: [{ number: 203, title: 'Draft work', stage: 10, base_ref: 'v6' }] }, stages, ctx);
+assert.ok(row.includes('<span class="ham-badge ham-issue-refs-chip" title="' + STAGE_TRACKER_SOFT_LINK_TIP + '">refs</span>'), 'issue refs chip: ' + row);
+assert.ok(row.includes('<span class="ham-badge">tracker 1/3</span>'), 'tracker progress: ' + row);
+assert.ok(row.includes('<span class="ham-badge">v6</span>'), 'covering PR base: ' + row);
+
 // 040 shares the PR in progress column with 030; the chevron tooltip names the real stage.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 9, kind: 'issue', title: 'Ordering drifts', stage: 40, linked_prs: [{ number: 103, title: 'Backport', author_kind: 'clanker', stage: 30 }, { number: 102, title: 'Fix it', url: 'u', author_kind: 'human', stage: 70, stage_since: new Date(now - 3600000).toISOString(), modifiers: ['needs-rebase'], caption: 'Rebasing onto main' }] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, B, B, B, 'blank cap']);
@@ -424,7 +459,7 @@ assert.strictEqual(sr.length, 2, 'one sub-row per covering PR');
 assert.ok(prCol(sr[0])[0].includes('ham-author-human') && prCol(sr[0])[0].includes('#102') && prCol(sr[0])[0].includes('<span class="ham-pr-title">Fix it</span>'), prCol(sr[0])[0]);
 assert.deepStrictEqual(segStates(sr[0]), [B, B, B, D, 'active detoured', T, 'todo cap'], 'PR strip starts at PR in progress');
 assert.ok(sr[0].includes('<span class="ham-detour">Fixing</span><svg class="ham-ico ham-actor-ico"') && sr[0].includes('aria-label="Next move: human"') && sr[0].indexOf('<span class="ham-since">1h</span>') < sr[0].indexOf('aria-label="Pipeline progress"') && sr[0].includes('ham-mod-needs-rebase">needs rebase</span>'), 'Fixing is the author\'s move; the chip says what is being fixed: ' + sr[0]);
-assert.ok(/^ data-ham-kind="pr" data-ham-stage="70">/.test(sr[0]) && /<a class="ham-pr-ref"[^>]*title="Fix it · Fixing review findings Rebasing onto main/.test(sr[0]), 'sub-row tooltip rides the PR link, not the container: ' + sr[0].slice(0, 400));
+assert.ok(/^ data-ham-kind="pr" data-ham-stage="70" data-ham-sub-key="acme\/console\/pr#102">/.test(sr[0]) && /<a class="ham-pr-ref"[^>]*title="Fix it · Fixing review findings Rebasing onto main/.test(sr[0]), 'sub-row tooltip rides the PR link, not the container: ' + sr[0].slice(0, 400));
 assert.ok(prCol(sr[1])[0].includes('ham-author-clanker') && prCol(sr[1])[0].includes('#103'));
 assert.deepStrictEqual(segStates(sr[1]), [B, B, B, 'active', T, T, 'todo cap'], 'a PR at 030 lights PR in progress on its own sub-row');
 assert.ok(!row.slice(0, row.indexOf('<div class="ham-sub"')).includes('ham-pr-ref'), 'the issue title line itself lists no PRs');
@@ -540,7 +575,8 @@ assert.ok(/<a class="ham-ref"[^>]*title="[^"]*@ann[^"]*"/.test(row), 'the #N lin
 row = stageTrackerRowHtml(g[1], stages, ctx);
 expectTitles(row, ['a.ham-ref', 'span.ham-title', 'a.ham-pr-ref', 'li.ham-seg'], 'issue with one PR');
 assert.ok(/<a class="ham-pr-ref"[^>]*title="The one PR Author: hive · @hive-bot"/.test(row), row);
-assert.ok(/<li class="ham-seg active" title="Review pending · Next move: hive" aria-current="step">/.test(row), 'active chevron: stage + whose move: ' + row);
+assert.ok(/<li class="ham-seg active" data-motion="active" title="Review pending · Next move: hive" aria-current="step">/.test(row), 'active chevron: stage + whose move (hive acting: pulses): ' + row);
+assert.ok(!/<li class="ham-seg active" data-motion=[^>]*title="Claimed"/.test(stageTrackerRowHtml(g[0], stages, ctx)), 'Claimed is static: no data-motion');
 // Issue with two PRs: #N link + title on the issue line, nothing lit there;
 // each sub-row has its PR link (full PR tooltip) and its active chevron.
 row = stageTrackerRowHtml(g[3], stages, ctx);
@@ -586,6 +622,7 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_LABEL_FAMILIES"),
 		jsConstLine(t, html, "STAGE_TRACKER_SORTS"),
 		jsConstLine(t, html, "STAGE_TRACKER_TERMINAL"),
+		stageTrackerSentinelJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_PATH"),
 		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_DECISION"),
 		jsConstLine(t, html, "STAGE_TRACKER_ISSUE_NEEDS_DECISION"),
@@ -594,6 +631,7 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_SOFT_LINK_VIAS"),
 		jsConstLine(t, html, "STAGE_TRACKER_SOFT_LINK_TIP"),
 		jsConstLine(t, html, "STAGE_TRACKER_TRIAGE_NEEDED"),
+		jsConstLine(t, html, "STAGE_TRACKER_POSSIBLY_EXISTS"),
 		jsConstLine(t, html, "STAGE_TRACKER_ISSUE_DECISION_COLUMN"),
 		jsConstLine(t, html, "STAGE_TRACKER_PRE_MERGE_SOAK"),
 		jsFunc(t, html, "stageTrackerDefaultFilter"),
@@ -604,6 +642,11 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsFunc(t, html, "stageTrackerNeedsAttention"),
 		jsFunc(t, html, "stageTrackerWaitSince"),
 		jsFunc(t, html, "stageTrackerLabelFamily"),
+		jsFunc(t, html, "stageTrackerNeedsHumanLabels"),
+		jsFunc(t, html, "stageTrackerLabelNeedsHuman"),
+		jsFunc(t, html, "stageTrackerItemNeedsHuman"),
+		jsFunc(t, html, "stageTrackerLabelCompare"),
+		jsFunc(t, html, "stageTrackerLabelDialogData"),
 		jsFunc(t, html, "stageTrackerNormalizeFilter"),
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
@@ -712,14 +755,44 @@ c = stageTrackerCountsText(stageTrackerPage([], F()), 5, 0);
 assert.strictEqual(c.showing, 'showing 0 of 0 (5 filtered out)');
 assert.strictEqual(c.header, '0 of 5 items · nothing needs attention');
 
-// Label facets: family labels always offered, others only when shared; selected chips stay.
+// Label facets: stage/NNN first by number, then every other label alphabetically; every label is offered.
 let fac = stageTrackerLabelFacets(items, F());
-assert.deepStrictEqual(fac.chips.map(x => x.label), ['stage/010-actionable', 'stage/020-claimed', 'stage/050-review', 'stage/080-merge-gate', 'needs-rebase', 'author/clanker', 'author/hive', 'author/human', 'role/docs', 'bug']);
+assert.deepStrictEqual(fac.chips.map(x => x.label), ['stage/010-actionable', 'stage/020-claimed', 'stage/050-review', 'stage/080-merge-gate', 'author/clanker', 'author/hive', 'author/human', 'bug', 'needs-rebase', 'role/docs']);
 assert.deepStrictEqual(fac.chips.find(x => x.label === 'author/clanker').count, 2);
-assert.ok(stageTrackerLabelFacets(items.concat([{ kind: 'pr', repo: 'a/b', number: 6, labels: ['do-not-merge/hold'] }]), F()).chips.some(x => x.label === 'do-not-merge/hold'), 'hold labels are offered even when only one item is held');
-fac = stageTrackerLabelFacets(items.concat([{ kind: 'issue', repo: 'a/b', number: 6, labels: ['lonely'] }]), F({ labels: ['lonely'] }));
-assert.ok(fac.chips.some(x => x.label === 'lonely' && x.on), 'a selected single-item label is still offered so it can be cleared');
-assert.strictEqual(stageTrackerLabelFacets(items.concat([{ kind: 'issue', repo: 'a/b', number: 7, labels: ['solo'] }]), F()).chips.some(x => x.label === 'solo'), false);
+assert.deepStrictEqual(fac.all.map(x => x.label), fac.chips.map(x => x.label), 'under the limit the dialog list equals the row');
+assert.strictEqual(fac.hidden, 0);
+assert.strictEqual(fac.needsHuman, null, 'no needs-human set in the payload, no synthetic chip');
+assert.ok(stageTrackerLabelFacets(items.concat([{ kind: 'issue', repo: 'a/b', number: 7, labels: ['solo'] }]), F()).chips.some(x => x.label === 'solo'), 'single-item labels are offered too (no hidden labels)');
+// Over the limit: the row shows the first N in order plus any selected label; all keeps every label and hidden the overflow.
+const wide = items.concat(Array.from({ length: 30 }, (_, i) => ({ kind: 'issue', repo: 'a/b', number: 100 + i, labels: ['zz-' + String(i).padStart(2, '0')] })));
+fac = stageTrackerLabelFacets(wide, F({ labels: ['zz-29'] }));
+assert.strictEqual(fac.chips.length, STAGE_TRACKER_LABEL_CHIP_LIMIT + 1);
+assert.strictEqual(fac.chips[fac.chips.length - 1].label, 'zz-29', 'a selected overflow label is promoted into the row, in order');
+assert.ok(fac.chips[fac.chips.length - 1].on);
+assert.strictEqual(fac.all.length, 40);
+assert.strictEqual(fac.hidden, 40 - STAGE_TRACKER_LABEL_CHIP_LIMIT - 1);
+let dlg = stageTrackerLabelDialogData(fac, 'ZZ-1');
+assert.deepStrictEqual(dlg.rows.map(x => x.label), ['zz-10', 'zz-11', 'zz-12', 'zz-13', 'zz-14', 'zz-15', 'zz-16', 'zz-17', 'zz-18', 'zz-19', 'zz-29'], 'query is a case-insensitive substring; selected labels stay listed');
+assert.deepStrictEqual([dlg.total, dlg.selected, dlg.query], [40, 1, 'zz-1']);
+
+// Needs human: one synthetic facet over the payload's set; count = distinct items, prefix children match, filter is OR across the set.
+const nh = stageTrackerNeedsHumanLabels({ needs_human_labels: ['stage/045-needs-decision', 'Needs-Human', 'hold', ' stage/071-needs-author '] });
+assert.deepStrictEqual(nh, ['stage/045-needs-decision', 'needs-human', 'hold', 'stage/071-needs-author']);
+const parked = items.concat([
+  { kind: 'issue', repo: 'a/b', number: 20, labels: ['stage/045-needs-decision', 'needs-human', 'hold'] },
+  { kind: 'issue', repo: 'a/b', number: 21, labels: ['needs-human/agent-ready'] },
+  { kind: 'pr', repo: 'a/b', number: 22, labels: ['stage/071-needs-author', 'author/human'] },
+  { kind: 'issue', repo: 'a/b', number: 23, labels: ['holder'] },
+]);
+assert.strictEqual(stageTrackerLabelNeedsHuman('needs-human/agent-ready', nh), true);
+assert.strictEqual(stageTrackerLabelNeedsHuman('holder', nh), false, 'prefix match needs the / separator');
+fac = stageTrackerLabelFacets(parked, F(), { needsHumanLabels: nh });
+assert.deepStrictEqual([fac.needsHuman.count, fac.needsHuman.on], [3, false], 'three distinct items, not five label hits');
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true }), Object.assign({ needsHumanLabels: nh }, ctx))), [20, 21, 22]);
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true, labels: ['author/human'] }), Object.assign({ needsHumanLabels: nh }, ctx))), [22], 'needs-human ANDs with label chips');
+assert.strictEqual(stageTrackerFilterActive(F({ needsHuman: true })), true);
+assert.strictEqual(stageTrackerNormalizeFilter({ needsHuman: 'yes' }).needsHuman, true);
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true }), ctx)), [], 'without a set nothing can need a human');
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/compliance"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/fleetreport"
@@ -94,6 +95,8 @@ func isOwnerRole(role string) bool {
 var proxyProofRequired = true
 
 type Server struct {
+	webhookNoSecretOnce sync.Once // warn once per process about a missing webhook secret (#13666)
+
 	port       int
 	authToken  string
 	statusMu   sync.RWMutex
@@ -116,6 +119,8 @@ type Server struct {
 	// stageTrackerServed flips once /api/stage-tracker has been built; it
 	// gates the SSE nudge UpdateStatusIfFresh sends after a publish.
 	stageTrackerServed bool
+	// stageTrackerNudge coalesces the SSE nudges to one per ~2s.
+	stageTrackerNudge stageTrackerNudger
 	// webhookRefresh re-reads the PR or issue a GitHub webhook named and
 	// patches its tracker row (webhook_tracker_refresh.go); built lazily.
 	webhookRefresh     *webhookTrackerRefresher
@@ -559,7 +564,7 @@ type StatusPayload struct {
 	// Providers rolls Agents up per provider into two separate dimensions,
 	// auth_state and availability_state (ADR-0024, #12611). Redacted; the
 	// same block the hub heartbeat carries. Omitted when disabled.
-	Providers []agent.ProviderStatus `json:"providers,omitempty"`
+	Providers []crux.ProviderStatus `json:"providers,omitempty"`
 	// HiddenAgents is diagnostic-only (#6581): agent-manager runtime entries
 	// that were left out of Agents (the dashboard cards), each with the stable
 	// reason category it was omitted for. It exists so an operator whose
@@ -850,7 +855,7 @@ type FrontendAgent struct {
 	Continuous        bool   `json:"continuous,omitempty"`
 	ContinuousBackoff string `json:"continuousBackoff,omitempty"`
 	FrontendAgentContinuous
-	SubAgentModels []agent.SubAgentModel `json:"subAgentModels,omitempty"`
+	SubAgentModels []crux.SubAgentModel `json:"subAgentModels,omitempty"`
 
 	KicksUndeliverable     int    `json:"kicksUndeliverable,omitempty"`
 	BusySince              string `json:"busySince,omitempty"`
@@ -2778,7 +2783,7 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 
 	s.broadcastFrame(fmt.Sprintf("data: %s\n\n", data))
 	if nudgeTracker {
-		s.broadcastFrame(stageTrackerSSEFrame(status.StatusSeq))
+		s.nudgeStageTracker(status.StatusSeq)
 	}
 	return true
 }
@@ -3431,7 +3436,7 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 			if proc.Paused {
 				ac["paused"] = true
 				ac["status"] = "skip"
-			} else if proc.State == agent.StateRunning {
+			} else if proc.State == crux.StateRunning {
 				ac["status"] = "pass"
 				if proc.LastKick != nil {
 					ac["last_kick"] = proc.LastKick.Format(time.RFC3339)
@@ -3549,7 +3554,7 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 		const staleOutputThreshold = 30 * time.Minute
 		stalled := []string{}
 		for name, proc := range s.deps.AgentMgr.AllStatuses() {
-			if proc.State != agent.StateRunning || proc.Paused {
+			if proc.State != crux.StateRunning || proc.Paused {
 				continue
 			}
 			if proc.OutputBuffer != nil && proc.OutputBuffer.Count() == 0 && proc.LastKick != nil {
@@ -3760,23 +3765,26 @@ func (s *Server) handleStatusSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func statusJSONResponse(w http.ResponseWriter, r *http.Request, data any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Add("Vary", "Accept-Encoding")
+	body, ok := conditionalJSONBytes(w, r, data)
+	if !ok {
+		return
+	}
 	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		if err := json.NewEncoder(w).Encode(data); err != nil {
-			slog.Warn("status json encode failed", "error", err)
+		if _, err := w.Write(body); err != nil {
+			slog.Warn("status json write failed", "error", err)
 		}
 		return
 	}
 	w.Header().Set("Content-Encoding", "gzip")
-	w.Header().Add("Vary", "Accept-Encoding")
 	gz := gzip.NewWriter(w)
 	defer func() {
 		if err := gz.Close(); err != nil {
 			slog.Warn("status gzip close failed", "error", err)
 		}
 	}()
-	if err := json.NewEncoder(gz).Encode(data); err != nil {
-		slog.Warn("status json gzip encode failed", "error", err)
+	if _, err := gz.Write(body); err != nil {
+		slog.Warn("status json gzip write failed", "error", err)
 	}
 }
 
@@ -4449,9 +4457,9 @@ func (s *Server) InferenceAuthState() (errMsg string, since time.Time) {
 // A test seam mirroring SetBackendAuthProvider: AllStatuses returns value
 // snapshots, so tests cannot stage states (running-at-login-prompt) by
 // mutating manager internals — they override this instead. nil ⇒ live manager.
-var healthAgentStatuses func() map[string]*agent.AgentProcess
+var healthAgentStatuses func() map[string]*crux.Process
 
-func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend string) (available, known bool)) bool {
+func agentCLIUnauthenticated(proc *crux.Process, authFn func(backend string) (available, known bool)) bool {
 	if proc.NeedsLogin {
 		return true
 	}
@@ -4459,7 +4467,7 @@ func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend strin
 	if proc.BackendOverride != "" {
 		backend = proc.BackendOverride
 	}
-	if backend == "bob" && proc.StartFailureClass == string(agent.StartFailureCredentialRejected) {
+	if backend == "bob" && proc.StartFailureClass == string(crux.StartFailureCredentialRejected) {
 		return true
 	}
 	// METHOD GATE. An inference backend (litellm/vllm/llm-d) authenticates with
@@ -4477,7 +4485,7 @@ func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend strin
 	// reclassify it. Only a non-running agent falls through to the probe. This
 	// is what stopped the empty shared credential path (per-agent-UID layout)
 	// from reporting healthy agents as needing login.
-	if proc.State == agent.StateRunning {
+	if proc.State == crux.StateRunning {
 		return false
 	}
 	if authFn == nil {
@@ -4487,7 +4495,7 @@ func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend strin
 	return known && !available
 }
 
-func agentProviderAuthBlocked(proc *agent.AgentProcess, now time.Time) bool {
+func agentProviderAuthBlocked(proc *crux.Process, now time.Time) bool {
 	return proc != nil &&
 		strings.EqualFold(strings.TrimSpace(proc.ProviderErrorClass), "auth") &&
 		!proc.ProviderErrorBackoffUntil.IsZero() &&
@@ -4509,7 +4517,7 @@ func (s *Server) healthGovernorMode() string {
 	return string(s.deps.Governor.GetState().Mode)
 }
 
-func (s *Server) agentIdleByDesign(name string, proc *agent.AgentProcess, currentMode string, onDemandFromPack map[string]bool) string {
+func (s *Server) agentIdleByDesign(name string, proc *crux.Process, currentMode string, onDemandFromPack map[string]bool) string {
 	if s == nil || s.deps == nil || s.deps.Config == nil || proc == nil {
 		return ""
 	}
@@ -4579,7 +4587,7 @@ func (s *Server) allAgentsPaused() bool {
 			continue
 		}
 		seen = true
-		if !proc.Paused && proc.State != agent.StatePaused {
+		if !proc.Paused && proc.State != crux.StatePaused {
 			return false
 		}
 	}
@@ -4598,10 +4606,10 @@ func (s *Server) noAgentsDue() bool {
 	onDemandFromPack := config.OnDemandAgentsFromPacks()
 	seen := false
 	for name, proc := range statuses {
-		if proc == nil || agentDisabledInConfig(s.deps.Config, name, proc) || proc.Paused || proc.State == agent.StatePaused {
+		if proc == nil || agentDisabledInConfig(s.deps.Config, name, proc) || proc.Paused || proc.State == crux.StatePaused {
 			continue
 		}
-		if proc.State == agent.StateRunning {
+		if proc.State == crux.StateRunning {
 			return false
 		}
 		seen = true
@@ -4628,7 +4636,7 @@ func (s *Server) hasRunningMeteredAgentWithoutLiveCapture() bool {
 		statuses = healthAgentStatuses()
 	}
 	for _, proc := range statuses {
-		if proc == nil || proc.State != agent.StateRunning {
+		if proc == nil || proc.State != crux.StateRunning {
 			continue
 		}
 		backend := strings.ToLower(strings.TrimSpace(proc.BackendOverride))
@@ -4739,7 +4747,7 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 				providerAuth++
 				providerAuthNames = append(providerAuthNames, name)
 			}
-			if proc.State == agent.StateRunning {
+			if proc.State == crux.StateRunning {
 				// A RUNNING agent sitting at a login prompt is alive but cannot
 				// work — the pane poller has literally seen "/login" on its
 				// terminal (proc.NeedsLogin). Counting it as running rendered a

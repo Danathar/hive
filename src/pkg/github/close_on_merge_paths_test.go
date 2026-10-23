@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/fleetreport/slogfeed"
 )
 
 func TestParseCoveredByPRComments(t *testing.T) {
@@ -436,6 +437,7 @@ func TestCloseOnMergeDecisionSkipAndFailurePaths(t *testing.T) {
 		{name: "no claim metadata without closing keyword skipped", author: "hive[bot]", body: "unrelated", head: "scanner/other", claimMetadata: false, wantAction: CloseOnMergeSkipped, wantReason: "no_closing_or_claim_metadata"},
 		{name: "refs-only claim flagged wrong refs and is not closed", author: "hive[bot]", body: "Refs #7", head: "scanner/other", claimMetadata: true, wantAction: CloseOnMergeSkipped, wantReason: "partially_addressed", wantWrongRefs: true},
 		{name: "closing keyword with remainder paragraph is not closed", author: "hive[bot]", body: "Fixes #7\n\nRecommendation 2 is deliberately left open; what remains needs a maintainer.", claimMetadata: true, wantAction: CloseOnMergeSkipped, wantReason: "partially_addressed"},
+		{name: "refs-only claim for closed issue remains informational", author: "hive[bot]", body: "Refs #7", head: "scanner/other", claimMetadata: true, issueState: "closed", wantAction: CloseOnMergeAlreadyDone, wantReason: "issue_not_open", wantWrongRefs: true},
 		{name: "issue read failure noops", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, issueGetStatus: http.StatusInternalServerError, wantAction: CloseOnMergeNoop, wantReason: "issue_read_failed"},
 		{name: "closed issue already done", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, issueState: "closed", wantAction: CloseOnMergeAlreadyDone, wantReason: "issue_not_open"},
 		{name: "close comment failure noops", author: "hive[bot]", body: "Fixes #7", claimMetadata: true, commentStatus: http.StatusForbidden, wantAction: CloseOnMergeNoop, wantReason: "close_comment_failed"},
@@ -490,7 +492,10 @@ func TestCloseOnMergeDecisionSkipAndFailurePaths(t *testing.T) {
 			defer srv.Close()
 
 			var logBuf strings.Builder
-			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+			var observed []string
+			logger := slog.New(slogfeed.NewWithObserver(slog.NewTextHandler(&logBuf, nil), func(class, key, message, diagnostics string) {
+				observed = append(observed, message)
+			}))
 			c := newTestClient(t, srv, "o", []string{"r"})
 			head := tc.head
 			if head == "" {
@@ -508,11 +513,19 @@ func TestCloseOnMergeDecisionSkipAndFailurePaths(t *testing.T) {
 			if res.WrongRefs != tc.wantWrongRefs {
 				t.Fatalf("WrongRefs = %v, want %v", res.WrongRefs, tc.wantWrongRefs)
 			}
-			if tc.wantWrongRefs && !strings.Contains(logBuf.String(), "non-closing Refs") {
-				t.Fatalf("wrong-refs warning not logged: %s", logBuf.String())
+			if tc.wantWrongRefs {
+				if !strings.Contains(logBuf.String(), "non-closing Refs") {
+					t.Fatalf("wrong-refs diagnostic not logged: %s", logBuf.String())
+				}
+				if len(observed) != 0 {
+					t.Fatalf("PR metadata fed runtime self-report observations: %v", observed)
+				}
 			}
 			if tc.wantReason == "issue_read_failed" && !strings.Contains(logBuf.String(), "reading issue failed") {
 				t.Fatalf("issue read failure not logged: %s", logBuf.String())
+			}
+			if tc.wantReason == "issue_read_failed" && (len(observed) != 1 || observed[0] != "close-on-merge: reading issue failed") {
+				t.Fatalf("issue read failure must still feed runtime self-reports: %v", observed)
 			}
 		})
 	}

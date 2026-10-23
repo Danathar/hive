@@ -1273,11 +1273,14 @@
     .status-badge.disabled { --component-status: var(--status-neutral); }
     .agent-card.status-blocked { border-left-color: var(--red) !important; }
     .agent-card.status-needs-context { border-left-color: var(--yellow) !important; }
+    /* Stale pulse: an opacity-only overlay on the left edge (compositor
+       thread) rather than animating border-left-color on the main thread. */
     @keyframes pulse-amber {
-      0%,100% { border-left-color: color-mix(in srgb, var(--yellow) 30%, transparent); }
-      50% { border-left-color: color-mix(in srgb, var(--yellow) 80%, transparent); }
+      0%,100% { opacity: 0.3; }
+      50% { opacity: 0.8; }
     }
-    .agent-card.status-stale { animation: pulse-amber 2s ease-in-out infinite; }
+    .agent-card.status-stale { border-left-color: transparent !important; }
+    .agent-card.status-stale::before { content: ''; position: absolute; top: calc(-1 * var(--line-width)); bottom: calc(-1 * var(--line-width)); left: calc(-1 * var(--focus-ring-width)); width: var(--focus-ring-width); border-radius: var(--r-lg) 0 0 var(--r-lg); background: var(--yellow); pointer-events: none; animation: pulse-amber 2s ease-in-out infinite; }
     /* Last upstream/launch error — stacked below .agent-state, never under the
        working-indicator dot, so a retry in progress cannot hide it (#3604). */
     .agent-error { font-size: 0.72rem; color: var(--red); margin-top: var(--sp-2); text-align: right; word-break: break-word; }
@@ -1336,7 +1339,13 @@
     .ham-labels { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-bottom: var(--sp-3); }
     .ham-labels:empty { display: none; }
     .ham-label-chip { font-family: var(--font-mono); }
-    .ham-labels-more { align-self: center; font-size: var(--fs-xs); color: var(--text-faint); }
+    .ham-labels-more { color: var(--text-faint); border-style: dashed; }
+    /* Synthetic "Needs human" facet: first in the row, attention-coloured so it reads as a verdict, not a label. */
+    .ham-needs-human-chip { color: var(--status-attention); border-color: var(--status-attention); font-weight: 600; }
+    .ham-needs-human-chip[aria-pressed="true"] { background: color-mix(in srgb, var(--status-attention) 16%, transparent); color: var(--text); border-color: var(--status-attention); }
+    .ham-label-dialog-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+    .ham-label-dialog-tools .ham-input { flex: 1 1 14rem; }
+    .ham-label-dialog .ham-labels { margin-bottom: var(--sp-2); }
     .ham-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4); font-size: var(--fs-xs); color: var(--text-faint); margin-bottom: var(--sp-3); }
     .ham-meta-foot { margin: var(--sp-3) 0 0; }
     .ham-meta:empty { display: none; }
@@ -1346,7 +1355,6 @@
     .ham-engine > span { padding: 0 var(--sp-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-sm); }
     .ham-engine .ham-engine-mode { color: var(--muted); }
     .ham-engine[data-mode="enforce"] .ham-engine-mode { color: var(--status-ok); }
-    .ham-engine[data-mode="off"] .ham-engine-mode { color: var(--text-faint); }
     .ham-engine .ham-engine-warn { color: var(--status-error); border-color: var(--status-error); }
     .ham-pager { display: inline-flex; align-items: center; gap: var(--sp-2); }
     .ham-pager .ham-chip:disabled { opacity: 0.4; cursor: default; }
@@ -1443,6 +1451,13 @@
     .ham-badge { display: inline-block; font-size: var(--fs-xs); line-height: 1.4; padding: 0 var(--sp-3); border-radius: var(--r-pill); border: var(--line-width) solid var(--line-subtle); color: var(--text-faint); white-space: nowrap; }
     .ham-badge-mod.ham-mod-stalled, .ham-badge-mod.ham-mod-regressed { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
     .ham-badge-mod.ham-mod-needs-triage { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+    .ham-badge-mod.ham-mod-possible-dupe { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, transparent); }
+    /* Sentinel-flagged PR, #13535 follow-up: the chip beside needs rebase /
+       regressed, and the human-decision chevron itself when its word
+       reads "Sentinel alert · needs human". Danger-tinted from the
+       status token the sentinel pill on the repo card already uses. */
+    .ham-badge-sentinel { color: var(--status-error); border-color: color-mix(in srgb, var(--status-error) 55%, transparent); font-weight: var(--fw-medium); }
+    .ham-seg.active.ham-sentinel { background: var(--status-error); color: var(--surface-0); }
     .ham-strip { list-style: none; margin: 0; padding: 0; display: flex; gap: var(--sp-1); min-height: 18px; flex: 1 1 auto; min-width: 0; --ham-notch: 8px; }
     .ham-seg { position: relative; flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 0 var(--sp-4) 0 var(--sp-5); font-size: var(--fs-xs); font-weight: var(--fw-medium); white-space: nowrap; overflow: hidden; clip-path: polygon(0 0, calc(100% - var(--ham-notch)) 0, 100% 50%, calc(100% - var(--ham-notch)) 100%, 0 100%, var(--ham-notch) 50%); }
     .ham-seg:first-child { clip-path: polygon(0 0, calc(100% - var(--ham-notch)) 0, 100% 50%, calc(100% - var(--ham-notch)) 100%, 0 100%); }
@@ -1456,15 +1471,66 @@
     .ham-seg.todo { background: transparent; color: var(--text-faint); box-shadow: inset 0 0 0 var(--line-width) var(--line-subtle); opacity: 0.5; }
     .ham-seg.blank { visibility: hidden; }
     .ham-sub { display: grid; gap: var(--sp-2); margin-top: var(--sp-3); }
-    .ham-seg.active { background: var(--amber); color: var(--surface-0); animation: ham-pulse 1.6s ease-in-out infinite; }
+    /* Only the two moving buckets animate (see stageTrackerMotion): the hive
+       acting = gentle pulse; waiting on a person = slower amber→red breathe.
+       A lit step with no data-motion (Open, Open · hold, Claimed, …) is a
+       steady fill. The pulse lives on a ::before overlay that animates only
+       opacity, so it runs on the compositor thread; animating filter /
+       background on the segment itself forced a main-thread style+paint+
+       layerize pass of the page every vsync (#13764). ::after is the
+       movement effects' (flash / ripple / wash). */
+    .ham-seg.active { background: var(--amber); color: var(--surface-0); }
+    .ham-seg.active[data-motion]::before { content: ''; position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+    .ham-seg.active[data-motion="active"]::before { background: white; animation: ham-pulse 1.6s ease-in-out infinite; }
+    .ham-seg.active[data-motion="needs-human"]::before { background: var(--red); animation: ham-breathe-human 2.8s ease-in-out infinite; }
     .ham-seg.active.ham-open-hold { background: var(--yellow); color: var(--surface-0); }
     .ham-seg.active.ham-open-hold .ham-seg-t::before { content: '⏸'; margin-right: var(--sp-1); }
     .ham-detour { white-space: normal; overflow-wrap: anywhere; }
     .ham-current-stage { display: none; margin: 0; font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
     .ham-active-ico { display: none; }
-    @keyframes ham-pulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
+    @keyframes ham-pulse { 0%, 100% { opacity: 0; } 50% { opacity: 0.3; } }
+    @keyframes ham-breathe-human { 0%, 100% { opacity: 0; } 50% { opacity: 0.55; } }
     .ham-empty { color: var(--muted); font-size: var(--fs-sm); padding: var(--sp-4) 0; }
-    @media (prefers-reduced-motion: reduce) { .ham-seg.active { animation: none; box-shadow: inset 0 0 0 2px var(--surface-0); } }
+    /* Row actions: a left gutter holds the select checkbox and the ⋯ kebab.
+       The gutter is part of every selectable row's markup and is always
+       visible: dimmed at rest (--ham-tool-rest-opacity), full emphasis on
+       the hovered / focused row and on every row while a selection or the
+       context menu is open. Nothing is tied to viewport position, row
+       index or the pointer's history — a hover-only reveal left rows
+       "randomly" with and without their gutter as the 1 Hz reconcile
+       swapped nodes under a still pointer. The context menu is a fixed,
+       viewport-clamped menu; the selection bar sits above the list.
+       Tokens only (ADR-0018). */
+    #activity-monitor-panel { position: relative; padding-left: var(--ham-gutter); }
+    .ham-row { position: relative; }
+    .ham-row:focus-visible { outline: var(--focus-ring-width) solid var(--accent); outline-offset: calc(-1 * var(--focus-ring-width)); border-radius: var(--r-sm); }
+    .ham-row.ham-selected { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset var(--sp-1) 0 0 var(--accent); border-radius: var(--r-sm); }
+    .ham-row-tools { position: absolute; left: calc(-1 * var(--ham-gutter)); top: var(--sp-5); width: var(--ham-gutter); display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); }
+    .ham-sel, .ham-kebab { appearance: none; -webkit-appearance: none; margin: 0; padding: 0; width: var(--ham-tool-size); height: var(--ham-tool-size); border: var(--line-width) solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: inherit; font-size: var(--fs-xs); line-height: 1; cursor: pointer; opacity: var(--ham-tool-rest-opacity); transition: opacity var(--ham-tool-fade-ms); }
+    .ham-row:hover .ham-sel, .ham-row:hover .ham-kebab, .ham-row:focus-within .ham-sel, .ham-row:focus-within .ham-kebab, .ham-row.ham-selected .ham-sel, .ham-row.ham-selected .ham-kebab, .ham-has-sel .ham-sel, .ham-has-sel .ham-kebab, .ham-menu-open .ham-sel, .ham-menu-open .ham-kebab { opacity: 1; }
+    @media (hover: none) { .ham-sel, .ham-kebab { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .ham-sel, .ham-kebab { transition: none; } }
+    .ham-sel:hover, .ham-kebab:hover { color: var(--text); border-color: var(--accent); }
+    .ham-sel[aria-checked="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface-0); }
+    .ham-sel[aria-checked="true"]::before { content: '✓'; font-weight: var(--fw-bold); }
+    .ham-menu { position: fixed; z-index: 9000; min-width: 14em; max-width: min(22em, calc(100vw - 2 * var(--sp-3))); padding: var(--sp-1); margin: 0; background: var(--panel); border: var(--line-width) solid var(--line-strong); border-radius: var(--r); box-shadow: var(--shadow-raised); font-size: var(--fs-sm); color: var(--text); }
+    .ham-menu-head { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ham-menu-sep { height: var(--line-width); margin: var(--sp-1) 0; background: var(--line-subtle); }
+    .ham-menu-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); width: 100%; padding: var(--sp-2) var(--sp-3); border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; }
+    .ham-menu-item:hover, .ham-menu-item:focus-visible { background: var(--panel-strong); outline: none; }
+    .ham-menu-item[aria-disabled="true"] { color: var(--text-faint); cursor: default; }
+    .ham-menu-item[aria-disabled="true"]:hover { background: transparent; }
+    .ham-menu-item.ham-menu-danger { color: var(--red); }
+    .ham-menu-item .ham-menu-more { color: var(--text-faint); }
+    .ham-submenu { display: none; margin: 0 0 0 var(--sp-3); padding-left: var(--sp-2); border-left: var(--line-width) solid var(--line-subtle); }
+    .ham-menu-item[aria-expanded="true"] + .ham-submenu { display: block; }
+    .ham-selbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-2); padding: var(--sp-2) var(--sp-3); border: var(--line-width) solid color-mix(in srgb, var(--accent) 45%, var(--line-subtle)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); font-size: var(--fs-xs); }
+    .ham-selbar[hidden] { display: none; }
+    .ham-selbar .ham-sel-count { font-weight: var(--fw-semibold); color: var(--text); margin-right: var(--sp-2); }
+    .ham-selbar .ham-chip[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+    /* Reduced motion: no animation at all — the pulse overlay is removed and
+       a needs-human step keeps a steady red tint so it still stands out. */
+    @media (prefers-reduced-motion: reduce) { .ham-seg.active { animation: none; box-shadow: inset 0 0 0 2px var(--surface-0); } .ham-seg.active[data-motion]::before { display: none; } .ham-seg.active[data-motion="needs-human"] { background: color-mix(in srgb, var(--amber) 45%, var(--red)); } }
     @media (max-width: 1100px) {
       /* Keep the aligned progress strip compact; put its active step in a
          wrapping caption instead of squeezing actionable words into a chevron. */
@@ -2749,9 +2815,12 @@
       100% { box-shadow: inset 0 0 0 2px transparent; }
     }
     .anchor-highlight { animation: anchor-flash 1.2s ease-out; }
+    /* Infinite pulses animate opacity only (compositor thread). Animating
+       box-shadow forced a main-thread paint of the page every frame. The glow
+       is a static shadow on the dot and fades with the dot's opacity. */
     @keyframes breathe-green {
-      0%,100% { opacity: 1; box-shadow: 0 0 6px 2px rgba(63,185,80,0.5); }
-      50% { opacity: 0.25; box-shadow: 0 0 2px 0px rgba(63,185,80,0.1); }
+      0%,100% { opacity: 1; }
+      50% { opacity: 0.25; }
     }
     .working-indicator {
       position: absolute; top: 12px; right: 12px;
@@ -2760,14 +2829,16 @@
     }
     .agent-card.working .working-indicator {
       display: block;
+      box-shadow: 0 0 6px 2px color-mix(in srgb, var(--green) 50%, transparent);
       animation: breathe-green 4s ease-in-out infinite;
     }
 
     /* Green pulsing dot for active agents in cadence matrix */
-    @keyframes green-pulse { 0%,100% { opacity: 1; box-shadow: 0 0 4px var(--green); } 50% { opacity: 0.3; box-shadow: none; } }
+    @keyframes green-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
     .active-dot {
       display: inline-block; width: 6px; height: 6px; border-radius: 50%;
       background: var(--green); margin-right: var(--sp-3); vertical-align: middle;
+      box-shadow: 0 0 4px var(--green);
       animation: green-pulse 6s ease-in-out infinite;
     }
 
@@ -2886,6 +2957,7 @@
     .gov-matrix .agent-dot {
       display: inline-block; width: 6px; height: 6px; border-radius: 50%;
       background: var(--green); margin-right: var(--sp-2); vertical-align: middle;
+      box-shadow: 0 0 4px var(--green);
       animation: green-pulse 6s ease-in-out infinite;
     }
 
@@ -4539,6 +4611,10 @@
     .kb-actions { display: flex; flex-wrap: wrap; gap: var(--sp-4); margin-bottom: 14px; }
     .kb-fact-list { display: flex; flex-direction: column; gap: var(--sp-3); max-height: 500px; overflow-y: auto; }
     .kb-fact-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; transition: all 0.15s; }
+    /* The list can hold thousands of facts inside a 500px scroller; let the
+       browser skip layout and paint for the cards that are scrolled out of
+       view instead of re-rendering all of them on every frame. */
+    .kb-fact-item { content-visibility: auto; contain-intrinsic-size: auto 80px; }
     .kb-fact-item:hover { border-color: var(--accent); background: rgba(88,166,255,0.04); }
     .kb-fact-item.selected { border-color: var(--accent); background: rgba(88,166,255,0.08); }
     .kb-fact-meta { flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); width: 50px; }
@@ -4654,7 +4730,7 @@
     }
     .section-chevron.collapsed { transform: rotate(-90deg); }
     .section-body {
-      overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease;
+      overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease, content-visibility 200ms;
       max-height: none; opacity: 1;
     }
     .section-body.collapsed {
@@ -4850,7 +4926,12 @@
     .gh-api-budget-table .gh-api-budget-empty { white-space: normal; }
     .gh-api-budget-empty { color: var(--muted); }
     @media (max-width: 640px) { .debug-headline-tokens { display: none; } }
-    .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease; max-height: none; opacity: 1; }
+    .dash-card-body { overflow: hidden; transition: max-height 200ms ease, opacity 200ms ease, content-visibility 200ms; max-height: none; opacity: 1; }
+    /* Keep content rendered until collapse finishes, but reveal it at the start
+       of expansion so scrollHeight and sparkline geometry can be measured. */
+    .dash-card-body, .section-body { transition-behavior: allow-discrete; }
+    .dash-card-body.collapsed:not(.collapsed-with-headline),
+    .section-body.collapsed:not(.collapsed-with-headline) { content-visibility: hidden; }
     .dash-card-body.collapsed { max-height: 0 !important; opacity: 0; pointer-events: none; }
     .dash-card-body.collapsed.collapsed-with-headline { max-height: none !important; opacity: 1; pointer-events: auto; }
     /* Wrap controls separately from the dense, locally scrolling audit table. */
@@ -7201,6 +7282,7 @@
       </div>
       <div class="ham-labels" id="activity-monitor-labels" role="group" aria-label="Filter by label"></div>
       <div class="ham-meta" id="activity-monitor-meta" aria-live="polite"></div>
+      <div class="ham-selbar" id="activity-monitor-selbar" role="toolbar" aria-label="Selected rows" hidden></div>
       <div id="activity-monitor-panel"><div class="ham-empty">Loading the tracker…</div></div>
       <div class="ham-meta ham-meta-foot" id="activity-monitor-meta-foot"></div>
     </div>
@@ -9733,6 +9815,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         body.style.maxHeight = hasHeadline ? SECTION_EXPANDED_MAX_HEIGHT : body.style.maxHeight;
       } else {
         clearCollapsedHeadlineVisibility(body);
+        // Restore content visibility before reading layout or replaying sparklines.
         body.classList.remove('collapsed');
         if (animate) {
           body.style.maxHeight = body.scrollHeight + 'px';
@@ -9782,6 +9865,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (!collapsed && section) replaySparklinesIn(section, { force: true });
       if (sectionId === 'overview-section' && !collapsed) triggerOverviewAnimations('expand');
       if (sectionId === 'lifecycle-section' && !collapsed && typeof lcScheduleLayout === 'function') lcScheduleLayout();
+      if (sectionId === 'logs-section' && !collapsed && typeof agentLogsResumeIfSkipped === 'function') agentLogsResumeIfSkipped();
     }
     /** Apply persisted collapsed state to a section after render */
     function applySectionCollapse(sectionId) {
@@ -10465,7 +10549,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         }
       });
       if (!experimentOn) {
-        if (_nousPollTimer) { clearInterval(_nousPollTimer); _nousPollTimer = null; }
+        if (_nousPollTimer) { dashboardClearInterval('nous-status'); _nousPollTimer = null; }
         _nousPollStarted = false;
         const panel = document.getElementById('nous-panel');
         if (panel) panel.innerHTML = '';
@@ -11793,15 +11877,34 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return capDashboardArray(arr, max || CLIENT_HISTORY_MAX_SAMPLES);
     }
     function dashboardSetInterval(key, fn, ms) {
-      if (DASHBOARD_INTERVALS[key]) clearInterval(DASHBOARD_INTERVALS[key]);
-      DASHBOARD_INTERVALS[key] = setInterval(fn, ms);
-      return DASHBOARD_INTERVALS[key];
+      dashboardClearInterval(key);
+      const entry = { fn, ms, timer: null };
+      DASHBOARD_INTERVALS[key] = entry;
+      if (!document.hidden) dashboardStartInterval(entry);
+      return entry;
+    }
+    function dashboardStartInterval(entry) {
+      entry.timer = setInterval(entry.fn, entry.ms);
     }
     function dashboardClearInterval(key) {
       if (!DASHBOARD_INTERVALS[key]) return;
-      clearInterval(DASHBOARD_INTERVALS[key]);
+      clearInterval(DASHBOARD_INTERVALS[key].timer);
       delete DASHBOARD_INTERVALS[key];
     }
+    document.addEventListener('visibilitychange', () => {
+      for (const [key, entry] of Object.entries(DASHBOARD_INTERVALS)) {
+        if (DASHBOARD_INTERVALS[key] !== entry) continue;
+        clearInterval(entry.timer);
+        entry.timer = null;
+        if (document.hidden) continue;
+        dashboardStartInterval(entry);
+        // A refresh failure must not prevent the other panels from resuming.
+        // Snapshot iteration also permits a callback to clear/replace itself.
+        if (DASHBOARD_INTERVALS[key] === entry) {
+          try { Promise.resolve(entry.fn()).catch(console.error); } catch (err) { console.error(err); }
+        }
+      }
+    });
     let historyData = (() => {
       try {
         const stored = localStorage.getItem(SPARKLINE_STORAGE_KEY);
@@ -11957,6 +12060,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (svg.getClientRects && svg.getClientRects().length === 0) return false;
       return true;
     }
+    function animateSparklinePart(element, frames, options) {
+      const animation = element.animate(frames, options);
+      animation.onfinish = () => {
+        // Persist the final appearance before releasing the forwards-fill effect.
+        const last = frames[frames.length - 1];
+        for (const [property, value] of Object.entries(last)) element.style[property] = String(value);
+        animation.cancel();
+      };
+      return animation;
+    }
     function animateSparklineSvg(svg, length) {
       if (!svg || !svg.isConnected) return;
       cancelSparklineWork(svg, false);
@@ -11971,9 +12084,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       wrap.classList.add('is-redrawing', 'is-glowing');
       line.style.strokeDasharray = String(len);
       line.style.strokeDashoffset = String(len);
-      line.animate([{ strokeDashoffset: len }, { strokeDashoffset: 0 }], { duration: SPARKLINE_ANIMATION_MS, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'forwards' });
-      if (area) area.animate([{ opacity: 0 }, { opacity: 0.14 }], { duration: SPARKLINE_ANIMATION_MS - 120, delay: 90, easing: 'ease-out', fill: 'forwards' });
-      if (dot) dot.animate([{ opacity: 0, transform: 'scale(0.35)' }, { opacity: 1, transform: 'scale(1.35)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 220, delay: SPARKLINE_ANIMATION_MS - 140, easing: 'cubic-bezier(.2,1.8,.4,1)', fill: 'forwards' });
+      animateSparklinePart(line, [{ strokeDashoffset: len }, { strokeDashoffset: 0 }], { duration: SPARKLINE_ANIMATION_MS, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'forwards' });
+      if (area) animateSparklinePart(area, [{ opacity: 0 }, { opacity: 0.14 }], { duration: SPARKLINE_ANIMATION_MS - 120, delay: 90, easing: 'ease-out', fill: 'forwards' });
+      if (dot) animateSparklinePart(dot, [{ opacity: 0, transform: 'scale(0.35)' }, { opacity: 1, transform: 'scale(1.35)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 220, delay: SPARKLINE_ANIMATION_MS - 140, easing: 'cubic-bezier(.2,1.8,.4,1)', fill: 'forwards' });
       const cleanupTimer = setTimeout(() => {
         _sparklineCleanupTimers.delete(wrap);
         if (!line.isConnected) return;
@@ -12071,12 +12184,29 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return sparkSvg(series, 'var(--red)', entries.map(e => e.t), `agent:${agentName}:restarts`);
     }
 
+    // Conditional reads avoid reparsing unchanged histories. Keep one validator
+    // per endpoint (not per since cursor), so this cache stays bounded.
+    const _historyValidators = new Map();
+    async function fetchDashboardHistory(url) {
+      const key = url.split('?')[0];
+      const previous = _historyValidators.get(key);
+      const headers = previous && previous.url === url ? { 'If-None-Match': previous.etag } : {};
+      const r = await fetch(url, { headers, cache: 'no-store' });
+      if (r.status === 304) return null;
+      if (!r.ok) throw new Error(`History request failed: ${r.status}`);
+      const data = await r.json();
+      const etag = r.headers.get('ETag');
+      if (etag) _historyValidators.set(key, { url, etag });
+      else _historyValidators.delete(key);
+      return data;
+    }
+
     // ── Fact count sparkline (30-day server-side history) ──
     let _factHistory = [];
     async function fetchFactHistory() {
       try {
-        const r = await fetch('/api/knowledge/fact-history');
-        _factHistory = capDashboardArray(await r.json(), DASHBOARD_SERVER_HISTORY_CAP);
+        const data = await fetchDashboardHistory('/api/knowledge/fact-history');
+        if (data !== null) _factHistory = capDashboardArray(data, DASHBOARD_SERVER_HISTORY_CAP);
       } catch { /* non-critical */ }
     }
     // axisSparkSvg renders a time series WITH axes (#4298: the dashboard's
@@ -12125,11 +12255,27 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // Mirrors the fact sparkline: same axis treatment,
     // reads /api/cost/history which parallels /api/knowledge/fact-history.
     let _costHistory = [];
+    let _costHistoryLoading = false;
+    let _costHistoryInstance = null;
+    // Spend calculations require every counter step, including resets. Bootstrap
+    // the full retained ring once, then transfer only new full-resolution rows.
+    const COST_HISTORY_POINTS = 8640;
     async function fetchCostHistory() {
+      if (_costHistoryLoading) return;
+      _costHistoryLoading = true;
       try {
-        const r = await fetch('/api/cost/history');
-        _costHistory = capDashboardArray(await r.json(), DASHBOARD_SERVER_HISTORY_CAP);
+        const instance = _statusInstance;
+        const history = _costHistoryInstance === instance ? _costHistory : [];
+        const since = history.length ? history[history.length - 1].t : 0;
+        if (_costHistoryInstance !== instance) _historyValidators.delete('/api/cost/history');
+        const data = await fetchDashboardHistory(`/api/cost/history?max_points=${COST_HISTORY_POINTS}${since ? '&since=' + since : ''}`);
+        if (instance !== _statusInstance) return; // a restart raced this request
+        if (data !== null) {
+          _costHistory = capDashboardArray(history.concat(data), COST_HISTORY_POINTS);
+          _costHistoryInstance = instance;
+        }
       } catch { /* non-critical */ }
+      finally { _costHistoryLoading = false; }
     }
     function costSparkSvg() {
       const total = costAllTimeEstimate(_lastCost && _lastCost.estimated);
@@ -13297,8 +13443,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     async function fetchHistory() {
       try {
-        const r = await fetch('/api/history');
-        const evalEntries = await r.json();
+        const evalEntries = await fetchDashboardHistory('/api/history');
+        if (evalEntries === null) return;
         // Ensure token history is loaded before merging (fixes race on initial page load)
         if (!window._serverTokenHistory) {
           try {
@@ -13832,14 +13978,71 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // It lights the Actionable column too, with its own word; a maintainer's
     // move. The Open column is untouched by it.
     const STAGE_TRACKER_TRIAGE_NEEDED = 15;
+    // 017 possible-existing: the prior-art gate parked the issue on its
+    // author (hivecommons/hive#13575). Lights Actionable with its own word.
+    const STAGE_TRACKER_POSSIBLY_EXISTS = 17;
     // Stages that share a column (or a detour word) and what the lit chevron says.
     const STAGE_TRACKER_PRE_MERGE_SOAK = 95;
-    const STAGE_TRACKER_ACTIVE_WORD = { 15: 'Triage needed', 60: 'Ready for auto merge', 80: 'Ready for auto merge', 95: 'Soaking', 100: 'Ready for auto merge', 45: 'Needs human decision', 85: 'Needs human decision' };
+    const STAGE_TRACKER_ACTIVE_WORD = { 15: 'Triage needed', 17: 'Possibly exists', 60: 'Ready for auto merge', 80: 'Ready for auto merge', 95: 'Soaking', 100: 'Ready for auto merge', 45: 'Needs human decision', 85: 'Needs human decision' };
     // Whose move it is on each lit chevron: 'author' = the PR's author kind,
     // 'claimant' = the live claim holder's kind; Open and Actionable carry none.
-    const STAGE_TRACKER_ACTOR = { 15: 'human', 20: 'claimant', 30: 'author', 40: 'author', 45: 'human', 50: 'hive', 60: 'hive', 70: 'author', 71: 'author', 72: 'author', 74: 'hive', 80: 'hive', 85: 'human', 90: 'human', 95: 'hive', 100: 'hive' };
+    const STAGE_TRACKER_ACTOR = { 15: 'human', 17: 'human', 20: 'claimant', 30: 'author', 40: 'author', 45: 'human', 50: 'hive', 60: 'hive', 70: 'author', 71: 'author', 72: 'author', 74: 'hive', 80: 'hive', 85: 'human', 90: 'human', 95: 'hive', 100: 'hive' };
     const STAGE_TRACKER_TERMINAL = 110;
+    // Motion bucket of the lit chevron: only a step the hive is acting on
+    // ('active', gentle pulse) or one waiting on a person ('needs-human',
+    // slower amber→red breathe) animates; every other lit step is 'static'.
+    // Open, Open · hold and Claimed never move — motion draws the eye to
+    // what is running or needs a hand, not to what is merely waiting.
+    //
+    //   bucket       | stages / conditions (first match wins, top to bottom)
+    //   -------------+------------------------------------------------------------
+    //   static       | any `hold` modifier (Open · hold); 110 Merged (✓ cap)
+    //   needs-human  | modifiers stalled, blocked, needs-human, needs-decision,
+    //                | needs-triage
+    //   active       | 030 PR in progress / 040 Covered by PR when the author is
+    //                | hive or clanker (an agent is working the PR)
+    //   static       | 030 / 040 with a human (or unknown) author
+    //   needs-human  | 015 Triage needed, 045 Needs decision (issue), 071 Needs
+    //                | author, 072 Returned to contributor, 085 Needs decision
+    //                | (PR), 090 Ready for human merge
+    //   active       | 050 CI / Review pending, 060 Reviewed, 070 Fixing,
+    //                | 074 Adopted by hive, 080 Merge gate, 095 Pre-merge soak,
+    //                | 100 Merge queue
+    //   static       | 000 Open, 010 Actionable, 020 Claimed, and any stage not
+    //                | listed above (default)
+    const STAGE_TRACKER_MOTION_STATIC = 'static';
+    const STAGE_TRACKER_MOTION_ACTIVE = 'active';
+    const STAGE_TRACKER_MOTION_HUMAN = 'needs-human';
+    const STAGE_TRACKER_MOTION_BY_STAGE = {
+      15: STAGE_TRACKER_MOTION_HUMAN, 45: STAGE_TRACKER_MOTION_HUMAN, 71: STAGE_TRACKER_MOTION_HUMAN, 72: STAGE_TRACKER_MOTION_HUMAN, 85: STAGE_TRACKER_MOTION_HUMAN, 90: STAGE_TRACKER_MOTION_HUMAN,
+      50: STAGE_TRACKER_MOTION_ACTIVE, 60: STAGE_TRACKER_MOTION_ACTIVE, 70: STAGE_TRACKER_MOTION_ACTIVE, 74: STAGE_TRACKER_MOTION_ACTIVE, 80: STAGE_TRACKER_MOTION_ACTIVE, 95: STAGE_TRACKER_MOTION_ACTIVE, 100: STAGE_TRACKER_MOTION_ACTIVE,
+    };
+    const STAGE_TRACKER_MOTION_AUTHOR_STAGES = [30, 40];
+    const STAGE_TRACKER_MOTION_HUMAN_MODS = ['stalled', 'blocked', 'needs-human', 'needs-decision', 'needs-triage'];
+    function stageTrackerMotion(item) {
+      const mods = Array.isArray(item && item.modifiers) ? item.modifiers : [];
+      if (mods.indexOf('hold') >= 0) return STAGE_TRACKER_MOTION_STATIC;
+      if (mods.some(m => STAGE_TRACKER_MOTION_HUMAN_MODS.indexOf(m) >= 0)) return STAGE_TRACKER_MOTION_HUMAN;
+      const n = Number(item && item.stage) || 0;
+      if (n >= STAGE_TRACKER_TERMINAL) return STAGE_TRACKER_MOTION_STATIC;
+      if (STAGE_TRACKER_MOTION_AUTHOR_STAGES.indexOf(n) >= 0) {
+        const ak = stageTrackerActorKind(item);
+        return ak === 'hive' || ak === 'clanker' ? STAGE_TRACKER_MOTION_ACTIVE : STAGE_TRACKER_MOTION_STATIC;
+      }
+      return STAGE_TRACKER_MOTION_BY_STAGE[n] || STAGE_TRACKER_MOTION_STATIC;
+    }
     const STAGE_TRACKER_TRAIL_HOPS = 4;
+    // Sentinel alert on a PR (payload sentinel_alert, from the sentinel-alert
+    // label or the head's evidence bundle): the human-decision lane names
+    // it in the chevron word itself; every other lane adds a chip. The
+    // words come from the hive's sentinel (possible security override,
+    // privilege escalation or codebase damage), so a maintainer reads the
+    // security reason before the row's "needs human".
+    const STAGE_TRACKER_SENTINEL_WORD = 'Sentinel alert · needs human';
+    const STAGE_TRACKER_SENTINEL_CHIP = 'sentinel';
+    const STAGE_TRACKER_SENTINEL_TIP = 'Sentinel flagged security-relevant changes';
+    const STAGE_TRACKER_SENTINEL_TIP_FALLBACK = 'possible security override, privilege escalation or codebase damage — a maintainer must review before merge';
+    const STAGE_TRACKER_SHORT_SHA = 7;
     var _stageTracker = null;
     var _stageTrackerSig = '';
     var _stageTrackerEtag = '';
@@ -13880,9 +14083,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     var _stageTrackerGroup = STAGE_TRACKER_GROUP_DEFAULT;
     var _stageTrackerCollapsed = {};
     function stageTrackerDefaultFilter() {
-      return { kind: 'all', repo: '', q: '', labels: [], age: 'any', author: 'any', attention: false, sort: 'furthest', dir: 'desc', size: STAGE_TRACKER_DEFAULT_PAGE_SIZE, page: 1 };
+      return { kind: 'all', repo: '', q: '', labels: [], needsHuman: false, age: 'any', author: 'any', attention: false, sort: 'furthest', dir: 'desc', size: STAGE_TRACKER_DEFAULT_PAGE_SIZE, page: 1 };
     }
     var _stageTrackerFilter = stageTrackerDefaultFilter();
+    // Type-to-filter text of the "all labels" dialog (not persisted).
+    var _stageTrackerLabelQuery = '';
 
     function stageTrackerHeadline(item) {
       const n = Number(item.stage) || 0;
@@ -13898,6 +14103,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 0: return 'Open';
         case 10: return 'Waiting for a worker';
         case 15: return 'Triage needed';
+        case 17: return 'Possibly exists · needs author';
         case 20: return 'Claimed';
         case 30: return 'PR in progress';
         case 40: return 'Covered by a PR, not yet in review';
@@ -13935,6 +14141,22 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       });
     }
 
+    // "Sentinel flagged security-relevant changes at <head short sha>:
+    // <reason>" — the sentinel wording for an item's tooltips and aria
+    // labels; '' when the item carries no alert. Without a reason or a
+    // head the generic sentinel description stands in.
+    function stageTrackerSentinelTip(item) {
+      if (!item || !item.sentinel_alert) return '';
+      const head = String(item.head || '').slice(0, STAGE_TRACKER_SHORT_SHA);
+      const reason = String(item.sentinel_reason || '').trim();
+      return STAGE_TRACKER_SENTINEL_TIP + (head ? ' at ' + head : '') + ': ' + (reason || STAGE_TRACKER_SENTINEL_TIP_FALLBACK);
+    }
+    // Whether the item's lit chevron word carries the alert itself (a PR
+    // parked at 085, or an issue riding one): the chip then adds nothing.
+    function stageTrackerSentinelInLane(item) {
+      return !!(item && item.sentinel_alert) && (Number(item.stage) || 0) === STAGE_TRACKER_NEEDS_DECISION && (item.kind === 'pr' || !!item.via_pr);
+    }
+
     // Which strip segment a stage lights: main stages light themselves,
     // 040 shares the PR in progress column with 030, 060, 095 and 100 share
     // the Merge gate column with 080, detours light the segment they branch from.
@@ -13944,7 +14166,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerAnchor(stage, stages, kind) {
       const cur = Number(stage) || 0;
       if (cur >= STAGE_TRACKER_TERMINAL) return STAGE_TRACKER_TERMINAL;
-      if (cur === STAGE_TRACKER_ISSUE_NEEDS_DECISION || cur === STAGE_TRACKER_TRIAGE_NEEDED) return STAGE_TRACKER_ISSUE_DECISION_COLUMN;
+      if (cur === STAGE_TRACKER_ISSUE_NEEDS_DECISION || cur === STAGE_TRACKER_TRIAGE_NEEDED || cur === STAGE_TRACKER_POSSIBLY_EXISTS) return STAGE_TRACKER_ISSUE_DECISION_COLUMN;
       if (cur === STAGE_TRACKER_NEEDS_DECISION && kind === 'issue') return STAGE_TRACKER_ISSUE_DECISION_COLUMN;
       if (STAGE_TRACKER_PATH.indexOf(cur) >= 0) return cur;
       if (cur === 40) return STAGE_TRACKER_PR_COLUMN;
@@ -13964,8 +14186,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const curStage = byNum[cur] || {};
       const anchor = stageTrackerAnchor(cur, stages, item.via_pr ? 'pr' : item.kind);
       const terminal = anchor >= STAGE_TRACKER_TERMINAL;
-      const detour = (!terminal && STAGE_TRACKER_PATH.indexOf(cur) < 0 && cur !== STAGE_TRACKER_TRIAGE_NEEDED && cur !== 40 && cur !== 60 && cur !== STAGE_TRACKER_PRE_MERGE_SOAK && cur !== 100)
-        ? { text: STAGE_TRACKER_ACTIVE_WORD[cur] || curStage.short || curStage.label || String(cur) } : null;
+      const sentinelLane = stageTrackerSentinelInLane(item);
+      const detour = (!terminal && STAGE_TRACKER_PATH.indexOf(cur) < 0 && cur !== STAGE_TRACKER_TRIAGE_NEEDED && cur !== STAGE_TRACKER_POSSIBLY_EXISTS && cur !== 40 && cur !== 60 && cur !== STAGE_TRACKER_PRE_MERGE_SOAK && cur !== 100)
+        ? { text: sentinelLane ? STAGE_TRACKER_SENTINEL_WORD : (STAGE_TRACKER_ACTIVE_WORD[cur] || curStage.short || curStage.label || String(cur)), sentinel: sentinelLane } : null;
       const segs = STAGE_TRACKER_PATH.map(n => {
         const st = n === 0 ? { label: 'Open', short: 'Open', description: 'Open, not yet in a stage' } : (byNum[n] || {});
         let state = 'todo';
@@ -13982,8 +14205,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return segs;
     }
 
-    const STAGE_TRACKER_MOD_PRIORITY = ['stalled', 'regressed', 'hold', 'needs-human', 'needs-decision', 'needs-triage', 'needs-rebase', 'blocked', 'draft'];
-    const STAGE_TRACKER_MOD_TEXT = { 'needs-decision': 'needs human decision', 'needs-triage': 'triage needed' };
+    const STAGE_TRACKER_MOD_PRIORITY = ['stalled', 'regressed', 'hold', 'needs-human', 'needs-decision', 'needs-triage', 'possible-dupe', 'needs-rebase', 'blocked', 'draft'];
+    const STAGE_TRACKER_MOD_TEXT = { 'needs-decision': 'needs human decision', 'needs-triage': 'triage needed', 'possible-dupe': 'possible dupe' };
     // 16-unit monochrome stroke icons, one per strip column (and the two kinds).
     const STAGE_TRACKER_ICONS = {
       0: '<circle cx="8" cy="8" r="5"/>',
@@ -14062,9 +14285,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const to = range && range.to != null ? range.to : Infinity;
       const actorKind = stageTrackerActorKind(item);
       const actorIco = actorKind ? stageTrackerIcon(actorKind, 'ham-ico ham-actor-ico', 'Next move: ' + actorKind) : '';
+      // Static chevrons carry no data-motion: the CSS only animates the two moving buckets.
+      const motion = stageTrackerMotion(item);
+      const motionAttr = motion === STAGE_TRACKER_MOTION_STATIC ? '' : ` data-motion="${motion}"`;
       return segs.map(sg => {
         if (sg.number < from || sg.number > to) return `<li class="ham-seg blank${sg.cap ? ' cap' : ''}" aria-hidden="true"></li>`;
-        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : '', sg.hold ? 'ham-open-hold' : ''].filter(Boolean).join(' ');
+        const sentinel = !!(sg.detour && sg.detour.sentinel);
+        const cls = ['ham-seg', sg.state, sg.cap ? 'cap' : '', sg.cap && sg.terminal ? 'merged' : '', sg.detour ? 'detoured' : '', sg.hold ? 'ham-open-hold' : '', sentinel ? 'ham-sentinel' : ''].filter(Boolean).join(' ');
         const active = sg.state === 'active';
         let tip = '';
         if (active) {
@@ -14074,12 +14301,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           else if (curStage === STAGE_TRACKER_PRE_MERGE_SOAK) tip = sg.label + ' — admitted, soaking' + stageTrackerSoakLeft(item);
           else if (curStage === 100) tip = sg.label + ' — admitted, merging';
           if (actorKind && !sg.cap) tip += ' · Next move: ' + actorKind;
+          // The sentinel's reason leads the lane tooltip so the security
+          // implication is read before the stage mechanics.
+          if (sentinel) tip = stageTrackerSentinelTip(item) + ' — ' + tip;
         }
         let inner;
         if (sg.cap) inner = stageTrackerIcon(sg.number, 'ham-ico');
         else if (active) inner = stageTrackerIcon(sg.number, 'ham-ico ham-active-ico') + (sg.detour ? `<span class="ham-detour">${esc(sg.detour.text)}</span>` : `<span class="ham-seg-t">${esc(sg.short)}</span>`) + actorIco;
         else inner = stageTrackerIcon(sg.number, 'ham-ico');
-        return `<li class="${cls}"${active ? ` title="${esc(tip)}" aria-current="step"` : ''}>${inner}</li>`;
+        return `<li class="${cls}"${active ? `${sg.cap ? '' : motionAttr} title="${esc(tip)}" aria-current="step"` : ''}${sentinel ? ` aria-label="${esc(STAGE_TRACKER_SENTINEL_WORD + ' — ' + stageTrackerSentinelTip(item))}"` : ''}>${inner}</li>`;
       }).join('');
     }
 
@@ -14140,6 +14370,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const actorKind = stageTrackerActorKind(item);
       if (actorKind) lines.push('Next move: ' + actorKind);
       if (mods.length) lines.push('Flags: ' + mods.map(m => STAGE_TRACKER_MOD_TEXT[m] || m).join(', '));
+      if (item.sentinel_alert) lines.push(stageTrackerSentinelTip(item));
       const regressed = stageTrackerRegressionText(item, nowMs);
       if (regressed) lines.push(regressed.charAt(0).toUpperCase() + regressed.slice(1));
       if (sinceMs) lines.push('Since ' + agentNowClockTime(sinceMs, nowMs) + ' · ' + agentNowAgo(nowMs - sinceMs));
@@ -14147,10 +14378,18 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return lines.filter(Boolean).join('\n');
     }
 
+    // The sentinel chip: drawn in the chip area (beside needs rebase /
+    // regressed) on every lane but the one whose word already says it.
+    function stageTrackerSentinelChipHtml(item) {
+      if (!item || !item.sentinel_alert || stageTrackerSentinelInLane(item)) return '';
+      return `<span class="ham-badge ham-badge-sentinel" title="${esc(stageTrackerSentinelTip(item))}" aria-label="${esc('Sentinel alert — ' + stageTrackerSentinelTip(item))}">${esc(STAGE_TRACKER_SENTINEL_CHIP)}</span>`;
+    }
+
     function stageTrackerChipsHtml(item) {
+      const sentinel = stageTrackerSentinelChipHtml(item);
       const mods = (Array.isArray(item.modifiers) ? item.modifiers.slice() : [])
         .sort((x, y) => STAGE_TRACKER_MOD_PRIORITY.indexOf(x) - STAGE_TRACKER_MOD_PRIORITY.indexOf(y));
-      if (!mods.length) return '';
+      if (!mods.length) return sentinel;
       let text = STAGE_TRACKER_MOD_TEXT[mods[0]] || mods[0].replace(/-/g, ' ');
       // A blocked row with a hive:recheck-after deadline ("blocked until <RFC3339>") names when the sweep re-checks it.
       const recheck = mods[0] === 'blocked' ? /^blocked until (\S+)/i.exec(String(item.bucket_reason || '')) : null;
@@ -14158,7 +14397,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (!isNaN(recheckMs)) text += ' · re-check at ' + agentNowClockTime(recheckMs, Date.now());
       // The regressed pill (lead or folded into "+1") explains itself on hover.
       const regressed = stageTrackerRegressionText(item, Date.now());
-      return `<span class="ham-badge ham-badge-mod ham-mod-${esc(mods[0])}"${regressed ? ` title="${esc(regressed)}"` : ''}>${esc(text)}${mods.length > 1 ? ' +' + (mods.length - 1) : ''}</span>`;
+      return sentinel + `<span class="ham-badge ham-badge-mod ham-mod-${esc(mods[0])}"${regressed ? ` title="${esc(regressed)}"` : ''}>${esc(text)}${mods.length > 1 ? ' +' + (mods.length - 1) : ''}</span>`;
     }
 
     // Ghost strip for a title line: the lead cell (Open..Claimed) carries
@@ -14181,11 +14420,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // PR's full tooltip rides its link; the sub-row container has none.
     function stageTrackerSubRowHtml(lp, issue, stages, nowMs, ctx) {
       const pr = { repo: issue.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', author: lp.author || '', author_kind: lp.author_kind || '',
-        stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], caption: lp.caption || '', reason: lp.reason || '' };
+        stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], caption: lp.caption || '', reason: lp.reason || '',
+        sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' };
       let ref = stageTrackerPRRef(pr.number, pr.url, pr.author_kind, pr.author, pr.title, (pr.title ? pr.title + ' · ' : '') + stageTrackerTooltip(pr, nowMs));
+      if (lp.base_ref) ref += ` <span class="ham-badge">${esc(lp.base_ref)}</span>`;
       const chip = ctx && ctx.repoChips ? stageTrackerRepoChipHtml(pr.repo, ctx) : '';
       if (chip) ref = `<span class="ham-pr-line">${chip}${ref}</span>`;
-      return `<div class="ham-sub" data-ham-kind="pr" data-ham-stage="${pr.stage}">
+      return `<div class="ham-sub" data-ham-kind="pr" data-ham-stage="${pr.stage}" data-ham-sub-key="${esc(stageTrackerItemKey(pr))}">
           <div class="ham-row-head">
             ${stageTrackerHeadColsHtml([ref], stageTrackerSinceHtml(pr, nowMs), '', stageTrackerChipsHtml(pr))}
           </div>
@@ -14355,8 +14596,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         if (linked.length === 1) {
           // One covering PR: a single entry whose strip the PR's stage drives.
           const lp = linked[0];
-          prRefs = [stageTrackerPRRef(lp.number, lp.url, lp.author_kind || '', lp.author, lp.title)];
-          shown = Object.assign({}, item, { via_pr: true, stage: lp.stage || 40, stage_since: lp.stage_since || item.stage_since, modifiers: lp.modifiers || item.modifiers, caption: lp.caption || item.caption, reason: lp.reason || item.reason });
+          prRefs = [stageTrackerPRRef(lp.number, lp.url, lp.author_kind || '', lp.author, lp.title) + (lp.base_ref ? ` <span class="ham-badge">${esc(lp.base_ref)}</span>` : '')];
+          shown = Object.assign({}, item, { via_pr: true, stage: lp.stage || 40, stage_since: lp.stage_since || item.stage_since, modifiers: lp.modifiers || item.modifiers, caption: lp.caption || item.caption, reason: lp.reason || item.reason,
+            sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' });
         } else if (linked.length) {
           // Several covering PRs: the issue strip ends at Claimed, all passed
           // and nothing lit; one sub-row per PR carries the live chevron.
@@ -14379,6 +14621,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
             ${stageTrackerIcon('issue', 'ham-kind-ico')}${chip}
             <a class="ham-ref" href="${esc(item.url || '#')}" target="_blank" rel="noopener" title="${esc(stageTrackerTooltip(shown, nowMs))}">#${Number(item.number) || 0}</a>
             <span class="ham-title" title="${esc(title)}">${esc(title)}</span>
+            ${item.claim_reference ? `<span class="ham-badge ham-issue-refs-chip" title="${esc(STAGE_TRACKER_SOFT_LINK_TIP)}">refs</span>` : ''}
+            ${item.is_tracker ? `<span class="ham-badge">tracker${item.children && item.children.total ? ' ' + Number(item.children.completed) + '/' + Number(item.children.total) : ''}</span>` : ''}
           </div>`;
       } else {
         const li = stageTrackerPRIssueSlot(item);
@@ -14394,7 +14638,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
             <span class="ham-title ham-no-issue-t">${esc(li.text)}</span>
           </div>`;
       }
-      return `<div class="ham-row" data-ham-kind="${esc(item.kind)}" data-ham-repo="${esc(item.repo || '')}" data-ham-stage="${Number(item.stage) || 0}">
+      return `<div class="ham-row" tabindex="0" data-ham-kind="${esc(item.kind)}" data-ham-repo="${esc(item.repo || '')}" data-ham-stage="${Number(item.stage) || 0}">
+        ${stageTrackerRowToolsHtml(item)}
         <div class="ham-row-head">
           ${stageTrackerHeadColsHtml(prRefs, stageTrackerSinceHtml(shown, nowMs), leadHtml, stageTrackerChipsHtml(shown))}
         </div>
@@ -14844,6 +15089,37 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return '';
     }
 
+    // label facet helpers begin
+    // The "a person must act" label set comes from the payload
+    // (needs_human_labels, one Go definition shared with the Projects
+    // preset). A label matches an entry exactly or as `entry/...`.
+    function stageTrackerNeedsHumanLabels(d) {
+      return (d && Array.isArray(d.needs_human_labels) ? d.needs_human_labels : []).map(l => String(l || '').trim().toLowerCase()).filter(Boolean);
+    }
+    // Patterns catch new stages/labels the explicit set does not list yet:
+    // needs-human*, *needs-decision, *needs-author.
+    function stageTrackerLabelNeedsHuman(label, set) {
+      const l = String(label || '').toLowerCase();
+      if (l.startsWith('needs-human') || l.endsWith('needs-decision') || l.endsWith('needs-author')) return true;
+      return (set || []).some(s => l === s || l.startsWith(s + '/'));
+    }
+    function stageTrackerItemNeedsHuman(item, set) {
+      if (!set || !set.length) return false;
+      return (item && Array.isArray(item.labels) ? item.labels : []).some(l => stageTrackerLabelNeedsHuman(l, set));
+    }
+
+    // Chip order: every stage/NNN-* label first by NNN, then everything
+    // else alphabetically, case-insensitive.
+    function stageTrackerLabelCompare(a, b) {
+      a = String(a || ''); b = String(b || '');
+      const sa = /^stage\/(\d+)/i.exec(a), sb = /^stage\/(\d+)/i.exec(b);
+      if (sa && sb) return (Number(sa[1]) - Number(sb[1])) || a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b);
+      if (sa) return -1;
+      if (sb) return 1;
+      return a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b);
+    }
+    // label facet helpers end
+
     // Normalise a filter object: unknown values fall back to the default.
     function stageTrackerNormalizeFilter(raw) {
       const d = stageTrackerDefaultFilter();
@@ -14852,6 +15128,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       f.repo = typeof f.repo === 'string' ? f.repo : '';
       f.q = typeof f.q === 'string' ? f.q : '';
       f.labels = Array.isArray(f.labels) ? f.labels.filter(l => typeof l === 'string' && l).map(l => l.toLowerCase()) : [];
+      f.needsHuman = !!f.needsHuman;
       if (!(f.age in STAGE_TRACKER_AGE_MS) && f.age !== 'stale') f.age = 'any';
       if (['human', 'clanker', 'hive'].indexOf(f.author) < 0) f.author = 'any';
       f.attention = !!f.attention;
@@ -14864,7 +15141,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     // True when any narrowing filter (not sort / paging) is set.
     function stageTrackerFilterActive(f) {
-      return f.kind !== 'all' || !!f.repo || !!f.q || f.labels.length > 0 || f.age !== 'any' || f.author !== 'any' || f.attention;
+      return f.kind !== 'all' || !!f.repo || !!f.q || f.labels.length > 0 || f.needsHuman || f.age !== 'any' || f.author !== 'any' || f.attention;
     }
 
     // Does one item pass the narrowing filters? ctx.nowMs anchors the age
@@ -14888,6 +15165,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         f.labels.forEach(l => { const fam = stageTrackerLabelFamily(l) || l; (byFamily[fam] = byFamily[fam] || []).push(l); });
         for (const fam in byFamily) if (!byFamily[fam].some(l => have.has(l))) return false;
       }
+      if (f.needsHuman && !stageTrackerItemNeedsHuman(item, ctx.needsHumanLabels)) return false;
       if (f.author !== 'any' && (item.author_kind || '') !== f.author) return false;
       if (f.attention && !stageTrackerNeedsAttention(item)) return false;
       if (f.age !== 'any') {
@@ -14945,19 +15223,39 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return { rows: (rows || []).slice(from ? from - 1 : 0, to), page, pages, from, to, total, size: f.size };
     }
 
-    // Label chips: every label of a known family, then other labels carried
-    // by two or more items, most common first; selected labels always stay.
-    function stageTrackerLabelFacets(items, f) {
+    // label facet model begin
+    // Label chips: every label on any item, stage/NNN first by number then
+    // the rest alphabetically (stageTrackerLabelCompare). The row shows the
+    // first STAGE_TRACKER_LABEL_CHIP_LIMIT plus every selected label; `all`
+    // is the complete list the "+N more" dialog offers, so no label is ever
+    // out of reach. `needsHuman` is the synthetic facet: its count is the
+    // number of distinct items carrying any label of the needs-human set.
+    function stageTrackerLabelFacets(items, f, opts) {
       f = stageTrackerNormalizeFilter(f);
+      opts = opts || {};
       const counts = {};
       (items || []).forEach(it => (Array.isArray(it.labels) ? it.labels : []).forEach(l => { const k = String(l).toLowerCase(); counts[k] = (counts[k] || 0) + 1; }));
-      const famRank = l => { const i = STAGE_TRACKER_LABEL_FAMILIES.indexOf(stageTrackerLabelFamily(l)); return i < 0 ? STAGE_TRACKER_LABEL_FAMILIES.length : i; };
-      const all = Object.keys(counts).filter(l => f.labels.indexOf(l) >= 0 || stageTrackerLabelFamily(l) || counts[l] > 1)
-        .sort((a, b) => (famRank(a) - famRank(b)) || (counts[b] - counts[a]) || a.localeCompare(b));
+      const all = Object.keys(counts).sort(stageTrackerLabelCompare);
       const shown = all.slice(0, STAGE_TRACKER_LABEL_CHIP_LIMIT);
       f.labels.forEach(l => { if (counts[l] && shown.indexOf(l) < 0) shown.push(l); });
-      return { chips: shown.map(l => ({ label: l, count: counts[l], on: f.labels.indexOf(l) >= 0 })), hidden: Math.max(0, all.length - shown.length) };
+      shown.sort(stageTrackerLabelCompare);
+      const chip = l => ({ label: l, count: counts[l], on: f.labels.indexOf(l) >= 0 });
+      const set = Array.isArray(opts.needsHumanLabels) ? opts.needsHumanLabels : [];
+      const needsHuman = set.length ? { count: (items || []).filter(it => stageTrackerItemNeedsHuman(it, set)).length, on: f.needsHuman, labels: set.slice(), covered: all.filter(l => stageTrackerLabelNeedsHuman(l, set)).map(chip) } : null;
+      return { chips: shown.map(chip), all: all.map(chip), hidden: Math.max(0, all.length - shown.length), needsHuman };
     }
+
+    // Rows of the "all labels" dialog: `facets.all` narrowed by a
+    // case-insensitive substring query; selected labels always stay listed
+    // so they can be cleared.
+    function stageTrackerLabelDialogData(facets, query) {
+      const q = String(query || '').trim().toLowerCase();
+      const all = facets && Array.isArray(facets.all) ? facets.all : [];
+      const rows = q ? all.filter(c => c.on || c.label.indexOf(q) >= 0) : all;
+      const selected = all.filter(c => c.on).length + (facets && facets.needsHuman && facets.needsHuman.on ? 1 : 0);
+      return { rows, total: all.length, selected, query: q, needsHuman: facets ? facets.needsHuman : null };
+    }
+    // label facet model end
 
     // "showing X–Y of N (M filtered out)" and the header's "N items · M need attention".
     // With `open` ({issues, prs} — the payload's open_issues/open_prs, i.e. the
@@ -15083,6 +15381,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 'dir': f.dir = value === 'toggle' ? (f.dir === 'asc' ? 'desc' : 'asc') : value; break;
         case 'size': f.size = Number(value) || STAGE_TRACKER_DEFAULT_PAGE_SIZE; break;
         case 'label': { const l = String(value || '').toLowerCase(); const i = f.labels.indexOf(l); if (i >= 0) f.labels.splice(i, 1); else if (l) f.labels.push(l); break; }
+        case 'needsHuman': f.needsHuman = value === 'toggle' ? !f.needsHuman : !!value; break;
+        case 'labelsClear': f.labels = []; f.needsHuman = false; break;
         case 'page': f.page = value === 'prev' ? f.page - 1 : value === 'next' ? f.page + 1 : Number(value) || 1; break;
         case 'reset': { const keep = { sort: f.sort, dir: f.dir, size: f.size }; _stageTrackerFilter = Object.assign(stageTrackerDefaultFilter(), keep); break; }
       }
@@ -15111,10 +15411,92 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (reset) reset.hidden = !stageTrackerFilterActive(f);
     }
 
+    function stageTrackerLabelChipHtml(c) {
+      return `<button type="button" class="ham-chip ham-label-chip" data-action="hamFilter" data-arg0="label" data-arg1="${esc(c.label)}" aria-pressed="${c.on ? 'true' : 'false'}" title="${esc((c.on ? 'Remove label filter ' : 'Filter by label ') + c.label)}">${esc(c.label)}<span class="ham-chip-n">${c.count}</span></button>`;
+    }
+    function stageTrackerNeedsHumanChipHtml(nh) {
+      if (!nh) return '';
+      const tip = (nh.on ? 'Remove the Needs human filter' : 'Show only items a person must act on') + ' — any of: ' + nh.labels.join(', ');
+      return `<button type="button" class="ham-chip ham-needs-human-chip" data-action="hamFilter" data-arg0="needsHuman" data-arg1="toggle" aria-pressed="${nh.on ? 'true' : 'false'}" title="${esc(tip)}">🙋 Needs human<span class="ham-chip-n">${nh.count}</span></button>`;
+    }
     function stageTrackerLabelsHtml(facets) {
-      if (!facets.chips.length) return '';
-      return facets.chips.map(c => `<button type="button" class="ham-chip ham-label-chip" data-action="hamFilter" data-arg0="label" data-arg1="${esc(c.label)}" aria-pressed="${c.on ? 'true' : 'false'}" title="${esc((c.on ? 'Remove label filter ' : 'Filter by label ') + c.label)}">${esc(c.label)}<span class="ham-chip-n">${c.count}</span></button>`).join('')
-        + (facets.hidden ? `<span class="ham-labels-more" title="Labels carried by a single item are not offered as chips">+${facets.hidden} more</span>` : '');
+      if (!facets.chips.length && !facets.needsHuman) return '';
+      return stageTrackerNeedsHumanChipHtml(facets.needsHuman)
+        + facets.chips.map(stageTrackerLabelChipHtml).join('')
+        + (facets.hidden ? `<button type="button" class="ham-chip ham-labels-more" data-action="openStageTrackerLabelDialog" aria-haspopup="dialog" title="Show all ${facets.all.length} labels with counts; pick any to filter">+${facets.hidden} more</button>` : '');
+    }
+
+    // "All labels" dialog: every label with its count, same order as the
+    // row, a type-to-filter box, the same toggle the chips use and Clear.
+    // In-app modal (config-overlay recipe), never a native prompt.
+    function stageTrackerLabelDialogHtml(data) {
+      return `<div class="ham-label-dialog-tools"><input type="search" class="ham-input" id="activity-monitor-labels-q" placeholder="Type to filter labels…" autocomplete="off" spellcheck="false" aria-label="Filter the label list" value="${esc(data.query)}" data-input-action="stageTrackerLabelDialogQuery" data-arg-types="w"><span class="ham-count">${esc(stageTrackerLabelDialogCountText(data))}</span><button type="button" class="hv-btn btn-secondary btn-sm" data-action="hamFilter" data-arg0="labelsClear"${data.selected ? '' : ' disabled'} title="Clear every label filter">Clear</button></div>`
+        + (data.needsHuman ? `<div class="ham-labels ham-label-dialog-needs-human">${stageTrackerNeedsHumanChipHtml(data.needsHuman)}</div>` + stageTrackerNeedsHumanGroupHtml(data.needsHuman) : '')
+        + `<div class="ham-labels ham-label-dialog-list" role="group" aria-label="All labels">${stageTrackerLabelDialogListHtml(data)}</div>`;
+    }
+    // Group header listing the labels the Needs human facet covers.
+    function stageTrackerNeedsHumanGroupHtml(nh) {
+      const covered = nh && Array.isArray(nh.covered) ? nh.covered : [];
+      if (!covered.length) return '';
+      return `<div class="ham-label-group" role="group" aria-label="Needs human labels"><div class="ham-label-group-title">Needs human covers ${covered.length} ${covered.length === 1 ? 'label' : 'labels'}</div><div class="ham-labels">${covered.map(stageTrackerLabelChipHtml).join('')}</div></div>`;
+    }
+    function stageTrackerLabelDialogListHtml(data) {
+      return data.rows.length ? data.rows.map(stageTrackerLabelChipHtml).join('') : `<div class="ham-empty">No label matches “${esc(data.query)}”</div>`;
+    }
+    function stageTrackerLabelDialogCountText(data) {
+      return (data.rows.length === data.total ? data.total + ' labels' : data.rows.length + ' of ' + data.total + ' labels') + ' · ' + data.selected + ' selected';
+    }
+    // Redraw the open dialog. While the filter box has focus only the list,
+    // the count, the Clear button and the Needs human chip are patched so a
+    // poll-driven render never steals the caret.
+    function stageTrackerRenderLabelDialog() {
+      const body = document.getElementById('activity-monitor-labels-body');
+      if (!body || !_stageTracker || !Array.isArray(_stageTracker.items)) return;
+      const facets = stageTrackerLabelFacets(_stageTracker.items, _stageTrackerFilter, { needsHumanLabels: stageTrackerNeedsHumanLabels(_stageTracker) });
+      const data = stageTrackerLabelDialogData(facets, _stageTrackerLabelQuery);
+      const q = document.getElementById('activity-monitor-labels-q');
+      if (!q || document.activeElement !== q) { setIfChanged(body, stageTrackerLabelDialogHtml(data)); return; }
+      const list = body.querySelector('.ham-label-dialog-list');
+      if (list) setIfChanged(list, stageTrackerLabelDialogListHtml(data));
+      const count = body.querySelector('.ham-label-dialog-tools .ham-count');
+      if (count && count.textContent !== stageTrackerLabelDialogCountText(data)) count.textContent = stageTrackerLabelDialogCountText(data);
+      const clear = body.querySelector('.ham-label-dialog-tools .hv-btn');
+      if (clear) clear.disabled = !data.selected;
+      const nh = body.querySelector('.ham-label-dialog-needs-human');
+      if (nh) setIfChanged(nh, stageTrackerNeedsHumanChipHtml(data.needsHuman));
+    }
+    var _stageTrackerLabelDialogReturnFocus = null;
+    function openStageTrackerLabelDialog() {
+      if (document.getElementById('activity-monitor-labels-overlay')) return;
+      _stageTrackerLabelDialogReturnFocus = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.id = 'activity-monitor-labels-overlay';
+      overlay.className = 'config-overlay';
+      hiveRememberModalOpen(overlay);
+      overlay.innerHTML = `<div class="config-modal overview-settings-modal ham-label-dialog" role="dialog" aria-modal="true" aria-labelledby="activity-monitor-labels-title">
+        <div class="config-header">
+          <h2 class="config-title" id="activity-monitor-labels-title">All labels</h2>
+          <button type="button" class="config-close" data-action="closeStageTrackerLabelDialog" aria-label="Close the label list">&times;</button>
+        </div>
+        <div class="config-body overview-settings-body modal-scroll" id="activity-monitor-labels-body"></div>
+      </div>`;
+      overlay.addEventListener('click', e => { if (e.target === overlay) closeStageTrackerLabelDialog(); });
+      document.body.appendChild(overlay);
+      stageTrackerRenderLabelDialog();
+      const q = document.getElementById('activity-monitor-labels-q');
+      if (q) setTimeout(() => q.focus(), 0);
+    }
+    function closeStageTrackerLabelDialog() {
+      const overlay = document.getElementById('activity-monitor-labels-overlay');
+      if (overlay) overlay.remove();
+      _stageTrackerLabelQuery = '';
+      const ret = _stageTrackerLabelDialogReturnFocus;
+      _stageTrackerLabelDialogReturnFocus = null;
+      if (ret && ret.focus && document.contains(ret)) setTimeout(() => ret.focus({ preventScroll: true }), 0);
+    }
+    function stageTrackerLabelDialogQuery(value) {
+      _stageTrackerLabelQuery = String(value || '');
+      stageTrackerRenderLabelDialog();
     }
 
     function stageTrackerPagerHtml(page) {
@@ -15133,23 +15515,17 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const src = d.source === 'fresh' ? 'built for this request' : 'from the server cache';
       return `<span class="ham-updated${stale ? ' ham-stale' : ''}" title="${esc('Payload built ' + agentNowClockTime(at, nowMs) + ' ' + src + (ttlMs ? '; the server rebuilds it at most every ' + Math.round(ttlMs / 1000) + 's and makes no GitHub call per request' : ''))}">updated ${esc(stageTrackerShortAgo(ageMs) === 'now' ? Math.floor(ageMs / 1000) + 's' : stageTrackerShortAgo(ageMs))} ago · ${esc(d.source || 'cache')}</span>`;
     }
-    // The ADR-0025 central stage engine's status strip: mode, shadow
-    // mismatches, admission anomalies (governor.labels.stage.engine.mode).
-    // Hover text on the items only, per the tracker hover rules.
+    // The ADR-0025 central stage engine's status strip: mode and admission
+    // anomalies (governor.labels.stage.engine.mode). Hover text on the
+    // items only, per the tracker hover rules.
     function stageTrackerEngineHtml(d) {
       const e = d && d.engine;
       if (!e || !e.mode) return '';
-      const mismatches = Number(e.mismatches) || 0;
       const anomalies = Number(e.anomalies) || 0;
-      const examples = Array.isArray(e.lastMismatchExamples) ? e.lastMismatchExamples : [];
-      const exampleText = examples.length
-        ? ' Latest: ' + examples.map(x => `${x.ref} ${x.kind}: legacy ${x.legacy || '-'} vs engine ${x.engine || '-'}`).join('; ')
-        : '';
-      const modeHelp = { off: 'off: rollback — the sweeps write their own derivation, the engine is inert.', shadow: 'shadow: the engine derives alongside the sweeps, which still write; disagreements are counted.', enforce: 'enforce: the engine derives and writes; its admission table rejects out-of-order transitions.' }[e.mode] || '';
+      const modeHelp = { shadow: 'shadow: the engine derives and counts but writes nothing (dry run; stage labels are left as found).', enforce: 'enforce: the engine derives and writes; its admission table counts out-of-order transitions.' }[e.mode] || '';
       return `<span class="ham-engine" data-mode="${esc(e.mode)}">`
         + `<span class="ham-engine-mode" title="${esc('Central stage engine (ADR-0025). ' + modeHelp + ' ' + (Number(e.derivations) || 0) + ' derivations since start. Settings → Labels → Central stage engine mode.')}">engine ${esc(e.mode)}</span>`
-        + `<span class="ham-engine-mismatch${mismatches ? ' ham-engine-warn' : ''}" title="${esc('Shadow mismatches: items where the engine and the sweep derived different stages (stage_shadow_mismatch_total).' + exampleText)}">${esc(mismatches)} mismatch${mismatches === 1 ? '' : 'es'}</span>`
-        + `<span class="ham-engine-anomaly${anomalies ? ' ham-engine-warn' : ''}" title="${esc('Transition anomalies: stage moves the admission table rejected (stage_transition_anomaly_total).')}">${esc(anomalies)} anomal${anomalies === 1 ? 'y' : 'ies'}</span>`
+        + `<span class="ham-engine-anomaly${anomalies ? ' ham-engine-warn' : ''}" title="${esc('Transition anomalies: stage moves the admission table did not expect (stage_transition_anomaly_total).')}">${esc(anomalies)} anomal${anomalies === 1 ? 'y' : 'ies'}</span>`
         + '</span>';
     }
     function stageTrackerTickClock() {
@@ -15180,6 +15556,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       }
       stageTrackerSyncToolbar(f);
       const ctx = { nowMs, stages, moves: _stageTrackerMoves };
+      ctx.needsHumanLabels = stageTrackerNeedsHumanLabels(d);
       // Repo chips ride the setting against how many repos the payload spans.
       if (stageTrackerRepoChipOn(stageTrackerRepoChipSetting(), repos.length)) ctx.repoChips = { primary: stageTrackerPrimaryRepo(), active: f.repo };
       const visible = stageTrackerVisible(d.items, f, ctx);
@@ -15206,7 +15583,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const badge = document.getElementById('activity-monitor-sidebar-badge');
       if (badge) { badge.textContent = String(counts.badge); badge.title = counts.badgeTitle; if (counts.badge) badge.removeAttribute('data-zero'); else badge.setAttribute('data-zero', ''); }
       const labelsEl = document.getElementById('activity-monitor-labels');
-      if (labelsEl) setIfChanged(labelsEl, stageTrackerLabelsHtml(stageTrackerLabelFacets(d.items, f)));
+      if (labelsEl) setIfChanged(labelsEl, stageTrackerLabelsHtml(stageTrackerLabelFacets(d.items, f, { needsHumanLabels: ctx.needsHumanLabels })));
+      stageTrackerRenderLabelDialog();
       const meta = document.getElementById('activity-monitor-meta');
       if (meta) setIfChanged(meta, `<span class="ham-count">${esc(counts.showing)}</span>${stageTrackerEngineHtml(d)}${stageTrackerUpdatedHtml(d, nowMs)}${stageTrackerPagerHtml(page)}`);
       const foot = document.getElementById('activity-monitor-meta-foot');
@@ -15214,6 +15592,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const effect = stageTrackerMotionEffect(stageTrackerMotionSetting(), stageTrackerReducedMotion());
       if (!visible.length) {
         _stageTrackerMoves = {};
+        stageTrackerSelectionSync(el, []);
         const emptyHtml = `<div class="ham-empty">${d.items.length ? 'Nothing matches the current filters.' : 'Nothing open is being tracked right now.'}</div>`;
         if (el.querySelector('[data-ham-key]')) {
           stageTrackerReconcile(el, [], { effect, hidden: document.hidden });
@@ -15232,6 +15611,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           : { key: stageTrackerItemKey(grouping ? e.item : e), html: stageTrackerRowHtml(grouping ? e.item : e, stages, ctx) }));
       const rec = stageTrackerReconcile(el, rows, { effect, hidden: document.hidden });
       if (rec.deferred) stageTrackerScheduleSettle();
+      // Selection is keyed on the row, never baked into its HTML, so a kept
+      // node stays selected across the refresh and a departed row leaves it.
+      stageTrackerSelectionSync(el, rows.map(r => r.key));
       // Moves play once, on the render that follows the payload; a filter
       // or paging re-render of the same payload does not replay them.
       if (Object.keys(_stageTrackerMoves).length) { stageTrackerAnimateMoves(el); _stageTrackerMoves = {}; }
@@ -15248,12 +15630,54 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // The endpoint is served from a server-side cache with an ETag; a poll
     // that matches it costs one 304 and no re-render. The filter/sort state
     // is restored from storage on the first fetch.
+    // SSE nudges arrive once per status publish and once per webhook
+    // delivery, uncoalesced: a busy hive sent ~36 a minute, each a refetch
+    // and a reconcile of the list. The first nudge in a window fetches at
+    // once; the rest collapse into one trailing fetch when the window ends.
+    // A nudge that lands while the tab is hidden is remembered and served
+    // on the next visibilitychange instead.
+    const STAGE_TRACKER_NUDGE_COALESCE_MS = 2000;
+    let _stageTrackerNudgeTimer = null;
+    let _stageTrackerNudgeAt = 0;
+    let _stageTrackerNudgeSkipped = false;
+    function stageTrackerNudge(now) {
+      now = typeof now === 'number' ? now : Date.now();
+      if (document.hidden) { _stageTrackerNudgeSkipped = true; return false; }
+      const wait = _stageTrackerNudgeAt + STAGE_TRACKER_NUDGE_COALESCE_MS - now;
+      if (wait <= 0) { _stageTrackerNudgeAt = now; fetchStageTracker(); return true; }
+      if (!_stageTrackerNudgeTimer) {
+        _stageTrackerNudgeTimer = setTimeout(() => {
+          _stageTrackerNudgeTimer = null;
+          _stageTrackerNudgeAt = Date.now();
+          if (document.hidden) { _stageTrackerNudgeSkipped = true; return; }
+          fetchStageTracker();
+        }, wait);
+      }
+      return false;
+    }
+    function stageTrackerResumeIfSkipped() {
+      if (!_stageTrackerNudgeSkipped) return;
+      _stageTrackerNudgeSkipped = false;
+      _stageTrackerNudgeAt = Date.now();
+      fetchStageTracker();
+    }
+
     async function fetchStageTracker() {
       try {
         if (!_stageTrackerSig && !_stageTrackerEtag) stageTrackerLoadGrouping();
         if (!_stageTrackerSig && !_stageTrackerEtag) { stageTrackerLoadFilter(); stageTrackerSoundInit(); }
         const r = await fetch('/api/stage-tracker', _stageTrackerEtag ? { headers: { 'If-None-Match': _stageTrackerEtag } } : undefined);
-        if (r.status === 304) { stageTrackerTickClock(); return; }
+        if (r.status === 304) {
+          // A 304 carries no body, so take generated_at/source from the headers or the "updated" chip goes amber on a quiet hive.
+          const at = r.headers.get('X-Hive-Stage-Tracker-Generated-At');
+          const src = r.headers.get('X-Hive-Stage-Tracker-Source');
+          if (_stageTracker) {
+            if (at) _stageTracker.generated_at = at;
+            if (src) _stageTracker.source = src;
+          }
+          stageTrackerTickClock();
+          return;
+        }
         if (!r.ok) return;
         _stageTrackerEtag = r.headers.get('ETag') || '';
         const text = await r.text();
@@ -15262,6 +15686,643 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         renderStageTracker(JSON.parse(text));
         dashboardSetInterval('stage-tracker-clock', stageTrackerTickClock, STAGE_TRACKER_CLOCK_MS);
       } catch (e) { /* keep the previous render */ }
+    }
+
+    /* ---- Row actions: context menu + multi-select -------------------------
+       A right-click (or the ⋯ kebab, Shift+F10, the context-menu key) on a
+       row opens an in-app menu of the actions that apply to that row's
+       state. The checkbox in the left gutter selects rows (Shift+click for
+       a range, Cmd/Ctrl+click to toggle); the selection bar above the list
+       carries the actions valid for every selected row and greys out the
+       rest with the reason. Selection is keyed on the row's item key, so
+       the ~1 s reconcile keeps it; rows that leave the list drop out of it.
+       Every action goes through an existing dashboard endpoint (hold,
+       send-to-human, rescan) or the decision endpoint, which records the
+       same /hive approve|decision a maintainer would — nothing merges. */
+    const STAGE_TRACKER_DECISION_STAGES = [45, 85];
+    const STAGE_TRACKER_SEL_ACTIONS = ['hold', 'release', 'retry', 'needs-human', 'copy'];
+    const STAGE_TRACKER_MENU_MARGIN = 4;
+    const STAGE_TRACKER_MENU_FAIL_LINES = 3;
+    const STAGE_TRACKER_ACTION_LABELS = {
+      'decide:approve': 'Approve', 'decide:direction': 'Give direction',
+      'decide:close-superseded': 'Close as superseded by', 'decide:close-wontfix': "Close as won't-fix",
+      hold: 'Hold', release: 'Release hold', retry: 'Re-evaluate now', 'accept-triage': 'Accept triage', 'needs-human': 'Mark needs-human',
+      open: 'Open on GitHub', copy: 'Copy link',
+    };
+    // Accept triage shows on an issue the chevron calls "Triage needed":
+    // stage 015, or the needs-triage pill on another stage (a claimed or
+    // covered issue the reporter-trust gate still holds). Never on a PR.
+    const STAGE_TRACKER_TRIAGE_STAGE = 15;
+    const STAGE_TRACKER_ACTIONABLE_STAGE = 10;
+    const STAGE_TRACKER_WHY_WRITE = 'Sign in with write access to this repo';
+    const STAGE_TRACKER_WHY_ROLE = 'Needs the merger or owner role';
+    var _stageTrackerSel = new Set();
+    var _stageTrackerSelAnchor = '';
+    var _stageTrackerMenu = null;
+
+    function stageTrackerRefOf(item) { return (item.repo || '') + '#' + (Number(item.number) || 0); }
+    // Pure: the gutter controls of a row. Selection state is never written
+    // here (the reconcile keys rows on their HTML); stageTrackerApplySelection
+    // sets aria-checked / .ham-selected on the live node.
+    function stageTrackerRowToolsHtml(item) {
+      const ref = stageTrackerRefOf(item);
+      return `<span class="ham-row-tools"><button type="button" class="ham-sel" role="checkbox" aria-checked="false" aria-label="Select ${esc(ref)} (Shift+click for a range)" data-action="hamSelectClick" data-arg-types="e,t" data-stop="1" data-prevent="1"></button><button type="button" class="ham-kebab" aria-label="Actions for ${esc(ref)}" aria-haspopup="menu" data-action="hamRowMenu" data-arg-types="e,t" data-stop="1" data-prevent="1">⋯</button></span>`;
+    }
+    // Pure: the next selection after a click on `key`. Shift extends from
+    // the anchor over the rows' current order (Cmd/Ctrl+Shift keeps what was
+    // selected outside the range); a plain or Cmd/Ctrl click toggles the row
+    // and moves the anchor.
+    function stageTrackerSelectionNext(sel, anchor, keys, key, mods) {
+      mods = mods || {};
+      const next = new Set(mods.shift && mods.meta ? sel : []);
+      if (mods.shift && anchor && keys.indexOf(anchor) >= 0 && keys.indexOf(key) >= 0) {
+        const a = keys.indexOf(anchor), b = keys.indexOf(key);
+        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) next.add(keys[i]);
+        return { sel: next, anchor };
+      }
+      sel.forEach(k => next.add(k));
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return { sel: next, anchor: key };
+    }
+    // Pure: a row key that stands for an item — not the column header, not
+    // a group:owner/repo header — and so can be selected.
+    function stageTrackerSelectableKey(key) {
+      return !!key && key !== STAGE_TRACKER_HEADER_KEY && key.indexOf(STAGE_TRACKER_GROUP_KEY_PREFIX) !== 0;
+    }
+    // Pure: keep only the keys still rendered as selectable rows.
+    function stageTrackerSelectionPrune(sel, keys) {
+      const present = new Set(keys.filter(stageTrackerSelectableKey));
+      const next = new Set();
+      sel.forEach(k => { if (present.has(k)) next.add(k); });
+      return next;
+    }
+    function stageTrackerApplySelection(el, sel) {
+      let any = false;
+      for (const n of Array.from(el.children || [])) {
+        const key = n.dataset && n.dataset.hamKey;
+        if (!stageTrackerSelectableKey(key)) continue;
+        const on = sel.has(key);
+        if (on) any = true;
+        if (on) n.classList.add('ham-selected'); else n.classList.remove('ham-selected');
+        const cb = typeof n.querySelector === 'function' ? n.querySelector('.ham-sel') : null;
+        if (cb) cb.setAttribute('aria-checked', on ? 'true' : 'false');
+      }
+      if (any) el.classList.add('ham-has-sel'); else el.classList.remove('ham-has-sel');
+      return any;
+    }
+    function stageTrackerRowKeys(el) {
+      return Array.from(el.children || []).map(n => n.dataset && n.dataset.hamKey).filter(stageTrackerSelectableKey);
+    }
+    // After a render: drop keys whose rows left, paint the rest, refresh the bar.
+    function stageTrackerSelectionSync(el, keys) {
+      _stageTrackerSel = stageTrackerSelectionPrune(_stageTrackerSel, keys);
+      if (_stageTrackerSelAnchor && keys.indexOf(_stageTrackerSelAnchor) < 0) _stageTrackerSelAnchor = '';
+      stageTrackerApplySelection(el, _stageTrackerSel);
+      stageTrackerRenderSelBar();
+      stageTrackerWireRowActions(el);
+    }
+    function stageTrackerItemByKey(d, key) {
+      if (!d || !Array.isArray(d.items)) return null;
+      for (const it of d.items) if (stageTrackerItemKey(it) === key) return it;
+      for (const it of d.items) {
+        for (const lp of (Array.isArray(it.linked_prs) ? it.linked_prs : [])) {
+          const pr = { repo: it.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', stage: lp.stage || 0, modifiers: lp.modifiers || [] };
+          if (stageTrackerItemKey(pr) === key) return pr;
+        }
+      }
+      return null;
+    }
+    function stageTrackerItemsForKeys(keys) {
+      return keys.map(k => stageTrackerItemByKey(_stageTracker, k)).filter(Boolean);
+    }
+    // What the signed-in viewer may do on this repo. Hold permission is
+    // looked up lazily (the server answers 403 either way); needs-human is
+    // merger/owner only.
+    function stageTrackerActionCtx(repo) {
+      const role = window._hiveRole || 'read';
+      const owner = dashboardRoleAtLeast(role, 'owner');
+      const user = !!window._hiveUser || owner;
+      if (typeof ensureRepoHoldPermission === 'function') ensureRepoHoldPermission(repo);
+      const canHold = owner || (typeof repoHoldPermissionKnown === 'function' && repoHoldPermissionKnown(repo)) ? true : (user ? null : false);
+      return { user, canHold, canHuman: user && dashboardRoleAtLeast(role, 'merger') };
+    }
+    // Pure: the item a row's "Decide…" acts on. A PR parked at 085 (the
+    // "Needs human decision" pill on the Merge gate column) decides itself;
+    // an issue row decides a nested PR parked at 085 when it has one (its
+    // own stage is only mirrored from that PR), else itself when parked at
+    // 045. null when nothing on the row is waiting on a person.
+    function stageTrackerDecisionTarget(item) {
+      if (!item) return null;
+      const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      const parked = it => (Array.isArray(it.modifiers) ? it.modifiers : []).indexOf('needs-decision') >= 0 || STAGE_TRACKER_DECISION_STAGES.indexOf(Number(it.stage) || 0) >= 0;
+      if (item.kind === 'pr') return parked(item) ? item : null;
+      for (const lp of (Array.isArray(item.linked_prs) ? item.linked_prs : [])) {
+        const pr = { repo: item.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', stage: lp.stage || 0, modifiers: lp.modifiers || [], author: lp.author || '',
+          sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' };
+        if (parked(pr)) return pr;
+      }
+      if (item.mirrored) return null;
+      return (mods.indexOf('needs-decision') >= 0 || (Number(item.stage) || 0) === 45) ? item : null;
+    }
+    // Pure: the decision choices for one decision target. On an issue
+    // parked at 045 the verbs are /hive approve and /hive decision. On a PR
+    // parked at 085, Approve posts the /lgtm + /approve commands as the
+    // operator (the merge gate decides from there — nothing merges here),
+    // Close as superseded names the PR that won, and Give direction is the
+    // /hive decision fix lane.
+    function stageTrackerDecideOptions(item, ctx) {
+      const enabled = ctx.canHold !== false && !!ctx.user;
+      const why = enabled ? '' : STAGE_TRACKER_WHY_WRITE;
+      const out = [];
+      if (item.kind === 'pr') {
+        out.push({ id: 'decide:approve', label: 'Approve (/lgtm + /approve)', enabled, why });
+        out.push({ id: 'decide:close-superseded', label: 'Close as superseded by…', enabled, why, danger: true });
+        out.push({ id: 'decide:close-wontfix', label: "Won't fix…", enabled, why, danger: true });
+        out.push({ id: 'decide:direction', label: 'Give direction…', enabled, why });
+        return out;
+      }
+      out.push({ id: 'decide:approve', label: 'Approve direction', enabled, why });
+      out.push({ id: 'decide:direction', label: 'Send back to the hive…', enabled, why });
+      out.push({ id: 'decide:close-superseded', label: 'Close as superseded by…', enabled, why, danger: true });
+      out.push({ id: 'decide:close-wontfix', label: "Close as won't-fix…", enabled, why, danger: true });
+      return out;
+    }
+    // Pure: whether a row is an issue waiting on a maintainer's triage.
+    function stageTrackerTriageNeeded(item) {
+      if (!item || item.kind === 'pr') return false;
+      const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      return (Number(item.stage) || 0) === STAGE_TRACKER_TRIAGE_STAGE || mods.indexOf('needs-triage') >= 0;
+    }
+    // Pure: the item as it reads once triage is accepted — 010 Actionable,
+    // the needs-triage pill and the 👤 next-move gone — for the optimistic
+    // re-render before the tracker's next payload confirms it.
+    function stageTrackerTriageAccepted(item) {
+      const next = Object.assign({}, item);
+      next.modifiers = (Array.isArray(item.modifiers) ? item.modifiers : []).filter(m => m !== 'needs-triage');
+      if ((Number(item.stage) || 0) === STAGE_TRACKER_TRIAGE_STAGE) {
+        next.stage = STAGE_TRACKER_ACTIONABLE_STAGE;
+        next.stage_slug = 'actionable';
+        next.stage_label = 'stage/010-actionable';
+        next.caption = ''; next.actor = ''; next.reason = '';
+      }
+      return next;
+    }
+    // Pure: the actions that apply to one row in its current state.
+    function stageTrackerRowActions(item, ctx) {
+      ctx = ctx || {};
+      const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      const has = m => mods.indexOf(m) >= 0;
+      const write = ctx.canHold !== false;
+      const out = [];
+      const target = stageTrackerDecisionTarget(item);
+      if (target) {
+        const on = target === item ? '' : ' PR #' + (Number(target.number) || 0);
+        out.push({ id: 'decide', label: 'Decide' + on + '…', enabled: write, why: write ? '' : STAGE_TRACKER_WHY_WRITE, submenu: stageTrackerDecideOptions(target, ctx), target });
+      }
+      out.push(has('hold')
+        ? { id: 'release', label: 'Release hold', enabled: write, why: write ? '' : STAGE_TRACKER_WHY_WRITE }
+        : { id: 'hold', label: 'Hold', enabled: write, why: write ? '' : STAGE_TRACKER_WHY_WRITE });
+      out.push({ id: 'retry', label: 'Re-evaluate now', hint: 'rescan', enabled: true, why: '' });
+      if (stageTrackerTriageNeeded(item)) out.push({ id: 'accept-triage', label: 'Accept triage', hint: 'triage/accepted', enabled: write, why: write ? '' : STAGE_TRACKER_WHY_WRITE });
+      if (!has('needs-human')) out.push({ id: 'needs-human', label: 'Mark needs-human…', enabled: !!ctx.canHuman, why: ctx.canHuman ? '' : STAGE_TRACKER_WHY_ROLE });
+      out.push({ id: 'open', label: 'Open on GitHub', enabled: !!item.url, why: item.url ? '' : 'No GitHub link', sep: true });
+      out.push({ id: 'copy', label: 'Copy link', enabled: !!item.url, why: item.url ? '' : 'No GitHub link' });
+      return out;
+    }
+    function stageTrackerFlatActions(actions) {
+      const flat = {};
+      for (const a of actions) {
+        flat[a.id] = a;
+        for (const s of (a.submenu || [])) flat[s.id] = s;
+      }
+      return flat;
+    }
+    // Pure: the actions for a selection — each enabled only when it applies
+    // to, and is allowed on, every item; otherwise disabled with the first
+    // reason. Open is per-row only; Copy copies every link.
+    function stageTrackerSelectionActions(items, ctxOf) {
+      const per = items.map(it => ({ it, flat: stageTrackerFlatActions(stageTrackerRowActions(it, typeof ctxOf === 'function' ? ctxOf(it.repo) : ctxOf)) }));
+      const judge = id => {
+        for (const p of per) {
+          const a = p.flat[id];
+          if (!a) return { enabled: false, why: 'Not applicable to ' + stageTrackerRefOf(p.it) };
+          if (!a.enabled) return { enabled: false, why: a.why + ' (' + stageTrackerRefOf(p.it) + ')' };
+        }
+        return { enabled: items.length > 0, why: items.length ? '' : 'Nothing selected' };
+      };
+      const decideIds = ['decide:approve', 'decide:direction', 'decide:close-superseded', 'decide:close-wontfix'];
+      const submenu = decideIds.map(id => Object.assign({ id, label: STAGE_TRACKER_ACTION_LABELS[id] + (id === 'decide:approve' ? '' : '…'), danger: id.indexOf('close') > 0 }, judge(id)));
+      const targets = items.map(stageTrackerDecisionTarget).filter(Boolean);
+      if (targets.length === items.length && items.length) {
+        const kinds = {};
+        for (const t of targets) kinds[t.kind] = true;
+        if (kinds.pr && kinds.issue) {
+          for (const sm of submenu) if (sm.enabled) Object.assign(sm, { enabled: false, why: 'Selection mixes issues and pull requests waiting on a decision' });
+        }
+      }
+      const out = [Object.assign({ id: 'decide', label: 'Decide…', submenu }, submenu.some(s => s.enabled) ? { enabled: true, why: '' } : { enabled: false, why: submenu[0].why })];
+      for (const id of STAGE_TRACKER_SEL_ACTIONS) out.push(Object.assign({ id, label: STAGE_TRACKER_ACTION_LABELS[id] + (id === 'needs-human' ? '…' : id === 'copy' ? 's' : '') }, judge(id)));
+      return out;
+    }
+    function stageTrackerMenuItemHtml(a) {
+      const dis = a.enabled ? '' : ` aria-disabled="true" title="${esc(a.why || '')}"`;
+      if (a.submenu) {
+        return `<button type="button" role="menuitem" class="ham-menu-item" data-ham-act="${esc(a.id)}" aria-haspopup="menu" aria-expanded="false" tabindex="-1"${dis}>${esc(a.label)}<span class="ham-menu-more" aria-hidden="true">▸</span></button><div class="ham-submenu" role="menu" aria-label="${esc(a.label)}">${a.submenu.map(stageTrackerMenuItemHtml).join('')}</div>`;
+      }
+      return `${a.sep ? '<div class="ham-menu-sep" role="separator"></div>' : ''}<button type="button" role="menuitem" class="ham-menu-item${a.danger ? ' ham-menu-danger' : ''}" data-ham-act="${esc(a.id)}" tabindex="-1"${dis}>${esc(a.label)}${a.hint ? `<span class="ham-menu-more">${esc(a.hint)}</span>` : ''}</button>`;
+    }
+    // Pure: the menu markup (roles menu / menuitem, the Decide group as a
+    // nested menu toggled by its item).
+    function stageTrackerMenuHtml(actions, head) {
+      return `<div class="ham-menu" role="menu" aria-label="Row actions" tabindex="-1">${head ? `<div class="ham-menu-head">${esc(head)}</div>` : ''}${actions.map(stageTrackerMenuItemHtml).join('')}</div>`;
+    }
+    // Pure: place the menu at the pointer, flipped/clamped to stay on screen.
+    function stageTrackerMenuPosition(x, y, w, h, vw, vh) {
+      const m = STAGE_TRACKER_MENU_MARGIN;
+      let left = x, top = y;
+      if (left + w + m > vw) left = Math.max(m, Math.min(x - w, vw - w - m));
+      if (top + h + m > vh) top = Math.max(m, Math.min(y - h, vh - h - m));
+      return { left: Math.max(m, left), top: Math.max(m, top) };
+    }
+    function stageTrackerMenuItems(menu) {
+      return Array.from(menu.querySelectorAll('[role="menuitem"]')).filter(b => {
+        const sub = b.closest('.ham-submenu');
+        return !sub || (sub.previousElementSibling && sub.previousElementSibling.getAttribute('aria-expanded') === 'true');
+      });
+    }
+    function stageTrackerMenuFocus(menu, dir, from) {
+      const items = stageTrackerMenuItems(menu).filter(b => b.getAttribute('aria-disabled') !== 'true');
+      if (!items.length) { menu.focus(); return; }
+      let i = items.indexOf(from);
+      if (dir === 'first') i = 0; else if (dir === 'last') i = items.length - 1;
+      else i = (i + dir + items.length) % items.length;
+      items[i].focus();
+    }
+    // While the context menu is open every row shows its gutter at full
+    // emphasis (the CSS keys on .ham-menu-open on the panel), so the row
+    // the menu acts on is not the only one with visible controls.
+    function stageTrackerSetMenuOpen(el, on) {
+      if (!el || !el.classList) return;
+      if (on) el.classList.add('ham-menu-open'); else el.classList.remove('ham-menu-open');
+    }
+    function stageTrackerCloseMenu(refocus) {
+      const m = _stageTrackerMenu;
+      if (!m) return;
+      _stageTrackerMenu = null;
+      stageTrackerSetMenuOpen(document.getElementById('activity-monitor-panel'), false);
+      document.removeEventListener('pointerdown', m.onAway, true);
+      document.removeEventListener('keydown', m.onKey, true);
+      window.removeEventListener('resize', m.onAway);
+      window.removeEventListener('scroll', m.onAway, true);
+      if (m.el.parentNode) m.el.parentNode.removeChild(m.el);
+      if (refocus && m.restore && typeof m.restore.focus === 'function' && document.contains(m.restore)) m.restore.focus();
+    }
+    // Open the menu for `items` at (x, y) — or below `anchor` — and run the
+    // picked action on them.
+    function stageTrackerOpenMenu(items, at) {
+      stageTrackerCloseMenu(false);
+      if (!items.length) return;
+      const actions = items.length === 1 ? stageTrackerRowActions(items[0], stageTrackerActionCtx(items[0].repo)) : stageTrackerSelectionActions(items, stageTrackerActionCtx);
+      const head = items.length === 1 ? stageTrackerRefOf(items[0]) + (items[0].title ? ' · ' + items[0].title : '') : items.length + ' selected';
+      const tpl = document.createElement('template');
+      tpl.innerHTML = stageTrackerMenuHtml(actions, head);
+      const el = tpl.content.firstElementChild;
+      document.body.appendChild(el);
+      let x = at.x, y = at.y;
+      if (at.anchor && typeof at.anchor.getBoundingClientRect === 'function') { const r = at.anchor.getBoundingClientRect(); x = r.left; y = r.bottom; }
+      const pos = stageTrackerMenuPosition(x, y, el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight);
+      el.style.setProperty('left', pos.left + 'px');
+      el.style.setProperty('top', pos.top + 'px');
+      const m = { el, items, restore: at.restore || at.anchor || null };
+      m.onAway = e => { if (e.type !== 'pointerdown' || !el.contains(e.target)) stageTrackerCloseMenu(false); };
+      m.onKey = e => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stageTrackerCloseMenu(true); return; }
+        if (!el.contains(e.target)) return;
+        const b = e.target.closest('[role="menuitem"]');
+        switch (e.key) {
+          case 'ArrowDown': e.preventDefault(); stageTrackerMenuFocus(el, 1, b); break;
+          case 'ArrowUp': e.preventDefault(); stageTrackerMenuFocus(el, -1, b); break;
+          case 'Home': e.preventDefault(); stageTrackerMenuFocus(el, 'first'); break;
+          case 'End': e.preventDefault(); stageTrackerMenuFocus(el, 'last'); break;
+          case 'ArrowRight': if (b && b.getAttribute('aria-haspopup') === 'menu' && b.getAttribute('aria-disabled') !== 'true') { e.preventDefault(); b.setAttribute('aria-expanded', 'true'); stageTrackerMenuFocus(el, 1, b); } break;
+          case 'ArrowLeft': { const sub = b && b.closest('.ham-submenu'); if (sub && sub.previousElementSibling) { e.preventDefault(); sub.previousElementSibling.setAttribute('aria-expanded', 'false'); sub.previousElementSibling.focus(); } break; }
+          case 'Tab': stageTrackerCloseMenu(true); break;
+        }
+      };
+      el.addEventListener('click', e => {
+        const b = e.target.closest('[data-ham-act]');
+        if (!b || b.getAttribute('aria-disabled') === 'true') return;
+        e.preventDefault(); e.stopPropagation();
+        const act = b.dataset.hamAct;
+        if (b.getAttribute('aria-haspopup') === 'menu') {
+          const open = b.getAttribute('aria-expanded') === 'true';
+          b.setAttribute('aria-expanded', open ? 'false' : 'true');
+          if (!open) stageTrackerMenuFocus(el, 1, b);
+          return;
+        }
+        stageTrackerCloseMenu(true);
+        stageTrackerDoAction(m.items, act);
+      });
+      document.addEventListener('pointerdown', m.onAway, true);
+      document.addEventListener('keydown', m.onKey, true);
+      window.addEventListener('resize', m.onAway);
+      window.addEventListener('scroll', m.onAway, true);
+      _stageTrackerMenu = m;
+      stageTrackerSetMenuOpen(document.getElementById('activity-monitor-panel'), true);
+      if (at.expandDecide) { const d = el.querySelector('[data-ham-act="decide"]'); if (d && d.getAttribute('aria-disabled') !== 'true') d.setAttribute('aria-expanded', 'true'); }
+      stageTrackerMenuFocus(el, 'first');
+    }
+    // The row (or nested PR) an event happened on, as the items a menu acts
+    // on: a selected row with company stands for the whole selection.
+    function stageTrackerMenuTargets(target) {
+      const sub = target && target.closest ? target.closest('[data-ham-sub-key]') : null;
+      if (sub) return { items: stageTrackerItemsForKeys([sub.dataset.hamSubKey]), restore: sub.closest('.ham-row') };
+      const row = target && target.closest ? target.closest('.ham-row[data-ham-key]') : null;
+      if (!row) return null;
+      const key = row.dataset.hamKey;
+      const keys = _stageTrackerSel.has(key) && _stageTrackerSel.size > 1 ? stageTrackerRowKeys(row.parentNode).filter(k => _stageTrackerSel.has(k)) : [key];
+      return { items: stageTrackerItemsForKeys(keys), restore: row };
+    }
+    function stageTrackerWireRowActions(el) {
+      if (!el || !el.dataset || el.dataset.hamWired === '1' || typeof el.addEventListener !== 'function') return;
+      el.dataset.hamWired = '1';
+      el.addEventListener('contextmenu', e => {
+        if (e.shiftKey) return; // Shift+right-click keeps the browser's own menu
+        const t = stageTrackerMenuTargets(e.target);
+        if (!t || !t.items.length) return;
+        e.preventDefault();
+        stageTrackerOpenMenu(t.items, { x: e.clientX, y: e.clientY, restore: t.restore });
+      });
+      el.addEventListener('keydown', e => {
+        const row = e.target.closest ? e.target.closest('.ham-row[data-ham-key]') : null;
+        if (!row) return;
+        if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') {
+          const t = stageTrackerMenuTargets(e.target);
+          if (!t || !t.items.length) return;
+          e.preventDefault();
+          stageTrackerOpenMenu(t.items, { anchor: row, restore: row });
+          return;
+        }
+        if (e.key === ' ' && e.target === row) {
+          e.preventDefault();
+          stageTrackerSelect(row.dataset.hamKey, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey });
+        }
+      });
+      // Cmd/Ctrl- or Shift-click anywhere on a row (not on its links or
+      // buttons) selects it too.
+      el.addEventListener('click', e => {
+        if (!(e.metaKey || e.ctrlKey || e.shiftKey)) return;
+        if (e.target.closest('a, button, input, select, textarea')) return;
+        const row = e.target.closest ? e.target.closest('.ham-row[data-ham-key]') : null;
+        if (!row) return;
+        e.preventDefault();
+        stageTrackerSelect(row.dataset.hamKey, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey });
+      });
+    }
+    function stageTrackerSelect(key, mods) {
+      const el = document.getElementById('activity-monitor-panel');
+      if (!el || !key) return;
+      const next = stageTrackerSelectionNext(_stageTrackerSel, _stageTrackerSelAnchor, stageTrackerRowKeys(el), key, mods);
+      _stageTrackerSel = next.sel;
+      _stageTrackerSelAnchor = next.anchor;
+      stageTrackerApplySelection(el, _stageTrackerSel);
+      stageTrackerRenderSelBar();
+    }
+    function hamSelectClick(e, btn) {
+      const row = btn && btn.closest ? btn.closest('.ham-row[data-ham-key]') : null;
+      if (row) stageTrackerSelect(row.dataset.hamKey, { shift: !!(e && e.shiftKey), meta: !!(e && (e.metaKey || e.ctrlKey)) });
+    }
+    function hamRowMenu(e, btn) {
+      const t = stageTrackerMenuTargets(btn);
+      if (!t || !t.items.length) return;
+      stageTrackerOpenMenu(t.items, { anchor: btn, restore: btn });
+    }
+    function hamSelClear() {
+      _stageTrackerSel = new Set();
+      _stageTrackerSelAnchor = '';
+      const el = document.getElementById('activity-monitor-panel');
+      if (el) stageTrackerApplySelection(el, _stageTrackerSel);
+      stageTrackerRenderSelBar();
+    }
+    function hamSelAction(id, btn) {
+      if (btn && btn.getAttribute('aria-disabled') === 'true') return;
+      const el = document.getElementById('activity-monitor-panel');
+      const items = stageTrackerItemsForKeys(el ? stageTrackerRowKeys(el).filter(k => _stageTrackerSel.has(k)) : []);
+      if (!items.length) return;
+      if (id === 'decide') { stageTrackerOpenMenu(items, { anchor: btn, restore: btn, expandDecide: true }); return; }
+      stageTrackerDoAction(items, id);
+    }
+    // Pure: the selection bar — count, Clear, and the shared actions
+    // (disabled ones keep their tooltip, so aria-disabled rather than disabled).
+    function stageTrackerSelBarHtml(items, actions) {
+      if (!items.length) return '';
+      const btn = a => `<button type="button" class="ham-chip" data-action="hamSelAction" data-arg0="${esc(a.id)}" data-arg-types="s,t"${a.enabled ? '' : ` aria-disabled="true" title="${esc(a.why || '')}"`}>${esc(a.label)}</button>`;
+      return `<span class="ham-sel-count">${items.length} selected</span><button type="button" class="ham-chip" data-action="hamSelClear">Clear</button>${actions.map(btn).join('')}`;
+    }
+    function stageTrackerRenderSelBar() {
+      const bar = document.getElementById('activity-monitor-selbar');
+      if (!bar) return;
+      const el = document.getElementById('activity-monitor-panel');
+      const items = stageTrackerItemsForKeys(el ? stageTrackerRowKeys(el).filter(k => _stageTrackerSel.has(k)) : []);
+      if (!items.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+      bar.hidden = false;
+      const html = stageTrackerSelBarHtml(items, stageTrackerSelectionActions(items, stageTrackerActionCtx));
+      if (bar.innerHTML !== html) bar.innerHTML = html;
+    }
+    function stageTrackerActionLabel(id) { return STAGE_TRACKER_ACTION_LABELS[id] || id; }
+    // Pure: which endpoint an action hits for one item. `once` marks a
+    // hive-wide call made one time per batch.
+    function stageTrackerActionRequest(item, id, payload) {
+      payload = payload || {};
+      const p = repoParts(item.repo);
+      const n = Number(item.number) || 0;
+      if (!p.owner || !p.repo || !n) return null;
+      const seg = encodeURIComponent(p.owner) + '/' + encodeURIComponent(p.repo);
+      const type = item.kind === 'pr' ? 'pr' : 'issue';
+      switch (id) {
+        case 'hold': return { url: '/api/repos/' + seg + '/items/' + n + '/hold', body: { held: true, type } };
+        case 'release': return { url: '/api/repos/' + seg + '/items/' + n + '/hold', body: { held: false, type } };
+        case 'retry': return { url: '/api/repos/rescan', body: {}, once: true };
+        case 'needs-human': return { url: '/api/review/pipeline/' + seg + '/' + n + '/send-to-human', body: { reason: payload.comment || ('flagged from the activity monitor for ' + stageTrackerRefOf(item)) } };
+        case 'accept-triage': return item.kind === 'pr' ? null : { url: '/api/repos/' + seg + '/items/' + n + '/accept-triage', body: {} };
+      }
+      if (id.indexOf('decide:') === 0) {
+        const body = { decision: id.slice('decide:'.length), comment: payload.comment || '', type };
+        if (payload.supersededBy) body.superseded_by = payload.supersededBy;
+        return { url: '/api/repos/' + seg + '/items/' + n + '/decision', body };
+      }
+      return null;
+    }
+    // Pure: one line for the result toast.
+    function stageTrackerActionSummary(label, results) {
+      const n = results.length;
+      const fails = results.filter(r => !r.ok);
+      const ok = n - fails.length;
+      let msg = label + ': ' + ok + '/' + n + ' done';
+      const debounced = results.some(r => r.ok && r.data && (r.data.status === 'debounced' || r.data.status === 'in-progress'));
+      if (debounced) msg += ' (a rescan was already running — the next one is queued by the hive)';
+      if (fails.length) {
+        msg += '. Failed: ' + fails.slice(0, STAGE_TRACKER_MENU_FAIL_LINES).map(r => stageTrackerRefOf(r.item) + ' — ' + r.error).join('; ');
+        if (fails.length > STAGE_TRACKER_MENU_FAIL_LINES) msg += '; +' + (fails.length - STAGE_TRACKER_MENU_FAIL_LINES) + ' more';
+      }
+      return { msg, type: fails.length ? 'error' : 'success' };
+    }
+    function stageTrackerProgressToast(label, n) {
+      const el = showToast('', 'info', true);
+      const text = document.createTextNode('');
+      if (el) el.appendChild(text);
+      return {
+        update(i, item) { text.nodeValue = label + ' ' + (i + 1) + '/' + n + ' — ' + stageTrackerRefOf(item) + '…'; },
+        done(msg, type) { if (el) dismissToast(el, msg, type); else showToast(msg, type); },
+      };
+    }
+    // Replace one item in the current tracker payload with fn(item) and
+    // re-render, so the row reads its new state before the next fetch.
+    function stageTrackerPatchItem(item, fn) {
+      const d = _stageTracker;
+      if (!d || !Array.isArray(d.items)) return;
+      const key = stageTrackerItemKey(item);
+      const i = d.items.findIndex(x => stageTrackerItemKey(x) === key);
+      if (i < 0) return;
+      d.items[i] = fn(d.items[i]);
+      if (typeof renderStageTracker === 'function') renderStageTracker(d);
+    }
+    function stageTrackerAfterActions() {
+      _stageTrackerEtag = '';
+      _stageTrackerSig = '';
+      fetchStageTracker();
+      fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+    }
+    // Run one action over the items in order, one request each (a hive-wide
+    // one once), reporting progress and the per-row outcome.
+    async function stageTrackerRunActions(items, id, payload) {
+      const label = stageTrackerActionLabel(id);
+      const prog = stageTrackerProgressToast(label, items.length);
+      const results = [];
+      const once = {};
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        prog.update(i, it);
+        const req = stageTrackerActionRequest(it, id, payload);
+        if (!req) { results.push({ item: it, ok: false, error: 'not applicable' }); continue; }
+        if (req.once && once[req.url]) { results.push({ item: it, ok: true, data: once[req.url] }); continue; }
+        try {
+          const r = await fetch(req.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+          if (data.minStatusSeq != null) _statusSeqFloor = Math.max(_statusSeqFloor || 0, Number(data.minStatusSeq) || 0);
+          if (req.once) once[req.url] = data;
+          if (id === 'accept-triage') stageTrackerPatchItem(it, stageTrackerTriageAccepted);
+          results.push({ item: it, ok: true, data });
+        } catch (e) {
+          results.push({ item: it, ok: false, error: e && e.message ? e.message : 'network error' });
+        }
+      }
+      const sum = stageTrackerActionSummary(label, results);
+      prog.done(sum.msg, sum.type);
+      stageTrackerAfterActions();
+      return results;
+    }
+    // What an action needs from the operator first (in-app dialogs only);
+    // null = cancelled.
+    // Pure: the other open PRs in the same repos as items, newest first, as
+    // datalist options for the "superseded by" picker.
+    function stageTrackerSupersederOptions(d, items) {
+      const repos = {};
+      const skip = {};
+      for (const it of items) { repos[it.repo] = true; skip[stageTrackerItemKey(it)] = true; }
+      const out = [];
+      const seen = {};
+      const add = pr => {
+        const k = stageTrackerItemKey(pr);
+        if (skip[k] || seen[k] || !repos[pr.repo]) return;
+        seen[k] = true;
+        out.push({ value: pr.repo + '#' + pr.number, label: (pr.title || '').slice(0, 80) });
+      };
+      for (const it of ((d && d.items) || [])) {
+        if (it.kind === 'pr') add(it);
+        for (const lp of (Array.isArray(it.linked_prs) ? it.linked_prs : [])) add({ repo: it.repo, number: lp.number, kind: 'pr', title: lp.title || '' });
+      }
+      return out.sort((a, b) => Number(b.value.split('#')[1]) - Number(a.value.split('#')[1]));
+    }
+    // Pure: validates a "superseded by" reference; "" is allowed (no winner named).
+    function stageTrackerSupersederValid(s, items) {
+      s = String(s || '').trim();
+      if (!s) return true;
+      const m = s.match(/^(?:https?:\/\/[^\/]+\/([^\/#]+\/[^\/#]+)\/(?:pull|issues)\/(\d+)\/?|(?:([^\/#\s]+\/[^\/#\s]+))?#?(\d+))$/);
+      if (!m) return 'Enter a PR number, owner/repo#number or a GitHub PR URL';
+      const repo = m[1] || m[3] || (items[0] && items[0].repo) || '';
+      const n = Number(m[2] || m[4]);
+      for (const it of items) if (it.repo === repo && Number(it.number) === n) return 'A pull request cannot supersede itself';
+      return true;
+    }
+    // Pure: the sentinel preface for a Decide… dialog — one line per
+    // flagged PR, so the operator reads the security reason before
+    // choosing Approve; '' when nothing in items is flagged.
+    function stageTrackerSentinelPreface(items) {
+      return (items || []).filter(it => it && it.sentinel_alert).map(it => '⚠ ' + stageTrackerRefOf(it) + ' — ' + stageTrackerSentinelTip(it)).join('\n');
+    }
+    async function stageTrackerActionPayload(items, id) {
+      const refs = items.map(stageTrackerRefOf).join(', ');
+      const who = window._hiveUser || 'you';
+      const prs = items.length > 0 && items.every(it => it.kind === 'pr');
+      const sentinel = id.indexOf('decide:') === 0 ? stageTrackerSentinelPreface(items) : '';
+      const preface = sentinel ? sentinel + '\n\n' : '';
+      switch (id) {
+        case 'decide:approve':
+          if (prs) {
+            return (await hiveConfirm({ title: 'Approve pull request' + (items.length > 1 ? 's' : ''), message: preface + 'Post "/lgtm" and "/approve" on ' + refs + ' as ' + who + '? The merge gate takes it from there — the dashboard does not merge.', confirmLabel: 'Post /lgtm + /approve', danger: !!sentinel })) ? {} : null;
+          }
+          return (await hiveConfirm({ title: 'Approve direction', message: 'Record "/hive approve" on ' + refs + ' as ' + who + '? The hive un-parks the issue' + (items.length > 1 ? 's' : '') + ' and carries on; nothing is merged.', confirmLabel: 'Approve' })) ? {} : null;
+        case 'decide:direction': {
+          const v = await hivePrompt(prs
+            ? { title: 'Give direction', label: preface + 'What should the hive change on ' + refs + '? (recorded as "/hive decision …"; the author agent pushes a new head)', placeholder: 'e.g. drop the retry loop and keep the flag', validate: s => s ? true : 'A direction is required', confirmLabel: 'Send' }
+            : { title: 'Send back to the hive', label: 'Direction for the hive on ' + refs + ' (recorded as "/hive decision …")', placeholder: 'e.g. take option B and keep the API as is', validate: s => s ? true : 'A direction is required', confirmLabel: 'Send' });
+          return v == null ? null : { comment: v };
+        }
+        case 'decide:close-superseded': {
+          const options = stageTrackerSupersederOptions(_stageTracker, items);
+          const by = await hivePrompt({ title: 'Close as superseded by', label: 'Which pull request supersedes ' + refs + '? (#number, owner/repo#number or URL; leave empty if none)', placeholder: options.length ? options[0].value : '#123', options, validate: s => stageTrackerSupersederValid(s, items) });
+          if (by == null) return null;
+          const v = await hivePrompt({ title: 'Close as superseded', label: 'Comment for ' + refs + ' (optional)', placeholder: 'Why this is closed', confirmLabel: 'Close' });
+          return v == null ? null : { comment: v, supersededBy: by };
+        }
+        case 'decide:close-wontfix': {
+          const v = await hivePrompt({ title: stageTrackerActionLabel(id), label: 'Comment for ' + refs + ' (optional)', placeholder: 'Why this is closed', confirmLabel: 'Close' });
+          return v == null ? null : { comment: v };
+        }
+        case 'needs-human': {
+          const v = await hivePrompt({ title: 'Mark needs-human', label: 'Why does ' + refs + ' need a human? (optional)', placeholder: 'Reason', confirmLabel: 'Mark' });
+          return v == null ? null : { comment: v };
+        }
+      }
+      return {};
+    }
+    async function stageTrackerDoAction(items, id) {
+      if (!items.length) return;
+      if (id === 'open') {
+        for (const it of items) if (it.url) window.open(it.url, '_blank', 'noopener');
+        return;
+      }
+      if (id === 'copy') {
+        const text = items.map(it => it.url).filter(Boolean).join('\n');
+        try {
+          if (!navigator.clipboard) throw new Error('clipboard unavailable');
+          await navigator.clipboard.writeText(text);
+          showToast(items.length > 1 ? 'Copied ' + items.length + ' links' : 'Link copied', 'success');
+        } catch (e) { showToast('Could not copy: ' + (e && e.message ? e.message : 'clipboard unavailable'), 'error'); }
+        return;
+      }
+      if (id.indexOf('decide:') === 0) {
+        // A row decides its parked PR when it has one (the issue's stage is
+        // only mirrored from it); dedupe when the PR row is selected too.
+        const seen = {};
+        items = items.map(stageTrackerDecisionTarget).filter(t => t && !seen[stageTrackerItemKey(t)] && (seen[stageTrackerItemKey(t)] = true));
+        if (!items.length) return;
+      }
+      const payload = await stageTrackerActionPayload(items, id);
+      if (payload == null) return;
+      await stageTrackerRunActions(items, id, payload);
     }
 
     /* ---- Activity monitor sounds (#13275) ---------------------------------
@@ -19239,7 +20300,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     const REPO_ISSUE_BAND_DEFAULTS = {
-      waitingLabels: ['needs-human', 'stage/045-needs-decision', 'stage/085-needs-decision', 'needs-direction', 'needs-decision', 'needs-spec', 'blocked'],
+      waitingLabels: ['needs-human', 'stage/045-needs-decision', 'stage/085-needs-decision', 'stage/017-possible-existing', 'needs-direction', 'needs-decision', 'needs-spec', 'blocked'],
       doneLabels: ['hive/already-done', 'hive/covered-by-pr', 'hive/likely-done'],
       staleDays: 14
     };
@@ -25923,16 +26984,15 @@ function burnAreaChart() {
         : '';
 
       const costBody = `
-          <div class="cost-subtitle">Estimated from token counts × list prices (as of ${esc(cost.price_table_date || '')}); models without an exact price use a coarse tier estimate (~). Where a metered gateway reports actual spend it refines the estimate, but the figure is always an estimate.</div>
-          <div class="cost-disclaimer" style="margin:4px 0 10px">${esc(cost.disclaimer || '')} vLLM / self-hosted figures are estimated (reflect list price, not your infra cost).</div>
+          <div class="cost-subtitle">Estimated from token counts × list prices (as of ${esc(cost.price_table_date || '')}); models without an exact price use a coarse tier estimate (~). Where a metered gateway reports actual spend it refines the estimate — but this is not a bill: subscription plans (Claude, Copilot), self-hosted inference (vLLM) and negotiated rates differ from list price.</div>
           ${recordingNotice}
           <div class="cost-grid sec-headline" data-collapsed-keep>
             <div class="cost-stat"><div class="cval" title="${esc(headlineTooltip)}">${fmtUSD(allTimeCost.usd)}<span class="cost-badge est" title="${esc(headlineTooltip)}">est.</span><span class="cost-help" role="img" aria-label="What this estimate means" title="${esc(headlineTooltip)}">?</span></div><div class="clabel" title="${esc(headlineTooltip)}">${esc(costTotalLabel(allTimeCost))}</div>${currentLine}${costSparkSvg()}</div>
             ${coinStat}
-            <div class="cost-stat"><div class="cval" title="${esc(prUnit.title + countAuthorNote)}">${prUnit.value}</div><div class="clabel">cost / merged PR — ${esc(prCountLabel)}</div></div>
             <div class="cost-stat"><div class="cval" title="${esc(issueUnit.title + countAuthorNote)}">${issueUnit.value}</div><div class="clabel">cost / closed issue — ${esc(issueCountLabel)}</div></div>
+            <div class="cost-stat"><div class="cval" title="${esc(prUnit.title + countAuthorNote)}">${prUnit.value}</div><div class="clabel">cost / merged PR — ${esc(prCountLabel)}</div></div>
           </div>
-          <div class="cost-disclaimer cost-sub-disclaimer">cost / merged PR and cost / closed issue each divide the same headline total — two views of one figure, not two costs to add.</div>
+          <div class="cost-disclaimer cost-sub-disclaimer">cost / closed issue and cost / merged PR each divide the same headline total — two views of one figure, not two costs to add.</div>
           ${costTrendHtml()}
           ${gwCards ? `<div class="cost-gateways">${gwCards}</div>` : ''}
           <div class="cost-subtable-title" title="Live token summary only — the sessions currently on disk, priced at list price. Spend recorded before a reset of that summary is in the headline but not in these rows.">usage by model <span class="cost-window-tag">(live token summary · ${esc(usageWindow)})</span></div>
@@ -25992,7 +27052,8 @@ function burnAreaChart() {
       const rows = refs.map(costLaunchRowHtml).join('');
       const total = Number(lc.total_tokens) || 0;
       const rate = total > 0 ? Math.round((Number(lc.attributed_tokens) || 0) / total * 100) : null;
-      const more = (lc.by_ref || []).length > refs.length ? ` · showing top ${refs.length} of ${(lc.by_ref || []).length}` : '';
+      const refTotal = lc.by_ref_total ?? (lc.by_ref || []).length;
+      const more = refTotal > refs.length ? ` · showing top ${refs.length} of ${refTotal}` : '';
       return `<div class="cost-subsection" data-cost-sub="launch">
         <div class="cost-subtable-title cost-sub-toggle" role="button" tabindex="0" aria-expanded="${costSubAriaExpanded('launch')}" aria-controls="cost-sub-launch-body" data-action="costSubToggle" data-keydown-action="costSubToggle" data-arg-types="e,s" data-arg1="launch" data-keys="*" title="Estimated cost per issue / PR, from the work each kick was launched for joined against per-message token timing. Inferred, not measured. Click to collapse / expand."><span class="cost-chevron${costSubCollapsedCls('launch')}" aria-hidden="true">▼</span>cost by work item <span class="cost-badge est">inferred</span></div>
         <div class="cost-sub-body${costSubCollapsedCls('launch')}" id="cost-sub-launch-body">
@@ -26008,9 +27069,8 @@ function burnAreaChart() {
 
     async function fetchLaunchCost() {
       try {
-        const r = await fetch('/api/launch-cost');
-        if (!r.ok) return;
-        lastLaunchCost = await r.json();
+        const data = await fetchDashboardHistory('/api/launch-cost');
+        if (data !== null) lastLaunchCost = data;
       } catch (e) { /* transient — keep the last good attribution */ }
     }
 
@@ -30533,6 +31593,11 @@ function burnAreaChart() {
     let _kbSearchQuery = '';
     let _kbSelectedFact = null;
     let _kbFacts = [];
+    const _kbPageSize = 50;
+    let _kbPageOffset = 0;
+    let _kbServerPaged = false;
+    let _kbHasMore = false;
+    let _kbRequest = 0;
     const KB_POLL_MS = 30000;
     const KB_LAYER_ICONS = { personal: '🔒', project: '📁', org: '🏢', community: '🌍' };
     const KB_LAYER_LABELS = { personal: 'Personal', project: 'Project', org: 'Org', community: 'Community' };
@@ -30673,7 +31738,19 @@ function burnAreaChart() {
       kbSearch();
     }
 
-    async function kbSearch() {
+    function kbSearch() {
+      return kbLoadFacts(0);
+    }
+
+    function kbChangePage(direction) {
+      const offset = Math.max(0, _kbPageOffset + direction * _kbPageSize);
+      if (_kbServerPaged) return kbLoadFacts(offset);
+      _kbPageOffset = offset;
+      renderKnowledgeFacts();
+    }
+
+    async function kbLoadFacts(offset) {
+      const request = ++_kbRequest;
       const query = _kbSearchQuery;
       const layer = _kbSelectedLayer;
       const typeFilter = _kbSelectedType;
@@ -30695,18 +31772,28 @@ function burnAreaChart() {
         if (typeFilter) url += (url.includes('?') ? '&' : '?') + 'type=' + encodeURIComponent(typeFilter);
       } else {
         url = '/api/knowledge';
-        const params = [];
+        const params = ['limit=' + _kbPageSize, 'offset=' + offset];
         if (typeFilter) params.push('type=' + encodeURIComponent(typeFilter));
         if (params.length) url += '?' + params.join('&');
       }
       try {
         const r = await fetch(url);
-        if (!r.ok) { _kbFacts = []; renderKnowledgeFacts(); return; }
+        if (!r.ok) throw new Error('Knowledge request failed');
         const data = await r.json();
+        if (request !== _kbRequest) return;
+        _kbServerPaged = !query && (!layer || layer === 'all');
+        _kbPageOffset = offset;
+        _kbHasMore = !!data.has_more;
         _kbFacts = Array.isArray(data) ? data : (data.results || data.facts || []);
         _kbSelectedFact = null;
         renderKnowledgeFacts();
-      } catch (e) { _kbFacts = []; renderKnowledgeFacts(); }
+      } catch (e) {
+        if (request !== _kbRequest) return;
+        _kbFacts = [];
+        _kbHasMore = false;
+        _kbPageOffset = 0;
+        renderKnowledgeFacts();
+      }
     }
 
     async function kbReadFact(slug, layer) {
@@ -31655,13 +32742,11 @@ function burnAreaChart() {
       if (!el) return;
 
       const visibleFacts = _kbFacts.filter(f => !kbIsDividerOnlyFact(f));
-      if (visibleFacts.length === 0) {
-        el.innerHTML = '<div class="kb-empty"><div class="kb-empty-icon">🔍</div>No facts found. Try a different search or layer.</div>';
-        return;
-      }
-
-      let html = '';
-      for (const f of visibleFacts) {
+      const start = _kbServerPaged ? 0 : _kbPageOffset;
+      const page = visibleFacts.slice(start, start + _kbPageSize);
+      const hasNext = _kbServerPaged ? _kbHasMore : start + _kbPageSize < visibleFacts.length;
+      let html = page.length ? '' : '<div class="kb-empty"><div class="kb-empty-icon">🔍</div>No facts found. Try a different search or layer.</div>';
+      for (const f of page) {
         const conf = typeof f.confidence === 'number' ? f.confidence : 0;
         const confPct = Math.round(conf * 100);
         const typeClass = 'kb-type-' + (f.type || 'pattern');
@@ -31680,6 +32765,12 @@ function burnAreaChart() {
         html += `<span class="kb-layer-badge ${layerClass}">${escapeHtml(f.layer || '')}</span>`;
         if (f.status) html += `<span class="kb-layer-badge" style="background:var(--bg);color:var(--muted)">${escapeHtml(f.status)}</span>`;
         html += '</div></div></div>';
+      }
+      if (_kbPageOffset > 0 || hasNext) {
+        html += '<div class="kb-pagination" role="group" aria-label="Knowledge fact pages">';
+        html += '<button class="hv-btn btn-secondary btn-sm" data-action="kbPreviousPage"' + (_kbPageOffset === 0 ? ' disabled' : '') + '>Previous</button>';
+        html += '<span> Page ' + (Math.floor(_kbPageOffset / _kbPageSize) + 1) + ' </span>';
+        html += '<button class="hv-btn btn-secondary btn-sm" data-action="kbNextPage"' + (!hasNext ? ' disabled' : '') + '>Next</button></div>';
       }
       el.innerHTML = html;
     }
@@ -32873,6 +33964,9 @@ function burnAreaChart() {
         const r = await fetch('/api/knowledge/vaults/' + encodeURIComponent(name) + '/facts');
         if (!r.ok) { _kbFacts = []; renderKnowledgeFacts(); return; }
         _kbFacts = await r.json();
+        _kbServerPaged = false;
+        _kbPageOffset = 0;
+        _kbHasMore = false;
         renderKnowledgeFacts();
       } catch (e) { _kbFacts = []; renderKnowledgeFacts(); }
     }
@@ -34315,8 +35409,12 @@ function burnAreaChart() {
 
     function validDashboardTimeZone(tz) {
       if (!tz || typeof tz !== 'string') return '';
+      const cache = validDashboardTimeZone.cache || (validDashboardTimeZone.cache = new Map());
+      if (cache.has(tz)) return cache.get(tz);
       try {
         new Intl.DateTimeFormat([], { timeZone: tz }).format(new Date());
+        if (cache.size >= 64) cache.clear();
+        cache.set(tz, tz);
         return tz;
       } catch (e) {
         return '';
@@ -34324,8 +35422,14 @@ function burnAreaChart() {
     }
 
     function browserDashboardTimeZone() {
+      // Recheck occasionally so OS timezone changes still reach a long-lived tab.
+      const now = Date.now();
+      if (browserDashboardTimeZone.expires > now) return browserDashboardTimeZone.value;
       try {
-        return (Intl && Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || '';
+        const tz = (Intl && Intl.DateTimeFormat && Intl.DateTimeFormat().resolvedOptions().timeZone) || '';
+        browserDashboardTimeZone.value = tz;
+        browserDashboardTimeZone.expires = now + 60000;
+        return tz;
       } catch (e) {
         return '';
       }
@@ -34359,11 +35463,18 @@ function burnAreaChart() {
       return ['UTC','America/New_York','America/Chicago','America/Denver','America/Los_Angeles','America/Phoenix','America/Anchorage','Pacific/Honolulu','Europe/London','Europe/Berlin','Asia/Kolkata','Asia/Tokyo','Australia/Sydney'];
     }
 
+    const _dashboardDateFormatters = new Map();
     function dashboardDateFormatter(options) {
       const opts = Object.assign({}, options || {});
       const tz = selectedDashboardTimeZone();
       if (tz) opts.timeZone = tz;
-      return new Intl.DateTimeFormat([], opts);
+      const key = JSON.stringify(Object.keys(opts).sort().map(k => [k, opts[k]]));
+      if (_dashboardDateFormatters.has(key)) return _dashboardDateFormatters.get(key);
+      const formatter = new Intl.DateTimeFormat([], opts);
+      // Bound memory even when callers supply arbitrary option combinations.
+      if (_dashboardDateFormatters.size >= 64) _dashboardDateFormatters.delete(_dashboardDateFormatters.keys().next().value);
+      _dashboardDateFormatters.set(key, formatter);
+      return formatter;
     }
 
     function formatDashboardDateTime(value, options, fallback) {
@@ -35543,7 +36654,7 @@ function burnAreaChart() {
     }
 
     function stopInceptionPoll() {
-      if (_inceptionPollTimer) { clearInterval(_inceptionPollTimer); _inceptionPollTimer = null; }
+      if (_inceptionPollTimer) { dashboardClearInterval('inception-activity'); _inceptionPollTimer = null; }
     }
 
     function _inceptionAuthHeaders() {
@@ -36501,7 +37612,28 @@ function burnAreaChart() {
 
     // ── Logs section ──
     const LOGS_REFRESH_MS = 5000;
+    // Lines shown per agent in the "all agents" view; the poll asks the
+    // server for only that many instead of its 100-line default.
+    const LOGS_ALL_VIEW_LINES = 15;
     let _logsData = {};
+    // Set when a poll tick was skipped because nothing could see the result
+    // (tab hidden, section collapsed or not displayed); the next time the
+    // section becomes visible one fetch runs immediately instead of waiting
+    // for the interval.
+    let _logsPollSkipped = false;
+    // Polling 16 agents' panes every 5s (~6.5 MB/min) while the Logs section
+    // was collapsed, or the tab in the background, was pure waste.
+    function agentLogsVisible() {
+      if (document.hidden) return false;
+      const section = document.getElementById('logs-section');
+      if (!section || section.offsetParent === null) return false;
+      return !isSectionCollapsed('logs-section');
+    }
+    function agentLogsResumeIfSkipped() {
+      if (!_logsPollSkipped || !agentLogsVisible()) return;
+      _logsPollSkipped = false;
+      fetchAgentLogs();
+    }
     // Agents whose /api/pane returned 404, keyed by name → the agent's state
     // at the time. A disabled or stopped agent has no tmux window, so polling
     // it again every 5s only produces console noise (#12512); the entry is
@@ -36523,6 +37655,8 @@ function burnAreaChart() {
       return out;
     }
     async function fetchAgentLogs() {
+      if (!agentLogsVisible()) { _logsPollSkipped = true; return; }
+      _logsPollSkipped = false;
       const allAgents = window._lastAgents || [];
       const agents = agentPaneCandidates(allAgents);
       const select = document.getElementById('logs-agent-select');
@@ -36540,9 +37674,10 @@ function burnAreaChart() {
       }
 
       const toFetch = current === 'all' ? agents : agents.filter(a => a.name === current);
+      const lines = current === 'all' ? '?lines=' + LOGS_ALL_VIEW_LINES : '';
       for (const a of toFetch) {
         try {
-          const res = await fetch(`/api/pane/${a.name}`);
+          const res = await fetch(`/api/pane/${a.name}${lines}`);
           if (res.ok) {
             const d = await res.json();
             _logsData[a.name] = capDashboardArray(d.lines || [], DASHBOARD_LOG_CAP);
@@ -36601,7 +37736,7 @@ function burnAreaChart() {
         for (const [name, data] of Object.entries(_logsData)) {
           if (data.length > 0) {
             lines.push(`\x1b[0m── ${name} ──`);
-            lines.push(...data.slice(-15));
+            lines.push(...data.slice(-LOGS_ALL_VIEW_LINES));
             lines.push('');
           }
         }
@@ -37162,7 +38297,8 @@ function burnAreaChart() {
         overlay.innerHTML = `<div class="hive-dialog" role="dialog" aria-modal="true" aria-labelledby="${id}-title">
           <div id="${id}-title" class="hive-dialog-title">${hiveDialogEscape(cfg.title || 'Input')}</div>
           <label for="${id}" class="hive-dialog-label">${hiveDialogEscape(cfg.label || cfg.message || cfg.title || '')}</label>
-          <input id="${id}" class="hive-dialog-input" type="text" value="${hiveDialogEscape(cfg.defaultValue || '')}" placeholder="${hiveDialogEscape(cfg.placeholder || '')}" autocomplete="off" aria-describedby="${errId}" data-initial-focus>
+          <input id="${id}" class="hive-dialog-input" type="text" value="${hiveDialogEscape(cfg.defaultValue || '')}" placeholder="${hiveDialogEscape(cfg.placeholder || '')}" autocomplete="off"${Array.isArray(cfg.options) && cfg.options.length ? ' list="' + id + '-list"' : ''} aria-describedby="${errId}" data-initial-focus>
+          ${Array.isArray(cfg.options) && cfg.options.length ? '<datalist id="' + id + '-list">' + cfg.options.map(o => '<option value="' + hiveDialogEscape(o.value) + '">' + hiveDialogEscape(o.label || '') + '</option>').join('') + '</datalist>' : ''}
           <div id="${errId}" class="hive-dialog-error" role="alert"></div>
           <div class="hive-dialog-buttons">
             <button type="button" class="hv-btn btn-secondary hive-dialog-btn cancel">Cancel</button>
@@ -40977,7 +42113,7 @@ function burnAreaChart() {
       // STAGE_TRACKER_POLL_MS tick. Only once the panel has loaded itself.
       source.addEventListener('stage-tracker', () => {
         noteSSEFrame();
-        if (_stageTrackerSig || _stageTrackerEtag) fetchStageTracker();
+        if (_stageTrackerSig || _stageTrackerEtag) stageTrackerNudge();
       });
 
       source.addEventListener('agent-status', (e) => {
@@ -41102,6 +42238,7 @@ function burnAreaChart() {
     dashboardSetInterval('sse-watchdog', function() { sseWatchdogTick(false); }, SSE_WATCHDOG_TICK_MS);
     document.addEventListener('visibilitychange', function() {
       if (document.visibilityState === 'visible') sseWatchdogTick(true);
+      if (document.visibilityState === 'visible') { agentLogsResumeIfSkipped(); stageTrackerResumeIfSkipped(); }
     });
     // Fetch persistent trends for sparklines (day/week)
     window._trendData = [];
@@ -41208,7 +42345,7 @@ function burnAreaChart() {
       { tab: 'Labels', section: 'Labels', label: 'Auto-merge queue label', key: 'governor.labels.automerge', text: 'auto merge queue label lgtm merger governor.labels.automerge' },
       { tab: 'Labels', section: 'Labels', label: 'Stage labels', key: 'governor.labels.stage.enabled', text: 'stage labels pipeline state review-pending merge-queue stalled role tier author kind human clanker hive governor.labels.stage.enabled' },
       { tab: 'Labels', section: 'Labels', label: 'Stalled requires quiet', key: 'governor.labels.stage.stalled.require_quiet', text: 'stalled no activity quiet dwell head push comment review ci label governor.labels.stage.stalled.require_quiet governor.labels.stage.dwell' },
-      { tab: 'Labels', section: 'Labels', label: 'Central stage engine', key: 'governor.labels.stage.engine.mode', text: 'stage engine mode off shadow enforce rollout rollback mismatch anomaly reconciler ADR-0025 governor.labels.stage.engine.mode' },
+      { tab: 'Labels', section: 'Labels', label: 'Central stage engine', key: 'governor.labels.stage.engine.mode', text: 'stage engine mode shadow enforce dry run pause anomaly reconciler ADR-0025 governor.labels.stage.engine.mode' },
       { tab: 'Labels', section: 'Labels', label: 'Stage dwell overrides', key: 'governor.labels.stage.dwell', text: 'stage dwell stalled threshold governor.labels.stage.dwell' },
       { tab: 'Labels', section: 'Labels', label: 'Contributor nudge', key: 'governor.labels.stage.contributor_nudge.enabled', text: 'contributor nudge returned-to-contributor red ci fix-pr relay interrupt renudge presence window governor.labels.stage.contributor_nudge.enabled governor.labels.stage.contributor_nudge.renudge_interval governor.labels.stage.presence_window' },
       { tab: 'Labels', section: 'Labels', label: 'Adopt red contributor PRs', key: 'governor.labels.stage.adoption.enabled', text: 'adoption adopted-by-hive stage 074 red contributor pr grace online offline supersede takeover in place after offline unregistered heartbeat governor.labels.stage.adoption.enabled governor.labels.stage.contributor_grace_online governor.labels.stage.contributor_grace_offline governor.labels.stage.adoption.after_offline governor.labels.stage.adoption.after_unregistered governor.labels.stage.adoption.in_place governor.labels.stage.adoption.strict_attribution strict attribution' },
@@ -41805,6 +42942,7 @@ function burnAreaChart() {
       add(document.getElementById('config-overlay'), closeConfigDialog, 10000);
       add(document.getElementById('overview-chart-settings-overlay'), closeOverviewChartSettings, 10000);
       add(document.getElementById('activity-monitor-settings-overlay'), closeStageTrackerSettings, 10000);
+      add(document.getElementById('activity-monitor-labels-overlay'), closeStageTrackerLabelDialog, 10000);
       add(document.getElementById('acmm-overlay'), closeACMMDialog, 10000);
       const nousOverlay = document.getElementById('nous-config-overlay');
       add(nousOverlay, function() { if (typeof closeNousConfig === 'function') closeNousConfig(); else nousOverlay.style.display = 'none'; }, 1000);
@@ -44726,7 +45864,7 @@ function burnAreaChart() {
     }
 
     function orStartCreditPolling() {
-      if (_openrouterPoll) clearInterval(_openrouterPoll);
+      if (_openrouterPoll) dashboardClearInterval('openrouter-credit');
       const OR_POLL_MS = 4000;
       _openrouterPoll = dashboardSetInterval('openrouter-credit', orCheckCredit, OR_POLL_MS);
     }
@@ -44738,7 +45876,7 @@ function burnAreaChart() {
         if (!res.ok) return;
         const d = await res.json();
         if (!d.connected) return;
-        if (_openrouterPoll) { clearInterval(_openrouterPoll); _openrouterPoll = null; }
+        if (_openrouterPoll) { dashboardClearInterval('openrouter-credit'); _openrouterPoll = null; }
         let creditLine = '';
         if (d.limit_remaining != null) creditLine = ' — $' + Number(d.limit_remaining).toFixed(2) + ' remaining';
         else if (d.limit == null) creditLine = ' — unlimited';
@@ -44748,7 +45886,7 @@ function burnAreaChart() {
     }
 
     function closeOpenRouterFund() {
-      if (_openrouterPoll) { clearInterval(_openrouterPoll); _openrouterPoll = null; }
+      if (_openrouterPoll) { dashboardClearInterval('openrouter-credit'); _openrouterPoll = null; }
       const host = document.getElementById('openrouter-fund-host');
       if (host) host.innerHTML = '';
     }
@@ -48258,7 +49396,7 @@ function burnAreaChart() {
       const stageEngineMode = (_configState.dirty.labels && _configState.dirty.labels.stage_engine_mode !== undefined)
         ? _configState.dirty.labels.stage_engine_mode
         : (_configState.data.stageEngineMode || 'enforce');
-      const stageEngineModeOptions = [['off', 'off — legacy pass-through (rollback)'], ['shadow', 'shadow — engine derives, legacy writes'], ['enforce', 'enforce — engine writes (default)']]
+      const stageEngineModeOptions = [['shadow', 'shadow — engine derives, writes nothing (dry run)'], ['enforce', 'enforce — engine writes (default)']]
         .map(([v, label]) => `<option value="${v}" ${stageEngineMode === v ? 'selected' : ''}>${esc(label)}</option>`).join('');
       const stageGraceOnline = (_configState.dirty.labels && _configState.dirty.labels.stage_grace_online !== undefined)
         ? _configState.dirty.labels.stage_grace_online
@@ -48299,9 +49437,9 @@ function burnAreaChart() {
         <div class="config-toggle"><div class="config-toggle-switch ${stageLabelsOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="labels" data-key="stage_enabled"></div><span class="config-toggle-label">Hive-owned stage/NN labels ${yamlHint('governor.labels.stage.enabled')} ${settingHelpMark('settings', 'labels', 'Stage labels', `Each eval cycle the hive writes exactly one stage/NN-* label per open issue/PR (review-pending, reviewed, fixing, returned-to-contributor, adopted-by-hive, awaiting-merge-admission, needs-decision, ready-for-human-merge, pre-merge-soak, merge-queue), a role/* admission-tier label, an author/* label saying who wrote the PR (human, clanker = a contributor's hive, hive = this hive), and stage/stalled when nobody has touched the item for the stage's dwell. Backward moves are a one-line stage comment and the dashboard's transition history, not a label. Writes happen only on change. See docs/labels-and-control-signals.md.`)}</span></div>
         <div class="config-toggle"><div class="config-toggle-switch ${stageStalledQuietOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="labels" data-key="stage_stalled_require_quiet"></div><span class="config-toggle-label">stage/stalled means no activity ${yamlHint('governor.labels.stage.stalled.require_quiet')} ${settingHelpMark('settings', 'labels', 'Stalled requires quiet', `On (default): stage/stalled is applied only when nobody but the hive has touched the item (head push, comment, review, CI state, label) for the stage's dwell, and never while required checks are running or the reviewer verdict for the current head is pending — those waits are on the hive. Any activity clears it at once. Off: the dwell is measured from entering the stage. See docs/labels-and-control-signals.md.`)}</span></div>
         <div class="config-field">
-          <label for="cfg-stage-engine-mode">Central stage engine mode ${yamlHint('governor.labels.stage.engine.mode')} ${settingHelpMark('settings', 'labels', 'Central stage engine', `ADR-0025: one reconciler derives every stage/NN label through one writer. shadow: the engine derives alongside the sweeps' own logic, writes what the sweeps derived, and counts each disagreement (stage_shadow_mismatch_total, Activity tracker strip, /api/status.stageEngine). enforce (default): the engine's derivation is written and its admission table rejects out-of-order transitions. off: rollback — the sweeps' derivation is written verbatim and the engine is inert. Rollout gate: run shadow for 48h with zero unexplained mismatches before enforce. Takes effect on the next sweep, no restart.`)}</label>
+          <label for="cfg-stage-engine-mode">Central stage engine mode ${yamlHint('governor.labels.stage.engine.mode')} ${settingHelpMark('settings', 'labels', 'Central stage engine', `ADR-0025: one reconciler derives every stage/NN label through one writer. enforce (default): the engine's derivation is written and its admission table counts out-of-order transitions (Activity tracker strip, /api/status.stageEngine). shadow: a pause — the engine derives and counts but writes nothing, so stage labels stay exactly as found until the mode returns to enforce. Takes effect on the next sweep, no restart.`)}</label>
           <select id="cfg-stage-engine-mode" data-change-action="markDirty" data-arg0="labels" data-arg1="stage_engine_mode" data-arg-types="s,s,v">${stageEngineModeOptions}</select>
-          <div class="config-help">Rollout: <code>shadow</code> for 48h with no unexplained mismatches, then <code>enforce</code>. Rollback: <code>off</code>. No restart needed.</div>
+          <div class="config-help"><code>enforce</code> is the default. <code>shadow</code> pauses every stage write (dry run). No restart needed.</div>
         </div>
         <div class="config-field">
           <label for="cfg-stage-dwell">Dwell overrides ${yamlHint('governor.labels.stage.dwell.<key>')}</label>
@@ -52150,6 +53288,22 @@ function burnAreaChart() {
             <span class="config-toggle-label">Post clarification comment ${yamlHint('runs.triage.clarify_comment')} ${settingHelpMark('settings', 'features', 'Post clarification comment', `Post one comment asking the reporter for more detail when an issue needs clarification. On by default.`)}</span>
           </div>
           <div class="config-field"><label>Minimum body length ${yamlHint('runs.triage.min_body_chars')} ${settingHelpMark('settings', 'features', 'Minimum body length', `An issue whose trimmed body is shorter than this many characters is marked needs-clarification (default ${esc(String(runsDefaults.runsTriageMinBodyChars || 80))}). 0 uses the default.`)}</label><input type="number" min="0" step="1" value="${esc(String(f.runsTriageMinBodyChars || ''))}" placeholder="${esc(String(runsDefaults.runsTriageMinBodyChars || 80))}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriageMinBodyChars" data-arg-types="s,s,N"><div class="config-help">0 = default.</div></div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.runsTriageClarityGateEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="runsTriageClarityGateEnabled"></div>
+            <span class="config-toggle-label">Clarity gate ${yamlHint('runs.triage.clarity_gate.enabled')} ${settingHelpMark('settings', 'features', 'Clarity gate', `Before an agent claims a human-filed issue, score how clearly it states a goal, acceptance criteria and scope. Below the threshold Hive asks the author once and parks the issue with needs-spec instead of claiming it. Works without Run triage. Off by default.`)}</span>
+          </div>
+          <div class="config-field"><label>Clarity threshold ${yamlHint('runs.triage.clarity_gate.threshold')} ${settingHelpMark('settings', 'features', 'Clarity threshold', `Clarity score (0-100) an issue needs to stay in the agent queue (default ${esc(String(runsDefaults.runsTriageClarityGateThreshold || 60))}). Goal 25, acceptance criteria 35, scope 20, detail 20; an open choice or TBD subtracts 30. 0 uses the default.`)}</label><input type="number" min="0" max="100" step="1" value="${esc(String(f.runsTriageClarityGateThreshold || ''))}" placeholder="${esc(String(runsDefaults.runsTriageClarityGateThreshold || 60))}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriageClarityGateThreshold" data-arg-types="s,s,N"><div class="config-help">0 = default.</div></div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.runsTriagePriorArtEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="runsTriagePriorArtEnabled"></div>
+            <span class="config-toggle-label">Prior-art gate ${yamlHint('runs.triage.prior_art.enabled')} ${settingHelpMark('settings', 'features', 'Prior-art gate', `Before an agent claims a feature, RFC or epic issue, search knowledge beads, settings, merged PRs, closed issues, docs and code for something that already covers it. At or above the threshold a human-filed issue is parked at stage/017-possible-existing with the findings until the author replies /hive decision proceed — <gap> or /hive decision exists; a clanker-filed one auto-closes after runs.triage.prior_art.bot_close_ttl; hive-filed issues get a findings note only. On by default.`)}</span>
+          </div>
+          <div class="config-field"><label>Prior-art threshold ${yamlHint('runs.triage.prior_art.threshold')} ${settingHelpMark('settings', 'features', 'Prior-art threshold', `Match confidence (0-100) the best finding needs before the gate parks an issue (default ${esc(String(runsDefaults.runsTriagePriorArtThreshold || 70))}): the share of the issue's weighted key terms (identifiers 4, title words 3, body words 1) the finding covers. 0 uses the default.`)}</label><input type="number" min="0" max="100" step="1" value="${esc(String(f.runsTriagePriorArtThreshold || ''))}" placeholder="${esc(String(runsDefaults.runsTriagePriorArtThreshold || 70))}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriagePriorArtThreshold" data-arg-types="s,s,N"><div class="config-help">0 = default.</div></div>
+          <div class="config-field"><label>Prior-art kinds ${yamlHint('runs.triage.prior_art.kinds[]')} ${settingHelpMark('settings', 'features', 'Prior-art kinds', `Comma-separated issue kinds the gate judges: feature, rfc, epic, enhancement (default ${esc(runsDefaults.runsTriagePriorArtKinds || 'feature, rfc, epic, enhancement')}). Empty uses the default. Bug reports are never gated.`)}</label><input type="text" value="${esc(f.runsTriagePriorArtKinds || '')}" placeholder="${esc(runsDefaults.runsTriagePriorArtKinds || 'feature, rfc, epic, enhancement')}" autocomplete="off" spellcheck="false" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriagePriorArtKinds" data-arg-types="s,s,w"></div>
+          <div class="config-field-row">
+            <div class="config-field"><label>Prior-art max findings ${yamlHint('runs.triage.prior_art.max_findings')} ${settingHelpMark('settings', 'features', 'Prior-art max findings', `Caps the findings listed in a park comment (default ${esc(String(runsDefaults.runsTriagePriorArtMaxFindings || 5))}). 0 uses the default.`)}</label><input type="number" min="0" step="1" value="${esc(String(f.runsTriagePriorArtMaxFindings || ''))}" placeholder="${esc(String(runsDefaults.runsTriagePriorArtMaxFindings || 5))}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriagePriorArtMaxFindings" data-arg-types="s,s,N"></div>
+            <div class="config-field"><label>Prior-art max parks per cycle ${yamlHint('runs.triage.prior_art.max_parks_per_cycle')} ${settingHelpMark('settings', 'features', 'Prior-art max parks per cycle', `Caps how many issues one enumeration cycle may park, so enabling the gate on a backlog never floods a repo (default ${esc(String(runsDefaults.runsTriagePriorArtMaxParksPerCycle || 5))}). 0 uses the default.`)}</label><input type="number" min="0" step="1" value="${esc(String(f.runsTriagePriorArtMaxParksPerCycle || ''))}" placeholder="${esc(String(runsDefaults.runsTriagePriorArtMaxParksPerCycle || 5))}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriagePriorArtMaxParksPerCycle" data-arg-types="s,s,N"></div>
+          </div>
+          <div class="config-field"><label>Prior-art bot close TTL ${yamlHint('runs.triage.prior_art.bot_close_ttl')} ${settingHelpMark('settings', 'features', 'Prior-art bot close TTL', `How long a clanker-filed park waits for a reply before it is closed as already-exists (default ${esc(runsDefaults.runsTriagePriorArtBotCloseTtl || '72h0m0s')}). Go duration; empty uses the default. A negative value that disables auto-close stays yaml-only.`)}</label><input type="text" value="${esc(f.runsTriagePriorArtBotCloseTtl || '')}" placeholder="${esc(runsDefaults.runsTriagePriorArtBotCloseTtl || '72h0m0s')}" data-change-action="markDirty" data-arg0="features" data-arg1="runsTriagePriorArtBotCloseTtl" data-arg-types="s,s,w"></div>
           <div class="settings-subsection-title mt-5">Spek recheck ${settingHelpMark('spektacular', '', 'Spek recheck', `Continuous convergence: re-runs the spec for opted-in campaigns on a cadence and imports changed or new plan tasks. The source lists (runs.spektacular.recheck.sources, runs.spektacular.recheck.discovery.sources) and runs.spektacular.recheck.egress_allowlist are yaml-only.`)}</div>
           <div class="config-toggle">
             <div class="config-toggle-switch ${f.spektacularRecheckEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="spektacularRecheckEnabled"></div>
@@ -58306,6 +59460,8 @@ function burnAreaChart() {
       gh15: function (event, A) { _kbSearchQuery=this.value;kbSearch(); },
       gh16: function (event, A) { _kbSearchQuery=this.value; },
       gh17: function (event, A) { kbReadFact(A[0]); },
+      kbPreviousPage: function () { kbChangePage(-1); },
+      kbNextPage: function () { kbChangePage(1); },
       gh18: function (event, A) { kbRemoveGitSource(A[0],A[1]); },
       gh19: function (event, A) { this.style.display='none'; },
       gh20: function (event, A) { this.style.borderColor='var(--blue)'; },

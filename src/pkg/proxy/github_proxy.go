@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -30,7 +31,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/agent"
-	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/crux/config"
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 	"github.com/hivecommons/hive/pkg/ioscan"
@@ -807,7 +808,11 @@ func (p *GitHubProxy) handleTransparentTLS(conn net.Conn, peeked []byte) {
 	handshakeErr := tlsClientConn.Handshake()
 	_ = conn.SetDeadline(time.Time{})
 	if handshakeErr != nil {
-		p.logger.Warn("transparent proxy TLS handshake failed", "error", handshakeErr)
+		if isClientHangup(handshakeErr) {
+			p.logger.Debug("proxy client hung up before TLS handshake", "error", handshakeErr)
+		} else {
+			p.logger.Warn("transparent proxy TLS handshake failed", "error", handshakeErr)
+		}
 		return
 	}
 	defer func() { _ = tlsClientConn.Close() }()
@@ -1222,7 +1227,11 @@ func (p *GitHubProxy) handleConnectDirect(conn net.Conn, r *http.Request) {
 	handshakeErr := tlsClientConn.Handshake()
 	_ = conn.SetDeadline(time.Time{})
 	if handshakeErr != nil {
-		p.logger.Warn("proxy client TLS handshake failed", "error", handshakeErr)
+		if isClientHangup(handshakeErr) {
+			p.logger.Debug("proxy client hung up before TLS handshake", "error", handshakeErr)
+		} else {
+			p.logger.Warn("proxy client TLS handshake failed", "error", handshakeErr)
+		}
 		return
 	}
 	defer func() { _ = tlsClientConn.Close() }()
@@ -1254,12 +1263,31 @@ func isTimeoutError(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-func (p *GitHubProxy) logTimeout(msg string, err error, attrs ...any) {
+// logUpstreamEvent logs an upstream timeout event at the given level.
+func (p *GitHubProxy) logUpstreamEvent(level slog.Level, msg string, err error, attrs ...any) {
 	if !isTimeoutError(err) {
 		return
 	}
 	attrs = append(attrs, "error", err)
-	p.logger.Warn(msg, attrs...)
+	p.logger.Log(context.Background(), level, msg, attrs...)
+}
+
+func (p *GitHubProxy) logTimeout(msg string, err error, attrs ...any) {
+	p.logUpstreamEvent(slog.LevelWarn, msg, err, attrs...)
+}
+
+// isClientHangup reports a client that went away (EOF, reset, broken pipe) or
+// stalled past the deadline: routine on restarts and liveness probes, not a
+// hive defect.
+func isClientHangup(err error) bool {
+	return isTimeoutError(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed)
+}
+
+// logClientRead logs a client-side request read failure at Debug: an idle or
+// departed client is expected, unlike an upstream stall.
+func (p *GitHubProxy) logClientRead(msg string, err error, attrs ...any) {
+	p.logUpstreamEvent(slog.LevelDebug, msg, err, attrs...)
 }
 
 // proxyHTTP relays a MITM'd GitHub connection with ACMM enforcement applied.
@@ -1293,7 +1321,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 		req, err := http.ReadRequest(clientBuf)
 		if err != nil {
 			_ = client.SetReadDeadline(time.Time{})
-			p.logTimeout("proxy client request read timed out", err, "agent", agentName)
+			p.logClientRead("proxy client request read timed out", err, "agent", agentName)
 			return
 		}
 
@@ -3272,7 +3300,11 @@ func (p *GitHubProxy) sniffCopilotOnTLS(clientConn net.Conn, host, agentName str
 	handshakeErr := tlsClientConn.Handshake()
 	_ = clientConn.SetDeadline(time.Time{})
 	if handshakeErr != nil {
-		p.logger.Warn("copilot sniff: client TLS handshake failed", "error", handshakeErr)
+		if isClientHangup(handshakeErr) {
+			p.logger.Debug("copilot sniff: client hung up before TLS handshake", "error", handshakeErr)
+		} else {
+			p.logger.Warn("copilot sniff: client TLS handshake failed", "error", handshakeErr)
+		}
 		return
 	}
 	defer func() { _ = tlsClientConn.Close() }()
@@ -3308,7 +3340,7 @@ func (p *GitHubProxy) proxyCopilotHTTP(client net.Conn, upstream net.Conn, host,
 		req, err := http.ReadRequest(clientBuf)
 		if err != nil {
 			_ = client.SetReadDeadline(time.Time{})
-			p.logTimeout("copilot sniff: client request read timed out", err, "agent", agentName, "host", host)
+			p.logClientRead("copilot sniff: client request read timed out", err, "agent", agentName, "host", host)
 			return
 		}
 

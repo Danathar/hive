@@ -61,13 +61,11 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/authorkind"
-	"github.com/hivecommons/hive/pkg/claims"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/stageengine"
 	"github.com/hivecommons/hive/pkg/stagelabels"
@@ -165,6 +163,9 @@ type IssueStageInput struct {
 	Claim     *IssueClaimContext
 	// Children is set on a decomposed parent (hivecommons/hive#12857).
 	Children *IssueChildren
+	// DelegatesWork mirrors the watcher's unchecked issue-task predicate.
+	// Unlike Children, it includes body-only delegation without ledger entries.
+	DelegatesWork bool
 	// Held is set for an issue the enumeration put in the Hold list
 	// (Client.isHeld: the hive's hold-label matcher, including the
 	// configured hive-pause/<id> label). IssueStageFor also reads the
@@ -193,83 +194,16 @@ func issueUntriaged(in IssueStageInput) (untriaged bool, why string) {
 	return false, ""
 }
 
-// actionableStage is 010-actionable or, for an untriaged issue, 015.
-func actionableStage(in IssueStageInput, reason string) (stagelabels.Stage, string) {
-	if untriaged, why := issueUntriaged(in); untriaged {
-		return stagelabels.TriageNeeded, "triage needed: " + why
-	}
-	return stagelabels.Actionable, reason
-}
-
-// IssueStageFor classifies one enumerated issue. covered reports whether an
-// open PR the lanes have staged covers it (health then belongs to the PR,
-// whose stage the reason names). prStage resolves the covering PR's current
-// stage from the shared store. The issue itself never goes past
-// 040-covered-by-pr: 050+ are PR stages (stagelabels.Table, PR: true) and
-// mirroring them onto the issue is what left hivecommons/hive#12451 wearing
-// stage/050-review-pending next to its own stages (hivecommons/hive#12451).
+// IssueStageFor classifies one enumerated issue: it resolves the hive's
+// label families into stageengine.Facts (issueFactsFrom) and asks the
+// engine (stageengine.DeriveIssue) for the stage. covered reports whether
+// an open PR the lanes have staged covers it (health then belongs to the
+// PR, whose stage the reason names). prStage resolves the covering PR's
+// current stage from the shared store. A decomposed parent's reason
+// carries the "waiting on N open child issue(s)" suffix.
 func IssueStageFor(in IssueStageInput, prStage func(repo string, number int) stagelabels.Stage) (stage stagelabels.Stage, covered bool, reason string) {
-	if issueHasLabel(in.Labels, LikelyDoneLabel) {
-		return stagelabels.None, false, "merged PR awaiting confirmation"
-	}
-	// A held issue is paused, not parked on a person: it shows as
-	// "Open · on hold", and hold outranks needs-human / needs-decision /
-	// needs-spec (hivecommons/hive#13012). PR holds keep 085 (RouteHuman).
-	if label := issueHoldLabel(in); label != "" {
-		return stagelabels.None, false, "held: " + label
-	}
-	// A blocked issue waits on an unmerged PR (or another outside blocker):
-	// nothing to decide, nothing to claim, so it is parked out of the
-	// pipeline like a hold until the sweep lifts the label
-	// (hivecommons/hive#13093).
-	if hasBlockedLabel(in.Labels) {
-		return stagelabels.None, false, blockedStageReason(in)
-	}
-	if issueHeldByNeedsHuman(in) {
-		return stagelabels.IssueNeedsDecision, false, "held for a person: " + issueNeedsHumanLabel
-	}
-	if label := parkedOnPersonLabel(in); label != "" {
-		return stagelabels.IssueNeedsDecision, false, "parked on a person: " + label
-	}
-	// An umbrella issue (governor.claims.never_claim_labels, default
-	// `epic`) is the list of work, not the work: a claim or start mark on
-	// it is never staged 020/030 — admission refuses new ones, and one that
-	// exists (recorded before the gate, or by a human) leaves the epic at
-	// its umbrella stage, 010 while open (hivecommons/hive#12999).
-	if label := issueUmbrellaLabel(in.Labels); label != "" && (in.Bucket == workBucketClaimed || in.Bucket == inProgressWorkBucket) {
-		stage, reason := actionableStage(in, "umbrella issue ("+label+"): claim not staged")
-		return stage, false, reason
-	}
-	switch in.Bucket {
-	case "", workBucketReporterTriage:
-		stage, reason := actionableStage(in, "actionable")
-		return stage, false, reason
-	case workBucketClaimed:
-		if in.PRStarted {
-			return stagelabels.PRInProgress, false, "live claim with a PR under way"
-		}
-		if strings.EqualFold(in.ClaimKind, string(claims.KindAgent)) {
-			return stagelabels.Claimed, false, "live agent claim (no PR yet)"
-		}
-		return stagelabels.Claimed, false, "live issue claim"
-	case inProgressWorkBucket:
-		if in.PRStarted {
-			return stagelabels.PRInProgress, false, "in-progress start mark with a PR under way"
-		}
-		return stagelabels.Claimed, false, "in-progress start mark (no PR yet)"
-	case workBucketClaimedByPR:
-		if in.Claim != nil && in.Claim.PRNumber > 0 && prStage != nil {
-			prRepo := in.Claim.PRRepo
-			if prRepo == "" {
-				prRepo = in.Repo
-			}
-			if s := prStage(prRepo, in.Claim.PRNumber); s != stagelabels.None && !s.Before(stagelabels.CoveredByPR) {
-				return stagelabels.CoveredByPR, true, "open PR #" + strconv.Itoa(in.Claim.PRNumber) + " covers it (PR at " + s.String() + ")"
-			}
-		}
-		return stagelabels.CoveredByPR, false, "open PR covers it"
-	}
-	return stagelabels.None, false, "outside the pipeline: " + in.Bucket
+	d := stageengine.DeriveIssue(issueFactsFrom(in, prStage))
+	return d.Stage, d.Covered, d.Reason
 }
 
 // issueHoldLabel returns the hold-class label that pauses the issue, or "".
@@ -310,6 +244,15 @@ func issueHeldByNeedsHuman(in IssueStageInput) bool {
 // needs-direction and stage/030-pr-in-progress together for five hours: the
 // reconciler cleared the stage to none, which read as "actionable" to a
 // person while the hive had in fact handed it to one.
+// possiblyExistsParked reports the prior-art gate's park: the 017 label on
+// the issue, or an enumeration that filtered the issue for it.
+func possiblyExistsParked(in IssueStageInput) bool {
+	if issueHasLabel(in.Labels, PossiblyExistsStageLabel) {
+		return true
+	}
+	return in.Bucket == workBucketFiltered && strings.EqualFold(strings.TrimSpace(in.Reason), PossiblyExistsStageLabel)
+}
+
 func parkedOnPersonLabel(in IssueStageInput) string {
 	if label := hardSuppressIssueLabel(in.Labels); label != "" {
 		return label
@@ -357,7 +300,7 @@ func IssueStageInputs(result *ActionableResult) []IssueStageInput {
 	}
 	var out []IssueStageInput
 	for _, issue := range result.Issues.Items {
-		out = append(out, IssueStageInput{Repo: issue.Repo, Number: issue.Number, Labels: forgeIssueLabels(issue.Labels, issue.ClaimContext), ClaimKind: issue.ClaimKind, ClaimedBy: issue.ClaimedBy, PRStarted: issue.ClaimPRStarted, Claim: issue.ClaimContext, Children: issue.Children, AuthorKind: issueAuthorKind(issue)})
+		out = append(out, IssueStageInput{Repo: issue.Repo, Number: issue.Number, Labels: forgeIssueLabels(issue.Labels, issue.ClaimContext), ClaimKind: issue.ClaimKind, ClaimedBy: issue.ClaimedBy, PRStarted: issue.ClaimPRStarted, Claim: issue.ClaimContext, Children: issue.Children, AuthorKind: issueAuthorKind(issue), DelegatesWork: hasUnfinishedDelegatedWork(issue.Body)})
 	}
 	// Held issues leave the pipeline at enumeration (Hold list, no
 	// work-detail row). They still have to be walked so a stage label
@@ -425,7 +368,7 @@ func SyncIssueStageLabelsWith(ctx context.Context, client *Client, result *Actio
 	if store == nil {
 		store = stagelabels.Shared()
 	}
-	reconciler, legacy := client.StageReconciler(store, engine, logger)
+	reconciler := client.StageReconciler(store, engine, logger)
 	ctx = WithRESTCaller(ctx, issueStageRESTCaller)
 	// The closes this pass may perform (decomposed parent, merged full-fix
 	// PR) are irreversible; bound them to a fresh, non-stale view of the
@@ -488,9 +431,6 @@ func SyncIssueStageLabelsWith(ctx context.Context, client *Client, result *Actio
 			in.PRStarted = false
 		}
 		stage, covered, reason := IssueStageFor(in, prStage)
-		if awaitingChildren && stage != stagelabels.None {
-			reason += "; waiting on " + strconv.Itoa(in.Children.Open()) + " open child issue(s)"
-		}
 		var want stagelabels.Desired
 		var tr stagelabels.Transition
 		if stage == stagelabels.None {
@@ -534,7 +474,6 @@ func SyncIssueStageLabelsWith(ctx context.Context, client *Client, result *Actio
 		facts.Ref.Owner, facts.Ref.Repo = owner, name
 		facts.ObservedAt = now
 		facts.Issue.Stalled = want.Stalled
-		legacy.Set(facts.Ref, stageengine.Decision{Stage: want.Stage, Stalled: want.Stalled, Terminal: stage == stagelabels.None, Reason: reason})
 		pending = append(pending, issueStagePending{in: in, key: key, want: want, tr: tr, covered: covered, reason: reason, facts: facts})
 	}
 	// The write: one ReconcileBatch for the pass. The reconciler re-reads
@@ -551,7 +490,6 @@ func SyncIssueStageLabelsWith(ctx context.Context, client *Client, result *Actio
 		transitions, _ = reconciler.ReconcileBatch(ctx, facts)
 	}
 	for i, p := range pending {
-		legacy.Delete(p.facts.Ref)
 		in, key, want, tr, covered, reason := p.in, p.key, p.want, p.tr, p.covered, p.reason
 		var out stagelabels.Outcome
 		err := ctx.Err()
@@ -706,7 +644,15 @@ func ensureIssueStagePRLink(ctx context.Context, client *Client, in IssueStageIn
 	if in.Claim.PRURL == "" && in.Claim.PRRepo == "" && in.Claim.PRAuthor == "" && !in.Claim.Closing && !in.Claim.Reference {
 		return false, false
 	}
-	link, err := client.EnsureIssueStagePRLink(ctx, in.Repo, in.Number, in.Claim)
+	claim := in.Claim
+	if claim.Reference && (in.DelegatesWork || in.Children != nil && in.Children.Open() > 0 || issueHasLabel(in.Labels, PartiallyAddressedLabel)) {
+		// Coverage is display-only for a delegating tracker (#13747).
+		// Keep its non-closing scope, without mutating the shared claim.
+		copy := *claim
+		copy.KeepReference = true
+		claim = &copy
+	}
+	link, err := client.EnsureIssueStagePRLink(ctx, in.Repo, in.Number, claim)
 	if err != nil {
 		if logger != nil {
 			logger.Warn("issue stage labels: PR issue-link safeguard failed", "repo", in.Repo, "issue", in.Number, "pr", in.Claim.PRNumber, "error", err)

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -59,6 +60,10 @@ type StageTrackerResponse struct {
 	// author/<kind> label, so the UI can say whether kinds are labelled or
 	// inferred from the PR's hive markers.
 	AuthorKindLabels bool `json:"author_kind_labels"`
+	// NeedsHumanLabels is the "a person must act" label set
+	// (needsHumanPresetLabels) behind the tracker's synthetic Needs human
+	// facet, so the page and the Projects preset cannot disagree.
+	NeedsHumanLabels []string `json:"needs_human_labels,omitempty"`
 	// Engine is the ADR-0025 central stage engine's mode and counters for
 	// the tracker's status strip; absent when the hive has no engine.
 	Engine *stageengine.Status `json:"engine,omitempty"`
@@ -213,7 +218,11 @@ type StageTrackerItem struct {
 	Author string `json:"author,omitempty"`
 	// Head is the PR head SHA the lane last evaluated ("" for issues), so
 	// a "waiting for a verdict" caption can name the revision it waits on.
-	Head string `json:"head,omitempty"`
+	Head           string                `json:"head,omitempty"`
+	BaseRef        string                `json:"base_ref,omitempty"`
+	ClaimReference bool                  `json:"claim_reference,omitempty"`
+	IsTracker      bool                  `json:"is_tracker,omitempty"`
+	Children       *github.IssueChildren `json:"children,omitempty"`
 	// Labels are the item's GitHub labels as the snapshot saw them, so the
 	// dashboard can offer a label filter without a second endpoint.
 	Labels    []string   `json:"labels,omitempty"`
@@ -268,10 +277,22 @@ type StageTrackerItem struct {
 	// soak window was left as of the last sweep (the lane's
 	// `soaking(remaining=…)` reason aged by the time since it was recorded);
 	// 0 when unknown or not soaking.
-	SoakRemainingSeconds int64      `json:"soak_remaining_seconds,omitempty"`
-	NudgeCount           int        `json:"nudge_count,omitempty"`
-	LastNudgeAt          *time.Time `json:"last_nudge_at,omitempty"`
-	AdoptedBy            int        `json:"adopted_by,omitempty"`
+	SoakRemainingSeconds int64 `json:"soak_remaining_seconds,omitempty"`
+	// SentinelAlert is true on a PR the suspicious-activity sentinel flagged:
+	// it wears the configured alert label (sentinel.label, default
+	// sentinel-alert) or the review evidence bundle for its current head
+	// records sentinel findings. A webhook label patch flips it without
+	// waiting for the next governor cycle. SentinelFindings counts the
+	// findings in that bundle (0 when only the label says so) and
+	// SentinelReason is the first finding's summary, so the lane text can
+	// name why a person must look (hivecommons/hive: "Sentinel alert ·
+	// needs human").
+	SentinelAlert    bool       `json:"sentinel_alert,omitempty"`
+	SentinelFindings int        `json:"sentinel_findings,omitempty"`
+	SentinelReason   string     `json:"sentinel_reason,omitempty"`
+	NudgeCount       int        `json:"nudge_count,omitempty"`
+	LastNudgeAt      *time.Time `json:"last_nudge_at,omitempty"`
+	AdoptedBy        int        `json:"adopted_by,omitempty"`
 	// ClaimantKind is the author kind of whoever holds the live claim on a
 	// claimed issue (human / clanker / hive), from the worker-claim ledger.
 	ClaimantKind string `json:"claimant_kind,omitempty"`
@@ -316,6 +337,7 @@ type StageTrackerLinkedIssue struct {
 
 // StageTrackerLinkedPR is one covering PR nested under an issue row.
 type StageTrackerLinkedPR struct {
+	BaseRef    string     `json:"base_ref,omitempty"`
 	Number     int        `json:"number"`
 	Title      string     `json:"title,omitempty"`
 	URL        string     `json:"url,omitempty"`
@@ -325,6 +347,11 @@ type StageTrackerLinkedPR struct {
 	StageSince *time.Time `json:"stage_since,omitempty"`
 	Caption    string     `json:"caption,omitempty"`
 	Modifiers  []string   `json:"modifiers,omitempty"`
+	// SentinelAlert / SentinelReason mirror the nested PR's own row fields
+	// so a sub-row under an issue names the alert too.
+	SentinelAlert  bool   `json:"sentinel_alert,omitempty"`
+	SentinelReason string `json:"sentinel_reason,omitempty"`
+	Head           string `json:"head,omitempty"`
 }
 
 // Stage numbers the tracker lays out by. Pinned to stagelabels.Table in
@@ -349,7 +376,11 @@ const (
 	trackerNumberActionable    = 10
 	// trackerNumberTriageNeeded is the untriaged-actionable stage (015): it
 	// lights the Actionable column with the word "Triage needed".
-	trackerNumberTriageNeeded   = 15
+	trackerNumberTriageNeeded = 15
+	// trackerNumberPossiblyExists is the prior-art park (017): the issue
+	// lights the Actionable column with the word "Possibly exists" and
+	// waits on its author (hivecommons/hive#13575).
+	trackerNumberPossiblyExists = 17
 	stageTrackerHistoryMaxItems = stagelabels.HistoryLimit
 )
 
@@ -361,9 +392,12 @@ const (
 	modNeedsHuman    = "needs-human"
 	modNeedsDecision = "needs-decision"
 	modNeedsTriage   = "needs-triage"
-	modNeedsRebase   = "needs-rebase"
-	modBlocked       = "blocked"
-	modDraft         = "draft"
+	// modPossibleDupe: the issue carries the prior-art park label; the
+	// chip reads "possible dupe".
+	modPossibleDupe = "possible-dupe"
+	modNeedsRebase  = "needs-rebase"
+	modBlocked      = "blocked"
+	modDraft        = "draft"
 )
 
 // Lane names.
@@ -406,6 +440,8 @@ func stageTrackerShort(s stagelabels.Stage) string {
 		return "Actionable"
 	case stagelabels.TriageNeeded:
 		return "Triage needed"
+	case stagelabels.PossiblyExisting:
+		return "Possibly exists"
 	case stagelabels.Claimed:
 		return "Claimed"
 	case stagelabels.PRInProgress:
@@ -533,7 +569,45 @@ func stageTrackerTier(labels []string) string {
 	return ""
 }
 
-// stageTrackerModifiers lists the control/health markers on the item.
+// stageTrackerSentinelMoreFormat renders how many findings follow the one
+// named in SentinelReason.
+const stageTrackerSentinelMoreFormat = " (+%d more)"
+
+// stageTrackerSentinel reports whether the sentinel flagged repo#number at
+// head: the PR wears the configured alert label (the sweep's blocking
+// signal, read from the live labels so a webhook label patch flips it at
+// once) or the review evidence bundle for head records sentinel findings
+// (how a trusted author's notice-only finding is seen, since those carry a
+// comment rather than the label). The findings count and the first
+// finding's summary come from the bundle; both are empty when only the
+// label says so. One file read per PR with a known head, ENOENT when the
+// sentinel never wrote one; the tracker payload is memoised so this runs
+// once per snapshot, not per request.
+func (s *Server) stageTrackerSentinel(repo string, number int, head string, labels []string) (alert bool, findings int, reason string) {
+	label := s.sentinelLabel()
+	for _, l := range labels {
+		if strings.EqualFold(strings.TrimSpace(l), label) {
+			alert = true
+			break
+		}
+	}
+	if head == "" {
+		return alert, 0, ""
+	}
+	b, err := github.LoadReviewEvidence(github.ReviewEvidencePath("", repo, number, head))
+	if err != nil || b == nil || len(b.Sentinel) == 0 {
+		return alert, 0, ""
+	}
+	findings = len(b.Sentinel)
+	reason = strings.TrimSpace(b.Sentinel[0].Summary)
+	if reason == "" {
+		reason = strings.TrimSpace(b.Sentinel[0].Rule)
+	}
+	if findings > 1 {
+		reason += fmt.Sprintf(stageTrackerSentinelMoreFormat, findings-1)
+	}
+	return true, findings, reason
+}
 func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Record, hasRec bool, overrides map[string]time.Duration, now time.Time, draft bool) []string {
 	set := map[string]bool{}
 	for _, l := range labels {
@@ -553,6 +627,8 @@ func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Recor
 			// Still waiting on triage (reporter trust / maintainer look):
 			// the Open row's action chip reads "triage needed".
 			set[modNeedsTriage] = true
+		case stagelabels.PossiblyExisting.Label():
+			set[modPossibleDupe] = true
 		case "needs-rebase":
 			set[modNeedsRebase] = true
 		case "blocked":
@@ -574,7 +650,7 @@ func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Recor
 		set[modDraft] = true
 	}
 	out := make([]string, 0, len(set))
-	for _, m := range []string{modStalled, modRegressed, modHold, modNeedsHuman, modNeedsDecision, modNeedsTriage, modNeedsRebase, modBlocked, modDraft} {
+	for _, m := range []string{modStalled, modRegressed, modHold, modNeedsHuman, modNeedsDecision, modNeedsTriage, modPossibleDupe, modNeedsRebase, modBlocked, modDraft} {
 		if set[m] {
 			out = append(out, m)
 		}
@@ -772,6 +848,8 @@ func stageTrackerCaption(stage stagelabels.Stage, reason, author string, kind st
 		return joinClause("Triaged and eligible; waiting for the scanner to pick it up", clause), "scanner"
 	case stagelabels.TriageNeeded:
 		return joinClause("Actionable, but no maintainer has looked at it yet; waiting for triage", clause), "maintainer"
+	case stagelabels.PossiblyExisting:
+		return joinClause("Prior art found; the author must confirm the gap (`/hive decision proceed — <gap>`) or close it (`/hive decision exists`)", clause), strings.TrimPrefix(who, "@")
 	case stagelabels.Claimed:
 		return joinClause("Claimed; work is about to start", clause), "claimant"
 	case stagelabels.PRInProgress:
@@ -921,6 +999,11 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		return resp
 	}
 	resp.HiveID = status.HiveID
+	var cfg *config.Config
+	if s.deps != nil {
+		cfg = s.deps.Config
+	}
+	resp.NeedsHumanLabels = needsHumanPresetLabels(cfg, status.HiveID)
 	lookup := func(repo string, number int) (stagelabels.Record, bool) {
 		if store == nil {
 			return stagelabels.Record{}, false
@@ -934,6 +1017,15 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		// must stop asking (hivecommons/docs#419).
 		if hasRec && stageTrackerStaleDecisionRecord(rec, labels) {
 			rec, hasRec = stagelabels.Record{}, false
+		}
+		// Likewise a 015 record on an issue whose labels already say
+		// triage was accepted (the row menu's Accept triage): 010 until the
+		// engine re-derives it.
+		if hasRec && s.stageTrackerAcceptedTriageRecord(rec, labels) {
+			rec, hasRec = stagelabels.Record{}, false
+			if stage == stagelabels.None || stage == stagelabels.TriageNeeded {
+				stage = stagelabels.Actionable
+			}
 		}
 		if hasRec && rec.Stage != stagelabels.None {
 			stage = rec.Stage
@@ -985,7 +1077,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		seen[key] = true
 		resp.Items = append(resp.Items, it)
 	}
-	addIssue := func(repoName string, issue github.Issue, bucket, bucketReason string) {
+	addIssue := func(repoName string, issue github.Issue, bucket, bucketReason string, progress *github.IssueChildren) {
 		// A closed issue has no stage; a stage label it closed wearing is
 		// the closed-issue sweep's to remove, not a row to render
 		// (hivecommons/homebrew-hive#127).
@@ -998,6 +1090,15 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			Labels: append([]string(nil), issue.Labels...), CreatedAt: timePtr(issue.CreatedAt), UpdatedAt: timePtr(issue.UpdatedAt),
 			Bucket: bucket, BucketReason: bucketReason,
 			URL: overviewItemURL(issue.URL, issue.Repo, issue.Number, "issue", status.GitHubBaseURL)}
+		it.Children = issue.Children
+		if it.Children == nil {
+			it.Children = progress
+		}
+		if it.Children == nil {
+			it.Children = github.TrackerTaskProgress(issue.Body)
+		}
+		it.IsTracker = github.RendersAsTracker(issue.IsTracker, issue.Labels, it.Children)
+		it.ClaimReference = issue.ClaimContext != nil && !issue.ClaimContext.MergedPR && issue.ClaimContext.Reference && issue.ClaimContext.Decision != github.ClaimDecisionReleasedRedStalePR
 		if issue.AuthorIsHuman {
 			it.AuthorKind, it.AuthorKindSource = authorKindHuman, authorKindSrcInfer
 		} else if strings.HasSuffix(strings.ToLower(issue.Author), botLoginSuffix) {
@@ -1041,6 +1142,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			Labels: append([]string(nil), pr.Labels...), CreatedAt: timePtr(pr.CreatedAt), UpdatedAt: timePtr(pr.UpdatedAt),
 			Bucket: bucket, BucketReason: bucketReason,
 			URL: overviewItemURL(pr.URL, pr.Repo, pr.Number, "pr", status.GitHubBaseURL)}
+		it.BaseRef = pr.BaseRef
 		it.AuthorKind, it.AuthorKindSource = stageTrackerAuthorKind(pr.Labels, pr.Author, pr.AppAuthored, pr.HiveAttributed)
 		if it.AuthorKindSource == authorKindSrcLabel {
 			resp.AuthorKindLabels = true
@@ -1054,6 +1156,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			it.Lane = laneHive
 		}
 		finish(&it, pr.Labels, labelStage(pr.Labels), rec, ok, pr.Draft)
+		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(repoName, pr.Number, pr.HeadSHA, pr.Labels)
 		it.LinkedIssues = stageTrackerPRLinkedIssues(pr, status.GitHubBaseURL)
 		add(it)
 	}
@@ -1066,7 +1169,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		for _, it := range repoOpenItems(repo) {
 			switch {
 			case it.Kind == "issue" && !it.Sidelined:
-				addIssue(repoName, it.Issue, "", "")
+				addIssue(repoName, it.Issue, "", "", nil)
 			case it.Kind == "pr" && !it.Sidelined:
 				addPR(repoName, it.PR.pr, it.PR.verdict, "", "")
 			case it.Kind == "issue":
@@ -1074,11 +1177,11 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 				// bucket, the open items the first tracker never showed.
 				w := it.WorkIssue
 				addIssue(repoName, github.Issue{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Assignees: w.Assignees,
-					CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, ClaimKind: w.ClaimKind, ClaimedBy: w.ClaimedBy, LinkedPRs: w.LinkedPRs, ClaimContext: w.ClaimContext}, w.Bucket, w.Reason)
+					CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, ClaimKind: w.ClaimKind, ClaimedBy: w.ClaimedBy, LinkedPRs: w.LinkedPRs, ClaimContext: w.ClaimContext, IsTracker: w.IsTracker, Children: w.Children}, w.Bucket, w.Reason, w.TrackerProgress)
 			default:
 				w := it.WorkPR
 				addPR(repoName, github.PullRequest{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Draft: w.Draft,
-					AppAuthored: w.AppAuthored, HiveAttributed: w.HiveAttributed, CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, LinkedIssues: w.LinkedIssues, ReferencedIssues: w.ReferencedIssues}, nil, w.Bucket, w.Reason)
+					AppAuthored: w.AppAuthored, HiveAttributed: w.HiveAttributed, CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, BaseRef: w.BaseRef, LinkedIssues: w.LinkedIssues, ReferencedIssues: w.ReferencedIssues}, nil, w.Bucket, w.Reason)
 			}
 		}
 	}
@@ -1210,12 +1313,22 @@ func (s *Server) stageTrackerPayload(status *StatusPayload, now time.Time) (body
 	// serves verbatim, and what the ETag validates. The building request
 	// alone rewrites the marker to fresh on its way out (handleStageTracker).
 	resp.Source = "cache"
+	// The ETag hashes the body with generated_at zeroed: the timestamp moves
+	// on every rebuild, so including it would turn an unchanged tracker into
+	// a 200 each time (the client revalidates with this ETag and gets a 304).
+	var hashBuf bytes.Buffer
+	hashResp := resp
+	hashResp.GeneratedAt = time.Time{}
+	if err := json.NewEncoder(&hashBuf).Encode(hashResp); err != nil {
+		slogWarnOverviewEncode(err)
+		return nil, "", now, true
+	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(resp); err != nil {
 		slogWarnOverviewEncode(err)
 		return nil, "", now, true
 	}
-	c.body, c.etag, c.generatedAt = buf.Bytes(), webstatic.ETagFor(buf.Bytes()), now
+	c.body, c.etag, c.generatedAt = buf.Bytes(), webstatic.ETagFor(hashBuf.Bytes()), now
 	return c.body, c.etag, c.generatedAt, true
 }
 
@@ -1266,7 +1379,9 @@ func (s *Server) handleStageTracker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age="+strconv.FormatInt(int64(remaining/time.Second), 10))
 	w.Header().Set("X-Hive-Stage-Tracker-Source", map[bool]string{true: "fresh", false: "cache"}[fresh])
-	if match := r.Header.Get("If-None-Match"); match != "" && !fresh && strings.Contains(match, etag) {
+	w.Header().Set("X-Hive-Stage-Tracker-Generated-At", generatedAt.UTC().Format(time.RFC3339Nano))
+	w.Header().Set("Last-Modified", generatedAt.UTC().Format(http.TimeFormat))
+	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
 		github.RecordLocalServe(stageTrackerRESTCaller, r.URL.Path, http.StatusNotModified)
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -1406,6 +1521,8 @@ func stageTrackerResolveLinkedPRs(items []StageTrackerItem) {
 			if pr := prs[it.Repo+"#"+strconv.Itoa(lp.Number)]; pr != nil {
 				lp.Title, lp.Author, lp.AuthorKind, lp.Stage = pr.Title, pr.Author, pr.AuthorKind, pr.Stage
 				lp.StageSince, lp.Caption = pr.StageSince, pr.Caption
+				lp.SentinelAlert, lp.SentinelReason, lp.Head = pr.SentinelAlert, pr.SentinelReason, pr.Head
+				lp.BaseRef = pr.BaseRef
 				if len(pr.Modifiers) > 0 {
 					lp.Modifiers = append([]string(nil), pr.Modifiers...)
 				}

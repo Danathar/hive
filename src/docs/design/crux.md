@@ -1,8 +1,14 @@
 # Crux: the agent runtime boundary (#13536)
 
-Status: **partly shipped (v5).** Stage 1 is in progress in this repo: the
-boundary is named, the architecture ratchet and the tmux funnel are live, and
-the remaining Stage 1 items are tracked on the RFC. Stages 2 and 3 are design only.
+Status: **Stage 1 shipped (v5); Stage 2 blocked on `pkg/config`.** The
+boundary is named, the inbound and outbound architecture ratchets and the
+tmux funnel are live, `crux.Runtime` exists, the dashboard is on it, Crux
+owns its value types and the hub, spoke, dashboard and `cmd/hive` reference
+them as `crux.<Name>`, CI path filters select Crux-only shards for Crux-only
+PRs, and the `crux` CLI ships. Stage 2 (nested module) is measured but not
+started: the ring's outbound closure is about 55 Hive packages, almost all
+through `pkg/config`; see [Outbound edges](#outbound-edges). Stage 3 is
+design only.
 
 ## What Crux is
 
@@ -28,10 +34,21 @@ The name is "the point everything turns on". Hive turns on Crux.
 | Policy at the tool boundary | `pkg/proxy` (MITM), `pkg/toolapprove` |
 | Isolation | `pkg/sandbox`, `pkg/kubejob` |
 | Observation | `pkg/watchdog`, `pkg/trajectory`, `pkg/logscrub` |
+| Surface and CLI | `pkg/crux`, `pkg/crux/types`, `pkg/crux/cli`, `cmd/crux` |
 
-Crux's outbound coupling is already small: `pkg/agent` imports `pkg/github`
-for one symbol (`AppAuth`), reads two `pkg/config` fields, and reaches pluk
-through `exec.LookPath`, which is already a process boundary.
+The same list, as directories, is `CRUX_DIRS` in
+`.github/scripts/crux-scope.sh` (CI path filter) and `cruxModulePrefixes` in
+`src/internal/testutil/crux_outbound_ratchet_test.go`; the two must agree.
+
+The RFC's claim that Crux's outbound coupling is "one `pkg/github` symbol and
+two `pkg/config` fields" was wrong. Measured on v5 at `437843c` (Oct 23,
+2026) with `go list -deps` plus an AST walk over selector expressions,
+`pkg/agent` alone imported 19 Hive packages outside the ring in non-test
+code, used 60 distinct `pkg/config` symbols, and `config.AgentConfig`
+appears in about 105 of its test files. The transitive closure of the ring
+is about 55 Hive packages. What is true is that pluk is reached through
+`exec.LookPath`, which is already a process boundary. The measured edge set
+and what was done about it is in [Outbound edges](#outbound-edges).
 
 ## Outside the boundary (stays in Hive)
 
@@ -79,27 +96,261 @@ two-repo changes per day, which is why Stage 1 happens in this repo.
    `HasSession`); `pkg/tui` attaches through it and the ratchet's tmux
    baseline is zero everywhere else. Operations are added as call sites
    move behind the funnel, not ahead of them.
-3. `agent.Runtime`: the surface dashboard and hub actually need (sessions,
-   panes, kicks, engines, limits, event stream). Migrate both to it and
-   ratchet the symbol counts down.
+3. `crux.Runtime` (shipped): `src/pkg/crux/runtime.go` is the exported
+   runtime surface, grouped as `Lifecycle`, `Observer`, `Kicker`,
+   `Definitions`, `Fleet` and `Credentials`; every method is annotated with
+   the consumer that needs it and `*agent.Manager` satisfies it directly, so
+   the adapter is zero-cost. `pkg/dashboard` holds a `crux.Runtime` in
+   `Dependencies.AgentMgr`; `pkg/hub` holds no manager at all.
+
+   The value types are Crux's own. Everything on the surface except
+   `Process` — `ProcessState` and the `State*` values, `KickDispatch` and
+   the `KickPhase*` values, `KickOutcome` and the `KickOutcome*` values,
+   `KickLogInfo`, `KickRecord`, `RestartEvent`, `SubAgentModel`,
+   `StartFailureClass` and its values, `TurnLoss`, `TurnInterruption`, and
+   the provider-status vocabulary (`ProviderStatus`,
+   `ProviderAgentEvidence`, `RollUpProviderStatus`, `BackendAuthState`, the
+   `BackendAuth*`, `ProviderAuth*` and `Provider*` constants) — is DEFINED
+   in `pkg/crux/types`, a stdlib-only leaf that `pkg/agent` imports and
+   re-exports as aliases and that `pkg/crux` re-exports as `crux.<Name>`.
+   Consumers never see the leaf. It is a separate package only because
+   `pkg/crux` still aliases `agent.AgentProcess` as `crux.Process` and so
+   imports `pkg/agent`, which cannot import it back; it folds into
+   `pkg/crux` once `Process` is its own type (Stage 2). The governor-side
+   audit vocabulary (lease stages, commit trailers, artifact links) that
+   `pkg/agent` used to re-export from `pkg/agentaudit` is no longer
+   re-exported; consumers reference `agentaudit` directly.
+
+   Ratchet counts over that sequence: `pkg/dashboard` 68 → 51 (onto
+   `crux.Runtime`) → 39 (provider status) → 19 (audit eviction);
+   `pkg/hub` 18 → 1 (`AgentAvailableAtACMMLevel`); `pkg/hub/spoke` 15 → 5
+   → 3; `cmd/hive` 37 → 33 → 22; `pkg/loginscan` 7 → 4. What remains in
+   every consumer is the manager and its constructors (`Manager`,
+   `NewManager`, `ProjectContext`, `NewRingBuffer`), agent-mode and
+   capability parsing, UID maps, Copilot-token helpers and pane
+   classification: implementation the test-only constructors and
+   `cmd/hive`'s wiring need, not observation. `pkg/crux` and everything
+   under it is inside the boundary for the ratchet's purposes.
 4. Agent configuration as its own struct and file (shipped):
    `AgentRuntimeConfig` and `AgentRuntimeGovernorConfig` in
    `src/pkg/config/agent_config.go`, embedded inline in `Config` and
    `GovernorConfig` so every `hive.yaml` key keeps its position.
-5. CI path filters so agent-only PRs skip hub/rest/dashboard shards and vice
-   versa, with the aggregate required check kept fail-closed.
+5. CI path filters (shipped, #13541): `.github/scripts/crux-scope.sh`
+   classifies a PR's diff as `crux-only`, `none`, `mixed` or `full` against
+   the ring's directory list; `v2-tests.yml` consults the verdict only when
+   dependency analysis already selected a partial package set, skipping the
+   hub slices and the dashboard shuffle lane on a crux-only diff and the
+   agent slices on a diff that touches no Crux package. Changes to
+   `go.mod`, `src/internal/`, `pkg/config`, workflows or CI scripts force
+   `full`. The aggregate required check stays fail-closed.
+6. A `crux` CLI (shipped): `src/cmd/crux` with `run`, `ps`, `logs`, `kick`,
+   `stop`, each mapped onto `crux.Runtime` methods. See [CLI](#cli) below.
+7. Outbound ratchet (shipped): `src/internal/testutil/crux_outbound_ratchet_test.go`
+   lists, per ring package, the Hive packages outside the ring it imports
+   (non-test and test), exact and fail-closed in both directions like the
+   inbound ratchet. The edges it froze and the ones it removed are in
+   [Outbound edges](#outbound-edges).
 
 **Stage 2: nested module.** `src/crux/` as its own Go module via `go.work`,
 own tags (`crux/vX.Y.Z`), own coverage floor and CI lane; same repo, same PRs,
-same v5/v6 branches. Ship a `crux` binary (`run <def>`, `ps`, `logs`, `kick`,
-`stop`) that runs an agent definition with policy and telemetry and no
-governor, GitHub or dashboard.
+same v5/v6 branches. The `crux` binary that this stage was going to ship
+already exists (item 6), so the stage is the module cut alone.
+
+Not started. It was blocked until the outbound ratchet's `pkg/config` rows
+were gone, which prerequisite 1 delivered; the remaining prerequisites are
+the other outbound rows. A nested module whose packages import `pkg/config` needs the root
+module to `replace` the nested one *and* the nested one to `replace` the
+root: a module cycle. It builds, but nothing can consume
+`github.com/hivecommons/hive/crux` without also pulling in all of Hive, so
+tags on it mean nothing, and every import path under `pkg/agent/...` would
+move for the ring's consumers and for the test shards, coverage floors and
+`crux-scope.sh` that key on `./pkg/agent`. Doing the move before the config
+cut buys the churn without the benefit. Prerequisites, in order:
+
+1. **Done** (#13834, #13868, #13883). An agent-runtime configuration
+   leaf: `config.AgentConfig` (35 methods, embedding review-model,
+   rotation and provider-budget types) and the `AgentRuntimeConfig` /
+   `AgentRuntimeGovernorConfig` structs from item 4 moved into the ring
+   as the stdlib-only `pkg/crux/config` (package name `config`, so a
+   consumer's migration was an import-path swap); `pkg/config` keeps them
+   as aliases so `hive.yaml` loading and every key position are
+   unchanged. No ring package imports `pkg/config` any more; the one
+   `config` row left in the outbound baseline is `cmd/crux`, the process
+   boundary that loads `hive.yaml` for the CLI's `DefinitionLoader`. What
+   moved, what was aliased and what was inverted is in
+   [Configuration leaf](#configuration-leaf).
+2. The remaining `pkg/agent` edges, measured on v5 after prerequisite 1
+   (distinct `<pkg>.<Symbol>` selectors; *test* counts only `_test.go`):
+
+   | Edge | Non-test | Test-only | Files | Shape of the cut |
+   |---|---|---|---|---|
+   | `effects` | 1 (`Boundary`) | 0 | 3 | stdlib-only already; moves into the ring (`pkg/crux/effects` or `pkg/crux/types`), `pkg/effects` aliases |
+   | `gitidentity` | 2 (`AgentIdentity`, `AppLinkedAgentIdentity`) | 0 | 1 | stdlib-only already; moves in, `pkg/gitidentity` aliases |
+   | `outputschema` | 4 (`AgentReport`, `AgentReportFilePrefix`, `AgentReportFileSuffix`, `Validate`) | 0 | 1 | the report schema moves in; it imports `effects` (moves with it) and `convergence/proof`, which has to be inverted or left behind with the host-side validator |
+   | `jev` | 6 (`DefaultEndpoint`, `EndpointEnvVar`, `ModeEnvVar`, `SkillFile`, `SkillMarkdown`, `SkillRelDir`) | 5 | 2 + 1 test | constants and the skill text: a host-provided skill installer / environment seam, or the six symbols move to a stdlib leaf (`jev` itself imports `agentaudit` and `config`, so it does not move whole) |
+   | `fleetreport` | 8 (`Observe`, `Clear`, six `Class*` constants) | 7 | 5 + 3 test | a reporter interface on `Manager` the host injects, the same shape as `SpanStarter`; the classes become `pkg/crux/types` constants. `pkg/watchdog` has the same edge (7 symbols, incl. `RuntimeTracker`) and takes the same seam |
+   | `pushbroker` | 6 (`Broker`, `DefaultRemote`, `GitHubAppMinter`, `PushEnv`, `Result`, `TokenMinter`) | 2 | 3 + 3 test | moves in once its own `pkg/github` (`GitHubAppMinter`) and `logscrub` edges are inverted the way `AgentTokenCachePath` was; `effects` and `gitidentity` move first |
+
+   27 non-test symbols across six edges; `effects`, `gitidentity` and
+   `outputschema` are 7 of them and are pure moves. Order: effects +
+   gitidentity (one PR, aliases), outputschema, fleetreport seam (agent and
+   watchdog together), jev, pushbroker.
+3. `pkg/proxy`'s edges to `github`, `ioscan`, `issueshape`, `tokens` and
+   `inferencehealth`, and `pkg/watchdog`'s to `rotation`. The proxy is both a
+   ring member and an inbound consumer (14 `agent.<Symbol>` references);
+   whether it stays in the ring is decided when those edges are cut, not
+   before.
+4. Then the move: `git mv` of the ring under `src/crux/`, `src/crux/go.mod`,
+   `src/go.work`, one `replace` in the root module, and the shards, floors
+   and `crux-scope.sh` repointed in the same PR.
 
 **Stage 3: platform.** `crux serve` with an API (gRPC or HTTP), tenancy, auth,
 quotas; Hive and hub become clients; the hub-to-runtime contract becomes
 explicit and versioned; move to `hivecommons/crux`. Only when a second
 consumer is real (candidates: Nous / Experiment Lab, Spektacular, Dibs,
 external optimizer and formal-verification lanes, enterprise agent services).
+
+## CLI
+
+The Stage 2 plan called for a `crux` binary; it shipped in Stage 1 instead
+(`src/cmd/crux`, logic in `src/pkg/crux/cli`, operator page
+[crux-cli.md](../crux-cli.md)) because it is the cheapest proof that
+`crux.Runtime` is a sufficient surface: every subcommand is written against
+the interface, and the only `*agent.Manager` reference is the constructor in
+`pkg/crux/cli/runtime.go`. Putting the logic under `pkg/crux/` keeps it inside
+the ratchet boundary, so it adds no baseline row.
+
+| Subcommand | `crux.Runtime` methods |
+|---|---|
+| `run` | `Definitions.AddAgent`, `Lifecycle.Start`, `Observer.GetBufferOutput` (stream), `Lifecycle.Stop` (on interrupt) |
+| `ps` | `Observer.AllStatuses` |
+| `logs` | `Observer.ResolveAgent`, `Observer.GetOutput` / `GetBufferOutput` / `FullLogHeader`+`CaptureFullLog` |
+| `kick` | `Observer.ResolveAgent`, `Kicker.SendKick` |
+| `stop` | `Observer.ResolveAgent`, `Lifecycle.Stop` |
+
+Definitions are the two formats hive already reads (`kind: AgentDefinition`
+via `defsrc`, or an `agents_dir` overlay via `config.LoadAgentOverrides`),
+and `--config hive.yaml` builds the runtime from `cfg.EnabledAgents()` the
+way `cmd/hive` does. No new format.
+
+What writing it surfaced: the runtime is in-process. `Lifecycle.Stop` and
+`Kicker.SendKick` consult the Manager's in-memory state, and `Runtime` has no
+adoption method, so a second process cannot stop or kick an agent that a
+first process started. The CLI therefore makes `crux run` the long-lived
+command and has it serve a unix control socket (`<workdir>/crux.sock`) that
+`ps`/`logs`/`kick`/`stop` forward to when present. That socket is a
+single-work-dir convenience and is not the Stage 3 API; what Stage 3 has to
+add to `Runtime` (or beside it) is exactly the piece the socket papers over:
+a way for a process other than the launcher to own or adopt an agent.
+
+## Configuration leaf
+
+`pkg/crux/config` is the stdlib-only home of the agent runtime's
+configuration types (Stage 2 prerequisite 1). It was cut from `pkg/config`
+by declaration closure: every type the ring reads, every method on those
+types (Go cannot attach a method to an alias of another package's type, so
+a type's methods travel with it), and the constants and defaults they
+reference. `pkg/config` imports it as `cruxconfig` and re-exports each
+symbol in `pkg/config/crux_aliases.go` (`type AgentConfig =
+cruxconfig.AgentConfig`, `const JevModeAssist = cruxconfig.JevModeAssist`,
+`var InferenceBackends = cruxconfig.InferenceBackends`), the direction
+`pkg/crux/types` established in #13770: Crux owns, Hive aliases. Loading,
+validation that needs YAML or ACMM packs, overlays and `Config` itself stay
+in `pkg/config`; the two pieces of `AgentConfig` that needed a host-only
+type were reshaped rather than moved — `ReviewModelsConfig.Select` (uses
+`pkg/modelfamily`) became `config.SelectReviewModel`, and
+`AgentConfig.ContinuousInMode` takes a `ContinuousCadence` interface that
+the governor's `Cadence` satisfies instead of the `Cadence` type.
+
+The `pkg/config` symbols each ring package used before the cut, measured on
+v5 at `1fe983e` (Oct 24, 2026) by an AST walk over `config.<X>` selectors
+(distinct symbols; *test* counts only `_test.go` files):
+
+| Ring package | Non-test | Test-only | Files | Not in the leaf |
+|---|---|---|---|---|
+| `pkg/agent` | 58 | 21 | 13 + 112 test | `GovernorConfig`, `LoggingConfig` *(test)* |
+| `pkg/crux` | 1 | 0 | 1 + 1 test | — |
+| `pkg/crux/cli` | 5 | 0 | 3 + 2 test | `Config`, `Load`, `LoadAgentOverrides`, `PoliciesConfig` |
+| `pkg/inference` | 7 | 5 | 1 + 3 test | `Config`; `GovernorConfig` *(test)* |
+| `pkg/proxy` | 9 | 4 | 3 + 2 test | `OriginLaneFromAgent`, `WithIssueOriginLabel`; `LoadWithOverrides` *(test)* |
+| `pkg/toolapprove` | 7 | 4 | 4 + 3 test | `AutoMergeConfig`, `Config`, `PlanAutoApproveForLevel`, `PlanningConfig` |
+| `pkg/watchdog` | 1 | 3 | 1 + 1 test | — |
+
+111 distinct symbols across the ring; 99 are in the leaf, 12 are not. The
+12 are the whole-`Config` loaders (`Config`, `GovernorConfig`,
+`LoggingConfig`, `PoliciesConfig`, `Load`, `LoadAgentOverrides`,
+`LoadWithOverrides`), the ACMM plan-approval policy (`AutoMergeConfig`,
+`PlanningConfig`, `PlanAutoApproveForLevel`, which drags the embedded pack
+YAML) and the review origin-label vocabulary (`OriginLaneFromAgent`,
+`WithIssueOriginLabel`). These are the inversion work for the migration
+PRs: a ring package that takes `*config.Config` narrows to the
+`AgentRuntimeConfig` / `AgentRuntimeGovernorConfig` value or to a small
+interface the host fills in, the same shape as `agent.SpanStarter`.
+
+Migration so far (the `config` row leaves a package's outbound baseline in
+the same change that swaps its imports):
+
+| Ring package | Moved | Inverted |
+|---|---|---|
+| `pkg/agent` | import-path swap in 13 + 112 test files; `GovernorConfig.ResolvedGateways` / `ResolveGateway` / `ValidateBackend` and `LegacyLiteLLMGatewayName` moved onto `AgentRuntimeGovernorConfig` (they read only `Gateways` and `LiteLLM`; `GovernorConfig` embeds it, so `cfg.Governor.ResolveGateway` still promotes); the kick-transcript test drives `NormalizeKickLogSource` instead of `LoggingConfig` | — |
+| `pkg/crux` | import-path swap; `crux.ProjectContext` re-exports `agent.ProjectContext` so a host can build one without naming `pkg/agent` | — |
+| `pkg/inference` | import-path swap; `GovernorConfig.ExplicitLiteLLMGateway` / `ResolveLiteLLMRemoteRoute` moved onto `AgentRuntimeGovernorConfig` (they read `Gateways` and `LiteLLM`) | `ResolveLiteLLMRoute`, `ExplicitLiteLLMGateway` and `ResolveWatsonxGateway` take `*config.AgentRuntimeGovernorConfig` instead of `*config.Config`; cmd/hive passes `&cfg.Governor.AgentRuntimeGovernorConfig` |
+| `pkg/proxy` | import-path swap; the origin-label vocabulary (`origin_labels.go`: `OriginLaneFromAgent`, `WithIssueOriginLabel`, `CanonicalOriginLabel`, `OriginLabelRenames` and the `*OriginLabel*` constants) moved into the leaf | the one test that loaded a full `hive.yaml` (`LoadWithOverrides`) moved to `cmd/hive/agent_repo_scope_test.go` |
+| `pkg/toolapprove` | import-path swap (`ToolApprovalConfig`, `SelfMergeMinACMMLevel`, `WildcardMatch` were already in the leaf) | `DeskFromConfig` takes the `ToolApprovalConfig` block, not `*Config`; `ACMMLevelOf` is `Config.ACMMLevelOrZero` on the host. The ACMM-pack plan gates (`PlanAutoApproveForLevel`, `PlanningConfig.PlanFromLabelEnabled`) are behind `toolapprove.PlanPolicy`, installed by `Desk.SetPlanPolicy`; cmd/hive's `planPolicyFromConfig` wires the real predicates and `cmd/hive/approvalparity_test.go` carries the per-level parity tests against them (the leaf-side tests pin that the desk follows its policy and fails closed without one). A desk with no policy sends plan kinds to the operator lane, which is why the host wires it unconditionally in `buildApprovalDesk`. |
+| `pkg/watchdog` | import-path swap (`WatchdogConfig` was already in the leaf) | — |
+| `pkg/crux/cli` | import-path swap | `cli.DefinitionLoader` (`LoadConfig`, `LoadDefinitionFile`) on `cli.Env`, passed to `cli.Main`. The Hive-backed implementation — `config.Load`, `config.LoadAgentOverrides`, `Config.ApplyAgentDefaults`, `defsrc.ParseDefinition` / `MergeAllowedFields`, cmd/hive's `ProjectContext` derivation — is `cmd/crux/definitions.go`. `pkg/defsrc` stays outside: beyond the portable-YAML parser it holds `ApplyToConfig(*config.Config)` and the governor `Cadence`, so moving it in would drag `Config`. |
+
+## Outbound edges
+
+Imports from ring packages to Hive packages outside the ring, as the
+outbound ratchet records them after the configuration-leaf migration: no
+ring package imports `pkg/config`. Entries marked *(test)* appear only in
+`_test.go` files.
+
+| Ring package | Outside Hive imports |
+|---|---|
+| `cmd/crux` | `config`, `defsrc` (the `DefinitionLoader` implementation; moved here from `pkg/crux/cli`, see [Configuration leaf](#configuration-leaf)) |
+| `pkg/agent` | `effects`, `fleetreport`, `gitidentity`, `jev`, `outputschema`, `pushbroker`, `internal/testutil` *(test)* |
+| `pkg/inference` | `watsonx`, `internal/testutil` *(test)* |
+| `pkg/proxy` | `github`, `inferencehealth`, `ioscan`, `issueshape`, `tokens` |
+| `pkg/toolapprove` | `ioscan` |
+| `pkg/trajectory` | `jsonextract` |
+| `pkg/watchdog` | `fleetreport`, `rotation` |
+
+Edges removed in #13785, and the shape each cut took, because the same
+shapes apply to the rows above:
+
+| Edge | Cut |
+|---|---|
+| `pkg/agent → pkg/github` (`CreatePRResult`, `AgentTokenCachePath`) | Type moved into the stdlib-only leaf `pkg/crux/types` (`PRResult`, `AgentTokenCachePath`); `pkg/github` aliases and delegates, so its callers did not change. |
+| `pkg/agent → pkg/github` (test, `AppAuth`) | The sandbox wiring test uses a local `TokenMinter` fake. |
+| `pkg/agent → pkg/agentaudit` | Runtime audit constants, `AuditSink` and `Fields` moved to `pkg/crux/types`; `agentaudit` aliases them. |
+| `pkg/agent → pkg/tracing` | Inverted: `agent.SpanStarter` and `Manager.SetSpanStarter`; the default is the otel global tracer and `cmd/hive` injects `tracing.StartSpan`. |
+| `pkg/agent → pkg/review` (test) | The test moved to `pkg/review` and reads `crux.FatalNetworkErrorPatterns()`. |
+
+The rule the inbound ratchet imposes on these cuts: an inversion must not
+add an `agent.<Symbol>` reference in a consumer, so seams are `Manager`
+setters or `crux.<Name>` / `pkg/crux/types` re-exports, never new exported
+`agent` symbols the host has to name.
+
+## Running the Crux set alone
+
+There is no separate module yet, so the ring is tested as a package list
+from `src/`:
+
+```sh
+cd src && go test ./pkg/agent/... ./pkg/crux/... ./cmd/crux \
+  ./pkg/agentmode ./pkg/agentparse ./pkg/agentsmd ./pkg/claude \
+  ./pkg/sandbox ./pkg/kubejob ./pkg/toolapprove ./pkg/skillreg \
+  ./pkg/inference ./pkg/openrouter ./pkg/watchdog ./pkg/trajectory \
+  ./pkg/logscrub ./pkg/proxy
+```
+
+Both ratchets live in `./internal/testutil` and run with that package. In
+CI, a PR whose diff is entirely inside the ring gets the `crux-only` verdict
+from `crux-scope.sh` and runs only the agent slices (item 5). Two
+`pkg/agent` tests fail on macOS because the tmux socket path under
+`$TMPDIR` exceeds `sun_path`; they pass on Linux and in CI.
 
 ## Not doing
 
@@ -108,8 +359,8 @@ external optimizer and formal-verification lanes, enterprise agent services).
 - Rewriting engines or the proxy. This is a boundary, not a rewrite.
 - Shortening the PR gate by splitting: `pkg/agent` is a 429 s serial test
   monolith already sliced five ways; the gate is bounded by the slowest shard,
-  so only path filters (Stage 1, item 5) change anything, and they work
-  in-repo.
+  so only path filters (Stage 1, item 5, shipped) change anything, and
+  they work in-repo.
 
 ## Naming
 
@@ -128,7 +379,9 @@ Comb, Hum, Osmia, Apis.
 ## References
 
 - RFC: [hivecommons/hive#13536](https://github.com/hivecommons/hive/issues/13536)
-- Ratchet: `src/internal/testutil/crux_boundary_ratchet_test.go`
+- Ratchets: `src/internal/testutil/crux_boundary_ratchet_test.go` (inbound),
+  `src/internal/testutil/crux_outbound_ratchet_test.go` (outbound)
+- CI scope: `.github/scripts/crux-scope.sh` (#13541)
 - Prior extractions from Hive: pluk, promptargs, rationguard, hotshot,
   spektacular, dibs
 - Related: #13532 (control arm)

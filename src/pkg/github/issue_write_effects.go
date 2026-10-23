@@ -74,6 +74,12 @@ func (c *Client) executeIssueWrite(ctx context.Context, claim effects.Claim, eff
 	c.logger.Info("reconciled unresolved issue write against GitHub",
 		slog.String("repo", claim.Repo), slog.String("kind", claim.Kind),
 		slog.String("target", claim.Target), slog.Bool("applied", state.Applied))
+	if claim.ObserveApplied != nil {
+		// The replay revalidates against the state just read rather than
+		// reading the issue a second time.
+		observed := state
+		claim.ObserveApplied = func(context.Context) (effects.ExternalState, error) { return observed, nil }
+	}
 	_, err = effects.Execute(ctx, boundary, claim, effect)
 	return err
 }

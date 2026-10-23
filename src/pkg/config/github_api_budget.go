@@ -7,11 +7,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	DefaultAgentsGitHubAPIHourlyCap = 300
-	DefaultGitHubAgentReserveFloor  = 400
-)
-
 // UnmarshalYAML accepts the operator-facing agents.github_api_hourly_cap
 // scalar alongside the existing agents.<name> map entries.
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
@@ -27,7 +22,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 				return fmt.Errorf("agents.github_api_hourly_cap: %w", err)
 			}
 			c.AgentsGitHubAPIHourlyCap = cap
-			c.agentsGitHubAPIHourlyCapSet = true
+			c.AgentsGitHubAPIHourlyCapSet = true
 			agents.Content = append(agents.Content[:i], agents.Content[i+2:]...)
 			break
 		}
@@ -36,15 +31,15 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	if err := node.Decode(&decoded); err != nil {
 		return err
 	}
-	cap, capSet := c.AgentsGitHubAPIHourlyCap, c.agentsGitHubAPIHourlyCapSet
+	cap, capSet := c.AgentsGitHubAPIHourlyCap, c.AgentsGitHubAPIHourlyCapSet
 	*c = Config(decoded)
 	c.AgentsGitHubAPIHourlyCap = cap
-	c.agentsGitHubAPIHourlyCapSet = capSet
+	c.AgentsGitHubAPIHourlyCapSet = capSet
 	return nil
 }
 
 func marshalConfigYAMLWithAgentCap(c Config, out any) (any, error) {
-	if !c.agentsGitHubAPIHourlyCapSet {
+	if !c.AgentsGitHubAPIHourlyCapSet {
 		return out, nil
 	}
 	var node yaml.Node
@@ -108,7 +103,7 @@ func (c *Config) AgentGitHubAPIHourlyCap(agentName string) int {
 	if c == nil {
 		return DefaultAgentsGitHubAPIHourlyCap
 	}
-	if c.AgentsGitHubAPIHourlyCap == 0 && !c.agentsGitHubAPIHourlyCapSet {
+	if c.AgentsGitHubAPIHourlyCap == 0 && !c.AgentsGitHubAPIHourlyCapSet {
 		return DefaultAgentsGitHubAPIHourlyCap
 	}
 	if a, ok := c.Agents[agentName]; ok && a.GitHubAPIHourlyCap != nil {
