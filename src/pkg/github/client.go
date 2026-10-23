@@ -760,15 +760,18 @@ type IssueDependency struct {
 // IssueClaimContext is prompt/API evidence that an actionable issue is related
 // to a PR claim that no longer suppresses the issue.
 type IssueClaimContext struct {
-	PRNumber       int       `json:"pr_number"`
-	PRRepo         string    `json:"pr_repo"`
-	PRURL          string    `json:"pr_url,omitempty"`
-	PRAuthor       string    `json:"pr_author,omitempty"`
-	ExternalAuthor bool      `json:"external_author,omitempty"`
-	Closing        bool      `json:"closing,omitempty"`
-	Reference      bool      `json:"reference,omitempty"`
-	MergedPR       bool      `json:"merged_pr,omitempty"`
-	MergedAt       time.Time `json:"merged_at,omitempty"`
+	PRNumber       int    `json:"pr_number"`
+	PRRepo         string `json:"pr_repo"`
+	PRURL          string `json:"pr_url,omitempty"`
+	PRAuthor       string `json:"pr_author,omitempty"`
+	ExternalAuthor bool   `json:"external_author,omitempty"`
+	Closing        bool   `json:"closing,omitempty"`
+	Reference      bool   `json:"reference,omitempty"`
+	// KeepReference prevents the stage-link safeguard from upgrading a
+	// delegating tracker's Refs link to a closing keyword. Process-local.
+	KeepReference bool      `json:"-"`
+	MergedPR      bool      `json:"merged_pr,omitempty"`
+	MergedAt      time.Time `json:"merged_at,omitempty"`
 	// ReopenedAt is set with Decision ClaimDecisionReopenedAfterMerge: when a
 	// person reopened the issue after the PR named here merged.
 	ReopenedAt time.Time `json:"reopened_at,omitempty"`
@@ -4290,6 +4293,8 @@ type RepoWorkPR struct {
 	URL            string    `json:"url,omitempty"`
 	Bucket         string    `json:"bucket"`
 	Reason         string    `json:"reason,omitempty"`
+	// BaseRef is the target branch, retained for the covering-PR chip.
+	BaseRef string `json:"base_ref,omitempty"`
 	// LinkedIssues mirrors PullRequest.LinkedIssues so a sidelined PR can
 	// still stand under the issue its `Fixes #N` names in the activity
 	// monitor. Stamped by EnrichReviewSignalsAndWorkPRs, not by the
@@ -4320,6 +4325,7 @@ func (c *Client) repoWorkPR(repo string, pr *gh.PullRequest, labels []string, hi
 		CreatedAt:      pr.GetCreatedAt().Time,
 		UpdatedAt:      pr.GetUpdatedAt().Time,
 		URL:            pr.GetHTMLURL(),
+		BaseRef:        prBaseRef(pr),
 		Bucket:         bucket,
 		Reason:         reason,
 		// The list payload carries the body, so the soft issue links cost
@@ -4353,6 +4359,10 @@ type RepoWorkIssue struct {
 	// github.Issue fields of the same name, copied as-is.
 	LinkedPRs    []IssueLinkedPR    `json:"linked_prs,omitempty"`
 	ClaimContext *IssueClaimContext `json:"claim_context,omitempty"`
+	// Tracker metadata is retained for rows outside the actionable set.
+	IsTracker bool `json:"is_tracker,omitempty"`
+	// TrackerProgress is display-only checklist progress, never a parent-close signal.
+	TrackerProgress *IssueChildren `json:"tracker_progress,omitempty"`
 	// Children is Issue.Children, copied for the issue stage reconciler.
 	Children *IssueChildren `json:"children,omitempty"`
 	// RecheckAfter and OpsTracking are read from a blocked issue's body
@@ -4366,24 +4376,27 @@ type RepoWorkIssue struct {
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
+	progress := TrackerTaskProgress(issue.Body)
 	return RepoWorkIssue{
-		Repo:           issue.Repo,
-		Number:         issue.Number,
-		Title:          issue.Title,
-		Author:         issue.Author,
-		Labels:         append([]string(nil), issue.Labels...),
-		Assignees:      append([]string(nil), issue.Assignees...),
-		CreatedAt:      issue.CreatedAt,
-		UpdatedAt:      issue.UpdatedAt,
-		URL:            issue.URL,
-		Bucket:         bucket,
-		Reason:         reason,
-		ClaimKind:      issue.ClaimKind,
-		ClaimedBy:      issue.ClaimedBy,
-		ClaimPRStarted: issue.ClaimPRStarted,
-		LinkedPRs:      append([]IssueLinkedPR(nil), issue.LinkedPRs...),
-		ClaimContext:   issue.ClaimContext,
-		Children:       issue.Children,
+		Repo:            issue.Repo,
+		Number:          issue.Number,
+		Title:           issue.Title,
+		Author:          issue.Author,
+		Labels:          append([]string(nil), issue.Labels...),
+		Assignees:       append([]string(nil), issue.Assignees...),
+		CreatedAt:       issue.CreatedAt,
+		UpdatedAt:       issue.UpdatedAt,
+		URL:             issue.URL,
+		Bucket:          bucket,
+		Reason:          reason,
+		ClaimKind:       issue.ClaimKind,
+		ClaimedBy:       issue.ClaimedBy,
+		ClaimPRStarted:  issue.ClaimPRStarted,
+		LinkedPRs:       append([]IssueLinkedPR(nil), issue.LinkedPRs...),
+		ClaimContext:    issue.ClaimContext,
+		Children:        issue.Children,
+		TrackerProgress: progress,
+		IsTracker:       RendersAsTracker(issue.IsTracker, issue.Labels, progress),
 	}
 }
 
@@ -4403,18 +4416,21 @@ func repoWorkIssue(repo string, issue *gh.Issue, labels []string, bucket, reason
 	if issue == nil {
 		return RepoWorkIssue{Repo: repo, Labels: append([]string(nil), labels...), Bucket: bucket, Reason: reason}
 	}
+	progress := TrackerTaskProgress(issue.GetBody())
 	return RepoWorkIssue{
-		Repo:      repo,
-		Number:    issue.GetNumber(),
-		Title:     issue.GetTitle(),
-		Author:    safeGetLogin(issue.GetUser()),
-		Labels:    append([]string(nil), labels...),
-		Assignees: extractAssignees(issue.Assignees),
-		CreatedAt: issue.GetCreatedAt().Time,
-		UpdatedAt: issue.GetUpdatedAt().Time,
-		URL:       issue.GetHTMLURL(),
-		Bucket:    bucket,
-		Reason:    reason,
+		Repo:            repo,
+		Number:          issue.GetNumber(),
+		Title:           issue.GetTitle(),
+		Author:          safeGetLogin(issue.GetUser()),
+		Labels:          append([]string(nil), labels...),
+		Assignees:       extractAssignees(issue.Assignees),
+		CreatedAt:       issue.GetCreatedAt().Time,
+		UpdatedAt:       issue.GetUpdatedAt().Time,
+		URL:             issue.GetHTMLURL(),
+		IsTracker:       RendersAsTracker(isTracker(issue.GetTitle(), labels, issue.GetBody()), labels, progress),
+		TrackerProgress: progress,
+		Bucket:          bucket,
+		Reason:          reason,
 	}
 }
 

@@ -304,7 +304,7 @@ func (c *Client) EnsureIssueStagePRLink(ctx context.Context, repo string, issueN
 		return res, nil
 	}
 	if claim.Reference {
-		if body, ok := rewriteRefsIssueLinkToClosing(pr.Body, owner+"/"+name, issueNumber); ok && c.isOwnBotLogin(pr.Author.Login) {
+		if body, ok := rewriteRefsIssueLinkToClosing(pr.Body, owner+"/"+name, issueNumber); !claim.KeepReference && ok && c.isOwnBotLogin(pr.Author.Login) {
 			if _, _, err := c.client.PullRequests.Edit(WithRESTCaller(ctx, "hive:issue_stage_pr_link"), owner, name, claim.PRNumber, &gh.PullRequest{Body: gh.Ptr(body)}); err != nil {
 				return res, fmt.Errorf("EnsureIssueStagePRLink %s#%d->#%d edit body: %w", repo, issueNumber, claim.PRNumber, err)
 			}
@@ -337,7 +337,9 @@ func (c *Client) EnsureIssueStagePRLink(ctx context.Context, repo string, issueN
 }
 
 func rewriteRefsIssueLinkToClosing(body, repo string, issue int) (string, bool) {
-	if body == "" || issue <= 0 || strings.Contains(body, issueLinkFixedMarker) {
+	// A watcher downgrade is intentional, even when the caller has no issue
+	// body or child ledger available. Never re-arm auto-close through repair.
+	if body == "" || issue <= 0 || strings.Contains(body, issueLinkFixedMarker) || strings.Contains(body, closingKeywordWithheldNote) {
 		return "", false
 	}
 	if _, ok := FindClosingKeywordReference(body, repo, repo, issue); ok {
