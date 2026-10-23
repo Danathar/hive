@@ -617,7 +617,16 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 				} else {
 					plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
 				}
-				revisiting = true
+				// Ask for an in-place correction only where the publish side
+				// will accept one. The stale-verdict path is allowlisted by
+				// construction, but a body-only edit re-arms review in any
+				// repo, and the watcher refuses --revise outside
+				// review.revise_repos as terminal (errReviseNotAllowlisted):
+				// the finished review is discarded, the pending entry expires,
+				// and after max_redispatch tries the PR parks as
+				// review-dispatch-exhausted. Outside the allowlist the
+				// re-review posts and records like any other review.
+				revisiting = reviseRepoAllowed(pr.Repo, opts.ReviseRepos)
 			}
 		} else if plan.redispatchExhausted(pr) {
 			continue

@@ -218,10 +218,13 @@ func TestPlanDispatchRevisitsFrozenPRWithReviseKick(t *testing.T) {
 	}
 }
 
-func TestPlanDispatchRevisitsNonApproveAfterBodyDigestChanges(t *testing.T) {
+// bodyEditRevisitFixture is a PR whose non-approve verdict went stale because
+// its body was edited without a new head SHA, plus the lifetime pending entry
+// that review left behind.
+func bodyEditRevisitFixture(repo string) (PullRequest, Artifact, DispatchState, time.Time) {
 	now := time.Date(2026, 10, 17, 2, 30, 0, 0, time.UTC)
 	pr := PullRequest{
-		Repo:       "hivecommons/hive",
+		Repo:       repo,
 		Number:     12417,
 		Title:      "fix claim wording",
 		Author:     "clubanderson",
@@ -250,12 +253,16 @@ func TestPlanDispatchRevisitsNonApproveAfterBodyDigestChanges(t *testing.T) {
 		Agent:       "reviewer",
 		Dispatched:  now.Add(-time.Hour),
 	}}}
+	return pr, artifact, state, now
+}
 
+func bodyEditRevisitOptions(t *testing.T, now time.Time, reviseRepos []string) DispatchOptions {
+	t.Helper()
 	set, err := NewPerspectiveSet([]string{"intent-alignment"}, nil)
 	if err != nil {
 		t.Fatalf("NewPerspectiveSet: %v", err)
 	}
-	plan := PlanDispatch([]PullRequest{pr}, artifact, state, DispatchOptions{
+	return DispatchOptions{
 		RequireApproval:      true,
 		FanOut:               true,
 		MaxParallelReviews:   1,
@@ -264,9 +271,17 @@ func TestPlanDispatchRevisitsNonApproveAfterBodyDigestChanges(t *testing.T) {
 		PostComments:         true,
 		AllAuthors:           true,
 		Perspectives:         set,
+		ReviseRepos:          reviseRepos,
 		Now:                  now,
 		Agents:               []AgentCapability{{Name: "reviewer", Enabled: true, UsesKick: true}},
-	})
+	}
+}
+
+// A body-only edit re-arms review in every repo. Where review.revise_repos
+// grants the in-place path, the re-review corrects the existing review.
+func TestPlanDispatchRevisitsNonApproveAfterBodyDigestChanges(t *testing.T) {
+	pr, artifact, state, now := bodyEditRevisitFixture("hivecommons/hive")
+	plan := PlanDispatch([]PullRequest{pr}, artifact, state, bodyEditRevisitOptions(t, now, []string{"hivecommons/hive"}))
 
 	if len(plan.ReviewKicks) != 1 {
 		t.Fatalf("body-only remediation should re-arm review, got %d kicks", len(plan.ReviewKicks))
@@ -275,7 +290,53 @@ func TestPlanDispatchRevisitsNonApproveAfterBodyDigestChanges(t *testing.T) {
 		t.Fatalf("pending body digest = %q, want %q", got, pr.BodyDigest)
 	}
 	if !strings.Contains(plan.ReviewKicks[0].Message, "--revise") {
-		t.Fatalf("body revisit should revise the existing review:\n%s", plan.ReviewKicks[0].Message)
+		t.Fatalf("body revisit in an allowlisted repo should revise the existing review:\n%s", plan.ReviewKicks[0].Message)
+	}
+}
+
+// Outside review.revise_repos the watcher refuses --revise as terminal
+// (errReviseNotAllowlisted in pkg/github), so a kick that asks for it throws
+// the finished review away: the pending entry expires, the PR is re-kicked,
+// and after max_redispatch tries it parks as review-dispatch-exhausted. On
+// the projectbluefin hive that loop ate every body-edited re-review in the 18
+// repos outside the one-repo allowlist. The re-review must still happen, as
+// an ordinary review that posts and records.
+func TestPlanDispatchBodyEditRevisitOutsideAllowlistDoesNotRevise(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		reviseRepos []string
+	}{
+		{name: "no allowlist", reviseRepos: nil},
+		{name: "other repo allowlisted", reviseRepos: []string{"projectbluefin/server"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr, artifact, state, now := bodyEditRevisitFixture("projectbluefin/bluefin-bling")
+			opts := bodyEditRevisitOptions(t, now, tc.reviseRepos)
+			plan := PlanDispatch([]PullRequest{pr}, artifact, state, opts)
+
+			if len(plan.ReviewKicks) != 1 {
+				t.Fatalf("body-only remediation should still re-arm review, got %d kicks", len(plan.ReviewKicks))
+			}
+			msg := plan.ReviewKicks[0].Message
+			for _, banned := range []string{"--revise", "YOU HAVE REVIEWED THIS PR BEFORE"} {
+				if strings.Contains(msg, banned) {
+					t.Fatalf("re-review outside review.revise_repos must not carry %q, the watcher refuses it:\n%s", banned, msg)
+				}
+			}
+			if got := plan.State.Pending[0].BodyDigest; got != pr.BodyDigest {
+				t.Fatalf("pending body digest = %q, want %q", got, pr.BodyDigest)
+			}
+
+			// The re-review is in flight: the next cycle waits for it
+			// instead of re-kicking every pass.
+			inFlight := plan.State
+			for i := range inFlight.Pending {
+				inFlight.Pending[i].Dispatched = now
+			}
+			if again := PlanDispatch([]PullRequest{pr}, artifact, inFlight, opts); len(again.ReviewKicks) != 0 {
+				t.Fatalf("body-edit re-review re-kicked while its verdict was outstanding: %d kicks", len(again.ReviewKicks))
+			}
+		})
 	}
 }
 
