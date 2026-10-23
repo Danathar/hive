@@ -266,6 +266,9 @@ type stageObservation struct {
 	Body    string
 	// HeadRepo is the head's owner/repo (differs from Display on a fork).
 	HeadRepo string
+	// ForwardMerge is set for a sync/top-up head between release lines
+	// (head-ref match only: the title is contributor-controlled).
+	ForwardMerge bool
 	// Route is set by ApplyStageLabels when the lane handed the PR to a
 	// human and the evidence routed it (feeds the entry comments and the
 	// 072 nudge diagnosis).
@@ -485,6 +488,7 @@ func (c *Engine) recordStage(lane, displayRepo, owner, repo string, pr *gh.PullR
 	if pr.GetBase() != nil {
 		obs.BaseRef = pr.GetBase().GetRef()
 	}
+	obs.ForwardMerge = hgithub.IsForwardMergeHead(pr.GetHead().GetRef())
 	obs.Author = hgithub.SafeGetLogin(pr.GetUser())
 	obs.Title = pr.GetTitle()
 	obs.URL = pr.GetHTMLURL()
@@ -1283,14 +1287,24 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 			// The commit check is the one author-side gate decided here,
 			// before CI or a verdict: an unsigned head goes straight back
 			// to its author (hivecommons/hive#12542).
-			stats, err := c.stageDCO(ctx, store, key, obs)
-			if err != nil {
-				c.warn("stage labels: dco commit check failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-				if firstErr == nil {
-					firstErr = err
+			var stats dcoStats
+			if !obs.ForwardMerge {
+				// A forward-merge lands as a merge commit carrying other
+				// people's commits by design: nothing is squashed, and a
+				// rebase to re-sign them would rewrite the source line
+				// (hivecommons/hive#13635). The skip caches nothing: a
+				// zero record for the head would be served back if the
+				// same head later stopped matching.
+				var err error
+				stats, err = c.stageDCO(ctx, store, key, obs)
+				if err != nil {
+					c.warn("stage labels: dco commit check failed", "repo", obs.Display, "pr", obs.Number, "error", err)
+					if firstErr == nil {
+						firstErr = err
+					}
 				}
+				dcoRead = err == nil
 			}
-			dcoRead = err == nil
 			obs.Detail.DCO = dcoState(stats.total, stats.unsigned)
 			obs.Detail.DCOTotal = stats.total
 			obs.Detail.DCOUnsigned = stats.unsigned
