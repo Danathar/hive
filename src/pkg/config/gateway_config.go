@@ -1,10 +1,5 @@
 package config
 
-import (
-	"strings"
-)
-
-
 // ResolveLiteLLMInferenceKey resolves the API key an agent should present when
 // its inference routes through the legacy "litellm" backend. It MUST agree with
 // the key the entitlement/probe path validates (dashboard gateways.go/cost.go/
