@@ -129,6 +129,10 @@ func TestStageTrackerCacheServesWithoutGitHub(t *testing.T) {
 		t.Fatalf("fresh payload: source=%q ttl=%d at=%v items=%d", fresh.Source, fresh.CacheTTLSeconds, fresh.GeneratedAt, len(fresh.Items))
 	}
 	etag := first.Header().Get("ETag")
+	if first.Header().Get("X-Hive-Stage-Tracker-Generated-At") == "" || first.Header().Get("Last-Modified") == "" {
+		t.Fatalf("200 lacks generated-at headers: %v", first.Header())
+	}
+	wantAt := first.Header().Get("X-Hive-Stage-Tracker-Generated-At")
 
 	second := get("")
 	if second.Code != http.StatusOK || second.Header().Get("ETag") != etag || second.Header().Get("X-Hive-Stage-Tracker-Source") != "cache" {
@@ -146,6 +150,17 @@ func TestStageTrackerCacheServesWithoutGitHub(t *testing.T) {
 	}
 	if third := get(etag); third.Code != http.StatusNotModified || third.Body.Len() != 0 {
 		t.Fatalf("If-None-Match: %d body=%d", third.Code, third.Body.Len())
+	} else {
+		at, err := time.Parse(time.RFC3339Nano, third.Header().Get("X-Hive-Stage-Tracker-Generated-At"))
+		if err != nil || !at.Equal(fresh.GeneratedAt) || third.Header().Get("X-Hive-Stage-Tracker-Generated-At") != wantAt {
+			t.Fatalf("304 generated-at header %q (err %v), want %q", third.Header().Get("X-Hive-Stage-Tracker-Generated-At"), err, wantAt)
+		}
+		if _, err := http.ParseTime(third.Header().Get("Last-Modified")); err != nil {
+			t.Fatalf("304 Last-Modified %q: %v", third.Header().Get("Last-Modified"), err)
+		}
+		if third.Header().Get("X-Hive-Stage-Tracker-Source") == "" {
+			t.Fatal("304 lacks the Source header")
+		}
 	}
 	if miss := get(`"nope"`); miss.Code != http.StatusOK {
 		t.Fatalf("stale validator: %d", miss.Code)
@@ -155,14 +170,16 @@ func TestStageTrackerCacheServesWithoutGitHub(t *testing.T) {
 	s.stageTrackerCacheMu.Lock()
 	s.stageTrackerCache.generatedAt = s.stageTrackerCache.generatedAt.Add(-21 * time.Second)
 	s.stageTrackerCacheMu.Unlock()
-	if again := get(etag); again.Code != http.StatusOK || again.Header().Get("X-Hive-Stage-Tracker-Source") != "fresh" {
+	// The rebuilt payload differs only in generated_at, which the ETag
+	// excludes, so the revalidation is a 304 even though the build was fresh.
+	if again := get(etag); again.Code != http.StatusNotModified || again.Header().Get("X-Hive-Stage-Tracker-Source") != "fresh" {
 		t.Fatalf("after TTL: %d src=%q", again.Code, again.Header().Get("X-Hive-Stage-Tracker-Source"))
 	}
 
 	// The REST accounting store is process-wide, so other tests in the
 	// package also drive this caller; only the delta from this test counts.
 	after := stageTrackerRESTAccounting()
-	if after.Requests-before.Requests != 5 || after.Charged != before.Charged || after.NotModified-before.NotModified != 1 {
+	if after.Requests-before.Requests != 5 || after.Charged != before.Charged || after.NotModified-before.NotModified != 2 {
 		t.Fatalf("accounting delta: before=%+v after=%+v", before, after)
 	}
 }
