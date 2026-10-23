@@ -135,7 +135,7 @@ func (s *Scheduler) formatIssueListWithPolicyForAgent(issues []github.Issue, ref
 		for _, issue := range shown {
 			_, verdict := s.enforceIssueTextVerdict(issue.Title)
 			failClosed = failClosed || (s.ioscanFailClosed() && verdict.HasCriticalInjection())
-			_, labelsFailClosed := s.enforceLabelsWithPolicy(issue.Labels)
+			_, labelsFailClosed := s.enforceLabelsWithPolicy(issue.Labels, issueSource(issue))
 			failClosed = failClosed || labelsFailClosed
 			b.WriteString(fmt.Sprintf("  %s\n", issueDisplayRef(issue)))
 		}

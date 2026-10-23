@@ -142,7 +142,7 @@ func TestTrackerClassificationConversionThreshold(t *testing.T) {
 				apiIssue := &gh.Issue{Title: &title, Body: &body}
 				for _, row := range []RepoWorkIssue{
 					repoWorkIssueFromIssue(issue, "claimed", "live claim"),
-					repoWorkIssue("acme/widgets", apiIssue, labels, "claimed", "live claim"),
+					(*Client)(nil).repoWorkIssue("acme/widgets", apiIssue, labels, "claimed", "live claim"),
 				} {
 					if row.IsTracker != want {
 						t.Fatalf("IsTracker = %v, want %v: %+v", row.IsTracker, want, row)
