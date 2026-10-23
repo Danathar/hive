@@ -776,9 +776,9 @@ func IsLegacy(label string) bool {
 }
 
 // CarriesStageAtLeast reports whether labels carry a current stage label at
-// or past min. It is the migration-safe replacement for "has the
-// covered-by-PR label": a PR-covered issue carries 040 (or, from an older
-// build, a PR stage past it that Enforce clamps back on its next pass).
+// or past min. It is an ORDINAL test and must not be used to decide whether
+// a PR covers an issue — the parking stages (045, 085) sort past 040 but
+// mean the opposite; use IssueCoveredByPR / Stage.CoversIssue for that.
 func CarriesStageAtLeast(labels []string, min Stage) bool {
 	cur := Current(labels)
 	return cur != None && !cur.Before(min)
