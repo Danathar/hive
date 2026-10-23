@@ -20,9 +20,11 @@ import (
 
 const (
 	maxFileBytes = 1 << 20
-	maxRepoBytes = 64 << 20
 	maxLineBytes = 4096
 )
+
+// maxRepoBytes is a variable so tests can exercise the budget cutoff.
+var maxRepoBytes = 64 << 20
 
 // Repo is one explicitly registered checkout; Name is its GitHub owner/name.
 type Repo struct {
@@ -175,7 +177,11 @@ func (idx *Index) addRepo(ctx context.Context, repo Repo) error {
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			if len(line) > maxLineBytes {
-				lines[i] = line[:maxLineBytes]
+				cut := maxLineBytes
+				for cut > 0 && !utf8.RuneStart(line[cut]) {
+					cut--
+				}
+				lines[i] = line[:cut]
 			}
 		}
 		id := len(idx.docs)
