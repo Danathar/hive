@@ -486,6 +486,10 @@ type mergeGates struct {
 	// the hive's fix lane owns its branch, so merge-only blocks such as the
 	// sentinel alert do not keep its red CI or conflict from the fixer.
 	adopted bool
+	// repoAutoMergeOff is config.RepoAutoMergeEnabled(repo) == false: every
+	// Hive merge sweep skips the repo ("repo-auto-merge-disabled"), so a PR
+	// that passes every other gate is still not one the sweep would merge.
+	repoAutoMergeOff bool
 }
 
 // classifyMergeEligibility is THE merge-eligibility rule: the one place that
@@ -683,8 +687,26 @@ func classifyMergeEligibility(pr github.PullRequest, held bool, fullRepo string,
 	case pr.Mergeable == github.MergeableUnknown:
 		reason += " — mergeability not yet fetched; the sweep re-checks it at merge time"
 	}
+	if g.repoAutoMergeOff {
+		// Every per-PR gate passed, but every merge sweep skips this repo.
+		// The PR stays in the eligible bucket — merge-eligible.json is the
+		// list the merge-request relay and the lanes' kick messages read,
+		// and both apply the same repo switch themselves — while the
+		// verdict says what the sweep will actually do: nothing. Green
+		// here would tell the operator "it merges on its own" about a PR
+		// only a person can land (#7478's contract).
+		return mergeBucketEligible, github.MergeVerdict{
+			State:     github.MergeVerdictOutstanding,
+			Reason:    repoAutoMergeOffReason,
+			HandMerge: true,
+		}, ""
+	}
 	return mergeBucketEligible, github.MergeVerdict{State: github.MergeVerdictEligible, Reason: reason}, ""
 }
+
+// repoAutoMergeOffReason is the verdict reason for a PR that passes every
+// gate in a repo whose auto-merge switch is off.
+const repoAutoMergeOffReason = "auto-merge is off for this repo (its auto-merge setting, or the hive is below ACMM L6) — a person merges it"
 
 // needsDecisionParkLabel returns the needs-decision parking stage label a PR
 // carries (PR stage 085 or the issue-side 045 spelling), lower-cased, or "".
@@ -1090,6 +1112,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			} else {
 				prGates.requiredChecks = nil
 			}
+			prGates.repoAutoMergeOff = !cfg.RepoAutoMergeEnabled(fullRepo)
 		}
 
 		adopted := adoptedInPlace(fullRepo, pr.Number)

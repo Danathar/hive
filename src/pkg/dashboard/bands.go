@@ -344,9 +344,15 @@ func prBand(pr github.PullRequest, verdict *github.MergeVerdict, held bool, cfg 
 
 // prBandFlags reports the merge-state facts every PR band is chosen from.
 func prBandFlags(pr github.PullRequest, verdict *github.MergeVerdict, labels map[string]bool, autoMergeLabel string, review *prReviewInfo) (eligible, blocked, inReview bool) {
-	eligible = (verdict != nil && verdict.State == github.MergeVerdictEligible) || prQueued(labels, autoMergeLabel)
+	// A hand-merge verdict (the repo's auto-merge is off) is never eligible,
+	// even with the auto-merge label: every sweep, the queued one included,
+	// skips that repo.
+	eligible = (verdict == nil || !verdict.HandMerge) &&
+		((verdict != nil && verdict.State == github.MergeVerdictEligible) || prQueued(labels, autoMergeLabel))
 	blocked = (verdict != nil && verdict.State == github.MergeVerdictBlocked) || pr.Mergeable == github.MergeableNo || prCIFailing(pr)
-	inReview = (verdict != nil && verdict.State == github.MergeVerdictOutstanding) || pr.ReviewURL != "" || review != nil
+	// A hand-merge verdict is outstanding because the repo's switch is off,
+	// not because anyone is reviewing it; it does not earn the in-review band.
+	inReview = (verdict != nil && verdict.State == github.MergeVerdictOutstanding && !verdict.HandMerge) || pr.ReviewURL != "" || review != nil
 	return eligible, blocked, inReview
 }
 
