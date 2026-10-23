@@ -843,7 +843,7 @@ func (s *Server) sentinelLabel() string {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.historyPayload())
+	evalHistoryResponse(w, r, s.historyPayload())
 }
 
 // historyPayload is the /api/history body: the live eval history, prefixed by
@@ -1380,11 +1380,11 @@ func (s *Server) prQueueRepoAllowed(repo string) bool {
 }
 
 func (s *Server) handleFactHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.FactHistory())
+	historyResponse(w, r, s.FactHistory(), func(e FactHistoryEntry) int64 { return e.Timestamp })
 }
 
 func (s *Server) handleCostHistory(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, s.CostHistory())
+	historyResponse(w, r, s.CostHistory(), func(e CostHistoryEntry) int64 { return e.Timestamp })
 }
 
 func (s *Server) handleTrendHistory(w http.ResponseWriter, r *http.Request) {
@@ -1409,9 +1409,9 @@ func (s *Server) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
 	case "token", "tokens":
 		jsonResponse(w, s.TokenSparklineHistory())
 	case "fact", "facts":
-		jsonResponse(w, s.FactHistory())
+		historyResponse(w, r, s.FactHistory(), func(e FactHistoryEntry) int64 { return e.Timestamp })
 	case "cost":
-		jsonResponse(w, s.CostHistory())
+		historyResponse(w, r, s.CostHistory(), func(e CostHistoryEntry) int64 { return e.Timestamp })
 	default:
 		http.Error(w, `{"error":"unknown series; valid: token, fact, cost"}`, http.StatusBadRequest)
 	}

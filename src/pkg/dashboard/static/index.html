@@ -11839,12 +11839,29 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return sparkSvg(series, 'var(--red)', entries.map(e => e.t), `agent:${agentName}:restarts`);
     }
 
+    // Conditional reads avoid reparsing unchanged histories. Keep one validator
+    // per endpoint (not per since cursor), so this cache stays bounded.
+    const _historyValidators = new Map();
+    async function fetchDashboardHistory(url) {
+      const key = url.split('?')[0];
+      const previous = _historyValidators.get(key);
+      const headers = previous && previous.url === url ? { 'If-None-Match': previous.etag } : {};
+      const r = await fetch(url, { headers, cache: 'no-store' });
+      if (r.status === 304) return null;
+      if (!r.ok) throw new Error(`History request failed: ${r.status}`);
+      const data = await r.json();
+      const etag = r.headers.get('ETag');
+      if (etag) _historyValidators.set(key, { url, etag });
+      else _historyValidators.delete(key);
+      return data;
+    }
+
     // ── Fact count sparkline (30-day server-side history) ──
     let _factHistory = [];
     async function fetchFactHistory() {
       try {
-        const r = await fetch('/api/knowledge/fact-history');
-        _factHistory = capDashboardArray(await r.json(), DASHBOARD_SERVER_HISTORY_CAP);
+        const data = await fetchDashboardHistory('/api/knowledge/fact-history');
+        if (data !== null) _factHistory = capDashboardArray(data, DASHBOARD_SERVER_HISTORY_CAP);
       } catch { /* non-critical */ }
     }
     // axisSparkSvg renders a time series WITH axes (#4298: the dashboard's
@@ -11893,11 +11910,27 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // Mirrors the fact sparkline: same axis treatment,
     // reads /api/cost/history which parallels /api/knowledge/fact-history.
     let _costHistory = [];
+    let _costHistoryLoading = false;
+    let _costHistoryInstance = null;
+    // Spend calculations require every counter step, including resets. Bootstrap
+    // the full retained ring once, then transfer only new full-resolution rows.
+    const COST_HISTORY_POINTS = 8640;
     async function fetchCostHistory() {
+      if (_costHistoryLoading) return;
+      _costHistoryLoading = true;
       try {
-        const r = await fetch('/api/cost/history');
-        _costHistory = capDashboardArray(await r.json(), DASHBOARD_SERVER_HISTORY_CAP);
+        const instance = _statusInstance;
+        const history = _costHistoryInstance === instance ? _costHistory : [];
+        const since = history.length ? history[history.length - 1].t : 0;
+        if (_costHistoryInstance !== instance) _historyValidators.delete('/api/cost/history');
+        const data = await fetchDashboardHistory(`/api/cost/history?max_points=${COST_HISTORY_POINTS}${since ? '&since=' + since : ''}`);
+        if (instance !== _statusInstance) return; // a restart raced this request
+        if (data !== null) {
+          _costHistory = capDashboardArray(history.concat(data), COST_HISTORY_POINTS);
+          _costHistoryInstance = instance;
+        }
       } catch { /* non-critical */ }
+      finally { _costHistoryLoading = false; }
     }
     function costSparkSvg() {
       const total = costAllTimeEstimate(_lastCost && _lastCost.estimated);
@@ -13064,8 +13097,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
 
     async function fetchHistory() {
       try {
-        const r = await fetch('/api/history');
-        const evalEntries = await r.json();
+        const evalEntries = await fetchDashboardHistory('/api/history');
+        if (evalEntries === null) return;
         // Ensure token history is loaded before merging (fixes race on initial page load)
         if (!window._serverTokenHistory) {
           try {
@@ -25346,7 +25379,8 @@ function burnAreaChart() {
       const rows = refs.map(costLaunchRowHtml).join('');
       const total = Number(lc.total_tokens) || 0;
       const rate = total > 0 ? Math.round((Number(lc.attributed_tokens) || 0) / total * 100) : null;
-      const more = (lc.by_ref || []).length > refs.length ? ` · showing top ${refs.length} of ${(lc.by_ref || []).length}` : '';
+      const refTotal = lc.by_ref_total ?? (lc.by_ref || []).length;
+      const more = refTotal > refs.length ? ` · showing top ${refs.length} of ${refTotal}` : '';
       return `<div class="cost-subsection" data-cost-sub="launch">
         <div class="cost-subtable-title cost-sub-toggle" role="button" tabindex="0" aria-expanded="${costSubAriaExpanded('launch')}" aria-controls="cost-sub-launch-body" data-action="costSubToggle" data-keydown-action="costSubToggle" data-arg-types="e,s" data-arg1="launch" data-keys="*" title="Estimated cost per issue / PR, from the work each kick was launched for joined against per-message token timing. Inferred, not measured. Click to collapse / expand."><span class="cost-chevron${costSubCollapsedCls('launch')}" aria-hidden="true">▼</span>cost by work item <span class="cost-badge est">inferred</span></div>
         <div class="cost-sub-body${costSubCollapsedCls('launch')}" id="cost-sub-launch-body">
@@ -25362,9 +25396,8 @@ function burnAreaChart() {
 
     async function fetchLaunchCost() {
       try {
-        const r = await fetch('/api/launch-cost');
-        if (!r.ok) return;
-        lastLaunchCost = await r.json();
+        const data = await fetchDashboardHistory('/api/launch-cost');
+        if (data !== null) lastLaunchCost = data;
       } catch (e) { /* transient — keep the last good attribution */ }
     }
 

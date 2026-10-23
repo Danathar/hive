@@ -4,6 +4,8 @@ Pragmatic v1 endpoint index compiled by hand from route registrations in `src/pk
 
 Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard token/session auth, and the `/api/v1` GitHub-token wrapper) or from hub route wrappers such as `requireAuth` (rows marked `Hub auth`) and `requireAdmin` (rows marked `Hub admin`). Hub rows marked handler-specific have no dashboard middleware; check the named handler for bearer secrets, admin checks, or public behavior.
 
+History point limits, timestamp cutoffs, incremental cost reads and ETag/304 behavior are documented in [Dashboard history reads](dashboard-history-api.md).
+
 ## Health, status, events
 
 | Method | Path | Auth | Purpose | Source |
