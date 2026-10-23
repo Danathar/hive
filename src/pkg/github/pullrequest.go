@@ -32,6 +32,14 @@ var forwardMergeTitleRe = regexp.MustCompile(`(?i)^[^\p{L}\p{N}]*(top-up|sync):`
 // releaseLineBranchRe matches release-line branch names ("v5", "v6").
 var releaseLineBranchRe = regexp.MustCompile(`^v\d+$`)
 
+// IsForwardMergeHead reports whether ref is a head branch the forward-merge
+// workflows use (forwardMergeHeadRe). Unlike IsForwardMergePR it ignores the
+// title, which any contributor controls, so gates that relax on a
+// forward-merge key on it (hivecommons/hive#13635).
+func IsForwardMergeHead(ref string) bool {
+	return forwardMergeHeadRe.MatchString(ref)
+}
+
 // IsForwardMergePR reports whether pr is a forward-merge between release
 // lines, which must land as a merge commit rather than a squash. It only
 // looks at the PR's metadata; ResolveForwardMergeMethod adds the head-history

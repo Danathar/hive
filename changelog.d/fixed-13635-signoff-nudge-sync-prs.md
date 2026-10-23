@@ -1,1 +1,0 @@
-Skip the sign-off attribution nudge and commit sign-off check on `sync/v*-to-v*` and top-up forward-merge PRs, which carry other people's commits by design (#13635).
