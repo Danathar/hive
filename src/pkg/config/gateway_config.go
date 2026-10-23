@@ -28,23 +28,3 @@ func (g GovernorConfig) ResolveLiteLLMInferenceKey(backend string) string {
 	}
 	return g.LiteLLM.ResolveAPIKey()
 }
-
-// ResolveAPIKey returns this gateway's key value, preferring the env var when
-// set and falling back to the file. Returns "" when neither yields a value
-// (a keyless endpoint). Mirrors LiteLLMConfig key resolution.
-// secretFileRoots are the ONLY directories an api_key_file may live under.
-//
-//   - /secrets      — the read-only Kubernetes Secret projection
-//   - /data/secrets — the PVC-backed dir the dashboard writes UI-entered keys to
-//
-// Anything else is refused. See SecretFilePathAllowed.
-//
-// A package var, not a const slice, so tests can point it at a t.TempDir()
-// (production never reassigns it). Use SetSecretFileRootsForTest.
-var secretFileRoots = []string{"/secrets", WritableSecretsDir}
-
-// SecretFileRoots returns the directories hive reads secret files from, so a
-// reader can redact their contents (the admin log read, #11942).
-func SecretFileRoots() []string {
-	return append([]string(nil), secretFileRoots...)
-}

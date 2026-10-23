@@ -16,13 +16,15 @@ import (
 
 // The default waiting labels are exactly the four parking buckets' labels
 // plus `blocked`, the set the un-park sweep answers (with needs-spec, which
-// the band parks but the sweep leaves alone).
+// the band parks but the sweep leaves alone), plus the prior-art gate's park
+// stage/017-possible-existing, which the gate's resume answers instead
+// (hivecommons/hive#13575).
 func TestDefaultWaitingLabelsAreParkingPlusBlocked12376(t *testing.T) {
 	var want []string
 	for _, p := range defaultOwnershipParking() {
 		want = append(want, p.labels...)
 	}
-	want = append(want, blockedWorkflowLabel)
+	want = append(want, blockedWorkflowLabel, config.PossiblyExistsStageLabel)
 	got := append([]string{}, defaultIssueWaitingLabels...)
 	slices.Sort(want)
 	slices.Sort(got)

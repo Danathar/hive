@@ -82,6 +82,13 @@ func issueBucketFrom(bucket string) stageengine.IssueBucket {
 func resolveIssueLabelFacts(in IssueStageInput, f *stageengine.Facts) {
 	f.Park.Holds = stagelabels.Holds(in.Labels)
 	f.Park.NeedsHuman = f.Park.NeedsHuman || issueHeldByNeedsHuman(in)
+	// A Parked fact's label parks the issue at 045 only when it is in the
+	// hard-suppress park vocabulary, the same test a worn label passes. An
+	// operator-renamed decision label is applied by the caller and parks
+	// through the issue filter; the engine writes no stage for it (#12329).
+	if f.Park.DecisionLabel != "" && hardSuppressIssueLabel([]string{f.Park.DecisionLabel}) == "" {
+		f.Park.DecisionLabel = ""
+	}
 	if f.Park.DecisionLabel == "" {
 		f.Park.DecisionLabel = parkedOnPersonLabel(in)
 	}

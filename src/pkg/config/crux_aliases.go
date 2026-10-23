@@ -170,6 +170,7 @@ var (
 	QualifyRepo               = cruxconfig.QualifyRepo
 	ReviewHeadKey             = cruxconfig.ReviewHeadKey
 	SecretFilePathAllowed     = cruxconfig.SecretFilePathAllowed
+	SecretFileRoots           = cruxconfig.SecretFileRoots
 	SetSecretFileRootsForTest = cruxconfig.SetSecretFileRootsForTest
 	SupportedBackends         = cruxconfig.SupportedBackends
 	ValidEffort               = cruxconfig.ValidEffort

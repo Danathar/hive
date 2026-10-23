@@ -163,6 +163,7 @@ func TestPRGateLabelsAreYourTurn12378(t *testing.T) {
 		"needs-direction":                {OwnershipVerbSteer, OwnershipReasonParkedNeedsDirection},
 		"needs-spec":                     {OwnershipVerbSpec, OwnershipReasonParkedNeedsSpec},
 		"blocked":                        {OwnershipVerbReview, OwnershipReasonPRGateLabel},
+		config.PossiblyExistsStageLabel:  {OwnershipVerbReview, OwnershipReasonPRGateLabel},
 		"waiting-on-legal":               {OwnershipVerbReview, OwnershipReasonPRGateLabel},
 	}
 	seen := map[string]bool{}

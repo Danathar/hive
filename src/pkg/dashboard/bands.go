@@ -45,7 +45,7 @@ var (
 	// which the un-park sweep answers like the needs-* labels
 	// (hivecommons/hive#12376). static/index.html keeps a copy
 	// (REPO_ISSUE_BAND_DEFAULTS.waitingLabels).
-	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, prNeedsDecisionLabel, "stage/017-possible-existing", "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
+	defaultIssueWaitingLabels = []string{"needs-human", needsDecisionLabel, prNeedsDecisionLabel, config.PossiblyExistsStageLabel, "needs-direction", "needs-decision", "needs-spec", blockedWorkflowLabel}
 	defaultIssueDoneLabels    = []string{"hive/already-done", "hive/covered-by-pr", "hive/likely-done"}
 	prHumanGateLabels         = []string{"needs-human", prNeedsDecisionLabel, "needs-decision", "2-discussing"}
 	issueBandOrder            = []string{"ready", "in-progress", "agent-filed", "waiting", "done"}
