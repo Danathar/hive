@@ -195,8 +195,10 @@ func TestPREnricherReserveAPICallCov(t *testing.T) {
 		}
 	}
 	e = &PREnricher{maxAPICalls: 2}
-	if !e.reserveAPICallLocked() || !e.reserveAPICallLocked() {
-		t.Fatal("first two calls should be reserved")
+	for i := 0; i < 2; i++ {
+		if !e.reserveAPICallLocked() {
+			t.Fatalf("call %d should be reserved within the cap", i+1)
+		}
 	}
 	if e.reserveAPICallLocked() {
 		t.Fatal("third call should exceed the cap")
