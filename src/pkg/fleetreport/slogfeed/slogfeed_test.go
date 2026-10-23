@@ -129,3 +129,35 @@ func TestHandlerEnabledDefersToWrapped(t *testing.T) {
 		t.Fatal("ERROR not enabled")
 	}
 }
+
+func TestReviewPendingExpiryLogsWithoutFleetReport(t *testing.T) {
+	now := time.Date(2026, 10, 23, 17, 39, 0, 0, time.UTC)
+	tr := fleetreport.NewRuntimeTracker(func() time.Time { return now })
+	var out bytes.Buffer
+	logger := slog.New(NewWithObserver(slog.NewJSONHandler(&out, nil), tr.Observe))
+	// Five unrelated first expiries in one cycle meet the generic feed's
+	// threshold, even when the governor warns only once per PR (#13850).
+	for i := 0; i < 5; i++ {
+		logger.Warn("review pending expired", "repo", "owner/repo", "pr", 90+i,
+			"perspective", "docs-currency", "agent", "reviewer", "age", "49m30s", "expiries", 1)
+	}
+	if ev := tr.Evidence(); len(ev) != 0 {
+		t.Fatalf("bounded review retries produced fleet evidence: %+v", ev)
+	}
+	if n := strings.Count(out.String(), "\n"); n != 5 {
+		t.Fatalf("wrapped handler saw %d expiry records, want 5: %s", n, out.String())
+	}
+	if !strings.Contains(out.String(), `"msg":"review pending expired"`) || !strings.Contains(out.String(), `"expiries":1`) {
+		t.Fatalf("expiry log lost its message or diagnostics: %s", out.String())
+	}
+	// Exhausting the retry budget is still actionable, and must still cross
+	// the report threshold instead of being swallowed by the retry filter.
+	const exhausted = "review dispatch exhausted; holding PR for a human"
+	for i := 0; i < 5; i++ {
+		logger.Warn(exhausted, "repo", "owner/repo", "pr", 90+i)
+	}
+	ev := tr.Evidence()
+	if len(ev) != 1 || ev[0].Class != fleetreport.ClassUnclassifiedRepeated || ev[0].Message != exhausted || ev[0].Count != 5 {
+		t.Fatalf("exhausted reviews should still produce fleet evidence: %+v", ev)
+	}
+}

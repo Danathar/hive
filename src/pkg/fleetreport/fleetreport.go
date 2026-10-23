@@ -712,9 +712,17 @@ var benignSubstrings = []string{
 
 // IsBenignMessage reports whether a raw log message is noise the generic
 // repeated-error feed must not report: the read/keepalive i/o timeout rule
-// above applied to the whole line, plus every benignSubstrings entry.
+// above applied to the whole line, every benignSubstrings entry, and the
+// review planner's pending-expiry retry notification.
 func IsBenignMessage(msg string) bool {
 	m := strings.ToLower(msg)
+	// Pending expiry is a bounded retry, logged per perspective/PR. A burst
+	// across unrelated reviews is not a repeated runtime defect (#13850).
+	// Match only the retry notification: "review dispatch exhausted; holding
+	// PR for a human" and failures during expiry must remain reportable.
+	if strings.TrimSpace(m) == "review pending expired" {
+		return true
+	}
 	if benignIOTimeout(m, m) {
 		return true
 	}

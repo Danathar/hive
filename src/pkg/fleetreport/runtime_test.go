@@ -742,6 +742,23 @@ func TestIsBenignMessage(t *testing.T) {
 	}
 }
 
+func TestIsBenignMessageReviewPendingExpiry(t *testing.T) {
+	for _, msg := range []string{"review pending expired", "  REVIEW PENDING EXPIRED  "} {
+		if !IsBenignMessage(msg) {
+			t.Errorf("retry notification %q not benign", msg)
+		}
+	}
+	for _, msg := range []string{
+		"review dispatch exhausted; holding PR for a human",
+		"review pending expired: redispatch failed",
+		"failed to persist review pending expired state",
+	} {
+		if IsBenignMessage(msg) {
+			t.Errorf("failure %q wrongly benign", msg)
+		}
+	}
+}
+
 func TestQueueHealthClassesQualifyOnFirstObservationAndClear(t *testing.T) {
 	now, _ := fakeClock(time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC))
 	tr := NewRuntimeTracker(now)
