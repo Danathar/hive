@@ -71,6 +71,9 @@ type Options struct {
 	// for an owner/repo. Every sweep lane refuses a PR touching one (#11038).
 	// nil means no repo has any.
 	HumanMergePaths func(repo string) []string
+	// RequireCurrentBase returns the live auto_merge.require_current_base
+	// switch for an owner/repo (hivecommons/hive#13634). nil means off.
+	RequireCurrentBase func(repo string) bool
 	// SelfAuthorizationHoldEnabled returns the live per-repo #5117 hold switch.
 	// nil preserves the default-on behavior.
 	SelfAuthorizationHoldEnabled      func(repo string) bool
@@ -180,6 +183,8 @@ type Engine struct {
 	humanMergePathsMu sync.RWMutex
 	humanMergePaths   func(repo string) []string
 
+	requireCurrentBase func(repo string) bool
+
 	selfAuthorizationHoldEnabled      func(repo string) bool
 	selfAuthorizationHoldReleaseLimit int
 	repoAutoMergeEnabled              func(repo string) bool
@@ -245,6 +250,7 @@ func New(transport Transport, opts Options) *Engine {
 		reviewGate:                        opts.ReviewGate,
 		humanChangeRequests:               opts.HumanChangeRequests,
 		humanMergePaths:                   opts.HumanMergePaths,
+		requireCurrentBase:                opts.RequireCurrentBase,
 		selfAuthorizationHoldEnabled:      opts.SelfAuthorizationHoldEnabled,
 		selfAuthorizationHoldReleaseLimit: opts.SelfAuthorizationHoldReleaseLimit,
 		repoAutoMergeEnabled:              opts.RepoAutoMergeEnabled,
@@ -1652,6 +1658,15 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, intentReason, nil
 	}
 
+	// Current-base gate (hivecommons/hive#13634). Consulted only once the
+	// head is green and every policy gate above has passed: a red or pending
+	// head is the author's to fix and must not be re-based under them, and a
+	// head policy refuses would be updated for nothing. Sits before the desk
+	// so the desk is only asked about a head that would merge this tick.
+	if ev, reason, stop, err := c.currentBaseGate(ctx, displayRepo, owner, repo, number, baseBranch, evaluatedHeadSHA, branchUpdateAllowed, autoMergeReasonBehindBudgetExhausted); stop {
+		return ev, reason, err
+	}
+
 	// Approval desk (RFC #4000). Consulted AFTER the sweep's own eligibility
 	// checks so the desk only ever sees requests the legacy gate already
 	// permits — it can withhold a merge, never widen authority beyond what
@@ -2052,6 +2067,11 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	}
 	if humanReason, err := c.humanMergePathGate(ctx, displayRepo, owner, repo, pr); err != nil || humanReason != "" {
 		return AutoMergeSweepEvent{}, humanReason, err
+	}
+	// Current-base gate (hivecommons/hive#13634): only a green head that
+	// every gate above lets through is worth an update-branch commit.
+	if ev, reason, stop, err := c.currentBaseGate(ctx, displayRepo, owner, repo, number, baseBranch, headSHA, true, "behind"); stop {
+		return ev, reason, err
 	}
 	if gateReason, err := c.forgestateMergeGate(ctx, owner, repo, number, headSHA); gateReason != "" || err != nil {
 		return AutoMergeSweepEvent{}, gateReason, err
