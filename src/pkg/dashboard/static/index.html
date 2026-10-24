@@ -2332,7 +2332,10 @@
        shares the pill rows' grid so its two chips centre on one line instead
        of sitting inline on a text baseline at different heights. */
     .repo-overview-filter-bucket { display: grid; grid-template-columns: minmax(4.5rem, max-content) minmax(0, 1fr); align-items: center; justify-items: start; gap: var(--sp-2); min-width: 0; max-width: 100%; }
-    .repo-pill-main { display: flex; align-items: baseline; gap: var(--sp-1); min-width: 0; }
+    /* The title keeps a 10rem floor: signals and critical-path chips wrap
+       under it rather than squeezing it to one character per line. */
+    .repo-pill-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1); min-width: 0; }
+    .repo-pill-main .cp-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .repo-pill-status { display: inline-block; text-align: center; min-width: 4.5rem; max-width: 100%; padding: var(--sp-1) var(--sp-3); border: 1px solid color-mix(in srgb, var(--pill-c, var(--border)) 45%, transparent); border-radius: var(--r-pill); color: var(--pill-c, var(--muted)); background: color-mix(in srgb, var(--pill-c, var(--muted)) 10%, transparent); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.02em; line-height: 1.2; text-transform: uppercase; white-space: normal; overflow-wrap: anywhere; }
     .repo-pill-status.held { --pill-c: var(--muted); border-style: dashed; }
     /* Actions wrap as a cluster, retaining every slot within its column. */
@@ -2364,7 +2367,7 @@
     .repo-issue-pill { --component-status: var(--status-info); --pill-c: var(--status-info); text-decoration: none; border: 1px solid color-mix(in srgb, var(--pill-c) 40%, transparent); background: color-mix(in srgb, var(--pill-c) 12%, transparent); color: var(--pill-c); max-width: 100%; transition: background 0.15s; }
     .repo-issue-pill:hover { background: color-mix(in srgb, var(--pill-c) 24%, transparent); text-decoration: none; }
     .repo-issue-pill .pill-num { flex: 0 0 auto; font-weight: 700; white-space: nowrap; }
-    .repo-issue-pill .pill-title { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+    .repo-issue-pill .pill-title { flex: 1 1 10rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
     /* Plan/design/link and Hold/Release remain in the shared action cluster. */
     .repo-issue-pill-wrap .repo-issue-pill:not(.repo-pill-status) { min-width: 0; overflow: hidden; }
     .repo-issue-plan { --pill-c: var(--purple); flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--pill-c) 40%, transparent); background: color-mix(in srgb, var(--pill-c) 12%, transparent); color: var(--pill-c); font-size: 0.7rem; font-weight: 600; line-height: 1; padding: var(--sp-1) var(--sp-3); border-radius: var(--r-pill); cursor: pointer; white-space: nowrap; opacity: 0.75; transition: opacity 0.15s, background 0.15s; }
@@ -2393,7 +2396,7 @@
     .repo-pr-pill.merge-outstanding { --pill-c: var(--yellow); }
     .repo-pr-pill.merge-outstanding { --component-status: var(--status-warn); }
     .repo-pr-pill .pill-num { flex: 0 0 auto; font-weight: 700; white-space: nowrap; }
-    .repo-pr-pill .pill-title { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+    .repo-pr-pill .pill-title { flex: 1 1 10rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
     .repo-pr-pill .pill-merge-icon { font-size: var(--fs-2xs); margin-left: 1px; }
     /* Review-priority class badge (#6183): the snapshot orders PRs fixes >
        refactors/docs > tests, then by age; the badge says WHY a PR sits

@@ -28,3 +28,19 @@ func TestRepoCardPillRowsUseSharedGrid(t *testing.T) {
 		}
 	}
 }
+
+// A pill's signals and critical-path chips wrap under its title, which keeps
+// a 10rem floor (pinned in TestRepoCardPillColumnsStaticWiring). Without it, a
+// row whose chips outgrew a narrow column squeezed the title to one character
+// per line.
+func TestRepoCardPillChipsWrapUnderTitle(t *testing.T) {
+	html := indexHTML(t)
+	for _, want := range []string{
+		".repo-pill-main { display: flex; flex-wrap: wrap; align-items: baseline;",
+		".repo-pill-main .cp-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing pill chip-wrap snippet %q", want)
+		}
+	}
+}
