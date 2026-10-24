@@ -17,8 +17,8 @@ func TestRepoCardPillColumnsStaticWiring(t *testing.T) {
 		".repo-pr-pill-wrap .repo-pr-pill:not(.pill-icon):not(.repo-pill-status) { min-width: 0; overflow: hidden; }",
 		".repo-issue-pill .pill-num { flex: 0 0 auto;",
 		".repo-pr-pill .pill-num { flex: 0 0 auto;",
-		".repo-issue-pill .pill-title { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }",
-		".repo-pr-pill .pill-title { flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }",
+		".repo-issue-pill .pill-title { flex: 1 1 10rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }",
+		".repo-pr-pill .pill-title { flex: 1 1 10rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }",
 		"const pillColClass = issueCol && prCol ? '' : (issueCol ? ' repo-pills-issues-only' : ' repo-pills-prs-only');",
 		"<div class=\"repo-pills${pillColClass}\">",
 	} {
