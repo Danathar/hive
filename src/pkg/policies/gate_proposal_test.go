@@ -26,6 +26,9 @@ func TestThreeOfAClassPoliciesHonourGateProposalRulings(t *testing.T) {
 		{"search every repository in `$HIVE_REPOS` for a `Gate proposal:` on", "one proposal per class across the hive, not one per repository (#13680)"},
 		{"A ruling on a proposal is the written policy for its class", "a ruling must bind the class in every repository the proposal lists (#13679, #13680)"},
 		{"Resume individual findings in a declined class only if the ruling", "a decline ends the class unless the ruling asks for individual findings (#13679)"},
+		{"An accepted proposal", "an accepted ruling must reach repositories the proposal did not list, or the owner is asked again per repository"},
+		{"also settles the class in every other repository in `$HIVE_REPOS`", "an accepted ruling must reach repositories the proposal did not list, or the owner is asked again per repository"},
+		{"Decision taken by hive: applying the ruling on <owner/repo#n>", "work filed on an accepted ruling must say which ruling it applies"},
 	}
 	forbidden := []struct {
 		fragment string
