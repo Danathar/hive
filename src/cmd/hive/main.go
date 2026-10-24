@@ -7391,6 +7391,7 @@ func runEvalCycle(
 	applyHumanDecisionLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	if ghClient != nil {
 		applyReviewPriorityLabels(ctx, cfg, ghClient, reviewQueue, logger)
+		applyReviewVerdictLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	}
 	messages, messageSkips := sched.BuildKickMessagesWithSkips(kickActionable, agentsDue)
 	agentsSkipped = append(agentsSkipped, messageSkips...)
@@ -9968,6 +9969,14 @@ func applyDuplicatePRGuard(
 	// recheck-after deadline get evidence from the hub (or this spoke).
 	github.SetRecheckSoakProbe(github.NewHTTPSoakProbe(recheckSoakHubURL(cfg), fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port), nil))
 	blockedCtx, blockedCancel := context.WithTimeout(ctx, issueStageSyncTimeout)
+	// hivecommons/hive#13833: review-backlog items wait on the PR they were
+	// filed from in every destination; lift them when it merges, and when it
+	// closes unmerged unblock them with a re-triage note (never auto-close).
+	// Runs first so the items get the sweep's own note rather than the
+	// generic one from the sweep below.
+	if rb := github.ReconcileReviewBacklogBlocks(blockedCtx, ghClient, logger); rb.Lifted+rb.Retriaged+rb.Errors > 0 {
+		logger.Info("review backlog blocks reconciled", "checked", rb.Checked, "lifted", rb.Lifted, "retriaged", rb.Retriaged, "errors", rb.Errors)
+	}
 	if br := github.ReconcileBlockedIssues(blockedCtx, ghClient, actionable, logger); br.Unblocked+br.Stripped+br.SoakTriaged+br.Errors > 0 {
 		logger.Info("blocked issues reconciled", "items", br.Items, "unblocked", br.Unblocked, "help_wanted_stripped", br.Stripped, "soak_triaged", br.SoakTriaged, "errors", br.Errors)
 	}
