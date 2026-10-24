@@ -242,6 +242,14 @@ declined proposal ends the class; lanes resume individual findings only when
 the ruling asks for them ([#13679](https://github.com/hivecommons/hive/issues/13679),
 [#13680](https://github.com/hivecommons/hive/issues/13680)).
 
+An accepted proposal also settles the class in every other repository in
+`$HIVE_REPOS`, including ones it did not list. In a new repository the lane
+comments that repository's instances on the accepted proposal and files adding
+the gate as ordinary actionable work that links the ruling, instead of filing a
+new proposal and parking it for the maintainer again. Conditions in the ruling
+carry over, and a repository's own written policy that rules the class out
+still wins.
+
 ## What to read next
 
 - **[Skill registry](skills.md)** — the sibling injection path: file format,
