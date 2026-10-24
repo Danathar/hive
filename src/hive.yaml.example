@@ -15,6 +15,11 @@ project:
   ai_author: your-bot-user               # Login agents author as. Leave unset on App-authenticated hives (the App bot is used). Never a maintainer's own login: Hive treats this account as itself and ignores its /hive commands.
   primary_repo: repo-one                 # Main repo for priority routing
   # agent_issue_decision_policy: resolve # resolve (default) lets Hive-authored issues stay actionable for non-risk engineering choices; escalate parks every --needs-decision request
+  # standing_approvals:                # kinds of change the owner approves in advance; see docs/agent-configuration.md
+  #   - id: advisory-ci-checks
+  #     text: Adding a CI job that is advisory only (never a required check) is approved in advance.
+  #     # repos: [repo-one]            # optional; default = every repo
+  #     # agents: [quality]            # optional; default = every lane
   # Optional: host-local directory holding one checkout per repo, as
   # <checkouts_dir>/<repo name>. Supplies the repo root Hive reads AGENTS.md
   # from at kick time (src/docs/agents-md.md). Hive agents work over the API and

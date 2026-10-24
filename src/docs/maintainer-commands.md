@@ -34,6 +34,8 @@ https://github.com/hivecommons/hive/blob/v5/src/docs/maintainer-commands.md
 
 Hive-authored issues normally arrive actionable rather than parked when the question is only an engineering choice (sequencing, naming, numbering, config shape, scope, or approach A vs B). With `project.agent_issue_decision_policy: resolve` (the default), the relay downgrades those attempted parks and records `Decision taken by hive: …`; maintainers can still override with `/hive hold` or `needs-human`. Parked Hive-authored issues should include `Risk: <category>` for the reason a person is required.
 
+To stop being asked the same question again, list the kind of change in `project.standing_approvals` ([`agent-configuration.md`](agent-configuration.md#standing-approvals-projectstanding_approvals)). Agents then file covered governance questions (an advisory CI check, test-only rows) as actionable work with `Decision taken by hive: …` naming the entry, instead of parking them for `/hive approve`. Security, credentials, licensing, branch protection, merge policy, spend and data-loss questions still park.
+
 The un-park sweep only honors `/hive approve`, `/hive decision <text>`,
 `/hive done`, `/fixed` (alias `/close`), and the sweep fallback for `/hive help` when the command is the first non-empty line of
 the comment, outside quoted text and fenced code. The comment must be newer than

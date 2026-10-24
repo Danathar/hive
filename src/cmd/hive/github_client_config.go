@@ -125,6 +125,8 @@ func (b *boot) applyGitHubClientConfigHooks(client *github.Client) {
 	// even when no exempt labels are configured.
 	client.SetIssueFilter(b.cfg.Project.IssueFilter)
 	client.SetAgentIssueDecisionPolicy(b.cfg.Project.EffectiveAgentIssueDecisionPolicy())
+	// project.standing_approvals, live like the scope predicates above.
+	client.SetStandingApprovalFunc(b.cfg.StandingApprovalCovers)
 	client.SetReporterConfirmationEnabledFunc(func() bool {
 		return b.cfg.Issues.ReporterConfirmationEnabled()
 	})

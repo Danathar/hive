@@ -433,6 +433,7 @@ func (s *Scheduler) substituteTemplateWithVars(template string, actionable *gith
 		"PROJECT_HOMEBREW_REPO": lit(fmt.Sprintf("%s/homebrew-tap", s.cfg.Project.Org)),
 		"PROJECT_OBSERVABILITY": lit(s.cfg.Governor.ProjectObservability.PromptSection()),
 		"WRITING_GUIDE":         lit(s.cfg.Project.WritingGuideSection()),
+		"STANDING_APPROVALS":    lit(s.cfg.StandingApprovalsSection(agentName)),
 		"HIVE_REPO":             lit(fmt.Sprintf("%s/hive", s.cfg.Project.Org)),
 		"HIVE_ID":               lit(s.cfg.HiveID),
 		"AGENT_LIST":            lit(agentList),

@@ -80,6 +80,11 @@ type Client struct {
 	// value, and what every test constructs) means no scoping, so the client
 	// behaves exactly as it did before.
 	agentServesRepo func(agent, repo string) bool
+	// standingApprovalCovers reports whether a project.standing_approvals
+	// entry exists and covers an agent filing in a repo. Guarded by
+	// standingApprovalMu; nil means no standing approvals.
+	standingApprovalMu     sync.RWMutex
+	standingApprovalCovers func(id, agent, repo string) bool
 	// neutralizeMentions reports whether an agent's lane has opted in to
 	// write_surface.neutralize_mentions (hivecommons/hive#9587). Guarded by
 	// reposMu like agentMayWrite. Nil means no lane is covered, so bodies are

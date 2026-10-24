@@ -93,6 +93,9 @@ func (c *Config) ValidateWithOptions(opts ValidateOptions) error {
 	if err := ValidateWritingGuide(c.Project.WritingGuide); err != nil {
 		return err
 	}
+	if err := ValidateStandingApprovals(c.Project.StandingApprovals); err != nil {
+		return err
+	}
 	for _, rp := range c.Project.RepoPolicies {
 		if err := ValidateRepoMergeStrategy(rp.Repo, rp.MergeStrategy); err != nil {
 			return err

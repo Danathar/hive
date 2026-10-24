@@ -65,6 +65,7 @@ hive-open-issue request-review --repo <owner/repo> <number|url> [--reviewer a,b]
 | `--release-tag` | — | issue, comment | release tag from the repository's version source |
 | `--release-target` | — | issue, comment | full lowercase 40-character commit SHA for the proposed release |
 | `--needs-decision` | — | issue, comment | park the new issue, or the existing issue being commented on, on a maintainer decision: the watcher applies the hive's configured needs-decision label itself (see [Parking an issue that needs a decision](#parking-an-issue-that-needs-a-decision)). On both subcommands a Hive-authored non-risk question is downgraded instead of parked under `project.agent_issue_decision_policy: resolve` (the default); a typed `--step-kind` owner step always parks |
+| `--standing-approval` | — | issue, comment | requires `--needs-decision`; names the `project.standing_approvals` entry that covers the question, so the watcher files the issue (or posts the comment) actionable instead of parking it when the entry covers this repo and lane and the `Risk:` line is a governance question; otherwise it parks and the result carries `standing_approval_refused` (see [Parking an issue that needs a decision](#parking-an-issue-that-needs-a-decision)) |
 | `--blocked-on-pr` | — | comment | park the issue on open PR `<n>` in the same repo: the watcher prefixes the note with `<!-- hive:blocked-on pr=owner/repo#n -->`, strips `@`-mentions from it, adds the `blocked` label and removes `help wanted` (see [Blocked on an unmerged PR](#blocked-on-an-unmerged-pr)) |
 | `--number` | — | comment, claim, close, label, request-review | the issue/PR number; a bare positional number or a `.../issues/N` or `.../pull/N` URL is also accepted |
 | `--dry-run` | `-n` | all | validate the arguments and print the exact request that would be written, then exit `0` **without writing it** — nothing is created, commented, claimed, or closed. **This is how you test the tool.** A live call creates a real GitHub issue/comment/label change under the hive's App identity |
@@ -173,6 +174,8 @@ maintainer answers with `/hive approve` or `/hive decision` (see
 issues tells the agent to pass the flag rather than name the label, so parking
 no longer depends on which lane filed the issue or on the label's name in this
 hive.
+
+**Standing approvals.** When the owner has listed the kind of change in `project.standing_approvals` (the entries appear in your policy after the parking rule), keep `--needs-decision` and add `--standing-approval <id>`. The watcher files the issue, or posts the comment, as actionable work with a `Decision taken by hive: …` line naming the entry, instead of parking it, but only when the entry covers this repo and lane and the body's `Risk:` line is a governance question that names none of the excluded topics (licensing, branch protection or rulesets, merge or trust policy, permissions, keys or tokens, spend, data loss, irreversible changes). Otherwise it parks exactly as plain `--needs-decision` does, and `standing_approval_refused` in the result says why. See [`agent-configuration.md`](agent-configuration.md#standing-approvals-projectstanding_approvals).
 
 On `comment` the same flag parks an **existing** issue
 ([#12329](https://github.com/hivecommons/hive/issues/12329)). Use it when a

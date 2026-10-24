@@ -167,3 +167,47 @@ var nonRiskTerms = []string{
 	"organisation", "organization", "numbering", "numbered", "renumber", "adr", "v6-only",
 	"app pr", "contributor branch", "supersede", "simplest additive", "backward-compatible",
 }
+
+// CategoryGovernance is the only risk category a standing approval
+// (project.standing_approvals) can cover. Gate proposals and other
+// "should this repository adopt this check" questions park under it.
+const CategoryGovernance = "governance/policy/licensing"
+
+// standingApprovalFloorTerms are governance topics no standing approval
+// covers, however its owner worded it. They are matched against the
+// `Risk:` line only: an issue body routinely says "token", "merge" or
+// "security" while describing the finding, and matching the whole body
+// would refuse every security-lane filing.
+var standingApprovalFloorTerms = []string{
+	"licens", "legal", "copyright",
+	"branch protection", "branch rule", "ruleset",
+	"merge polic", "merge rule", "trust",
+	"permission", "privilege", "credential", "secret", "token", "key",
+	"spend", "cost", "billing", "budget",
+	"data loss", "destructive", "irreversible", "public-facing", "public facing",
+}
+
+// StandingApprovalRefusal says why a standing approval cannot cover a
+// parked request, or returns "" when it can. The request must carry a
+// `Risk:` line, the line must classify as governance, and it must name
+// none of the floor topics above. Everything else parks for a person.
+func StandingApprovalRefusal(text string) string {
+	m := riskLineRE.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return "the request has no `Risk:` line, so Hive cannot check that it is a governance question"
+	}
+	category, ok := riskLineCategory(text)
+	if !ok {
+		return "the `Risk:` line names no known risk category"
+	}
+	if category != CategoryGovernance {
+		return "the `Risk:` line names " + category + ", which a standing approval never covers"
+	}
+	line := strings.ToLower(m[1])
+	for _, term := range standingApprovalFloorTerms {
+		if strings.Contains(line, term) {
+			return "the `Risk:` line mentions " + strings.TrimSpace(term) + ", which a standing approval never covers"
+		}
+	}
+	return ""
+}

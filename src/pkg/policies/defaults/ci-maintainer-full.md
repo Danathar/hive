@@ -192,7 +192,7 @@ maintainer to choose between options, or to approve before work can start, add
 `hive-open-issue`). Hive then applies its configured needs-decision label
 itself, posts the "What to reply" notice offering `/hive approve` and
 `/hive decision`, and keeps the issue out of the work queue until the
-maintainer answers. Use the flag; do not name the label yourself.
+maintainer answers. Use the flag; do not name the label yourself.${STANDING_APPROVALS}
 
 ${WRITING_GUIDE}
 

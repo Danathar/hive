@@ -91,6 +91,17 @@ type ProjectConfig struct {
 	// Empty (the default) renders nothing, so a hive that never sets it gets
 	// byte-identical prompts. See WritingGuideSection.
 	WritingGuide string `yaml:"writing_guide,omitempty"`
+	// StandingApprovals are kinds of change the hive owner approves in
+	// advance, so an agent need not park an issue on them for a decision.
+	// Each entry's text is rendered into the issue-filing policies as
+	// ${STANDING_APPROVALS}, and the hive-open-issue relay downgrades a
+	// `--needs-decision --standing-approval <id>` park to actionable only
+	// when the entry covers the repo and lane and the request's `Risk:` line
+	// is a governance question (decisionpolicy.StandingApprovalRefusal).
+	//
+	// Empty (the default) renders nothing and the relay never downgrades on
+	// it. See standing_approvals.go.
+	StandingApprovals []StandingApproval `yaml:"standing_approvals,omitempty" json:"standing_approvals,omitempty"`
 
 	// LabelDrivenApprovalLabels, LabelDrivenTrustOrgMembers and
 	// LabelDrivenTrustedBots configure label-driven approval

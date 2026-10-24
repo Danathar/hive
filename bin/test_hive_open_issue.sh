@@ -331,6 +331,53 @@ check "--needs-decision refusal writes no request" "" "$(find_req needsdecisionc
 rm -rf "$REQ_DIR"
 mkdir -p "$REQ_DIR"
 
+# --standing-approval names a project.standing_approvals entry; it rides
+# along with --needs-decision on an issue or comment, never alone.
+run_script "standingissuebot" --repo "hiveorg/widgets" --title "Gate proposal" --body "Risk: governance" --needs-decision --standing-approval advisory-ci-checks >/dev/null
+REQ_FILE="$(find_req standingissuebot)"
+if [ -n "$REQ_FILE" ]; then
+  GOT_SA="$(python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print(r.get('needs_decision'), r.get('standing_approval'))" "$REQ_FILE")"
+  check "--standing-approval rides on an issue request" "True advisory-ci-checks" "$GOT_SA"
+else
+  echo "  FAIL: request file not created for --standing-approval issue test"
+  FAIL=$((FAIL + 1))
+fi
+
+run_script "standingcommentbot" comment --repo "hiveorg/widgets" 5 --body "Risk: governance" --needs-decision --standing-approval=test-only-rows >/dev/null
+REQ_FILE="$(find_req standingcommentbot)"
+if [ -n "$REQ_FILE" ]; then
+  GOT_SA="$(python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print(r['kind'], r.get('needs_decision'), r.get('standing_approval'))" "$REQ_FILE")"
+  check "--standing-approval= rides on a comment request" "comment True test-only-rows" "$GOT_SA"
+else
+  echo "  FAIL: request file not created for --standing-approval comment test"
+  FAIL=$((FAIL + 1))
+fi
+
+GOT_SA="$(run_script "standingplainbot" --repo "hiveorg/widgets" --title "Plain" --body "x" --dry-run | python3 -c "import json,sys; t=sys.stdin.read(); print('standing_approval' in t)")"
+check "no --standing-approval omits the field" "False" "$GOT_SA"
+
+set +e
+run_script "standingalonebot" --repo "hiveorg/widgets" --title "No park" --body "x" --standing-approval advisory-ci-checks >/dev/null 2>&1
+BAD_RC=$?
+set -e
+check "--standing-approval without --needs-decision is refused (exit 2)" "2" "$BAD_RC"
+check "--standing-approval refusal writes no request" "" "$(find_req standingalonebot)"
+
+set +e
+run_script "standingbadidbot" --repo "hiveorg/widgets" --title "Bad id" --body "x" --needs-decision --standing-approval "Not An Id" >/dev/null 2>&1
+BAD_RC=$?
+set -e
+check "--standing-approval with a malformed id is refused (exit 2)" "2" "$BAD_RC"
+
+set +e
+run_script "standingemptybot" --repo "hiveorg/widgets" --title "No id" --body "x" --needs-decision --standing-approval >/dev/null 2>&1
+BAD_RC=$?
+set -e
+check "--standing-approval with no id is refused (exit 2)" "2" "$BAD_RC"
+
+rm -rf "$REQ_DIR"
+mkdir -p "$REQ_DIR"
+
 # Typed release steps record metadata, never a release write (#12483).
 RELEASE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 run_script "releasestepbot" comment --repo hiveorg/widgets 5 --body "Cut the release." --needs-decision \

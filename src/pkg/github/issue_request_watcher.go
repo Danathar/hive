@@ -142,6 +142,13 @@ type IssueRequest struct {
 	// target (hivecommons/hive#12334). The label relay still refuses the
 	// label itself: this flag is the only way an agent applies it.
 	NeedsDecision bool `json:"needs_decision,omitempty"` // issue and comment
+	// StandingApproval names the project.standing_approvals entry the agent
+	// says covers this park. With NeedsDecision on an "issue" or "comment"
+	// request the watcher files the item as actionable instead of parking it,
+	// but only when the entry covers this repo and agent and the request's
+	// `Risk:` line is a governance question; otherwise it parks as usual and
+	// the result says why (issue_standing_approval.go).
+	StandingApproval string `json:"standing_approval,omitempty"` // issue and comment; requires NeedsDecision
 	// OwnerStep records a typed proposal; it does not authorize execution.
 	OwnerStep *IssueOwnerStep `json:"owner_step,omitempty"` // requires NeedsDecision
 	// BlockedOnPR parks the issue on an open PR in the same repo
@@ -190,6 +197,11 @@ type IssueResponse struct {
 	// names each one that could not be, with the reason (#9839).
 	BlockedByLinked []int    `json:"blocked_by_linked,omitempty"`
 	BlockedByErrors []string `json:"blocked_by_errors,omitempty"`
+	// StandingApproval is the entry id that let the request skip the park.
+	// StandingApprovalRefused says why a requested standing approval did not
+	// apply; the request was then handled as if it had named none.
+	StandingApproval        string `json:"standing_approval,omitempty"`
+	StandingApprovalRefused string `json:"standing_approval_refused,omitempty"`
 }
 
 // IssueRequestAuthorizer mirrors PRRequestAuthorizer: it receives the claimed
@@ -666,7 +678,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		if err == nil {
 			commentBody := issueOwnerStepBody(body, req.NeedsDecision && !issueDecisionDowngrade.Active, req.OwnerStep)
 			if issueDecisionDowngrade.Active {
-				commentBody = appendHiveDecisionTaken(commentBody, issueDecisionDowngrade.Question)
+				commentBody = appendDecisionTaken(commentBody, issueDecisionDowngrade)
 			}
 			err = c.CreateIssueCommentBudgeted(ctx, req.Repo, req.Number, commentBody)
 			if errors.Is(err, ErrIssueCommentBudget) {
@@ -764,9 +776,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 	default: // "issue"
 		var res CreateIssueResult
 		createLabels, createBody, d := c.issueCreateLabels(req, body)
-		if d.Active {
-			issueDecisionDowngrade = d
-		}
+		issueDecisionDowngrade = d
 		res, err = c.createIssue(ctx, CreateIssueRequest{Repo: req.Repo, Title: req.Title, Body: issueOwnerStepBody(createBody, req.NeedsDecision && !issueDecisionDowngrade.Active, req.OwnerStep), Labels: createLabels, Origin: req.Agent, ConsolidateOpen: true})
 		if err == nil && res.RejectedTwin {
 			// Terminal, not retried: a maintainer already rejected this
@@ -895,7 +905,12 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		extra = append(extra, "path", PRAuditPathRelay)
 	}
 	c.recordWriteAudit(action, meta, WriteTarget{Repo: req.Repo, Number: resp.Number}, extra...)
-	if issueDecisionDowngrade.Active {
+	recordStandingApprovalResult(&resp, req, issueDecisionDowngrade)
+	if issueDecisionDowngrade.Active && issueDecisionDowngrade.StandingApproval != "" {
+		c.recordWriteAudit(AuditActionAgentIssueDecisionResolved, meta, WriteTarget{Repo: req.Repo, Number: resp.Number},
+			"policy", standingApprovalAuditPolicy, "standing_approval", issueDecisionDowngrade.StandingApproval,
+			"question", issueDecisionDowngrade.Question)
+	} else if issueDecisionDowngrade.Active {
 		c.recordWriteAudit(AuditActionAgentIssueDecisionResolved, meta, WriteTarget{Repo: req.Repo, Number: resp.Number},
 			"policy", decisionpolicy.PolicyResolve, "question", issueDecisionDowngrade.Question)
 	}
@@ -913,6 +928,11 @@ type issueDecisionDowngrade struct {
 	Active   bool
 	Question string
 	Note     string
+	// StandingApproval is set when an owner's standing approval, not the
+	// resolve policy, took the decision. Refused carries why a requested
+	// standing approval did not apply.
+	StandingApproval string
+	Refused          string
 }
 
 // A typed owner step (e.g. a release) proposes an action only a person
@@ -922,7 +942,13 @@ func (c *Client) issueDecisionDowngradeForCreate(req IssueRequest, body string) 
 	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
 		return issueDecisionDowngrade{}
 	}
-	return c.issueDecisionDowngrade(req.Title, body)
+	sa := c.standingApprovalDowngrade(req, req.Title, body)
+	if sa.Active {
+		return sa
+	}
+	d := c.issueDecisionDowngrade(req.Title, body)
+	d.Refused = sa.Refused
+	return d
 }
 
 // issueDecisionDowngradeForComment classifies a `comment --needs-decision`
@@ -932,7 +958,13 @@ func (c *Client) issueDecisionDowngradeForComment(req IssueRequest, body string)
 	if !req.NeedsDecision || req.OwnerStep != nil || !hiveIssueRequestActor(req.Agent, req.Labels) {
 		return issueDecisionDowngrade{}
 	}
-	return c.issueDecisionDowngrade("", body)
+	sa := c.standingApprovalDowngrade(req, "", body)
+	if sa.Active {
+		return sa
+	}
+	d := c.issueDecisionDowngrade("", body)
+	d.Refused = sa.Refused
+	return d
 }
 
 func (c *Client) issueDecisionDowngradeForLabel(ctx context.Context, req IssueRequest, addLabels []string) (issueDecisionDowngrade, error) {
@@ -999,8 +1031,11 @@ func decisionQuestionSummary(title, body string) string {
 	return "non-risk engineering question"
 }
 
-func appendHiveDecisionTaken(body, question string) string {
-	line := "Decision taken by hive: Hive did not park this: engineering decision taken by hive — " + question + ". Owner may override with `/hive hold` or `needs-human`."
+// appendDecisionTaken records a downgraded park in the item's body as one
+// "Decision taken by hive:" line carrying the downgrade's note, which names
+// the standing approval when one took the decision.
+func appendDecisionTaken(body string, d issueDecisionDowngrade) string {
+	line := "Decision taken by hive: " + d.Note
 	body = strings.TrimRight(body, "\n")
 	if body == "" {
 		return line
@@ -1028,7 +1063,7 @@ func (c *Client) issueCreateLabels(req IssueRequest, body string) (labels []stri
 	if d = c.issueDecisionDowngradeForCreate(req, createBody); d.Active {
 		labels = removeDecisionParkLabels(labels, c.needsDecisionLabel())
 		labels = appendLabelIfMissing(labels, stagelabels.Actionable.Label())
-		createBody = appendHiveDecisionTaken(createBody, d.Question)
+		createBody = appendDecisionTaken(createBody, d)
 		return labels, createBody, d
 	}
 	return appendLabelIfMissing(labels, c.needsDecisionLabel()), createBody, d

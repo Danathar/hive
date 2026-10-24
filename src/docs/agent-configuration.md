@@ -971,6 +971,35 @@ project:
   agent_issue_decision_policy: resolve  # resolve (default) or escalate
 ```
 
+### Standing approvals (`project.standing_approvals`)
+
+Some questions an agent parks are ones the owner has already answered the same way many times. A typical case: a lane proposes an advisory CI check in one repository, the owner approves it, and the same proposal then arrives from every other repository the hive serves. `project.standing_approvals` lets the owner approve a narrow kind of change once, in advance.
+
+```yaml
+project:
+  standing_approvals:
+    - id: advisory-ci-checks
+      text: >-
+        Adding a CI job that is advisory only (continue-on-error, never a
+        required check, read-only permissions) is approved in advance.
+    - id: test-only-rows
+      text: >-
+        Adding test cases or corpus rows that pin existing behaviour, with no
+        change to the code under test, is approved in advance.
+      repos: [akmods, tududi]  # optional; default = every repo the hive serves
+      agents: [sec-check]      # optional; default = every lane (replicas count as their base lane)
+```
+
+How it works:
+
+- **The agent reads the list.** Each entry's `text` is rendered into every issue-filing policy as `${STANDING_APPROVALS}`, at the end of the "Park an issue that needs the maintainer's call" paragraph, with the entries that apply to that lane. The agent's Prompt Template tab shows it there.
+- **The agent names the entry.** When an issue it would park is covered as a whole by one entry, it keeps `--needs-decision` and adds `--standing-approval <id>` ([`hive-open-issue.md`](hive-open-issue.md#parking-an-issue-that-needs-a-decision)).
+- **The relay checks it.** The issue is filed (or the comment posted) as `stage/010-actionable` instead of parked only when the entry exists, covers that repository and lane, and the body's `Risk:` line is a governance question. The body gets a `Decision taken by hive: …` line naming the entry, and the audit log records an `agent_issue_decision_resolved` line with `policy=standing_approval` and the entry id. In every other case the issue parks as plain `--needs-decision` would, and the request's result carries `standing_approval_refused` with the reason.
+- **Some topics can never be pre-approved.** A `Risk:` line that names security posture, data loss, irreversible or public-facing behaviour, spend, credentials, secrets or owner-only infrastructure, or human intent is refused, as is a governance line that mentions licensing, branch protection or rulesets, merge or trust policy, permissions, keys or tokens, spend, data loss or irreversible changes. These are matched against the `Risk:` line only, so a security finding whose body discusses tokens can still be covered when its `Risk:` line is governance.
+- **It is separate from `agent_issue_decision_policy`.** Standing approvals apply under `resolve` and `escalate` alike: listing an entry is the owner deciding that question in advance. A typed `--step-kind` owner step always parks.
+
+The owner can still override any single issue with `/hive hold` or `needs-human`. The list is capped at 20 entries of up to 2 KB each, because every entry is prompt text on every issue-filing kick. Ids are lowercase letters, digits and dashes. An entry that names a repo or lane the hive does not have never applies; config load does not fail on it. Empty (the default) renders nothing and leaves every prompt unchanged. The setting is edited in `hive.yaml`; there is no Settings tab for it yet.
+
 ## Label policy: which issues agents may work
 
 There is exactly **one** label-policy surface for the hive's own agents — the **Governor Configuration → Labels** tab — and it has two polarities:

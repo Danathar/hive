@@ -16,8 +16,8 @@
 # forge-resistance as the gh wrapper; this shim adds no privilege.
 #
 # Usage (drop-in for the common gh shapes):
-#   hive-open-issue --repo <owner/repo> --title "<t>" [--body "<b>"|--body-file f] [--label a,b] [--parent <n>] [--blocked-by <n[,n]>] [--close-on-merge] [--needs-decision]
-#   hive-open-issue comment --repo <owner/repo> <number|url> --body "<b>" [--needs-decision] [--blocked-on-pr <n>]
+#   hive-open-issue --repo <owner/repo> --title "<t>" [--body "<b>"|--body-file f] [--label a,b] [--parent <n>] [--blocked-by <n[,n]>] [--close-on-merge] [--needs-decision [--standing-approval <id>]]
+#   hive-open-issue comment --repo <owner/repo> <number|url> --body "<b>" [--needs-decision [--standing-approval <id>]] [--blocked-on-pr <n>]
 #   hive-open-issue claim   --repo <owner/repo> <number|url>
 #   hive-open-issue close   --repo <owner/repo> <number|url> [--override-reason "..."]
 #   hive-open-issue label   --repo <owner/repo> <number|url> [--label a,b] [--remove-label c]
@@ -55,6 +55,15 @@
 # the body. Either shape tags the text so the notice offers /hive done; the
 # owner's /hive done reply records the done decision, and the lane that next
 # picks the issue up re-checks the step and closes it once verified.
+#
+# --standing-approval <id> (with --needs-decision, issue or comment only)
+# names the project.standing_approvals entry that covers this question. The
+# watcher then files the issue, or posts the comment, as actionable work with
+# the approval recorded in the body instead of parking it, but only when the
+# entry covers this repo and lane and the body's `Risk:` line is a
+# governance question. Otherwise it parks as plain --needs-decision would,
+# and the result's standing_approval_refused says why. Use it only when an
+# entry listed in your policy plainly covers the whole question.
 #
 # --blocked-on-pr <n> (comment only) parks the issue on open PR <n> in the
 # same repo (hivecommons/hive#13093): use it when the code a finding names
@@ -132,6 +141,7 @@ PARENT=""
 BLOCKED_BY=()
 CLOSE_ON_MERGE=0
 NEEDS_DECISION=0
+STANDING_APPROVAL=""
 STEP_KIND=""; RELEASE_TAG=""; RELEASE_TARGET=""; STEP_REQUESTED=0
 BLOCKED_ON_PR=""
 DRY_RUN=0
@@ -139,7 +149,7 @@ LABELS=()
 REMOVE_LABELS=()
 REVIEWERS=()
 TEAM_REVIEWERS=()
-SUPPORTED_FLAGS="--repo/-R, --title/-t, --body/-b, --body-file/-F, --label/-l, --remove-label, --reviewer, --team-reviewer, --number, --parent, --blocked-by, --close-on-merge, --needs-decision, --blocked-on-pr, --step-kind, --release-tag, --release-target, --override-reason, --dry-run/-n (plus the ignored gh flags --assignee/-a, --milestone/-m, --project/-p, --template/-T, --web/-w, --editor/-e)"
+SUPPORTED_FLAGS="--repo/-R, --title/-t, --body/-b, --body-file/-F, --label/-l, --remove-label, --reviewer, --team-reviewer, --number, --parent, --blocked-by, --close-on-merge, --needs-decision, --standing-approval, --blocked-on-pr, --step-kind, --release-tag, --release-target, --override-reason, --dry-run/-n (plus the ignored gh flags --assignee/-a, --milestone/-m, --project/-p, --template/-T, --web/-w, --editor/-e)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo|-R) REPO="$2"; shift 2;;
@@ -168,6 +178,13 @@ while [ $# -gt 0 ]; do
     --override-reason=*) OVERRIDE_REASON="${1#*=}"; shift;;
     --close-on-merge) CLOSE_ON_MERGE=1; shift;;
     --needs-decision) NEEDS_DECISION=1; shift;;
+    --standing-approval)
+      if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == --* ]]; then
+        echo "hive-open-issue: --standing-approval requires an id; nothing was written." >&2
+        exit 2
+      fi
+      STANDING_APPROVAL="$2"; shift 2;;
+    --standing-approval=*) STANDING_APPROVAL="${1#*=}"; shift;;
     --step-kind|--release-tag|--release-target)
       STEP_REQUESTED=1
       if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == --* ]]; then
@@ -233,6 +250,17 @@ fi
 if [ "$NEEDS_DECISION" -eq 1 ] && [ "$KIND" != "issue" ] && [ "$KIND" != "comment" ]; then
   echo "hive-open-issue: --needs-decision only applies when creating an issue or commenting on one; nothing was written." >&2
   exit 2
+fi
+
+if [ -n "$STANDING_APPROVAL" ]; then
+  if [ "$NEEDS_DECISION" -ne 1 ]; then
+    echo "hive-open-issue: --standing-approval only applies together with --needs-decision; nothing was written." >&2
+    exit 2
+  fi
+  if ! printf '%s' "$STANDING_APPROVAL" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$'; then
+    echo "hive-open-issue: --standing-approval expects an entry id (lowercase letters, digits and dashes), got '$STANDING_APPROVAL'; nothing was written." >&2
+    exit 2
+  fi
 fi
 
 if [ -n "${BLOCKED_ON_PR:-}" ] && [ "$KIND" != "comment" ]; then
@@ -358,7 +386,7 @@ REMOVE_LABELS_JSON="$(printf '%s\n' "${REMOVE_LABELS[@]:-}" | python3 -c 'import
 REVIEWERS_JSON="$(printf '%s\n' "${REVIEWERS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
 TEAM_REVIEWERS_JSON="$(printf '%s\n' "${TEAM_REVIEWERS[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
 BLOCKED_BY_JSON="$(printf '%s\n' "${BLOCKED_BY[@]:-}" | python3 -c 'import json,sys; print(json.dumps([x.rstrip("\n") for x in sys.stdin if x.rstrip("\n")]))')"
-python3 - "$TEMP_FILE" "$REQ_FILE" "$KIND" "$REPO" "$TITLE" "${OVERRIDE_REASON:-$BODY}" "$AGENT" "$LABELS_JSON" "${NUMBER:-0}" "$DRY_RUN" "${PARENT:-0}" "$REMOVE_LABELS_JSON" "$REVIEWERS_JSON" "$TEAM_REVIEWERS_JSON" "$BLOCKED_BY_JSON" "$NEEDS_DECISION" "${BLOCKED_ON_PR:-0}" "$STEP_KIND" "$RELEASE_TAG" "$RELEASE_TARGET" "$STEP_REQUESTED" <<'PY'
+python3 - "$TEMP_FILE" "$REQ_FILE" "$KIND" "$REPO" "$TITLE" "${OVERRIDE_REASON:-$BODY}" "$AGENT" "$LABELS_JSON" "${NUMBER:-0}" "$DRY_RUN" "${PARENT:-0}" "$REMOVE_LABELS_JSON" "$REVIEWERS_JSON" "$TEAM_REVIEWERS_JSON" "$BLOCKED_BY_JSON" "$NEEDS_DECISION" "${BLOCKED_ON_PR:-0}" "$STEP_KIND" "$RELEASE_TAG" "$RELEASE_TARGET" "$STEP_REQUESTED" "$STANDING_APPROVAL" <<'PY'
 import json, os, re, sys
 temporary, path, kind, repo, title, body, agent, labels, number, dry_run, parent, remove_labels, reviewers, team_reviewers, blocked_by, needs_decision, blocked_on_pr = sys.argv[1:18]
 labels = [part.strip() for value in json.loads(labels)
@@ -371,6 +399,7 @@ team_reviewers = [part.strip() for value in json.loads(team_reviewers)
                   for part in value.split(",") if part.strip()]
 req = {"kind": kind, "repo": repo, "agent": agent}
 step_kind, release_tag, release_target = sys.argv[18:21]
+standing_approval = sys.argv[22]
 if sys.argv[21] == "1":
     error = ""
     if needs_decision != "1" or kind not in ("issue", "comment"):
@@ -397,6 +426,8 @@ if kind == "comment":
     # the configured needs-decision label before posting (hivecommons/hive#12329).
     if needs_decision == "1":
         req["needs_decision"] = True
+        if standing_approval:
+            req["standing_approval"] = standing_approval
 elif kind == "claim":
     # The watcher applies the hive/claimed-by-<agent> label; number is all it
     # needs. No body/title/labels.
@@ -450,6 +481,10 @@ else:
     # label itself (hivecommons/hive#11215).
     if needs_decision == "1":
         req["needs_decision"] = True
+        # --standing-approval: the watcher checks the entry and the Risk:
+        # line, and files the issue actionable only if both allow it.
+        if standing_approval:
+            req["standing_approval"] = standing_approval
 if kind == "comment" and int(blocked_on_pr) > 0:
     # --blocked-on-pr: the watcher adds the marker and the `blocked` label
     # itself (hivecommons/hive#13093).
@@ -470,7 +505,9 @@ fi
 
 if [ "$KIND" = "comment" ]; then
   echo "hive-open-issue: requested comment on $REPO#$NUMBER as the App bot"
-  if [ "$NEEDS_DECISION" -eq 1 ]; then
+  if [ "$NEEDS_DECISION" -eq 1 ] && [ -n "$STANDING_APPROVAL" ]; then
+    echo "hive-open-issue: will not park $REPO#$NUMBER if standing approval '$STANDING_APPROVAL' covers it; otherwise parks on a maintainer decision (see standing_approval_refused in the result)"
+  elif [ "$NEEDS_DECISION" -eq 1 ]; then
     echo "hive-open-issue: will park $REPO#$NUMBER on a maintainer decision (needs-decision label)"
   fi
   if [ -n "${BLOCKED_ON_PR:-}" ]; then
@@ -489,7 +526,9 @@ else
   if [ -n "$PARENT" ] && [ "$PARENT" != "0" ]; then
     echo "hive-open-issue: will link as a GitHub sub-issue of $REPO#$PARENT"
   fi
-  if [ "$NEEDS_DECISION" -eq 1 ]; then
+  if [ "$NEEDS_DECISION" -eq 1 ] && [ -n "$STANDING_APPROVAL" ]; then
+    echo "hive-open-issue: will file the issue actionable if standing approval '$STANDING_APPROVAL' covers it; otherwise parks it on a maintainer decision (see standing_approval_refused in the result)"
+  elif [ "$NEEDS_DECISION" -eq 1 ]; then
     echo "hive-open-issue: will park the issue on a maintainer decision (needs-decision label)"
   fi
 fi

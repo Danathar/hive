@@ -363,6 +363,8 @@ func (s *Server) substituteTemplateVars(template, agentName string) string {
 		// can show it exactly where a kick will place it — which is how an
 		// owner sees that the setting took (hivecommons/hive#7667).
 		"WRITING_GUIDE": lit(cfg.Project.WritingGuideSection()),
+		// project.standing_approvals is config-only too, and per lane.
+		"STANDING_APPROVALS": lit(cfg.StandingApprovalsSection(agentName)),
 	}}
 	return cfg.ResolveRegistryForAgent(agentName, s.deps.Logger).Expand(context.Background(), template, resolve.ScopeTemplate, rt)
 }
