@@ -357,7 +357,11 @@ Still Stage 2, in this order:
 - **`crux.Process` as its own type**, so the dashboard, hub and spoke stop
   importing `crux/agent` for the test-only constructors (`NewManager`,
   `ProjectContext`, `NewRingBuffer`) and the inbound baseline for
-  `agent.<Symbol>` can go to zero outside `cmd/hive`.
+  `agent.<Symbol>` can go to zero outside `cmd/hive`. The first slice of
+  #13962 moves consumer test construction and setup controls behind
+  `crux/cruxtest`, and spoke activity reads behind `crux.ActivityObserver`.
+  Agent-mode parsing, token/pane helpers and the final `Process` type
+  conversion remain in the following slices.
 - **Fold `crux/types` into the module root.** It is a sub-package so that
   the alias packages in the root could be written against a stdlib-only
   leaf before the cut; with the ring in its own module the leaf no longer

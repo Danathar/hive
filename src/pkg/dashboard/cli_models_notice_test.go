@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hivecommons/hive/crux"
 	"github.com/hivecommons/hive/crux/agent"
+	"github.com/hivecommons/hive/crux/cruxtest"
 )
 
 // Copilot model discovery is best-effort: every failure degrades to a static
@@ -385,7 +387,7 @@ func TestDiscoverCopilotModels_NoticeNamesCredentialSource(t *testing.T) {
 	t.Run("dashboard login resolves to the account", func(t *testing.T) {
 		t.Setenv("COPILOT_GITHUB_TOKEN", "")
 		calls := swapCopilotLoginLookup(t, "alice")
-		mgr := agent.NewManager(nil, testLogger(), agent.ProjectContext{})
+		mgr := cruxtest.NewRuntime(nil, testLogger(), crux.ProjectContext{})
 		mgr.SetCopilotToken("gho_alice")
 		s := &Server{cliModels: newCLIModelCache(), logger: testLogger(), deps: &Dependencies{AgentMgr: mgr}}
 

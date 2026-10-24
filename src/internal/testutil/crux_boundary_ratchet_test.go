@@ -64,14 +64,16 @@ import (
 // src/internal): the consumers. pkg/proxy's 14 references moved with it to
 // crux/proxy, an intra-module import the module boundary now owns, so its
 // row left the table without any consumer's count changing.
+// Test construction moved behind crux/cruxtest (#13962 slice 1): dashboard
+// 19 → 12, loginscan 4 → 2. Spoke now takes crux.ActivityObserver and its
+// tests use cruxtest too, removing all three remaining agent symbols.
 var cruxSymbolBaseline = map[string]int{
 	"cmd/hive":      22,
-	"pkg/dashboard": 19,
+	"pkg/dashboard": 12,
 	"pkg/discord":   1,
 	"pkg/hub":       1,
-	"pkg/hub/spoke": 3,
 	"pkg/ioscan":    5,
-	"pkg/loginscan": 4,
+	"pkg/loginscan": 2,
 }
 
 // cruxTmuxBaseline is the per-package count of non-test files that invoke

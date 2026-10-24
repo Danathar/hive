@@ -14,7 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/hivecommons/hive/crux/agent"
+	"github.com/hivecommons/hive/crux"
+	"github.com/hivecommons/hive/crux/cruxtest"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/governor"
@@ -57,7 +58,7 @@ func testDeps(t *testing.T) *Dependencies {
 	}
 
 	gov := governor.New(cfg.Governor, cfg.Agents, logger)
-	mgr := agent.NewManager(cfg.Agents, logger, agent.ProjectContext{})
+	mgr := cruxtest.NewRuntime(cfg.Agents, logger, crux.ProjectContext{})
 
 	var refreshCalled atomic.Bool
 	var persistCalled atomic.Bool
@@ -657,7 +658,7 @@ func TestHandleAgentConfigGet_MultilineDescription(t *testing.T) {
 	}
 
 	gov := governor.New(cfg.Governor, cfg.Agents, logger)
-	mgr := agent.NewManager(cfg.Agents, logger, agent.ProjectContext{})
+	mgr := cruxtest.NewRuntime(cfg.Agents, logger, crux.ProjectContext{})
 
 	s.RegisterAPI(&Dependencies{
 		Config:      cfg,
