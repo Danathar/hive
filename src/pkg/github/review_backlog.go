@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -39,6 +40,40 @@ type reviewBacklogLedger struct {
 	Fingerprints map[string]map[string]reviewBacklogFingerprintRecord `json:"fingerprints,omitempty"`
 	// PRDailyCount counts items filed or updated per "<pr key>@<UTC day>".
 	PRDailyCount map[string]int `json:"pr_daily_count,omitempty"`
+	// SplitKeys maps a folded finding's link-marker key to every closed
+	// host issue it has been split out of (hivecommons/hive#13914). A
+	// finding can be split more than once when the split lands in an open
+	// twin that later closes, so this is a set per key: a re-run of the
+	// split sweep never files the same finding twice from any one host.
+	SplitKeys map[string][]int `json:"split_keys,omitempty"`
+}
+
+// reviewBacklogLedgerMu serialises the load→mutate→save cycles of the two
+// ledger writers, fileOutOfScopeReviewBacklog and SweepReviewBacklogSplits,
+// so a concurrent save cannot drop the other side's update. Both hold it
+// across their CreateItem/AppendToItem calls on purpose: the ledger records
+// the issue each call creates, so releasing it between the call and the
+// save would reopen the lost-update window. The cost is that the run
+// loop's split sweep waits while a review's backlog filing is in flight,
+// bounded by the review's per-PR daily cap and the sweep's per-pass cap.
+var reviewBacklogLedgerMu sync.Mutex
+
+// splitFrom reports whether key was already split out of host.
+func (l *reviewBacklogLedger) splitFrom(key string, host int) bool {
+	for _, h := range l.SplitKeys[key] {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// markSplitFrom adds host to the set of hosts key was split out of.
+func (l *reviewBacklogLedger) markSplitFrom(key string, host int) {
+	if l.splitFrom(key, host) {
+		return
+	}
+	l.SplitKeys[key] = append(l.SplitKeys[key], host)
 }
 
 type reviewBacklogRecord struct {
@@ -72,6 +107,7 @@ func newReviewBacklogLedger() *reviewBacklogLedger {
 		PRFiledIssueCount: map[string]int{},
 		Fingerprints:      map[string]map[string]reviewBacklogFingerprintRecord{},
 		PRDailyCount:      map[string]int{},
+		SplitKeys:         map[string][]int{},
 	}
 }
 
@@ -104,6 +140,9 @@ func loadReviewBacklog(path string) (*reviewBacklogLedger, error) {
 	}
 	if l.PRDailyCount == nil {
 		l.PRDailyCount = map[string]int{}
+	}
+	if l.SplitKeys == nil {
+		l.SplitKeys = map[string][]int{}
 	}
 	return l, nil
 }
@@ -154,6 +193,8 @@ func (c *Client) fileOutOfScopeReviewBacklog(ctx context.Context, req ReviewRequ
 	if len(reports) == 0 {
 		return nil
 	}
+	reviewBacklogLedgerMu.Lock()
+	defer reviewBacklogLedgerMu.Unlock()
 	ledger, err := loadReviewBacklog("")
 	if err != nil {
 		return err
