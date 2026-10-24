@@ -527,6 +527,7 @@ const (
 	autoMergeReasonNoHiveQueueApproval        = "no-hive-queue-approval"
 	autoMergeReasonHumanChangesRequested      = prstage.AutoMergeReasonHumanChangesRequested
 	autoMergeReasonNoAppBotLogin              = prstage.AutoMergeReasonNoAppBotLogin
+	autoMergeReasonMergeQueueRequired         = prstage.AutoMergeReasonMergeQueueRequired
 	autoMergeReasonUntrustedQueueApproval     = "untrusted-hive-queue-approval"
 	autoMergeReasonUntrustedMerger            = "untrusted-merger"
 	autoMergeReasonNoMergerAuthz              = "no-merger-authorizer"
@@ -540,6 +541,7 @@ const (
 
 var hiveQueueReviewRE = regexp.MustCompile(`(?i)^Approved by @([A-Za-z0-9-]+) for Hive auto-merge on green CI\.`)
 var requiredChecksExpectedRE = regexp.MustCompile(`(?i)(required status check ["'][^"']+["'] is expected|\d+\s+of\s+\d+\s+required status checks are expected)`)
+var mergeQueueRequiredRE = regexp.MustCompile(`(?i)must be made through the merge queue`)
 
 // mergeMethodFor returns the GitHub merge method the sweep should use for pr.
 // Forward-merge / top-up PRs between release lines must land as true merge
@@ -1121,7 +1123,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				"updated_branches", result.UpdatedBranches,
 				"skipped", repoSkipped,
 			}
-			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", autoMergeReasonForkNotEditable, "not-mergeable"}
+			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", autoMergeReasonForkNotEditable, "not-mergeable", autoMergeReasonMergeQueueRequired}
 			if sentinelLabel := c.sentinelLabelName(); sentinelLabel != "" {
 				skipReasonOrder = append([]string{sentinelLabel}, skipReasonOrder...)
 			}
@@ -1811,6 +1813,9 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 			}
 			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "required-checks-expected", c.isForkPR(pr))
 		}
+		if mergeQueueRequiredMergeError(err) {
+			return AutoMergeSweepEvent{}, autoMergeReasonMergeQueueRequired, nil
+		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
 	if mergeResult == nil {
@@ -2315,6 +2320,9 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 		if requiredChecksExpectedMergeError(err) {
 			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected", c.isForkPR(pr))
 		}
+		if mergeQueueRequiredMergeError(err) {
+			return AutoMergeSweepEvent{}, autoMergeReasonMergeQueueRequired, nil
+		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
 	if mergeResult == nil {
@@ -2679,6 +2687,9 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 		return effects.Result{Provenance: mergeResult.GetSHA()}, nil
 	})
 	if err != nil {
+		if mergeQueueRequiredMergeError(err) {
+			return AutoMergeSweepEvent{}, autoMergeReasonMergeQueueRequired, nil
+		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
 	if mergeResult == nil {
@@ -3020,6 +3031,19 @@ func requiredChecksExpectedMergeError(err error) bool {
 		msg = ghErr.Error()
 	}
 	return requiredChecksExpectedRE.MatchString(msg)
+}
+
+// mergeQueueRequiredMergeError reports the 405 a base branch whose ruleset
+// requires a merge queue returns for a direct merge ("Repository rule
+// violations found ... Changes must be made through the merge queue"). The
+// REST merge can never succeed there, so the sweeps record a skip reason
+// instead of a merge-failed error every pass (hivecommons/hive#14018).
+func mergeQueueRequiredMergeError(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusMethodNotAllowed {
+		return false
+	}
+	return mergeQueueRequiredRE.MatchString(ghErr.Message) || mergeQueueRequiredRE.MatchString(ghErr.Error())
 }
 
 func mergeAPIErrorNotApplied(err error) error {
