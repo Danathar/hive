@@ -580,9 +580,12 @@ const stageTrackerSentinelMoreFormat = " (+%d more)"
 // (how a trusted author's notice-only finding is seen, since those carry a
 // comment rather than the label). The findings count and the first
 // finding's summary come from the bundle; both are empty when only the
-// label says so. One file read per PR with a known head, ENOENT when the
-// sentinel never wrote one; the tracker payload is memoised so this runs
-// once per snapshot, not per request.
+// label says so. Blocking-alert findings without the label mean a
+// maintainer removed it after reviewing this head (the sweep re-applies it
+// only on a new head), so they do not flag the row; only notice findings
+// flag a row that has no label. One file read per PR with a known head,
+// ENOENT when the sentinel never wrote one; the tracker payload is memoised
+// so this runs once per snapshot, not per request.
 func (s *Server) stageTrackerSentinel(repo string, number int, head string, labels []string) (alert bool, findings int, reason string) {
 	label := s.sentinelLabel()
 	for _, l := range labels {
@@ -598,10 +601,22 @@ func (s *Server) stageTrackerSentinel(repo string, number int, head string, labe
 	if err != nil || b == nil || len(b.Sentinel) == 0 {
 		return alert, 0, ""
 	}
-	findings = len(b.Sentinel)
-	reason = strings.TrimSpace(b.Sentinel[0].Summary)
+	shown := b.Sentinel
+	if !alert {
+		shown = nil
+		for _, f := range b.Sentinel {
+			if f.Notice {
+				shown = append(shown, f)
+			}
+		}
+		if len(shown) == 0 {
+			return false, 0, ""
+		}
+	}
+	findings = len(shown)
+	reason = strings.TrimSpace(shown[0].Summary)
 	if reason == "" {
-		reason = strings.TrimSpace(b.Sentinel[0].Rule)
+		reason = strings.TrimSpace(shown[0].Rule)
 	}
 	if findings > 1 {
 		reason += fmt.Sprintf(stageTrackerSentinelMoreFormat, findings-1)

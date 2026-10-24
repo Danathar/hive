@@ -64,12 +64,16 @@ func TestStageTrackerSentinelFlag(t *testing.T) {
 	s, store := stageTrackerFixture(t, now)
 	const headEvidence = "feedface0123456789abcdef0123456789abcdef"
 	const headClean = "0badf00d0123456789abcdef0123456789abcdef"
+	const headCleared = "c1ea4ed00123456789abcdef0123456789abcdef"
 	writeSentinelBundle(t, root, "acme/console", 110, headEvidence, []evidence.SentinelFinding{
-		{Rule: "sensitive_path", Summary: "touches OWNERS", Paths: []string{"OWNERS"}},
-		{Rule: "workflow_permissions", Summary: "widens workflow permissions"},
+		{Rule: "sensitive_path", Summary: "touches OWNERS", Paths: []string{"OWNERS"}, Notice: true},
+		{Rule: "workflow_permissions", Summary: "widens workflow permissions", Notice: true},
 	})
 	// A bundle for a superseded head says nothing about the current one.
 	writeSentinelBundle(t, root, "acme/console", 111, "0ld0ld0ld", []evidence.SentinelFinding{{Rule: "test_removal", Summary: "deletes tests"}})
+	// A blocking alert on the current head whose label a maintainer removed:
+	// the sweep only re-applies it on a new head, so the row is clear.
+	writeSentinelBundle(t, root, "acme/console", 120, headCleared, []evidence.SentinelFinding{{Rule: "sensitive_path", Summary: "touches a workflow"}})
 	s.statusMu.Lock()
 	s.status.Repos[0].OpenPrs = append(s.status.Repos[0].OpenPrs,
 		// Label only, parked on a person.
@@ -78,6 +82,8 @@ func TestStageTrackerSentinelFlag(t *testing.T) {
 		FrontendPR{PullRequest: github.PullRequest{Number: 110, Title: "Owners tweak", Author: "pat", HeadSHA: headEvidence, Labels: []string{"stage/050-review-pending"}}},
 		// Stale evidence on an older head: clean.
 		FrontendPR{PullRequest: github.PullRequest{Number: 111, Title: "Re-pushed", Author: "pat", HeadSHA: headClean, Labels: []string{"stage/050-review-pending"}}},
+		// Alert evidence on the current head, label removed by a maintainer.
+		FrontendPR{PullRequest: github.PullRequest{Number: 120, Title: "Bump action", Author: "renovate[bot]", HeadSHA: headCleared, Labels: []string{"stage/085-needs-decision"}}},
 	)
 	s.statusMu.Unlock()
 
@@ -95,6 +101,9 @@ func TestStageTrackerSentinelFlag(t *testing.T) {
 	}
 	if stale := trackerItem(t, resp, "pr", 111); stale.SentinelAlert || stale.SentinelFindings != 0 {
 		t.Fatalf("a bundle for a superseded head must not flag PR 111: %+v", stale)
+	}
+	if cleared := trackerItem(t, resp, "pr", 120); cleared.SentinelAlert || cleared.SentinelFindings != 0 || cleared.SentinelReason != "" {
+		t.Fatalf("an alert a maintainer cleared on this head must not flag PR 120: %+v", cleared)
 	}
 	for _, it := range resp.Items {
 		if it.Kind == "issue" && it.SentinelAlert {

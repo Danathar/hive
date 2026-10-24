@@ -282,7 +282,7 @@ func TestRecordReviewEvidenceSentinel(t *testing.T) {
 			}
 			c := evidenceTestClient(t, &evidencePRFixture{head: "h1"}, tt.settings)
 
-			c.recordReviewEvidenceSentinel("o/r", tt.pr, tt.findings, now)
+			c.recordReviewEvidenceSentinel("o/r", tt.pr, tt.findings, false, now)
 
 			if tt.wantNoBundle {
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -311,11 +311,31 @@ func TestRecordReviewEvidenceSentinel(t *testing.T) {
 			}
 
 			// The same finding flagged again is not duplicated and the file is untouched.
-			c.recordReviewEvidenceSentinel("o/r", tt.pr, tt.findings, now.Add(time.Hour))
+			c.recordReviewEvidenceSentinel("o/r", tt.pr, tt.findings, false, now.Add(time.Hour))
 			if again := mustLoadBundle(t, root, "h1"); again.Hash != b.Hash || len(again.Sentinel) != len(tt.wantSentinel) {
 				t.Fatalf("re-flag changed the bundle: %+v", again.Sentinel)
 			}
 		})
+	}
+}
+
+// A notice (trusted author, no label) is recorded as one, so readers can tell
+// it from a blocking alert a maintainer later cleared.
+func TestRecordReviewEvidenceSentinelMarksNotices(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	root := withEvidenceRoot(t)
+	c := evidenceTestClient(t, &evidencePRFixture{head: "h1"}, &ReviewEvidenceSettings{Enabled: true})
+	findings := []sentinel.Finding{{Rule: sentinel.RuleSensitivePath, Summary: "touches OWNERS", Paths: []string{"OWNERS"}}}
+
+	c.recordReviewEvidenceSentinel("o/r", evidenceSentinelPR("h1"), findings, true, now)
+
+	b := mustLoadBundle(t, root, "h1")
+	want := []evidence.SentinelFinding{{Rule: sentinel.RuleSensitivePath, Summary: "touches OWNERS", Paths: []string{"OWNERS"}, Notice: true}}
+	if !reflect.DeepEqual(b.Sentinel, want) {
+		t.Fatalf("sentinel = %+v, want %+v", b.Sentinel, want)
+	}
+	if err := b.Validate(); err != nil {
+		t.Fatalf("bundle with a notice finding invalid: %v", err)
 	}
 }
 
@@ -343,6 +363,9 @@ func TestSweepSentinelRecordsReviewEvidence(t *testing.T) {
 	var rules []string
 	for _, s := range b.Sentinel {
 		rules = append(rules, s.Rule)
+		if s.Notice {
+			t.Fatalf("a blocking alert was recorded as a notice: %+v", s)
+		}
 	}
 	if want := res.Flagged[0].Rules(); !reflect.DeepEqual(rules, want) {
 		t.Fatalf("bundle sentinel rules = %v, want %v", rules, want)

@@ -162,11 +162,16 @@ type Check struct {
 	URL        string `json:"url,omitempty"`
 }
 
-// SentinelFinding records why the sentinel sweep flagged the PR.
+// SentinelFinding records why the sentinel sweep flagged the PR. Notice is
+// true when the sweep only posted an informational notice (a trusted author)
+// rather than a blocking alert with the label; readers use it to tell "a
+// maintainer cleared this alert" (label gone, Notice false) from "this head
+// only ever got a notice". Bundles written before the field read as alerts.
 type SentinelFinding struct {
 	Rule    string   `json:"rule"`
 	Summary string   `json:"summary"`
 	Paths   []string `json:"paths,omitempty"`
+	Notice  bool     `json:"notice,omitempty"`
 }
 
 // Action is a human action on the PR: approval, label change, hold lift.
