@@ -458,8 +458,9 @@ func reviewEvidenceMergeFromPR(pr *gh.PullRequest, head string, now time.Time) *
 // already holds, so a head the relay has not written yet gets its bundle
 // started from it (author, base, policy) without another fetch. Like the
 // relay's writes, every failure is logged and swallowed: the alert label and
-// comment are already on GitHub.
-func (c *Client) recordReviewEvidenceSentinel(repo string, pr *gh.PullRequest, findings []sentinel.Finding, now time.Time) {
+// comment are already on GitHub. notice marks findings the sweep only
+// reported (a trusted author) rather than blocked on with the label.
+func (c *Client) recordReviewEvidenceSentinel(repo string, pr *gh.PullRequest, findings []sentinel.Finding, notice bool, now time.Time) {
 	settings, ok := c.reviewEvidenceSettings(repo)
 	if !ok || pr == nil || len(findings) == 0 {
 		return
@@ -472,6 +473,7 @@ func (c *Client) recordReviewEvidenceSentinel(repo string, pr *gh.PullRequest, f
 	var u reviewEvidenceUpdate
 	for _, f := range findings {
 		if ef, ok := evidenceSentinelFinding(f); ok {
+			ef.Notice = notice
 			u.sentinel = append(u.sentinel, ef)
 		}
 	}
