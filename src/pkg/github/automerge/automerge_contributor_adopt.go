@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/delegatedecision"
 	"github.com/hivecommons/hive/pkg/effects"
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/stagelabels"
@@ -528,7 +529,13 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	if !ok || obs.Lane == stageLaneSelf || obs.Author == "" || obs.BaseRef == "" {
 		return 0, nil
 	}
+	requested := hasLabel(obs.Labels, delegatedecision.LabelAdoptSupersede)
 	due, reason := adoptionDue(rec, obs.HeadSHA, policy, now, presence, hasPresence)
+	if requested && obs.HeadSHA != "" && !(rec.Adopted(obs.HeadSHA) && rec.AdoptedBy > 0) {
+		// An explicit owner-delegate decision bypasses the nudge/grace and
+		// re-homes a stalled in-place adoption through the same supersede path.
+		due, reason = true, AdoptReasonOffline
+	}
 	if !due {
 		return 0, nil
 	}
@@ -563,7 +570,7 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	c.info("stage labels: adopting contributor PR", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head", obs.HeadSHA, "reason", reason, "registered", presence.Registered, "online", presence.Online, "lane_reason", obs.Reason, "fence", fence)
 
 	canPushInPlace := false
-	if policy.AdoptInPlace {
+	if policy.AdoptInPlace && !requested {
 		canPushInPlace = c.canPushToPRBranch(ctx, obs)
 	}
 	dcoRehome := adoptionNeedsDCORehome(obs, canPushInPlace)
@@ -579,6 +586,16 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	}
 
 	return c.supersedeAdoptedPR(ctx, store, key, obs, rec, policy, reason, grace, rec.NudgeOnline, dcoRehome, now)
+}
+
+// delegatedAdoptionAttempted reports whether adoptContributorPR recorded an
+// attempt between the two snapshots: MarkAdopted stamps head/by/at before
+// any write, so a changed adoption record means this head was tried.
+func delegatedAdoptionAttempted(before, after stagelabels.Record) bool {
+	return after.AdoptedHead != before.AdoptedHead ||
+		after.AdoptedBy != before.AdoptedBy ||
+		!after.AdoptedAt.Equal(before.AdoptedAt) ||
+		after.AdoptMode != before.AdoptMode
 }
 
 func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record, policy StageLabelPolicy, reason string, grace time.Duration, online bool, dcoRehome bool, now time.Time) (int, error) {

@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/delegatedecision"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -1603,5 +1605,99 @@ func TestAdoptionAndNudgeOnlyForClankers(t *testing.T) {
 				t.Fatalf("adopted a %s PR: added=%v comments=%v pulls=%d", tc.name, h.api.added, h.api.comments, len(h.adopt.pulls))
 			}
 		})
+	}
+}
+
+func TestDelegatedSupersedeAdoptsParkedPRWithoutGrace(t *testing.T) {
+	policy := adoptPolicy()
+	policy.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{}, policy)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	labels := []string{"stage/085-needs-decision", delegatedecision.LabelAdoptSupersede}
+	h.observe(adoptPR(7, "aaa", labels...), contributorLaneReasonNoReviewer)
+	if len(h.adopt.pulls) != 1 || h.adopt.refs["refs/heads/hive/adopt-7"] != "aaa" {
+		t.Fatalf("supersede not executed: pulls=%v refs=%v", h.adopt.pulls, h.adopt.refs)
+	}
+	body, _ := h.adopt.pulls[0]["body"].(string)
+	for _, want := range []string{"Supersedes #7", "@mallory", "Closes #12", "fixes #13"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+	h.observe(adoptPR(7, "aaa", labels...), contributorLaneReasonNoReviewer)
+	if len(h.adopt.pulls) != 1 {
+		t.Fatalf("duplicate adoption: %v", h.adopt.pulls)
+	}
+}
+
+func TestDelegatedSupersedeHonorsHoldAndDisabledAdoption(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		t.Run(map[bool]string{true: "hold", false: "disabled"}[held], func(t *testing.T) {
+			policy := adoptPolicy()
+			policy.Adoption = held
+			h, done := newAdoptHarness(t, ContributorNudgeOutcome{}, policy)
+			defer done()
+			labels := []string{delegatedecision.LabelAdoptSupersede}
+			if held {
+				labels = append(labels, "hold")
+			}
+			h.observe(adoptPR(7, "aaa", labels...), contributorLaneReasonNoReviewer)
+			if len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+				t.Fatalf("adopted: %v", h.adopt.pulls)
+			}
+		})
+	}
+}
+
+func TestDelegatedSupersedeRehomesInPlaceAdoption(t *testing.T) {
+	policy := adoptPolicy()
+	policy.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{}, policy)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+	key := stageKey("acme", "widget", 7)
+	h.e.stageStoreOrShared().MarkAdoptedInPlace(key, "aaa", AdoptReasonOffline, h.clock.at)
+	h.observe(adoptPR(7, "aaa", "stage/085-needs-decision", delegatedecision.LabelAdoptSupersede), "check-failing:unit")
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if len(h.adopt.pulls) != 1 || rec.AdoptMode != stagelabels.AdoptModeSupersede || rec.AdoptedBy != 90 {
+		t.Fatalf("in-place adoption not superseded: record=%+v pulls=%v", rec, h.adopt.pulls)
+	}
+}
+
+func TestDelegatedSupersedeFailureIsOneAttemptAndClearsLabel(t *testing.T) {
+	policy := adoptPolicy()
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{}, policy)
+	defer done()
+	h.adopt.failRefs = true
+	labels := []string{"stage/085-needs-decision", delegatedecision.LabelAdoptSupersede}
+	pr := adoptPR(7, "aaa", labels...)
+	h.adopt.mu.Lock()
+	h.adopt.heads[7] = "aaa"
+	h.adopt.mu.Unlock()
+	h.e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, contributorLaneReasonNoReviewer, false, nil)
+	h.e.noteStageRole("acme", "widget", 7, stagelabels.RoleContributor)
+	if _, err := h.e.ApplyStageLabels(context.Background()); err == nil {
+		t.Fatal("ApplyStageLabels should surface the failed supersede push")
+	}
+	if h.adopt.refAttempts != 1 || len(h.adopt.pulls) != 0 {
+		t.Fatalf("attempts=%d pulls=%v", h.adopt.refAttempts, h.adopt.pulls)
+	}
+	key := stageKey("acme", "widget", 7)
+	if rec, _ := h.e.stageStoreOrShared().Get(key); !rec.Adopted("aaa") || rec.AdoptedBy != 0 {
+		t.Fatalf("attempt not recorded: %+v", rec)
+	}
+	if !slices.Contains(h.api.removed, delegatedecision.LabelAdoptSupersede) {
+		t.Fatalf("request label kept after a recorded attempt: removed=%v", h.api.removed)
+	}
+
+	// With the request consumed the PR re-parks at 085 for the owner: the
+	// next sweep neither retries the push nor touches the label again.
+	h.api.reset()
+	h.clock.advance(time.Minute)
+	h.observe(adoptPR(7, "aaa", "stage/085-needs-decision"), contributorLaneReasonNoReviewer)
+	if h.adopt.refAttempts != 1 || len(h.api.removed) != 0 {
+		t.Fatalf("failed delegated supersede retried: attempts=%d removed=%v", h.adopt.refAttempts, h.api.removed)
 	}
 }
