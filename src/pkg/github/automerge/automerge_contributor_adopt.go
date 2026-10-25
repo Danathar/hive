@@ -562,6 +562,10 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 		c.info("stage labels: adoption due but blocked by label", "repo", obs.Display, "pr", obs.Number, "label", l)
 		return 0, nil
 	}
+	if c.authorMaintainsRepo(ctx, obs, now) {
+		c.info("stage labels: adoption due but the author maintains the repository; not adopting", "repo", obs.Display, "pr", obs.Number, "author", obs.Author)
+		return 0, nil
+	}
 	fence, err := c.adoptionDiffRefusal(ctx, obs)
 	if fence != "" && (err != nil || adoptionFenceDefers(fence)) {
 		// The fence could not judge this head (it moved, or its file list
@@ -608,6 +612,13 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 }
 
 func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record, policy StageLabelPolicy, reason string, grace time.Duration, online bool, dcoRehome bool, now time.Time) (int, error) {
+	if c.authorMaintainsRepo(ctx, obs, now) {
+		// Backstop for every re-home path (dco-rehome, in-place-stalled):
+		// a maintainer's PR is never closed in favour of a hive copy.
+		store.ClearAdoption(key)
+		c.info("stage labels: not superseding a repository maintainer's PR; adoption released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "reason", reason)
+		return 0, nil
+	}
 	owner, repo, number := obs.Owner, obs.Repo, obs.Number
 	rec.AdoptReason = reason
 	if stored, ok := store.Get(key); ok && stored.AdoptDiffFence != "" {
@@ -751,6 +762,54 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 	return 0, nil
 }
 
+// maintainerPermTTL is how long authorMaintainsRepo trusts a permission
+// read: one GET per (repo, author) per hour, not per PR per sweep.
+const maintainerPermTTL = time.Hour
+
+type maintainerPermEntry struct {
+	maintainer bool
+	at         time.Time
+}
+
+// repoMaintainerLevel reports whether a collaborator permission answer
+// (`permission`, and the finer `role_name`) is admin or maintain.
+func repoMaintainerLevel(permission, role string) bool {
+	permission, role = strings.ToLower(strings.TrimSpace(permission)), strings.ToLower(strings.TrimSpace(role))
+	return permission == "admin" || role == "admin" || role == "maintain"
+}
+
+// authorMaintainsRepo reports whether the PR author holds admin or maintain
+// on the PR's repository. Adoption stands in for a contributor's relay that
+// went quiet; a maintainer owns the branch and merges it themselves, so the
+// hive never takes their PR over (projectbluefin/utah-packages#619, adopted
+// as contributor-offline 16 minutes after its nudge and re-homed). A failed
+// read is not cached and counts as a maintainer: adoption fails closed.
+func (c *Engine) authorMaintainsRepo(ctx context.Context, obs stageObservation, now time.Time) bool {
+	if c == nil || c.gh == nil || obs.Author == "" || obs.Owner == "" || obs.Repo == "" {
+		return false
+	}
+	key := strings.ToLower(obs.Owner + "/" + obs.Repo + "#" + obs.Author)
+	c.maintainerPermMu.Lock()
+	if e, ok := c.maintainerPerm[key]; ok && now.Sub(e.at) < maintainerPermTTL {
+		c.maintainerPermMu.Unlock()
+		return e.maintainer
+	}
+	c.maintainerPermMu.Unlock()
+	level, _, err := c.gh.Repositories.GetPermissionLevel(ctx, obs.Owner, obs.Repo, obs.Author)
+	if err != nil {
+		c.warn("stage labels: could not read the author's repository permission; not adopting", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "error", err)
+		return true
+	}
+	maintainer := repoMaintainerLevel(level.GetPermission(), level.GetRoleName())
+	c.maintainerPermMu.Lock()
+	if c.maintainerPerm == nil {
+		c.maintainerPerm = map[string]maintainerPermEntry{}
+	}
+	c.maintainerPerm[key] = maintainerPermEntry{maintainer: maintainer, at: now}
+	c.maintainerPermMu.Unlock()
+	return maintainer
+}
+
 // canPushToPRBranch reports whether the App can push to the PR's head: a
 // head in the base repo always; a fork head only with "allow edits by
 // maintainers", which the list payload omits, so one GET resolves it.
@@ -814,6 +873,13 @@ func (c *Engine) baseSyncTouchesWorkflows(ctx context.Context, obs stageObservat
 // re-arms.
 // Returns the number of comments posted.
 func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, prev stagelabels.Record, policy StageLabelPolicy) (int, error) {
+	if prev.AdoptedInPlace() && c.authorMaintainsRepo(ctx, obs, c.now()) {
+		// Taken over before this rule, or before the author's permission
+		// was raised: hand the PR back rather than keep or re-home it.
+		store.ClearAdoption(key)
+		c.info("stage labels: in-place adoption of a repository maintainer's PR released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author)
+		return 0, nil
+	}
 	if !prev.AdoptedInPlace() || obs.HeadSHA == "" || obs.HeadSHA == prev.AdoptedHead {
 		return 0, nil
 	}

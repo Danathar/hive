@@ -43,6 +43,12 @@ type adoptAPI struct {
 	// changedFiles is the changed_files count GET pulls/n reports for an
 	// observed PR; 0 omits it.
 	changedFiles int
+	// permissions is the role GET collaborators/<login>/permission reports
+	// per login (default "write"); failPermission makes it answer 500;
+	// permissionReads counts the calls.
+	permissions     map[string]string
+	failPermission  bool
+	permissionReads int
 }
 
 type adoptCommit struct {
@@ -59,6 +65,21 @@ func (a *adoptAPI) handle(w http.ResponseWriter, r *http.Request) bool {
 	defer a.mu.Unlock()
 	path := r.URL.Path
 	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/collaborators/") && strings.HasSuffix(path, "/permission"):
+		a.permissionReads++
+		if a.failPermission {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "scripted failure"})
+			return true
+		}
+		login := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/collaborators/"), "/permission")
+		role := nonEmpty(a.permissions[login], "write")
+		permission := role
+		if role == "maintain" {
+			permission = "write" // GitHub's legacy field; role_name carries maintain
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"permission": permission, "role_name": role, "user": map[string]string{"login": login}})
+		return true
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/pulls/") && strings.HasSuffix(path, "/files"):
 		if a.failPRFiles {
 			w.WriteHeader(http.StatusInternalServerError)
