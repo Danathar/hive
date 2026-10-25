@@ -69,6 +69,8 @@ type unparkServer struct {
 	// timeline read with that status.
 	timelines      map[int][]unparkWireTimelineEvent
 	timelineStatus int
+	// removeStatus, when non-zero, fails every label DELETE with that status.
+	removeStatus int
 	// closedIssues is what GET /issues?state=closed answers; the plain
 	// listing answers the open issues the server was built with.
 	closedIssues []unparkWireIssue
@@ -237,6 +239,10 @@ func newUnparkServer(t *testing.T, owner, repo string, issues []unparkWireIssue,
 			_ = json.NewEncoder(w).Encode([]wireLabel{})
 
 		case strings.Contains(path, "/labels/") && r.Method == http.MethodDelete:
+			if rec.removeStatus != 0 {
+				w.WriteHeader(rec.removeStatus)
+				return
+			}
 			var n int
 			var label string
 			fmt.Sscanf(path, "issues/%d/labels/%s", &n, &label)

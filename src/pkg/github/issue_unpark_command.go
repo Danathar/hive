@@ -633,6 +633,7 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	}
 	var removed []string
 	var kept []string
+	var stageLabels []string
 	for _, label := range labels {
 		if !c.isParkingLabel(label) {
 			continue
@@ -662,13 +663,23 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 		}
 		if stagelabels.IsStageLabel(label) {
 			// The stage park label is the stage engine's to lift (below).
-			removed = append(removed, label)
+			stageLabels = append(stageLabels, label)
 			continue
 		}
 		if err := c.removeIssueLabel(ctx, owner, repo, number, label); err != nil {
 			return false, err
 		}
 		removed = append(removed, label)
+	}
+	// The engine re-derives the stage from the labels left behind, so a kept
+	// park label (a person's or a lifecycle bot's `needs-human`) re-parks the
+	// issue at the same stage (hivecommons/hive#12715). Only a stage the
+	// remaining labels no longer derive is reported as removed.
+	stayingStage := unparkStageThatStays(displayRepo, number, labels, removed, stageLabels)
+	for _, label := range stageLabels {
+		if !strings.EqualFold(label, stayingStage) {
+			removed = append(removed, label)
+		}
 	}
 	if !labelPresent(labels, HumanAckLabel) {
 		if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{HumanAckLabel}); err != nil {
@@ -682,7 +693,7 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 		return false, err
 	}
 	decision := unparkCommandDecisionText(command)
-	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept)
+	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept, stayingStage)
 	if note := c.unparkIssueFilterNote(labels, removed); note != "" {
 		reply += "\n\n" + note
 	}
@@ -697,7 +708,32 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	return true, nil
 }
 
-func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string) string {
+// unparkStageThatStays returns the stage label among stageLabels that the
+// issue still derives once the un-park has removed removed and applied
+// approved-direction, or "" when the park lifts.
+func unparkStageThatStays(displayRepo string, number int, labels, removed, stageLabels []string) string {
+	if len(stageLabels) == 0 {
+		return ""
+	}
+	after := []string{HumanAckLabel}
+	for _, label := range labels {
+		if !labelPresent(removed, label) && !labelPresent(stageLabels, label) {
+			after = append(after, label)
+		}
+	}
+	stage, _, _ := IssueStageFor(IssueStageInput{Repo: displayRepo, Number: number, Labels: after}, nil)
+	if stage == stagelabels.None {
+		return ""
+	}
+	for _, label := range stageLabels {
+		if strings.EqualFold(label, stage.Label()) {
+			return label
+		}
+	}
+	return ""
+}
+
+func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string, stayingStage string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\nApproved by @%s. Decision: %s\n\n`%s` is applied", unparkAcceptedMarker, actor, decision, HumanAckLabel)
 	if len(removed) > 0 {
@@ -706,6 +742,9 @@ func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept 
 	b.WriteString(".")
 	if len(kept) > 0 {
 		fmt.Fprintf(&b, " Left in place: %s.", strings.Join(kept, ", "))
+	}
+	if stayingStage != "" {
+		fmt.Fprintf(&b, " `%s` stays: a label left on the issue still parks it for a person, so agents will not pick it up until that label is removed.", stayingStage)
 	}
 	b.WriteString(" Any `hold` label is left exactly as it was.")
 	return b.String()
