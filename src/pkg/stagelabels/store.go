@@ -167,6 +167,9 @@ type Record struct {
 	// SignoffAttributionNotedHead is the head the 085 maintainer note for
 	// hive-caused sign-off attribution was posted for, once per head.
 	SignoffAttributionNotedHead string `json:"signoff_attribution_noted_head,omitempty"`
+	// ForkRehomeRefusedHead is the head of a fork PR the hive declined to
+	// move into a branch of the base repository (supersede / re-home).
+	ForkRehomeRefusedHead string `json:"fork_rehome_refused_head,omitempty"`
 	// LastSeen is the last cycle the item was observed; stale records are
 	// pruned by Prune so a closed item does not live in the file forever.
 	LastSeen time.Time `json:"last_seen"`
@@ -861,6 +864,25 @@ func (r Record) AdoptionEscalated(head string) bool {
 // posted for head, whether or not the escalation still holds.
 func (r Record) AdoptionEscalationNoted(head string) bool {
 	return head != "" && r.AdoptEscalationNotedHead == head
+}
+
+// ForkRehomeRefused reports whether the hive declined to re-home head, a
+// fork PR's head, into the base repository.
+func (r Record) ForkRehomeRefused(head string) bool {
+	return head != "" && r.ForkRehomeRefusedHead == head
+}
+
+// MarkForkRehomeRefused records that the hive declined to re-home head.
+func (s *Store) MarkForkRehomeRefused(key, head string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || r.ForkRehomeRefusedHead == head {
+		return
+	}
+	r.ForkRehomeRefusedHead = head
+	s.items[key] = r
+	s.dirty = true
 }
 
 // MergeCommitNoted reports whether the merge-method note was posted for head.
