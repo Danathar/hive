@@ -119,6 +119,30 @@ func TestFeedIntoTrackerQualifiesAtThresholdAndIdleClears(t *testing.T) {
 	}
 }
 
+func TestPaneTimeoutWarnsClassifyAsAgentPaneTimeout(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	tr := fleetreport.NewRuntimeTracker(func() time.Time { return now })
+	var out bytes.Buffer
+	logger := slog.New(NewWithObserver(slog.NewJSONHandler(&out, nil), tr.Observe))
+	for i := 0; i < 5; i++ {
+		logger.Warn("prompt timeout — dumping pane", "attempt", i)
+		logger.Warn("pane content at timeout", "attempt", i)
+		logger.Warn("startup kick dropped: CLI never reached input prompt", "attempt", i)
+		now = now.Add(time.Minute)
+	}
+	// Evidence is keyed per message, so each of the three WARN texts yields
+	// its own entry; all of them must land under the pane-timeout class.
+	ev := tr.Evidence()
+	if len(ev) != 3 {
+		t.Fatalf("evidence = %+v", ev)
+	}
+	for _, e := range ev {
+		if e.Class != fleetreport.ClassAgentPaneTimeout {
+			t.Fatalf("evidence class = %q, want %q: %+v", e.Class, fleetreport.ClassAgentPaneTimeout, e)
+		}
+	}
+}
+
 func TestHandlerEnabledDefersToWrapped(t *testing.T) {
 	var out bytes.Buffer
 	h := New(slog.NewJSONHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn}))
