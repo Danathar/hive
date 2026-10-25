@@ -133,6 +133,12 @@ type Options struct {
 	// HeadFirstSeen overrides the process-wide head-age tracker. nil shares
 	// the package default so one-shot engines keep a head's pinned age.
 	HeadFirstSeen *HeadFirstSeenTracker
+	// MergeQueueBases is the memory of base branches that refused a direct
+	// merge as merge-queue-only. The hive passes one instance to every sweep
+	// engine and to the merge-eligibility classifier, so a base one lane
+	// learned is skipped by the others and not shown as merge-eligible.
+	// nil gives the engine a private memory.
+	MergeQueueBases *MergeQueueBases
 	// SentinelLabel returns the configured sentinel alert label. The label also
 	// travels through the transport's hold-label set, but the sweep names this
 	// skip distinctly so operators can tell a sentinel block from an ordinary
@@ -256,7 +262,7 @@ type Engine struct {
 	// merge as merge-queue-only, so the self-authored sweep stops re-issuing
 	// a REST merge that cannot succeed (hivecommons/hive#14068).
 	mergeQueueBasesMu sync.Mutex
-	mergeQueueBases   map[string]time.Time
+	mergeQueueBases   *MergeQueueBases
 	// mergeRefusals remembers merges GitHub refused because an approving
 	// review is required (per PR head) or the merge method is disabled (per
 	// repository and method), so no sweep re-issues them every pass
@@ -320,6 +326,7 @@ func New(transport Transport, opts Options) *Engine {
 		contributorRegistryTier:           opts.ContributorRegistryTier,
 		contributorSoak:                   opts.ContributorSoak,
 		headFirstSeen:                     opts.HeadFirstSeen,
+		mergeQueueBases:                   opts.MergeQueueBases,
 		sentinelLabel:                     opts.SentinelLabel,
 		minHeadAge:                        opts.MinHeadAge,
 		now:                               opts.Now,
@@ -3107,42 +3114,33 @@ func mergeQueueRequiredMergeError(err error) bool {
 	return mergeQueueRequiredRE.MatchString(ghErr.Message) || mergeQueueRequiredRE.MatchString(ghErr.Error())
 }
 
-func mergeQueueBaseKey(owner, repo, base string) string {
-	return strings.ToLower(owner+"/"+repo) + "#" + base
+// mergeQueueMemory returns the engine's merge-queue base memory, creating
+// a private one for an engine built without Options.MergeQueueBases.
+func (c *Engine) mergeQueueMemory() *MergeQueueBases {
+	c.mergeQueueBasesMu.Lock()
+	defer c.mergeQueueBasesMu.Unlock()
+	if c.mergeQueueBases == nil {
+		c.mergeQueueBases = NewMergeQueueBases()
+	}
+	return c.mergeQueueBases
 }
 
 // noteMergeQueueBase records that base refused a direct merge as
 // merge-queue-only.
 func (c *Engine) noteMergeQueueBase(owner, repo, base string) {
-	if c == nil || strings.TrimSpace(base) == "" {
+	if c == nil {
 		return
 	}
-	c.mergeQueueBasesMu.Lock()
-	defer c.mergeQueueBasesMu.Unlock()
-	if c.mergeQueueBases == nil {
-		c.mergeQueueBases = make(map[string]time.Time)
-	}
-	c.mergeQueueBases[mergeQueueBaseKey(owner, repo, base)] = c.clock()
+	c.mergeQueueMemory().Note(owner+"/"+repo, base, c.clock())
 }
 
 // mergeQueueBaseKnown reports whether base refused a direct merge as
 // merge-queue-only within mergeQueueBaseRecheck.
 func (c *Engine) mergeQueueBaseKnown(owner, repo, base string) bool {
-	if c == nil || strings.TrimSpace(base) == "" {
+	if c == nil {
 		return false
 	}
-	key := mergeQueueBaseKey(owner, repo, base)
-	c.mergeQueueBasesMu.Lock()
-	defer c.mergeQueueBasesMu.Unlock()
-	seen, ok := c.mergeQueueBases[key]
-	if !ok {
-		return false
-	}
-	if c.clock().Sub(seen) >= mergeQueueBaseRecheck {
-		delete(c.mergeQueueBases, key)
-		return false
-	}
-	return true
+	return c.mergeQueueMemory().Required(owner+"/"+repo, base, c.clock())
 }
 
 func mergeAPIErrorNotApplied(err error) error {

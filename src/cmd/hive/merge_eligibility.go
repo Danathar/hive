@@ -491,6 +491,11 @@ type mergeGates struct {
 	// Hive merge sweep skips the repo ("repo-auto-merge-disabled"), so a PR
 	// that passes every other gate is still not one the sweep would merge.
 	repoAutoMergeOff bool
+	// mergeQueueRequired is set when a sweep's merge into this PR's base was
+	// refused because the base only accepts merges through GitHub's merge
+	// queue (hiveMergeQueueBases). Hive merges over REST and cannot
+	// enqueue, so no sweep will merge the PR.
+	mergeQueueRequired bool
 }
 
 // classifyMergeEligibility is THE merge-eligibility rule: the one place that
@@ -702,12 +707,38 @@ func classifyMergeEligibility(pr github.PullRequest, held bool, fullRepo string,
 			HandMerge: true,
 		}, ""
 	}
+	if g.mergeQueueRequired {
+		// Every per-PR gate passed, but the sweep skips this PR with
+		// merge-queue-required on every pass. Unlike the repo switch above,
+		// nothing that reads merge-eligible.json can land it either (the
+		// relay merges over REST too), so it leaves the eligible bucket.
+		return mergeBucketSkip, github.MergeVerdict{
+			State:     github.MergeVerdictOutstanding,
+			Reason:    mergeQueueRequiredReason(pr.BaseRef),
+			HandMerge: true,
+		}, ""
+	}
 	return mergeBucketEligible, github.MergeVerdict{State: github.MergeVerdictEligible, Reason: reason}, ""
 }
 
 // repoAutoMergeOffReason is the verdict reason for a PR that passes every
 // gate in a repo whose auto-merge switch is off.
 const repoAutoMergeOffReason = "auto-merge is off for this repo (its auto-merge setting, or the hive is below ACMM L6) — a person merges it"
+
+// hiveMergeQueueBases is the one merge-queue base memory the sweep engines
+// write and the classifier reads (automerge.MergeQueueBases).
+var hiveMergeQueueBases = automerge.NewMergeQueueBases()
+
+// mergeQueueRequiredReason is the verdict reason for a PR that passes every
+// gate but targets a base the sweep found to accept merges only through
+// GitHub's merge queue.
+func mergeQueueRequiredReason(base string) string {
+	branch := "the base branch"
+	if b := strings.TrimSpace(base); b != "" {
+		branch = b
+	}
+	return "merge-queue-required: " + branch + " only accepts merges through GitHub's merge queue, and Hive merges over REST and cannot enqueue — a person merges it through the merge queue, or the queue rule is removed"
+}
 
 // needsDecisionParkLabel returns the needs-decision parking stage label a PR
 // carries (PR stage 085 or the issue-side 045 spelling), lower-cased, or "".
@@ -1115,6 +1146,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			}
 			prGates.repoAutoMergeOff = !cfg.RepoAutoMergeEnabled(fullRepo)
 		}
+		prGates.mergeQueueRequired = hiveMergeQueueBases.Required(fullRepo, pr.BaseRef, time.Now())
 
 		adopted := adoptedInPlace(fullRepo, pr.Number)
 		prGates.adopted = adopted
