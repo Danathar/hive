@@ -3,63 +3,48 @@ package apiproxy
 import (
 	"testing"
 
-	"github.com/hivecommons/hive/crux/agent"
+	"github.com/hivecommons/hive/crux"
 )
 
-// allForgeModes is every ACMM tier, lowest first, so the hard-deny assertions
-// below cover a future fifth mode automatically.
-var allForgeModes = []agent.AgentMode{
-	agent.ModeAdvisory,
-	agent.ModeIssuesOnly,
-	agent.ModeIssuesAndPRs,
-	agent.ModeIssuesPRsMerge,
-}
-
-// TestForgeRulesHardDenyAllModes verifies the apiproxy wrappers surface the
-// shared crux rule table: direct MR/PR create and merge are denied on every
-// forge at every autonomy level, with an agent-facing directive.
-func TestForgeRulesHardDenyAllModes(t *testing.T) {
-	cases := []struct{ forge, method, path string }{
-		{"github", "POST", "/repos/org/repo/pulls"},
-		{"github", "PUT", "/repos/org/repo/pulls/42/merge"},
-		{"gitlab", "POST", "/api/v4/projects/org%2Frepo/merge_requests"},
-		{"gitlab", "PUT", "/api/v4/projects/org%2Frepo/merge_requests/42/merge"},
-		{"gitea", "POST", "/api/v1/repos/org/repo/pulls"},
-		{"gitea", "POST", "/api/v1/repos/org/repo/pulls/42/merge"},
+// TestForgeRulesWrappers verifies the apiproxy façade delegates to the shared
+// crux/proxy forge rule table: MR/PR creation and merge are hard-denied at
+// every tier, while issue comments are allowed from ISSUES_ONLY up. The
+// exhaustive table-driven contract, including capability grants, lives in
+// crux/proxy/forge_contract_test.go.
+func TestForgeRulesWrappers(t *testing.T) {
+	modes := []crux.AgentMode{
+		crux.ModeAdvisory,
+		crux.ModeIssuesOnly,
+		crux.ModeIssuesAndPRs,
+		crux.ModeIssuesPRsMerge,
 	}
-	for _, tc := range cases {
-		msg, denied := DeniedMessage(tc.method, tc.path)
-		if !denied || msg == "" {
-			t.Errorf("%s %s %s: expected hard-deny with directive, got denied=%v msg=%q", tc.forge, tc.method, tc.path, denied, msg)
-		}
-		for _, mode := range allForgeModes {
-			if AllowedByMode(mode, tc.method, tc.path) {
-				t.Errorf("%s %s %s: allowed at mode %v, want deny", tc.forge, tc.method, tc.path, mode)
+	denied := []struct{ method, path string }{
+		{"POST", "/repos/org/repo/pulls"},
+		{"PUT", "/repos/org/repo/pulls/1/merge"},
+		{"POST", "/api/v4/projects/org%2Frepo/merge_requests"},
+		{"PUT", "/api/v4/projects/org%2Frepo/merge_requests/1/merge"},
+		{"POST", "/api/v1/repos/org/repo/pulls"},
+		{"POST", "/api/v1/repos/org/repo/pulls/1/merge"},
+	}
+	for _, mode := range modes {
+		for _, d := range denied {
+			if AllowedByMode(mode, d.method, d.path) {
+				t.Errorf("%s %s should be denied at mode %v", d.method, d.path, mode)
 			}
-			if AllowedByModeCaps(mode, agent.AgentCapabilities{Converse: true}, tc.method, tc.path) {
-				t.Errorf("%s %s %s: allowed with caps at mode %v, want deny", tc.forge, tc.method, tc.path, mode)
+			if msg, ok := DeniedMessage(d.method, d.path); !ok || msg == "" {
+				t.Errorf("DeniedMessage(%s %s) = (%q,%v), want hard-deny directive", d.method, d.path, msg, ok)
 			}
 		}
 	}
-}
 
-// TestForgeRulesIssueCreateByMode verifies the wrappers apply the same minimum
-// mode to the equivalent issue-create route on every forge.
-func TestForgeRulesIssueCreateByMode(t *testing.T) {
-	paths := map[string]string{
-		"github": "/repos/org/repo/issues",
-		"gitlab": "/api/v4/projects/org%2Frepo/issues",
-		"gitea":  "/api/v1/repos/org/repo/issues",
+	comment := "/api/v4/projects/org%2Frepo/issues/1/notes"
+	if AllowedByMode(crux.ModeAdvisory, "POST", comment) {
+		t.Errorf("POST %s should be denied at ADVISORY", comment)
 	}
-	for forge, path := range paths {
-		if AllowedByMode(agent.ModeAdvisory, "POST", path) {
-			t.Errorf("%s: advisory mode may not create issues", forge)
-		}
-		if !AllowedByMode(agent.ModeIssuesOnly, "POST", path) {
-			t.Errorf("%s: issues-only mode should create issues", forge)
-		}
-		if _, denied := DeniedMessage("POST", path); denied {
-			t.Errorf("%s: issue creation must not be hard-denied", forge)
-		}
+	if !AllowedByMode(crux.ModeIssuesOnly, "POST", comment) {
+		t.Errorf("POST %s should be allowed at ISSUES_ONLY", comment)
+	}
+	if _, ok := DeniedMessage("POST", comment); ok {
+		t.Errorf("DeniedMessage(POST %s) matched a hard-deny rule unexpectedly", comment)
 	}
 }
