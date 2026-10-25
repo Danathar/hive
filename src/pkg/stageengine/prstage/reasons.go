@@ -22,6 +22,7 @@ const (
 	AutoMergeReasonMergeRefusedReview      = "merge-refused:review-required"
 	AutoMergeReasonNoAppBotLogin           = "no-app-bot-login"
 	AutoMergeReasonReviewGatePrefix        = "review-gate:"
+	AutoMergeReasonWorkflowPermission      = "workflow-permission"
 	ContributorLaneReasonAppAuthored       = "contributor-lane:app-authored"
 	ContributorLaneReasonAuthorAssociation = "contributor-lane:author-association"
 	ContributorLaneReasonChangesRequested  = "contributor-lane:changes-requested"

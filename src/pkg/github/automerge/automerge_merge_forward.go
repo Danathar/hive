@@ -36,7 +36,24 @@ func mergeForwardKey(prKey, headSHA string) string {
 }
 
 func (c *Engine) markMergeForwardAttempted(owner, repo string, number int, headSHA string) bool {
-	key := mergeForwardKey(c.evaluatedHeadKey(owner, repo, number), headSHA)
+	return c.markMergeForwardOnce(mergeForwardKey(c.evaluatedHeadKey(owner, repo, number), headSHA))
+}
+
+// mergeForwardWorkflowRefusedKey records, per head, that GitHub refused the
+// merge-forward for lack of the workflows permission, so the ticks after the
+// one attempt keep reporting that instead of falling back to "conflicting".
+func mergeForwardWorkflowRefusedKey(prKey, headSHA string) string {
+	return mergeForwardKey(prKey, headSHA) + "-workflow-permission"
+}
+
+func (c *Engine) mergeForwardWorkflowRefused(owner, repo string, number int, headSHA string) bool {
+	key := mergeForwardWorkflowRefusedKey(c.evaluatedHeadKey(owner, repo, number), headSHA)
+	c.heldRunApprovalsMu.Lock()
+	defer c.heldRunApprovalsMu.Unlock()
+	return c.heldRunApprovals[key]
+}
+
+func (c *Engine) markMergeForwardOnce(key string) bool {
 	c.heldRunApprovalsMu.Lock()
 	defer c.heldRunApprovalsMu.Unlock()
 	if c.heldRunApprovals == nil {
@@ -55,8 +72,12 @@ func (c *Engine) markMergeForwardAttempted(owner, repo string, number int, headS
 // as a new App-authored, signed-off merge commit (the GitHub merges API; no
 // human commit is rewritten) and the merge waits for CI on the new head. A
 // real conflict leaves the branch untouched and posts one note naming the
-// files both sides changed. Every other case keeps the "conflicting" hold.
-// It is attempted once per head SHA.
+// files both sides changed. A 403 refusing to write a workflow file (the base
+// changed .github/workflows/ and the App lacks the workflows permission) is
+// reported as "workflow-permission" for that head, so a person brings the
+// branch up to date rather than a fix agent being sent to make the same
+// refused push. Every other case keeps the "conflicting" hold. It is
+// attempted once per head SHA.
 func (c *Engine) mergeForwardOrConflict(ctx context.Context, displayRepo, owner, repo string, pr *gh.PullRequest, number int) (AutoMergeSweepEvent, string, error) {
 	if !c.mergeForwardTrustedHumanFor(owner+"/"+repo) || pr == nil || c.isForkPR(pr) {
 		return AutoMergeSweepEvent{}, "conflicting", nil
@@ -75,6 +96,9 @@ func (c *Engine) mergeForwardOrConflict(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, "conflicting", nil
 	}
 	if !c.markMergeForwardAttempted(owner, repo, number, headSHA) {
+		if c.mergeForwardWorkflowRefused(owner, repo, number, headSHA) {
+			return AutoMergeSweepEvent{}, autoMergeReasonWorkflowPermission, nil
+		}
 		return AutoMergeSweepEvent{}, "conflicting", nil
 	}
 	message := mergeForwardCommitMessage(baseRef, headRef, number, appLogin)
@@ -112,6 +136,10 @@ func (c *Engine) mergeForwardOrConflict(ctx context.Context, displayRepo, owner,
 		files := c.mergeForwardConflictFiles(ctx, owner, repo, baseRef, headSHA)
 		c.postMergeForwardConflictNote(ctx, displayRepo, owner, repo, number, hgithub.SafeGetLogin(pr.GetUser()), headSHA, baseRef, files)
 		return AutoMergeSweepEvent{}, "conflicting", nil
+	case hgithub.IsWorkflowPermissionRefusal(err):
+		c.markMergeForwardOnce(mergeForwardWorkflowRefusedKey(c.evaluatedHeadKey(owner, repo, number), headSHA))
+		c.info("automerge merge-forward refused: the base changed workflow files and the app lacks the workflows permission", "repo", displayRepo, "pr", number, "head", headSHA)
+		return AutoMergeSweepEvent{}, autoMergeReasonWorkflowPermission, nil
 	case status == http.StatusForbidden || status == http.StatusNotFound:
 		c.info("automerge merge-forward skipped: branch not writable by the app", "repo", displayRepo, "pr", number, "status", status)
 		return AutoMergeSweepEvent{}, "conflicting", nil

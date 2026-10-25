@@ -2428,6 +2428,9 @@ func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, re
 		case updateBranchForkNotEditable:
 			c.info("automerge update-branch skipped: fork head not editable by the app", "repo", displayRepo, "pr", number, "reason", reason)
 			return AutoMergeSweepEvent{}, autoMergeReasonForkNotEditable, nil
+		case updateBranchWorkflowPermission:
+			c.info("automerge update-branch refused: the base changed workflow files and the app lacks the workflows permission", "repo", displayRepo, "pr", number, "reason", reason)
+			return AutoMergeSweepEvent{}, autoMergeReasonWorkflowPermission, nil
 		case updateBranchConflict:
 			return AutoMergeSweepEvent{}, "conflicting", nil
 		}
@@ -2437,7 +2440,10 @@ func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, re
 	return AutoMergeSweepEvent{Repo: displayRepo, Number: number, HeadSHA: headSHA, BranchUpdated: true}, "check-pending", nil
 }
 
-const autoMergeReasonForkNotEditable = prstage.AutoMergeReasonForkNotEditable
+const (
+	autoMergeReasonForkNotEditable    = prstage.AutoMergeReasonForkNotEditable
+	autoMergeReasonWorkflowPermission = prstage.AutoMergeReasonWorkflowPermission
+)
 
 type updateBranchFailure int
 
@@ -2446,17 +2452,25 @@ const (
 	updateBranchConflict
 	updateBranchUpToDate
 	updateBranchForkNotEditable
+	updateBranchWorkflowPermission
 )
 
 // classifyUpdateBranchError separates the update-branch failures GitHub
 // reports with overlapping statuses: 422 covers conflicts and an already
 // current branch, while a 422 naming maintainer edits (or a 403 on a fork PR)
-// means the app cannot write to the fork head. A 403 on a same-repo branch is
-// a plain permission or rate-limit failure. An unrecognised 422 stays a conflict.
+// means the app cannot write to the fork head. A 403 refusing to update a
+// workflow file means the base changed .github/workflows/ and the App lacks the
+// workflows permission, on a fork or not: no retry with the same token can
+// succeed, so a person must update the branch. Any other 403 on a same-repo
+// branch is a plain permission or rate-limit failure. An unrecognised 422
+// stays a conflict.
 func classifyUpdateBranchError(err error, fork bool) updateBranchFailure {
 	var ghErr *gh.ErrorResponse
 	if !errors.As(err, &ghErr) || ghErr.Response == nil {
 		return updateBranchOther
+	}
+	if hgithub.IsWorkflowPermissionRefusal(err) {
+		return updateBranchWorkflowPermission
 	}
 	msg := strings.ToLower(ghErr.Message)
 	switch ghErr.Response.StatusCode {
