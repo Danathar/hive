@@ -141,7 +141,9 @@ func generateIssueStageGoldens() map[string][]issueStageGoldenCase {
 		"blocked+stage030":  {"Blocked", stagelabels.PRInProgress.Label()},
 	}
 	claimKinds := []string{"", string(claims.KindAgent), string(claims.KindHuman), string(claims.KindContributor), "AGENT"}
-	reasons := []string{"", issueNeedsHumanLabel, issueNeedsSpecLabel, PossiblyExistsStageLabel, NeedsDecisionStageLabel, issueNeedsDirectionLabel, "wontfix", " needs-human "}
+	// The project issue filter, exempt and reporter-confirmation reasons pin
+	// that those filtered issues derive no stage of their own.
+	reasons := []string{"", issueNeedsHumanLabel, issueNeedsSpecLabel, PossiblyExistsStageLabel, NeedsDecisionStageLabel, issueNeedsDirectionLabel, "wontfix", " needs-human ", issueFilterReason, "Exempt label", issueNeedsReporterConfirmationLabel}
 
 	out := map[string][]issueStageGoldenCase{}
 	add := func(file string, c issueStageGoldenCase) {

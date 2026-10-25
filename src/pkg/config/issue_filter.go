@@ -168,6 +168,12 @@ func (f IssueFilterConfig) Admits(labels []string) bool {
 	return anyLabelMatches(f.RequireLabels, labels)
 }
 
+// RequireLabelsForNotice returns the require_labels allow-list, so a reply
+// can name the labels that would admit an issue Admits refuses.
+func (f IssueFilterConfig) RequireLabelsForNotice() []string {
+	return append([]string(nil), f.RequireLabels...)
+}
+
 // AdmitsReporter is the reporter-trust half of admission (#9665). With the
 // gate off it admits everyone; with it on, a trusted reporter passes and any
 // other reporter's issue must carry one of the untrusted-require labels. The

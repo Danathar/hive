@@ -1887,7 +1887,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 
 		if !issueFilter.Admits(labels) {
 			breakdown.Filtered++
-			details = append(details, c.workIssue(repo, issue, labels, "filtered", "Project issue filter"))
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", issueFilterReason))
 			continue
 		}
 

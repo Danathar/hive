@@ -133,6 +133,15 @@ func (c *Client) enrichStageFacts(ctx context.Context, f stageengine.Facts) (sta
 			f.Park.DecisionLabel = label
 		}
 	}
+	// A fact that reports the issue actionable (un-park, claim release, a
+	// covering PR closed) is re-checked against project.issue_filter the
+	// way the enumeration would place it: a refused issue is filtered and
+	// derives no stage, instead of a 010 / 015 the next sweep takes off
+	// again. Exempt issues keep the fact's bucket, as before.
+	if f.Issue != nil && f.Issue.Bucket == stageengine.BucketActionable && !c.isExempt(f.Labels) && !c.getIssueFilter().Admits(f.Labels) {
+		f.Issue.Bucket = stageengine.BucketFiltered
+		f.Issue.FilteredReason = issueFilterReason
+	}
 	if f.Issue != nil {
 		resolveIssueLabelFacts(issueInputFrom(f), &f)
 		f.Issue.Stalled = issueHasLabel(f.Labels, stagelabels.StalledLabel)

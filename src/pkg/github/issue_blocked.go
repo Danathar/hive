@@ -254,7 +254,8 @@ type blockedIssueTarget struct {
 // whose reason is the blocked signal's) and, for each with a blocked-on
 // marker in its body or comments, lifts the `blocked` label with a one-line
 // note once the tracked PR has merged or closed — the next enumeration then
-// stages it 010 from scratch. While the PR is open it strips `help wanted`
+// re-triages it from scratch (010, or no stage while project.issue_filter
+// refuses it). While the PR is open it strips `help wanted`
 // (the org workflow adds it on every labelled issue) so the parked issue
 // does not advertise itself. A row with no tracked PR whose recheck-after
 // deadline has passed loses `blocked` with a one-line note (once per
@@ -340,7 +341,7 @@ func ReconcileBlockedIssues(ctx context.Context, client *Client, result *Actiona
 				logger.Warn("blocked sweep: unblock failed", "repo", t.repo, "issue", t.number, "error", err)
 				continue
 			}
-			note := blockedUnblockedMarker + "\nUnblocked: " + prRepo + "#" + strconv.Itoa(prNumber) + " is no longer open. This issue is actionable again."
+			note := blockedPRSettledNote(prRepo + "#" + strconv.Itoa(prNumber))
 			if err := client.CreateIssueCommentBudgeted(ctx, t.repo, t.number, note); err != nil {
 				logger.Warn("blocked sweep: unblock note not posted", "repo", t.repo, "issue", t.number, "error", err)
 			}
@@ -405,8 +406,16 @@ func liftBlockedMarkerless(ctx context.Context, client *Client, t blockedIssueTa
 }
 
 // blockedMarkerlessNote is the note posted when the sweep lifts a
-// hive-applied block that named no PR.
-const blockedMarkerlessNote = blockedUnblockedMarker + "\nUnblocked: the `blocked` label was applied by the hive without a blocked-on marker, so nothing could lift it. This issue is actionable again."
+// hive-applied block that named no PR. Like every unblocked note it says
+// "re-triaging", never "actionable again": an issue project.issue_filter
+// refuses stays out of the agent queue.
+const blockedMarkerlessNote = blockedUnblockedMarker + "\nUnblocked: the `blocked` label was applied by the hive without a blocked-on marker, so nothing could lift it; re-triaging."
+
+// blockedPRSettledNote is the note posted when the PR a blocked issue
+// waited on (pr, "owner/repo#N") has merged or closed.
+func blockedPRSettledNote(pr string) string {
+	return blockedUnblockedMarker + "\nUnblocked: " + pr + " is no longer open; re-triaging."
+}
 
 // blockedLabelActor returns the login that most recently applied `blocked`
 // to the issue, per its timeline; found is false when no labeled event
@@ -444,7 +453,8 @@ func parseBlockedOnReason(reason string) (repo string, pr int, ok bool) {
 
 // liftBlockedDeadline lifts `blocked` from an issue with no tracked PR whose
 // recheck-after deadline has passed and posts the unblocked note, so the next
-// enumeration stages it 010 for a fresh triage (hivecommons/hive#13310). An
+// enumeration re-triages it — 010, or no stage while project.issue_filter
+// refuses it (hivecommons/hive#13310). An
 // ops-tracking issue is left alone, and so is one that already carries the
 // note for this deadline: the label came back after the hive lifted it.
 func liftBlockedDeadline(ctx context.Context, client *Client, t blockedIssueTarget, noted bool, lookupErr error, res *BlockedIssueResult, logger *slog.Logger) {
