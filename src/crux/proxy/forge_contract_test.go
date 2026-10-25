@@ -129,14 +129,6 @@ var ForgeRulesContract = []ForgeRuleContract{
 	},
 }
 
-// allModes lists the agent modes in ascending autonomy order.
-var allModes = []agent.AgentMode{
-	agent.ModeAdvisory,
-	agent.ModeIssuesOnly,
-	agent.ModeIssuesAndPRs,
-	agent.ModeIssuesPRsMerge,
-}
-
 // RunForgeRulesContractTest executes the shared write-gate contract test across
 // GitHub, GitLab, and Gitea.
 func RunForgeRulesContractTest(t *testing.T) {
