@@ -2,6 +2,8 @@ package dashboard
 
 import (
 	"net/http"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,6 +152,13 @@ func (s *Server) handleAutoMergePut(w http.ResponseWriter, r *http.Request) {
 		// TrustedBotAuthors is the FULL desired list; an empty (non-nil) list
 		// disables the trusted-bot lane, absent leaves it untouched.
 		TrustedBotAuthors []string `json:"trusted_bot_authors"`
+		// SquashOnly, RequireCurrentBase and HumanMergePaths are the FULL
+		// desired values, keyed by repos in project.repos and stored as
+		// owner/repo; an empty (non-nil) value clears the setting, absent
+		// leaves it untouched.
+		SquashOnly         []string            `json:"squash_only"`
+		RequireCurrentBase []string            `json:"require_current_base"`
+		HumanMergePaths    map[string][]string `json:"human_merge_paths"`
 		// BotTakeoverEnabled is auto_merge.bot_takeover.enabled; flat so the
 		// dialog's plain toggle can stage it.
 		BotTakeoverEnabled *bool `json:"bot_takeover_enabled"`
@@ -188,6 +197,32 @@ func (s *Server) handleAutoMergePut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		minHeadAge = parsed
+	}
+	var squashOnly, requireCurrentBase []string
+	if body.SquashOnly != nil {
+		repos, msg := s.autoMergeWatchedRepoList("squash_only", body.SquashOnly)
+		if msg != "" {
+			jsonError(w, msg, http.StatusBadRequest)
+			return
+		}
+		squashOnly = repos
+	}
+	if body.RequireCurrentBase != nil {
+		repos, msg := s.autoMergeWatchedRepoList("require_current_base", body.RequireCurrentBase)
+		if msg != "" {
+			jsonError(w, msg, http.StatusBadRequest)
+			return
+		}
+		requireCurrentBase = repos
+	}
+	var humanMergePaths map[string][]string
+	if body.HumanMergePaths != nil {
+		paths, msg := s.autoMergeHumanMergePaths(body.HumanMergePaths)
+		if msg != "" {
+			jsonError(w, msg, http.StatusBadRequest)
+			return
+		}
+		humanMergePaths = paths
 	}
 	var trustedAuthorRepos []string
 	var trustedAuthorLabels []string
@@ -274,6 +309,15 @@ func (s *Server) handleAutoMergePut(w http.ResponseWriter, r *http.Request) {
 	if body.TrustedBotAuthors != nil {
 		cfg.AutoMerge.TrustedBotAuthors = normalizeBotLoginList(body.TrustedBotAuthors)
 	}
+	if body.SquashOnly != nil {
+		cfg.AutoMerge.SquashOnly = squashOnly
+	}
+	if body.RequireCurrentBase != nil {
+		cfg.AutoMerge.RequireCurrentBase = requireCurrentBase
+	}
+	if body.HumanMergePaths != nil {
+		cfg.AutoMerge.HumanMergePaths = humanMergePaths
+	}
 	if body.BotTakeoverEnabled != nil {
 		v := *body.BotTakeoverEnabled
 		cfg.AutoMerge.BotTakeover.Enabled = &v
@@ -355,6 +399,24 @@ func autoMergeSectionResponse(cfg *config.Config) map[string]interface{} {
 	if noCIOK == nil {
 		noCIOK = []string{}
 	}
+	squashOnly := am.SquashOnly
+	if squashOnly == nil {
+		squashOnly = []string{}
+	}
+	requireCurrentBase := am.RequireCurrentBase
+	if requireCurrentBase == nil {
+		requireCurrentBase = []string{}
+	}
+	humanMergePaths := am.HumanMergePaths
+	if humanMergePaths == nil {
+		humanMergePaths = map[string][]string{}
+	}
+	projectRepos := make([]string, 0, len(cfg.Project.Repos))
+	for _, repo := range cfg.Project.Repos {
+		if full := config.QualifyRepo(cfg.Project.Org, repo); full != "" {
+			projectRepos = append(projectRepos, full)
+		}
+	}
 	trustedBots := am.TrustedBotAuthors
 	if trustedBots == nil {
 		trustedBots = append([]string{}, config.DefaultTrustedBotAuthors...)
@@ -385,6 +447,10 @@ func autoMergeSectionResponse(cfg *config.Config) map[string]interface{} {
 		"required_checks":         checks,
 		"allow_unprotected_base":  allowUnprotected,
 		"no_ci_ok":                noCIOK,
+		"squash_only":             squashOnly,
+		"require_current_base":    requireCurrentBase,
+		"human_merge_paths":       humanMergePaths,
+		"project_repos":           projectRepos,
 		"trusted_bot_authors":     trustedBots,
 		"trusted_bot_authors_set": am.TrustedBotAuthors != nil,
 		"bot_takeover_enabled":    am.BotTakeover.IsEnabled(),
@@ -418,6 +484,7 @@ func syncAutoMergePolicyToGitHubClient(cfg *config.Config, ghClient *ghpkg.Clien
 	ghClient.SetRequiredChecksForRepo(cfg.AutoMerge.RequiredCheckSetForRepo)
 	ghClient.SetMergeRequestAllowUnprotectedBaseRepos(cfg.AutoMerge.AllowUnprotectedBaseSet())
 	ghClient.SetMergeRequestNoCIAllowedRepos(cfg.AutoMerge.NoCIOKSet())
+	ghClient.SetHumanMergePaths(cfg.AutoMerge.HumanMergePaths)
 	ghClient.SetAutoMergeMinHeadAge(cfg.AutoMerge.EffectiveMinHeadAge())
 }
 
@@ -430,4 +497,68 @@ func normalizeAutoMergeRepoList(repos []string) []string {
 		}
 	}
 	return out
+}
+
+// autoMergeWatchedRepoList validates a per-repo auto_merge list sent by the
+// dashboard. Every entry must name a repository in project.repos, bare or
+// owner/repo, and is stored as owner/repo because the sweep matches the
+// owner/repo name (SquashOnlyFor, RequireCurrentBaseFor). A non-empty msg is
+// the 400 to return.
+func (s *Server) autoMergeWatchedRepoList(key string, repos []string) ([]string, string) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(repos))
+	for _, repo := range normalizeAutoMergeRepoList(repos) {
+		full, msg := s.autoMergeWatchedRepo(key, repo)
+		if msg != "" {
+			return nil, msg
+		}
+		if lower := strings.ToLower(full); !seen[lower] {
+			seen[lower] = true
+			out = append(out, full)
+		}
+	}
+	return out, ""
+}
+
+func (s *Server) autoMergeWatchedRepo(key, repo string) (full, msg string) {
+	full = config.QualifyRepo(s.deps.Config.Project.Org, repo)
+	owner, name, ok := strings.Cut(full, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || strings.ContainsAny(full, " \t") {
+		return "", key + ": " + repo + " is not an owner/repo name"
+	}
+	if !s.watchesRepo(full) {
+		return "", key + ": " + repo + " is not in project.repos"
+	}
+	return full, ""
+}
+
+// autoMergeHumanMergePaths validates auto_merge.human_merge_paths sent by the
+// dashboard: keys follow autoMergeWatchedRepoList, patterns must be valid
+// globs (the syntax intent.PathMatchesAny uses), and a repo left with no
+// patterns is dropped.
+func (s *Server) autoMergeHumanMergePaths(paths map[string][]string) (map[string][]string, string) {
+	keys := make([]string, 0, len(paths))
+	for k := range paths {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := map[string][]string{}
+	for _, k := range keys {
+		full, msg := s.autoMergeWatchedRepo("human_merge_paths", strings.TrimSpace(k))
+		if msg != "" {
+			return nil, msg
+		}
+		for _, pattern := range normalizeAutoMergeRepoList(paths[k]) {
+			if _, err := filepath.Match(pattern, ""); err != nil {
+				return nil, "human_merge_paths: " + full + ": " + pattern + " is not a valid glob"
+			}
+			if !slices.Contains(out[full], pattern) {
+				out[full] = append(out[full], pattern)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, ""
+	}
+	return out, ""
 }

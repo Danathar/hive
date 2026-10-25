@@ -52439,6 +52439,24 @@ function burnAreaChart() {
       const amContributorLaneGrantable = Array.isArray(amContributorLane.grantable_tiers) ? amContributorLane.grantable_tiers : ['trusted','merger','advisor'];
       const amContributorLaneRepoSet = new Set((Array.isArray(amContributorLane.repos) ? amContributorLane.repos : []).map(r => String(r).toLowerCase()));
       const amContributorLaneRepoOptions = watchedRepos.map(r => `<option value="${esc(r)}"${amContributorLaneRepoSet.has(String(r).toLowerCase()) ? ' selected' : ''}>${esc(r)}</option>`).join('');
+      // Per-repo merge policy lists offer project.repos as owner/repo (the form
+      // the sweep matches); a configured entry outside that list stays shown
+      // and selected so saving never drops it silently.
+      const amProjectRepos = Array.isArray(am.project_repos) ? am.project_repos : [];
+      const amRepoPolicySize = Math.min(Math.max(amProjectRepos.length || 3, 3), 8);
+      const amRepoPolicyOptions = (configured) => {
+        const list = Array.isArray(configured) ? configured : [];
+        const selected = new Set(list.map(r => String(r).toLowerCase()));
+        const known = new Set(amProjectRepos.map(r => String(r).toLowerCase()));
+        return amProjectRepos.map(r => `<option value="${esc(r)}"${selected.has(String(r).toLowerCase()) ? ' selected' : ''}>${esc(r)}</option>`).join('')
+          + list.filter(r => !known.has(String(r).toLowerCase())).map(r => `<option value="${esc(r)}" selected>${esc(r)}</option>`).join('');
+      };
+      const amHumanMergePaths = (am.human_merge_paths && typeof am.human_merge_paths === 'object') ? am.human_merge_paths : {};
+      const amHumanMergePathRepos = amProjectRepos.concat(Object.keys(amHumanMergePaths).filter(k => !amProjectRepos.some(r => String(r).toLowerCase() === k.toLowerCase())));
+      const amHumanMergePathsFor = (repo) => {
+        const key = Object.keys(amHumanMergePaths).find(k => k.toLowerCase() === String(repo).toLowerCase());
+        return key && Array.isArray(amHumanMergePaths[key]) ? amHumanMergePaths[key] : [];
+      };
       const amBotSourceLabel = { known: 'known bot', discovered: 'seen in open PRs', custom: 'added manually' };
       const amBotRow = (b) => `<div class="config-toggle am-bot-row" data-bot-login="${esc(b.login)}">
               <div class="config-toggle-switch am-bot-switch ${b.trusted ? 'on' : ''}" data-action="gh97" data-arg0="${esc(b.login)}" data-arg-types="s" role="switch" aria-checked="${b.trusted ? 'true' : 'false'}"></div>
@@ -52558,6 +52576,25 @@ function burnAreaChart() {
           <div class="config-toggle mt-4">
             <div class="config-toggle-switch ${am.bot_takeover_enabled !== false ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="auto-merge" data-key="bot_takeover_enabled"></div>
             <span class="config-toggle-label">Take over github-actions[bot] PRs whose checks cannot run ${yamlHint('auto_merge.bot_takeover.enabled')} ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Take over github-actions[bot] PRs', `On by default. Applies only when github-actions[bot] is a trusted bot author above. A PR that bot opens with a workflow GITHUB_TOKEN never triggers pull_request checks, so it can never go green. Once its head is older than both the minimum head age and 30 minutes with no pull_request run, the App pushes the same change as one signed-off commit to hive/takeover-&lt;n&gt;, opens a PR that supersedes it and closes the bot PR. One attempt per bot head SHA. Applies on the next sweep.`)}</span>
+          </div>
+          <div class="config-field mt-4" id="am-repo-policy">
+            <label>Per-repository merge policy ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Per-repository merge policy', `Repo-scoped rules every auto-merge lane applies. Repositories come from project.repos; saving writes each list in full and applies on the next sweep.`)}</label>
+            <div class="config-field mt-3">
+              <label for="am-require-current-base">Require current base ${yamlHint('auto_merge.require_current_base')} ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Require current base', `Listed repos only merge a head that contains the current base tip. A green head tested against an older base is updated with GitHub update-branch and merges once CI is green on the new head, so a semantic conflict turns the PR red instead of breaking the base. Costs one compare call per merge candidate.`)}</label>
+              <select id="am-require-current-base" multiple size="${amRepoPolicySize}" data-change-action="markDirtyAutoMergeRepoPolicy" class="am-trusted-authors-repos">${amRepoPolicyOptions(am.require_current_base)}</select>
+            </div>
+            <div class="config-field mt-4">
+              <label for="am-squash-only">Squash only ${yamlHint('auto_merge.squash_only')} ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Squash only', `Listed repos forbid merge commits. Elsewhere a role/trusted PR mixing the contributor's commits with the hive's own signed-off fixes merges with a merge commit; in a listed repo it parks at stage/085 and the note names this key.`)}</label>
+              <select id="am-squash-only" multiple size="${amRepoPolicySize}" data-change-action="markDirtyAutoMergeRepoPolicy" class="am-trusted-authors-repos">${amRepoPolicyOptions(am.squash_only)}</select>
+            </div>
+            <div class="config-field mt-4" id="am-human-merge-paths">
+              <label>Paths a person must merge ${yamlHint('auto_merge.human_merge_paths')} ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Paths a person must merge', `Comma-separated glob patterns per repo (same syntax as intent.guardrail_path_patterns), for example .github/workflows/**. Every App merge path refuses a PR touching one, adds hold and posts one comment; a person must merge it. Leave a repo empty for no such paths.`)}</label>
+              ${amHumanMergePathRepos.length ? amHumanMergePathRepos.map(r => `<div class="config-field mt-3 am-human-merge-path-row" data-repo="${esc(r)}">
+                <label><code>${esc(r)}</code></label>
+                <input type="text" class="am-human-merge-path-input" value="${esc(amHumanMergePathsFor(r).join(', '))}" placeholder=".github/workflows/**, CODEOWNERS" data-change-action="markDirtyAutoMergeRepoPolicy">
+              </div>`).join('') : '<p class="am-trusted-authors-note">No repositories in project.repos yet.</p>'}
+            </div>
+            <p class="config-help">Select nothing (or leave paths empty) to turn a rule off for every repo. YAML keys: <code>auto_merge.require_current_base[]</code>, <code>auto_merge.squash_only[]</code>, <code>${esc('auto_merge.human_merge_paths.<key>')}</code>.</p>
           </div>
           <div class="config-field" id="am-trusted-authors">
             <label>Trusted-author auto-merge ${settingHelpMark('hive-merge', 'trusted-author-auto-merge', 'Trusted-author auto-merge', `Operator opt-in for human-authored PRs: Hive may merge a green PR only when the author holds the configured hive role and, when required, GitHub says the author has push/maintain/admin permission on that repository. Fork PRs from non-members are blocked, excluded labels and CHANGES_REQUESTED reviews block, and the head SHA is re-checked at merge.`)}</label>
@@ -55118,6 +55155,27 @@ function burnAreaChart() {
         exclude_labels: labels ? labels.value.split(',').map(s => s.trim()).filter(Boolean) : [],
         repos: repos ? Array.from(repos.selectedOptions).map(o => o.value).filter(Boolean) : []
       });
+    }
+
+    // Settings → Features → Auto-merge → Per-repository merge policy. Each
+    // control stages its key in full: an empty selection clears the list and
+    // a repo with no patterns drops out of auto_merge.human_merge_paths.
+    function markDirtyAutoMergeRepoPolicy() {
+      const selected = (id) => {
+        const el = document.getElementById(id);
+        return el ? Array.from(el.selectedOptions).map(o => o.value).filter(Boolean) : [];
+      };
+      if (this && this.id === 'am-require-current-base') markDirty('auto-merge', 'require_current_base', selected('am-require-current-base'));
+      if (this && this.id === 'am-squash-only') markDirty('auto-merge', 'squash_only', selected('am-squash-only'));
+      if (this && this.classList && this.classList.contains('am-human-merge-path-input')) {
+        const paths = {};
+        document.querySelectorAll('#am-human-merge-paths .am-human-merge-path-row').forEach(row => {
+          const input = row.querySelector('.am-human-merge-path-input');
+          const patterns = splitConfigLines(input ? input.value : '');
+          if (row.dataset.repo && patterns.length) paths[row.dataset.repo] = patterns;
+        });
+        markDirty('auto-merge', 'human_merge_paths', paths);
+      }
     }
 
     function markDirtyContributorLane() {
