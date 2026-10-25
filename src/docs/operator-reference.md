@@ -485,8 +485,12 @@ advanced into the merge path.
 | `auto_merge.contributor_lane.repos` | empty = all watched repos | Optional repo allow-list for the contributor-lane tier (bare name or `owner/repo`). |
 | `auto_merge.contributor_lane.exclude_labels` | `hold`, `do-not-merge`, `needs-human`, `blocked`, `needs-rebase` | Labels that keep a PR out of contributor-lane auto-merge (`do-not-merge/*` always excluded). |
 
-Owners can edit `auto_merge.trusted_authors.*` and `auto_merge.contributor_lane.*`
-from **Settings → Features → Auto-merge**. The dashboard writes the same
+Owners can edit `auto_merge.trusted_authors.*`, `auto_merge.contributor_lane.*`,
+`auto_merge.require_current_base`, `auto_merge.squash_only` and
+`auto_merge.human_merge_paths` from **Settings → Features → Auto-merge** (the
+last three under **Per-repository merge policy**, picking from `project.repos`
+and saving each value as `owner/repo`; a repo outside `project.repos` is
+refused). The dashboard writes the same
 owner-only `/api/config/auto-merge` overlay as the other auto-merge controls, so
 hosted spoke changes survive restarts without editing `hive.yaml`.
 

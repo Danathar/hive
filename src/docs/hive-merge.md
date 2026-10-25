@@ -151,7 +151,9 @@ unset by default. When a merge request touches a listed path, `hive-merge`
 refuses it, adds `hold`, and posts one `<!-- hive-human-merge-path -->` comment
 naming the path(s); a person must merge it. The same key guards the automerge
 sweep lanes whatever the intent tier. If the changed-file list for a configured
-repo cannot be fetched completely, the merge is withheld (fail closed). See
+repo cannot be fetched completely, the merge is withheld (fail closed). Owners
+can edit the map from **Settings → Features → Auto-merge → Per-repository merge
+policy**, one comma-separated pattern list per repo in `project.repos`. See
 [operator-reference.md](operator-reference.md).
 
 **Contributor PRs are held to the contributor-lane policy.** A merge request
@@ -316,6 +318,14 @@ turning every bot off writes an explicit empty list (App-only sweep). The
 underlying endpoint is `GET/PUT /api/config/auto-merge` (owner-only), whose
 response carries `bot_authors: [{login, source: known|discovered|custom,
 trusted}]`.
+
+The same section's **Per-repository merge policy** block edits
+`auto_merge.require_current_base`, `auto_merge.squash_only` and
+`auto_merge.human_merge_paths` with a multi-select (or a pattern list) over the
+hive's `project.repos`. Saving writes each key in full as `owner/repo` (the form
+the sweep matches); an empty selection clears it, and a repo outside
+`project.repos` or a malformed glob is refused with a 400. The sweep reads all
+three live, so a change applies on the next pass without a restart.
 
 ### Event-driven sweeps on the ForgeState cache
 
