@@ -33,8 +33,8 @@ Scope: freeze today's behaviour. No production code changes.
 
 - `src/pkg/stageengine/testdata/stage_goldens/*.json`: one fixture per
   lane × reason × verdict × author-kind × adoption combination reachable in
-  `ClassifyStage`/`ResolveStage` (`src/pkg/stageengine/derive_pr_classify.go:252`,
-  `src/pkg/stageengine/derive_pr_classify.go:450`), serialised as
+  `ClassifyStage`/`ResolveStage` (`src/pkg/stageengine/derive_pr_classify.go:260`,
+  `src/pkg/stageengine/derive_pr_classify.go:458`), serialised as
   `[]stageObservation` → `{stage, rank, reason, role, terminal}`. Generated
   by a `go test -run TestStageGoldens -update` flag; checked in.
 - `src/pkg/github/testdata/issue_stage_goldens/*.json`: one per bucket ×

@@ -82,12 +82,13 @@ func humanVerdict(v ContributorLaneVerdict) stagelabels.VerdictState {
 }
 
 // manualMergeReason reports whether a lane reason leaves no unattended way
-// to merge: CI workflow / action files edited, tests removed, or a
-// human-merge path touched. An approval or `/hive approve` never overrides
-// these, so the 085 comment says a person must merge (hivecommons/hive#13087).
+// to merge: CI workflow / action files edited, tests removed, a human-merge
+// path touched, or GitHub refusing the merge method the hive must use. An
+// approval or `/hive approve` never overrides these, so the 085 comment says
+// a person must merge (hivecommons/hive#13087).
 func manualMergeReason(reason string) bool {
 	switch reason {
-	case contributorLaneReasonWorkflowPath, contributorLaneReasonTestsRemoved, autoMergeReasonHumanMergePath:
+	case contributorLaneReasonWorkflowPath, contributorLaneReasonTestsRemoved, autoMergeReasonHumanMergePath, autoMergeReasonMergeRefusedMethod:
 		return true
 	}
 	return false
@@ -211,6 +212,10 @@ func decisionCause(reason string) string {
 			}
 			return "issue " + ref + ", which this PR closes, is parked for a decision (`" + label + "`); once it is decided, remove `" + label + "` from " + ref + " to release this PR"
 		}
+	case reason == autoMergeReasonMergeRefusedReview:
+		return "GitHub refused the merge: branch protection requires an approving review from someone with write access, and the Hive App cannot give it. A GitHub **Approve** review on this head (or an App bypass in the branch rules) lets the hive merge it; the hive retries once GitHub reports the PR unblocked, or within 30 minutes"
+	case reason == autoMergeReasonMergeRefusedMethod:
+		return "GitHub refused the merge: the repository does not allow the merge method the hive chose for this PR. The hive does not switch methods on its own: a forward merge or a `" + stagelabels.MergeCommitLabel + "` PR must never be squashed. Merge it by hand with an allowed method, or allow the method in the repository settings and the hive retries within 30 minutes"
 	case reason == "":
 		return ""
 	}
