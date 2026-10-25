@@ -30,6 +30,9 @@ const (
 	autoMergeReasonHumanMergePathEvidence  = prstage.AutoMergeReasonHumanMergePathEvidence
 	autoMergeReasonIntentEvidence          = prstage.AutoMergeReasonIntentEvidence
 	autoMergeReasonIntentUnauthorized      = prstage.AutoMergeReasonIntentUnauthorized
+	autoMergeReasonMergeQueueRequired      = prstage.AutoMergeReasonMergeQueueRequired
+	autoMergeReasonMergeRefusedMethod      = prstage.AutoMergeReasonMergeRefusedMethod
+	autoMergeReasonMergeRefusedReview      = prstage.AutoMergeReasonMergeRefusedReview
 	autoMergeReasonNoAppBotLogin           = prstage.AutoMergeReasonNoAppBotLogin
 	autoMergeReasonReviewGatePrefix        = prstage.AutoMergeReasonReviewGatePrefix
 	contributorLaneReasonAppAuthored       = prstage.ContributorLaneReasonAppAuthored
@@ -220,6 +223,11 @@ var stageNeedsHumanReasons = map[string]bool{
 	"approval-desk-withheld": true, "author-permission-missing": true, "fork-non-member": true,
 	"held": true, "label:hold": true, "label:needs-human": true, "exempt-label": true, "sentinel": true,
 	autoMergeReasonNoAppBotLogin: true, "self-authorization-hold-released": true,
+	// GitHub refused the merge for a reason no retry cures: branch
+	// protection wants a person's approving review, or the repository has
+	// the chosen merge method switched off. The merge is not imminent, and
+	// a person has to act (approve, change the setting, or merge by hand).
+	autoMergeReasonMergeRefusedReview: true, autoMergeReasonMergeRefusedMethod: true,
 }
 
 // stageMergeQueueReasons are reasons reached only after every gate passed,
@@ -228,7 +236,7 @@ var stageNeedsHumanReasons = map[string]bool{
 var stageMergeQueueReasons = map[string]bool{
 	"head-changed-since-eval": true, "merge-failed": true, "merge-not-applied": true,
 	"required-checks-expected": true, "behind": true, "updated-branch": true, "update-branch": true,
-	autoMergeReasonBehindBudgetExhausted: true,
+	autoMergeReasonBehindBudgetExhausted: true, autoMergeReasonMergeQueueRequired: true,
 }
 
 // stageFixingReasons are reasons an agent (or the author) must fix the head.

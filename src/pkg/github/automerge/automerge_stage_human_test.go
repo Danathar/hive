@@ -278,14 +278,21 @@ func TestTrustAndDecisionCauseProse(t *testing.T) {
 	if got := decisionCause("something-new"); got != "the lane reported `something-new`" {
 		t.Fatalf("fallback = %q", got)
 	}
+	// The 085 comment names the rule GitHub refused the merge on.
+	if got := decisionCause(autoMergeReasonMergeRefusedReview); !strings.Contains(got, "approving review") {
+		t.Fatalf("review required = %q", got)
+	}
+	if got := decisionCause(autoMergeReasonMergeRefusedMethod); !strings.Contains(got, "merge method") || !strings.Contains(got, stagelabels.MergeCommitLabel) {
+		t.Fatalf("method not allowed = %q", got)
+	}
 	// hivecommons/hive#13087: only the lane rules that allow no unattended
 	// merge are manual-merge; a failed file read (fails closed) is not a rule.
-	for _, r := range []string{contributorLaneReasonWorkflowPath, contributorLaneReasonTestsRemoved, autoMergeReasonHumanMergePath} {
+	for _, r := range []string{contributorLaneReasonWorkflowPath, contributorLaneReasonTestsRemoved, autoMergeReasonHumanMergePath, autoMergeReasonMergeRefusedMethod} {
 		if !manualMergeReason(r) {
 			t.Fatalf("manualMergeReason(%q) = false", r)
 		}
 	}
-	for _, r := range []string{autoMergeReasonHumanMergePathEvidence, stageReasonVerdictRequiresHuman, "held", "", "something-new"} {
+	for _, r := range []string{autoMergeReasonHumanMergePathEvidence, stageReasonVerdictRequiresHuman, autoMergeReasonMergeRefusedReview, "held", "", "something-new"} {
 		if manualMergeReason(r) {
 			t.Fatalf("manualMergeReason(%q) = true", r)
 		}

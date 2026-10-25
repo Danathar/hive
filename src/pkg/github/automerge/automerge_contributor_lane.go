@@ -1034,6 +1034,10 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	}
 	author, headSHA, claim, verdict, method, mergeClaim := eval.author, eval.headSHA, eval.claim, eval.verdict, eval.method, eval.mergeClaim
 	fullRepo := owner + "/" + repo
+	attempt := mergeAttempt{owner: owner, repo: repo, base: eval.pr.GetBase().GetRef(), number: number, head: headSHA, state: eval.pr.GetMergeableState(), method: method}
+	if refused := c.knownMergeRefusal(attempt); refused != "" {
+		return AutoMergeSweepEvent{}, refused, nil
+	}
 
 	var mergeResult *gh.PullRequestMergeResult
 	mergeOut, err := c.executeMergeEffect(ctx, mergeClaim, owner, repo, number, func(ctx context.Context) (effects.Result, error) {
@@ -1050,6 +1054,9 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	if err != nil {
 		if requiredChecksExpectedMergeError(err) {
 			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected", c.isForkPR(eval.pr))
+		}
+		if refused := c.refusedMerge(attempt, err); refused != "" {
+			return AutoMergeSweepEvent{}, refused, nil
 		}
 		return AutoMergeSweepEvent{}, "merge-failed", err
 	}
