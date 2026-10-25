@@ -388,6 +388,85 @@ func TestMergeContract_GitHub(t *testing.T) {
 	RunMergeContract(t, &gitHubContractAdapter{})
 }
 
+// giteaContractAdapter adapts giteaForge to the shared contract harness.
+//
+// Gitea carries the strategy, the head pin and the branch deletion in ONE
+// merge payload (Do / head_commit_id / delete_branch_after_merge), so the fake
+// asserts on that body rather than on a sequence of calls.
+type giteaContractAdapter struct{}
+
+func (a *giteaContractAdapter) Name() string { return "gitea" }
+
+func (a *giteaContractAdapter) Setup(t *testing.T, scenario MergeContractScenario) (Merger, string, int, func()) {
+	t.Helper()
+	const (
+		org   = "contract-org"
+		name  = "contract-repo"
+		slug  = org + "/" + name
+		prNum = 42
+		head  = "feedfacefeedfacefeedfacefeedfacefeedface"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, fmt.Sprintf("/pulls/%d", prNum)) {
+			pr := map[string]any{
+				"number": prNum,
+				"state":  "open",
+				"merged": scenario == ScenarioAlreadyMerged,
+				"head":   map[string]any{"ref": "contract-head", "sha": head},
+				"base":   map[string]any{"ref": "main"},
+			}
+			if scenario == ScenarioHoldLabelRefuses {
+				pr["labels"] = []map[string]any{{"name": "kind/bug"}, {"name": "hold"}}
+			}
+			_ = json.NewEncoder(w).Encode(pr)
+			return
+		}
+
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, fmt.Sprintf("/pulls/%d/merge", prNum)) {
+			switch scenario {
+			case ScenarioHoldLabelRefuses, ScenarioHeadSHAGuard, ScenarioAlreadyMerged:
+				t.Errorf("merge endpoint called in scenario %q — the gate must refuse before the merge", scenario)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			var p giteaMergePayload
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil && err != io.EOF {
+				t.Errorf("decode merge body: %v", err)
+			}
+			if want, ok := map[MergeContractScenario]string{
+				ScenarioStrategySquash: "squash",
+				ScenarioStrategyMerge:  "merge",
+				ScenarioStrategyRebase: "rebase",
+			}[scenario]; ok && p.Do != want {
+				t.Errorf("Do = %q, want %q", p.Do, want)
+			}
+			if scenario == ScenarioDeleteBranch && !p.DeleteBranchAfterMerge {
+				t.Errorf("delete_branch_after_merge = false, want true")
+			}
+			if scenario == ScenarioNotMergeable {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": "Please check your email address"})
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+
+	f, err := newGiteaForge("contract-token", Options{BaseURL: srv.URL, Org: org})
+	if err != nil {
+		srv.Close()
+		t.Fatalf("newGiteaForge: %v", err)
+	}
+	return f, slug, prNum, srv.Close
+}
+
 func TestMergeContract_Gitea(t *testing.T) {
-	t.Skip("Gitea adapter does not implement Merger yet (pending #14110)")
+	RunMergeContract(t, &giteaContractAdapter{})
 }
