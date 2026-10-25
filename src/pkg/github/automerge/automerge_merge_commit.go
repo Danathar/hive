@@ -23,7 +23,8 @@ import (
 // a maintainer to merge with a merge commit. Every commit on such a head is
 // signed off by its own author, so a merge commit lands them all unchanged
 // and the invariant holds without anyone rewriting the contributor's
-// history. For a role/trusted PR the lane now makes that choice itself:
+// history. For a role/trusted PR, or any PR whose current head a trusted
+// human approved, the lane now makes that choice itself:
 //   - the stage pass elects a merge commit when the head mixes contributor
 //     commits with hive commits, every commit is signed, and the repo is
 //     not squash-only (auto_merge.squash_only); it writes
@@ -33,8 +34,14 @@ import (
 //     reads the label and accepts a bot's self-signed commit under it;
 //   - the merge sweeps honour the label with merge_method=merge and record
 //     the reason in the merge ledger.
-// Where the election is refused the previous behaviour stands, and an
-// adopted head's stage/085 note names why.
+// Where the election is refused and the hive caused the shape (its own
+// commits next to the contributor's, or a head it pushed), the PR parks at
+// stage/085 with a maintainer note: the contributor did not make those
+// commits and is never asked to rewrite them (projectbluefin/testsuite#991,
+// where a maintainer merging with a merge commit was the real resolution).
+// A head made only of App-signed commits the hive never pushed is a
+// person's own commit made with the App's identity (hivecommons/pluk#315)
+// and still goes back to its author with the commands to re-sign it.
 
 // mergeMethodReasonMixedAuthorship is the merge-ledger reason recorded when
 // the label selects the method.
@@ -58,25 +65,43 @@ type mergeCommitDecision struct {
 
 // mergeCommitElection decides whether a head with squash-unsafe hive
 // commits is merged with a merge commit instead of being sent back to its
-// author. Requires: role/trusted (the hive will merge it at all), every
-// commit signed (a missing sign-off is the DCO lane's problem, not a merge
-// method's), contributor commits alongside the hive's (mixed authorship),
+// author. Requires: role/trusted, or a trusted human's approval of exactly
+// this head (approvedHead), so the hive will merge it at all; every commit
+// signed (a missing sign-off is the DCO lane's problem, not a merge
+// method's); contributor commits alongside the hive's (mixed authorship);
 // and a repo whose policy allows merge commits.
-func mergeCommitElection(stats dcoStats, role stagelabels.Role, policy StageLabelPolicy, display string) mergeCommitDecision {
+func mergeCommitElection(stats dcoStats, role stagelabels.Role, approvedHead bool, policy StageLabelPolicy, display string) mergeCommitDecision {
 	if stats.squashUnsafeHive <= 0 {
 		return mergeCommitDecision{}
 	}
+	// The role check comes last: Refused names the blocker the maintainer
+	// note asks about, and an approval cannot clear the other three.
 	switch {
-	case role != stagelabels.RoleTrusted:
-		return mergeCommitDecision{Refused: mergeCommitRefusedRole}
 	case stats.unsigned > 0:
 		return mergeCommitDecision{Refused: mergeCommitRefusedUnsigned}
 	case stats.total <= stats.squashUnsafeHive:
 		return mergeCommitDecision{Refused: mergeCommitRefusedHiveOnly}
 	case policy.SquashOnly != nil && policy.SquashOnly(display):
 		return mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}
+	case role != stagelabels.RoleTrusted && !approvedHead:
+		return mergeCommitDecision{Refused: mergeCommitRefusedRole}
 	}
 	return mergeCommitDecision{Elected: true}
+}
+
+// signoffHiveCaused reports whether the hive, not the PR author, put the
+// squash-unsafe commits on the head: the contributor's own commits sit next
+// to the App-signed ones (mixed authorship), or the hive recorded pushing
+// this head or adopted the PR in place. Such a head is a maintainer's to
+// land (merge commit) and never goes back to the contributor.
+func signoffHiveCaused(stats dcoStats, rec stagelabels.Record, hadPrev bool, head string) bool {
+	if stats.squashUnsafeHive <= 0 {
+		return false
+	}
+	if stats.total > stats.squashUnsafeHive {
+		return true
+	}
+	return hadPrev && (rec.HivePushedHead(head) || rec.AdoptedInPlace())
 }
 
 // MergeCommitComment is the one note left when the lane elects a merge
@@ -87,9 +112,9 @@ func MergeCommitComment(obs stageObservation, stats dcoStats) string {
 	fmt.Fprintf(&b, "%d of %d commits on `%s` are the hive's, signed off as the hive App, and the rest are @%s's with their own sign-off. ", stats.squashUnsafeHive, stats.total, shortSHA(obs.HeadSHA), nonEmpty(obs.Author, "the contributor"))
 	b.WriteString("A squash would land the hive's commits under @")
 	b.WriteString(nonEmpty(obs.Author, "the contributor"))
-	b.WriteString("'s name with the App's sign-off, so the hive will merge this PR with a **merge commit** instead (`")
+	b.WriteString("'s name with the App's sign-off, so this PR merges with a **merge commit** instead (`")
 	b.WriteString(stagelabels.MergeCommitLabel)
-	b.WriteString("`): every commit lands as it is, each with its own author's sign-off. Nothing is rewritten and nobody needs to act. ")
+	b.WriteString("`): every commit lands as it is, each with its own author's sign-off. Nothing is rewritten and nobody needs to re-sign anything. ")
 	b.WriteString("Maintainers merging by hand: use `gh pr merge --merge`, not squash.")
 	return b.String()
 }
@@ -114,6 +139,47 @@ func (c *Engine) noteMergeCommit(ctx context.Context, store *stagelabels.Store, 
 		return 0, err
 	}
 	store.MarkMergeCommitNoted(key, obs.HeadSHA)
+	return 1, nil
+}
+
+// SignoffAttributionDecisionMarkerPrefix opens the one stage/085 note per
+// head for a hive-caused sign-off attribution the lane could not resolve
+// with a merge commit by itself.
+const SignoffAttributionDecisionMarkerPrefix = "<!-- hive:maintainer-signoff-attribution"
+
+// SignoffAttributionDecisionComment is that note: addressed to maintainers,
+// it says the hive's commits caused the block, that the contributor has
+// nothing to fix, and what clears it (mergeCommitRefusalText).
+func SignoffAttributionDecisionComment(obs stageObservation) string {
+	n, total := max(obs.Detail.DCOSquashUnsafeHive, 1), obs.Detail.DCOTotal
+	if total < n {
+		total = n
+	}
+	author := nonEmpty(obs.Author, "the contributor")
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s head=%s -->\n", SignoffAttributionDecisionMarkerPrefix, obs.HeadSHA)
+	fmt.Fprintf(&b, "Held at `%s` for a maintainer. %d of %d commits on `%s` are the hive's own, signed off as the hive App, so a squash merge would land them as @%s with the App's sign-off and the `Sign-off survives the squash` gate stays red. ",
+		stagelabels.NeedsDecision.Label(), n, total, shortSHA(obs.HeadSHA), author)
+	fmt.Fprintf(&b, "@%s did not make those commits and has nothing to fix here.\n\n", author)
+	b.WriteString(mergeCommitRefusalText(obs))
+	return b.String()
+}
+
+// noteSignoffAttributionDecision posts SignoffAttributionDecisionComment
+// once per head.
+func (c *Engine) noteSignoffAttributionDecision(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation) (int, error) {
+	if obs.HeadSHA == "" {
+		return 0, nil
+	}
+	if rec, ok := store.Get(key); ok && rec.SignoffAttributionNoted(obs.HeadSHA) {
+		return 0, nil
+	}
+	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(SignoffAttributionDecisionComment(obs))}); err != nil {
+		c.warn("stage labels: sign-off attribution 085 note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
+		return 0, err
+	}
+	store.MarkSignoffAttributionNoted(key, obs.HeadSHA)
+	c.info("stage labels: hive-caused sign-off attribution parked for a maintainer", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "author", obs.Author, "refused", obs.Detail.MergeCommitRefused)
 	return 1, nil
 }
 

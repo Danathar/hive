@@ -26,6 +26,7 @@ package stagelabels
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -129,6 +130,11 @@ type Evidence struct {
 	// human-merge path touched): a review approval or `/hive approve` does
 	// not override it, only a person merging does (hivecommons/hive#13087).
 	ManualMerge bool
+	// ForkGuard names the red checks that refuse the PR only because it is
+	// from a fork (a fork-publication or fork-secrets guard). They are not
+	// the author's to fix: only a maintainer can clear them, so they route
+	// to 085 instead of the fixing stage (hivecommons/hive#14273).
+	ForkGuard []string
 }
 
 // HoldLabels are the modifier labels that turn a human hand-off into a
@@ -208,7 +214,15 @@ func RouteHuman(e Evidence) Route {
 		note("verdict changes_requested @"+ShortSHA(e.Head), LaneReasonChangesRequested)
 	}
 	if e.Checks.Known && len(e.Checks.Red) > 0 {
-		note("red checks: "+strings.Join(e.Checks.Red, ", "), laneReasonCheckFailing+e.Checks.Red[0])
+		var red []string
+		for _, name := range e.Checks.Red {
+			if !slices.Contains(e.ForkGuard, name) {
+				red = append(red, name)
+			}
+		}
+		if len(red) > 0 {
+			note("red checks: "+strings.Join(red, ", "), laneReasonCheckFailing+red[0])
+		}
 	}
 	if e.DCO == DCONo {
 		note("DCO sign-off missing", LaneReasonDCOMissing)
@@ -222,10 +236,17 @@ func RouteHuman(e Evidence) Route {
 	// A fresh head waits for its verdict — unless the reviewer has already
 	// answered requires_human for this very head, in which case the person
 	// is owed a decision now, not after CI reports (hivecommons/hive#13115).
-	if e.Verdict == VerdictPending || (e.HeadFresh && e.Verdict != VerdictRequiresHuman) {
+	if len(e.ForkGuard) == 0 && (e.Verdict == VerdictPending || (e.HeadFresh && e.Verdict != VerdictRequiresHuman)) {
 		return Route{Stage: ReviewPending, Reasons: []string{"no reviewer verdict for this head yet"}, Summary: summary}
 	}
 	var decide []string
+	if len(e.ForkGuard) > 0 {
+		subject, verb, it := "check", "refuses", "it"
+		if len(e.ForkGuard) > 1 {
+			subject, verb, it = "checks", "refuse", "them"
+		}
+		decide = append(decide, subject+" `"+strings.Join(e.ForkGuard, "`, `")+"` "+verb+" pull requests from a fork, so neither the author nor the hive can turn "+it+" green: a maintainer must push this branch to the repository (or approve the run as the repository requires)")
+	}
 	switch e.Verdict {
 	case VerdictUnavailable:
 		decide = append(decide, "no reviewer agent is configured, so this head will never get a swarm verdict")
@@ -252,7 +273,7 @@ func RouteHuman(e Evidence) Route {
 	}
 	if e.Cause == CauseDecision && strings.TrimSpace(e.CauseReason) != "" {
 		decide = append(decide, e.CauseReason)
-	} else if e.Cause == CauseDecision {
+	} else if e.Cause == CauseDecision && len(e.ForkGuard) == 0 {
 		decide = append(decide, "the automerge lane will not merge this unattended")
 	}
 	if len(decide) > 0 {

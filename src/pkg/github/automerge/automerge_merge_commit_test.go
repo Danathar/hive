@@ -62,22 +62,27 @@ func mergeCommitComments(api *stageAPI) []string {
 func TestMergeCommitElection(t *testing.T) {
 	squashOnly := StageLabelPolicy{SquashOnly: func(string) bool { return true }}
 	tests := []struct {
-		name   string
-		stats  dcoStats
-		role   stagelabels.Role
-		policy StageLabelPolicy
-		want   mergeCommitDecision
+		name     string
+		stats    dcoStats
+		role     stagelabels.Role
+		approved bool
+		policy   StageLabelPolicy
+		want     mergeCommitDecision
 	}{
-		{"pure contributor head: nothing to elect", dcoStats{total: 2}, stagelabels.RoleTrusted, StageLabelPolicy{}, mergeCommitDecision{}},
-		{"mixed, self-signed, trusted", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleTrusted, StageLabelPolicy{}, mergeCommitDecision{Elected: true}},
-		{"mixed but role/contributor", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleContributor, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedRole}},
-		{"mixed with an unsigned commit", dcoStats{total: 3, unsigned: 1, squashUnsafeHive: 1}, stagelabels.RoleTrusted, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedUnsigned}},
-		{"only hive commits", dcoStats{total: 1, squashUnsafeHive: 1}, stagelabels.RoleTrusted, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedHiveOnly}},
-		{"squash-only repo", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleTrusted, squashOnly, mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}},
+		{"pure contributor head: nothing to elect", dcoStats{total: 2}, stagelabels.RoleTrusted, false, StageLabelPolicy{}, mergeCommitDecision{}},
+		{"mixed, self-signed, trusted", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleTrusted, false, StageLabelPolicy{}, mergeCommitDecision{Elected: true}},
+		{"mixed but role/contributor", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleContributor, false, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedRole}},
+		{"mixed with an unsigned commit", dcoStats{total: 3, unsigned: 1, squashUnsafeHive: 1}, stagelabels.RoleTrusted, false, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedUnsigned}},
+		{"only hive commits", dcoStats{total: 1, squashUnsafeHive: 1}, stagelabels.RoleTrusted, false, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedHiveOnly}},
+		{"squash-only repo", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleTrusted, false, squashOnly, mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}},
+		{"mixed, role/contributor, trusted human approved the head", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleContributor, true, StageLabelPolicy{}, mergeCommitDecision{Elected: true}},
+		{"approved head in a squash-only repo", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleContributor, true, squashOnly, mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}},
+		{"contributor role in a squash-only repo names the policy", dcoStats{total: 2, squashUnsafeHive: 1}, stagelabels.RoleContributor, false, squashOnly, mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}},
+		{"approved head that is only hive commits", dcoStats{total: 1, squashUnsafeHive: 1}, stagelabels.RoleContributor, true, StageLabelPolicy{}, mergeCommitDecision{Refused: mergeCommitRefusedHiveOnly}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mergeCommitElection(tt.stats, tt.role, tt.policy, "acme/widget"); got != tt.want {
+			if got := mergeCommitElection(tt.stats, tt.role, tt.approved, tt.policy, "acme/widget"); got != tt.want {
 				t.Fatalf("mergeCommitElection = %+v, want %+v", got, tt.want)
 			}
 		})

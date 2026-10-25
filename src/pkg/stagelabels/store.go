@@ -164,6 +164,9 @@ type Record struct {
 	// MergeCommitNotedHead is the head the `merge-method/merge` note was
 	// posted for, so the lane explains the merge method once per head.
 	MergeCommitNotedHead string `json:"merge_commit_noted_head,omitempty"`
+	// SignoffAttributionNotedHead is the head the 085 maintainer note for
+	// hive-caused sign-off attribution was posted for, once per head.
+	SignoffAttributionNotedHead string `json:"signoff_attribution_noted_head,omitempty"`
 	// LastSeen is the last cycle the item was observed; stale records are
 	// pruned by Prune so a closed item does not live in the file forever.
 	LastSeen time.Time `json:"last_seen"`
@@ -865,6 +868,12 @@ func (r Record) MergeCommitNoted(head string) bool {
 	return head != "" && r.MergeCommitNotedHead == head
 }
 
+// SignoffAttributionNoted reports whether the 085 sign-off attribution note
+// was posted for head.
+func (r Record) SignoffAttributionNoted(head string) bool {
+	return head != "" && r.SignoffAttributionNotedHead == head
+}
+
 // AdoptedHeadClockUnset reports a live in-place adoption whose head clock
 // was never stamped: a record written before AdoptedHeadAt existed.
 func (r Record) AdoptedHeadClockUnset() bool {
@@ -1034,6 +1043,20 @@ func (s *Store) MarkMergeCommitNoted(key, head string) {
 		return
 	}
 	r.MergeCommitNotedHead = head
+	s.items[key] = r
+	s.dirty = true
+}
+
+// MarkSignoffAttributionNoted records that the 085 sign-off attribution note
+// was posted for head.
+func (s *Store) MarkSignoffAttributionNoted(key, head string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || r.SignoffAttributionNotedHead == head {
+		return
+	}
+	r.SignoffAttributionNotedHead = head
 	s.items[key] = r
 	s.dirty = true
 }
