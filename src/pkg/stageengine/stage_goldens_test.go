@@ -296,7 +296,14 @@ func runStageGoldenWithFacts(in stageGoldenInput) (stageGoldenWant, Facts) {
 			verdict.Rank = stageRankOwned
 			obs.Reason = stagelabels.LaneReasonDCOMissing
 		} else if in.DCO.SquashUnsafeHive > 0 && !in.DCO.AuthorIsApp {
+			// No merge commit is elected here (no role/trusted lane in
+			// these fixtures). Mixed authorship is the hive's doing and
+			// parks for a maintainer; an all-App head goes to its author.
 			verdict.Stage = FixingStage(obs)
+			if in.DCO.Total > in.DCO.SquashUnsafeHive && !(hadPrev && prevRec.AdoptionLive(obs.HeadSHA)) {
+				verdict.Stage = stagelabels.NeedsDecision
+				pass.SignoffHiveCaused = true
+			}
 			verdict.Rank = stageRankOwned
 			obs.Reason = stagelabels.LaneReasonHiveSignoffAttribution
 		}
@@ -679,6 +686,7 @@ func generateStageGoldens() map[string][]stageGoldenCase {
 					{"empty", stageGoldenDCO{}},
 					{"squash-unsafe", stageGoldenDCO{Total: 2, SquashUnsafeHive: 1}},
 					{"squash-unsafe-app", stageGoldenDCO{Total: 2, SquashUnsafeHive: 1, AuthorIsApp: true}},
+					{"squash-unsafe-hive-only", stageGoldenDCO{Total: 1, SquashUnsafeHive: 1}},
 					{"unsigned+squash-unsafe-required", stageGoldenDCO{Total: 3, Unsigned: 1, SquashUnsafeHive: 1, Policy: "required"}},
 				} {
 					gates := []struct {

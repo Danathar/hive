@@ -422,22 +422,27 @@ func AdoptionStalledComment(obs stageObservation, rec stagelabels.Record, reason
 	return b.String()
 }
 
-// mergeCommitRefusalText is the ask in the hive-signoff-attribution stall
-// note: why the hive did not select a merge commit itself
-// (stageDetail.MergeCommitRefused) and what a person can do.
-func mergeCommitRefusalText(obs stageObservation, author string) string {
+// mergeCommitRefusalText is the maintainer ask for a hive-caused
+// hive-signoff-attribution block (the stage/085 note and the adoption stall
+// note): why the hive did not select a merge commit itself
+// (stageDetail.MergeCommitRefused) and what a maintainer can do. The
+// contributor did not make the hive's commits, so it never asks them to
+// rewrite anything.
+func mergeCommitRefusalText(obs stageObservation) string {
 	var b strings.Builder
 	switch obs.Detail.MergeCommitRefused {
 	case mergeCommitRefusedSquashOnly:
 		fmt.Fprintf(&b, "Every commit already carries a sign-off matching its own author, so a merge commit would land them without rewriting history, but `%s` is squash-only (`auto_merge.squash_only`), so the hive did not select one. ", obs.Display)
-		fmt.Fprintf(&b, "**Ask:** either lift the squash-only policy for this repo (the hive then merges with a merge commit on its next sweep) or @%s re-authors the hive's commits under their own sign-off and pushes a new head.", author)
+		b.WriteString("**Ask (maintainer):** either lift the squash-only policy for this repo (the hive then merges with a merge commit on its next sweep), or re-author the hive's commits under a maintainer's own sign-off and push a new head.")
 	case mergeCommitRefusedRole:
-		fmt.Fprintf(&b, "The hive selects a merge commit for this shape only on a `%s` PR; this one is not, so it will not merge it unattended. ", stagelabels.RoleTrusted.Label())
-		fmt.Fprintf(&b, "**Ask:** every commit already carries a sign-off matching its own author, so a maintainer can merge this PR with a merge commit (`gh pr merge %d --merge`, not squash) and DCO holds without rewriting history; otherwise @%s re-authors the hive's commits under their own sign-off and pushes a new head.", obs.Number, author)
+		fmt.Fprintf(&b, "The hive selects a merge commit for this shape by itself only on a `%s` PR or a head a trusted maintainer has approved; this one is neither yet. ", stagelabels.RoleTrusted.Label())
+		fmt.Fprintf(&b, "**Ask (maintainer):** every commit already carries a sign-off matching its own author, so DCO holds without rewriting history: approve the current head with a GitHub **Approve** review (the hive then selects the merge commit itself), or merge it by hand with a merge commit (`gh pr merge %d --merge`, not squash).", obs.Number)
 	case mergeCommitRefusedHiveOnly:
-		fmt.Fprintf(&b, "Every non-merge commit on the head is the hive's, so there is no contributor authorship for a merge commit to preserve. **Ask:** a maintainer merges with a merge commit (`gh pr merge %d --merge`, not squash), or @%s pushes a head of their own.", obs.Number, author)
+		fmt.Fprintf(&b, "Every non-merge commit on the head is the hive's, so there is no contributor authorship for a merge commit to preserve. **Ask (maintainer):** merge with a merge commit (`gh pr merge %d --merge`, not squash), or close this PR if the hive's change is not wanted.", obs.Number)
+	case mergeCommitRefusedUnsigned:
+		fmt.Fprintf(&b, "Some commits on the head carry no sign-off at all, so the hive did not select a merge commit. **Ask (maintainer):** decide whether those commits need a sign-off before merging; if not, merge with a merge commit (`gh pr merge %d --merge`, not squash).", obs.Number)
 	default:
-		fmt.Fprintf(&b, "**Ask:** every commit already carries a sign-off matching its own author, so a maintainer can merge this PR with a merge commit (`gh pr merge %d --merge`, not squash) and DCO holds without rewriting history; otherwise @%s re-authors the hive's commits under their own sign-off and pushes a new head.", obs.Number, author)
+		fmt.Fprintf(&b, "**Ask (maintainer):** every commit already carries a sign-off matching its own author, so a maintainer can merge this PR with a merge commit (`gh pr merge %d --merge`, not squash) and DCO holds without rewriting history.", obs.Number)
 	}
 	return b.String()
 }
@@ -450,7 +455,7 @@ func adoptionBlockerText(obs stageObservation, rec stagelabels.Record) string {
 		msg := fmt.Sprintf("%d commit(s) on `%s` carry the App's `Signed-off-by` while a squash merge would land them as @%s, so the `Sign-off survives the squash` gate stays red. "+
 			"The hive cannot rewrite that authorship without the contributor, and a superseding PR would carry the same head, so it opened none. ",
 			obs.Detail.DCOSquashUnsafeHive, shortSHA(obs.HeadSHA), author)
-		msg += mergeCommitRefusalText(obs, author)
+		msg += mergeCommitRefusalText(obs)
 		return msg
 	case verdictBlocks(obs.Detail):
 		msg := fmt.Sprintf("the review swarm's latest verdict on `%s` is `%s` and no fix landed", shortSHA(obs.HeadSHA), strings.ToLower(strings.TrimSpace(obs.Detail.Verdict.Verdict)))

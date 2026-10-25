@@ -114,6 +114,14 @@ type StageLabelPolicy struct {
 	// reason `base-branch-red:<checks>` and never nudged: the red is the
 	// base branch's, not the author's. nil = unknown (no deferral).
 	BaseBranchRed func(repo string, number int, head string) []string
+	// ForkGuard returns the failing checks on a fork PR head (repo
+	// "owner/name", number, head SHA) that refuse it only because it is from
+	// a fork, when EVERY failing check does —
+	// hgithub.PullRequest.ForkGuardChecks. Such a PR is parked for a
+	// maintainer at 085 with reason `fork-guard:<checks>`: neither its author
+	// nor an adoption can turn the check green (hivecommons/hive#14273).
+	// nil = unknown (no park).
+	ForkGuard func(repo string, number int, head string) []string
 }
 
 // ownershipRoutingPrefix is the lane routing label family. `agent/<lane>`
@@ -402,6 +410,7 @@ func (c *Engine) recordStage(lane, displayRepo, owner, repo string, pr *gh.PullR
 	obs.OpenedAt = pr.GetCreatedAt().Time
 	obs.SharedCIIncident = stageSharedCIIncident(policy, owner, repo, obs.Number, obs.HeadSHA)
 	obs.BaseRedChecks = stageBaseBranchRed(policy, owner, repo, obs.Number, obs.HeadSHA)
+	obs.ForkGuardChecks = stageForkGuard(policy, owner, repo, obs.Number, obs.HeadSHA)
 	c.stageTrackerOrShared().record(obs)
 }
 
@@ -809,16 +818,31 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 				obs.Reason = stagelabels.LaneReasonDCOMissing
 			} else if stats.squashUnsafeHive > 0 && !pass.AuthorIsApp {
 				// A sign-off naming the App on a commit the squash would
-				// land as the contributor. For a role/trusted PR whose
-				// every commit is self-signed the lane selects a merge
-				// commit instead (mergeCommitElection): nothing is
-				// squashed, so nothing is misattributed, and the PR
-				// stays in its lane. Otherwise only the branch owner can
-				// rewrite it (no hive push lands on a non-App branch), so
-				// the PR goes back to its author by kind (071/072), not
-				// to 070 where nothing can act (hivecommons/hive OWNERS
-				// PRs of 2026-10-20).
-				election := mergeCommitElection(stats, role, policy, obs.Display)
+				// land as the contributor. For a role/trusted PR, or a
+				// head a trusted human approved, whose every commit is
+				// self-signed the lane selects a merge commit instead
+				// (mergeCommitElection): nothing is squashed, so nothing
+				// is misattributed, and the PR stays in its lane.
+				// Otherwise a hive-caused head (signoffHiveCaused) is a
+				// maintainer's call (085): the contributor did not make
+				// those commits (projectbluefin/testsuite#991). Only a
+				// head of the author's own App-signed commits goes back
+				// to its author by kind (071/072), not to 070 where
+				// nothing can act (hivecommons/hive OWNERS PRs of
+				// 2026-10-20, hivecommons/pluk#315).
+				hiveCaused := signoffHiveCaused(stats, prevRec, hadPrev, obs.HeadSHA)
+				approved := obs.Detail.HumanApprover != "" && obs.Detail.HumanApprovalHead == obs.HeadSHA
+				election := mergeCommitElection(stats, role, approved, policy, obs.Display)
+				_, mergersConfigured := c.isTrustedMerger("")
+				if election.Refused == mergeCommitRefusedRole && hiveCaused && mergersConfigured && obs.HeadSHA != "" && !(obs.Detail.ReviewsKnown && obs.Detail.Reviews == 0) {
+					// No lane asked for the approval on this head yet:
+					// read it once here rather than park a PR a
+					// maintainer already approved.
+					if login, ok := c.latestTrustedHumanApproval(ctx, obs.Owner, obs.Repo, obs.Number, obs.HeadSHA); ok {
+						obs.Detail.HumanApprover, obs.Detail.HumanApprovalHead = login, obs.HeadSHA
+						election = mergeCommitElection(stats, role, true, policy, obs.Display)
+					}
+				}
 				obs.Detail.MergeCommit, obs.Detail.MergeCommitRefused = election.Elected, election.Refused
 				if election.Elected {
 					want.MergeCommit = stagelabels.MergeCommitWanted
@@ -830,7 +854,15 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 					}
 				} else {
 					want.MergeCommit, pass.MergeCommit = stagelabels.MergeCommitNotWanted, stagelabels.MergeCommitNotWanted
+					// A live adoption keeps its own path: the 074 pin
+					// escalates an unfixable adopted head to 085 with the
+					// same maintainer ask (adoptedHeadSignoffUnfixable).
+					park := hiveCaused && !(hadPrev && prevRec.AdoptionLive(obs.HeadSHA))
+					pass.SignoffHiveCaused = park
 					verdict.Stage = fixingStage(obs)
+					if park {
+						verdict.Stage = stagelabels.NeedsDecision
+					}
 					verdict.Rank = stageRankOwned
 					obs.Reason = stagelabels.LaneReasonHiveSignoffAttribution
 				}
@@ -987,6 +1019,15 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 		}
 		if obs.Route != nil && (want.Stage == stagelabels.ReadyForHumanMerge || want.Stage == stagelabels.NeedsDecision) {
 			n, err := c.postHumanEntry(ctx, store, key, obs, role, *obs.Route)
+			result.Comments += n
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if want.Stage == stagelabels.NeedsDecision && obs.Reason == stagelabels.LaneReasonHiveSignoffAttribution {
+			// Hive-caused attribution: the maintainer is told what clears
+			// it; the contributor is not nudged.
+			n, err := c.noteSignoffAttributionDecision(ctx, store, key, obs)
 			result.Comments += n
 			if err != nil && firstErr == nil {
 				firstErr = err

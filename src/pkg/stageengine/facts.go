@@ -188,7 +188,11 @@ type PRFacts struct {
 	// base branch tip; non-empty only when every failing check is (the PR
 	// is then kept out of the repair stages with reason base-branch-red).
 	BaseRedChecks []string
-	Lanes         []LaneFact // automerge lane opinions, precedence order (self > trusted > contributor)
+	// ForkGuardChecks are the head's failing checks that refuse the PR only
+	// because it is from a fork; non-empty only when every failing check
+	// does (the PR is then parked for a maintainer with reason fork-guard).
+	ForkGuardChecks []string
+	Lanes           []LaneFact // automerge lane opinions, precedence order (self > trusted > contributor)
 	// Pass is what the sweep's own pass learned after the lanes spoke and
 	// before the stage was written: the inputs of ApplyStageLabels' pure
 	// post-steps (author-kind split, normalized-fixing guard, human route,
@@ -229,6 +233,11 @@ type PRPassFacts struct {
 	// puts `merge-method/merge` on; NotWanted takes it off; Unknown (commit
 	// check not read) leaves it as found.
 	MergeCommit stagelabels.MergeCommitState
+	// SignoffHiveCaused says the hive, not the author, put the squash-unsafe
+	// commits on the head (mixed authorship, or a head the hive pushed) and
+	// no merge commit was elected: the attribution override parks the PR at
+	// 085 for a maintainer instead of returning it to its author.
+	SignoffHiveCaused bool
 	// AdoptionLive is prev.AdoptionLive(head): the hive owns the PR, so a
 	// stage that yields to adoption reads 074. EscalationReason is set when
 	// the stalled-adoption escape moved it to 085 instead.

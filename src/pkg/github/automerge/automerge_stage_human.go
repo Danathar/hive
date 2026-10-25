@@ -170,6 +170,9 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 			}
 		}
 	}
+	if strings.HasPrefix(obs.Reason, stageReasonForkGuard) {
+		e.ForkGuard = append([]string(nil), obs.ForkGuardChecks...)
+	}
 	sentinel := c.sentinelLabelName()
 	if sentinel == "" {
 		sentinel = defaultSentinelLabel
@@ -238,6 +241,9 @@ func decisionCause(reason string) string {
 		return "the PR edits CI workflow / action files, which the lane never merges unattended"
 	case reason == contributorLaneReasonTestsRemoved:
 		return "the PR removes tests, which the lane never merges unattended"
+	case strings.HasPrefix(reason, stageReasonForkGuard):
+		// RouteHuman names the fork-guard checks from the evidence.
+		return ""
 	case reason == contributorLaneReasonNoReviewer, reason == stageReasonVerdictRequiresHuman, reason == stageReasonDecisionRequested:
 		// RouteHuman renders the verdict itself from the evidence.
 		return ""
