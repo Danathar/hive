@@ -308,6 +308,7 @@ contribute-check-backend backend="claude":
           echo "ERROR: OMP CLI not found. Install: https://github.com/can1357/oh-my-pi"
           exit 1
         fi
+        ;;
       omnigent)
         if command -v omnigent &>/dev/null; then
           echo "Omnigent CLI detected ($(omnigent --version 2>&1 | head -1))"
