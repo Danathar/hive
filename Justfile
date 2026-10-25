@@ -312,8 +312,10 @@ contribute-check-backend backend="claude":
         if command -v omnigent &>/dev/null; then
           echo "Omnigent CLI detected ($(omnigent --version 2>&1 | head -1))"
           echo "  Meta-harness for Claude Code, Codex, Cursor, Pi, and custom agents."
-          echo "  Auth: export ANTHROPIC_API_KEY=..., OPENAI_API_KEY=..., or run 'omnigent login <url>'"
-          echo "        (credentials stored at ~/.omnigent/auth_tokens.json or ~/.omnigent/config.yaml)"
+          echo "  Auth: export ANTHROPIC_API_KEY=..., OPENAI_API_KEY=..., or GEMINI_API_KEY=..."
+          echo "        (persisted ~/.omnigent/auth_tokens.json / config.yaml credentials are staged too)"
+          echo "  Hive launches 'omnigent run --server local': a remote server default from"
+          echo "  'omnigent login <url>' is NOT honoured — remote-server mode is unsupported."
           echo "  omnigent has NO OS sandbox on the local CLI path; local mode refuses to launch without"
           echo "  HIVE_OMNIGENT_DANGEROUSLY_RUN_UNCONFINED=1."
           if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && -z "${DATABRICKS_TOKEN:-}" && ! -s "$HOME/.omnigent/auth_tokens.json" && ! -s "$HOME/.omnigent/config.yaml" ]]; then
@@ -1783,12 +1785,27 @@ contribute-hive backend="" mode="docker": check-version
           fi
           ;;
         omnigent)
-          # Omnigent stores server auth tokens and configuration under ~/.omnigent.
-          # Stage it when present.
+          # Stage ONLY Omnigent's credential files, never the directory.
+          # ~/.omnigent also holds omnigent.db (every prior session and turn),
+          # logs/ (full JSON conversation dumps) and debug/ (SSE event tapes)
+          # — the same transcript-exposure problem #7836 closed for ~/.claude.
+          #   auth_tokens.json — persisted server session tokens
+          #   config.yaml      — provider/LLM configuration. Its `server:`
+          #                      default is NOT honoured: the launch line pins
+          #                      `--server local` (backends.conf) so a remote
+          #                      server from `omnigent login <url>` can never
+          #                      take the session out of this container.
+          mkdir -p "${CLI_STAGE}/.omnigent"
           if [ -d "${HOME}/.omnigent" ]; then
-            stage_copy "${HOME}/.omnigent" ".omnigent"
-            CLI_MOUNTS="-v ${CLI_STAGE}/.omnigent:/home/dev/.omnigent${VOLSUF}"
+            staged=""
+            for f in auth_tokens.json config.yaml; do
+              if [ -f "${HOME}/.omnigent/${f}" ] && cp -p "${HOME}/.omnigent/${f}" "${CLI_STAGE}/.omnigent/${f}" 2>/dev/null; then
+                staged="${staged:+${staged} }${f}"
+              fi
+            done
+            echo "Staged:    ${staged:-nothing} from ${HOME}/.omnigent (allowlist: auth_tokens.json config.yaml; omnigent.db, logs/ and debug/ stay on the host)"
           fi
+          CLI_MOUNTS="-v ${CLI_STAGE}/.omnigent:/home/dev/.omnigent${VOLSUF}"
           ;;
       esac
       CONTAINER_NAME="hive-contributor-${BACKEND}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ')"

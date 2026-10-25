@@ -6,9 +6,26 @@ Tracking issue: [#14094](https://github.com/hivecommons/hive/issues/14094) (chil
 
 ---
 
+## 0. What Hive actually launches
+
+Hive wires omnigent on the **interactive** contributor path only. `backend_perm_flag omnigent` (`config/backends.conf`) emits `run --server local`, so every launch path — the contributor tmux line (`bin/contributor-agent.sh`), the Justfile local-mode line and `bin/agent-launch.sh` argv — produces:
+
+```bash
+omnigent run --server local [--model <id>]
+```
+
+Both words are load-bearing and neither is a sandbox:
+
+- **`run`** is the agent REPL. A bare `omnigent` on a TTY is rewritten by upstream `omnigent.cli:main` to `omnigent start` (spawns the background server/host and returns to the shell prompt — no agent), and a bare `omnigent --model X` is a root-level Click `UsageError` (exit 2). Without `run`, the tmux pane would show a shell prompt or help text and the relay would type the task into bash.
+- **`--server local`** pins the session to a local Omnigent server. `omnigent login <url>` persists a `server:` default in `~/.omnigent/config.yaml`, and `omnigent run` falls back to it when `--server` is absent. A remote Omnigent server hands the user's GitHub token to its managed runners, which push branches and open PRs from outside the Hive container and egress proxy — exactly the path the precedence rule in §5 says must not exist. `local` is Omnigent's documented sentinel for `run` ("overriding any configured server default"; `--server ""` is the historical spelling). **Remote-server mode is unsupported by Hive**, and `contribute-check-backend omnigent` says so.
+
+omnigent is **not** in the relay's `HEADLESS_BACKENDS` (`bin/contributor-relay.js`) and is declared non-headless in `bin/test_backend_smoke.sh` and the Kubernetes capability map (`api_contribute_test.go`). The one-shot `omnigent run -p` shape in Facts 1–3 below is recorded from upstream's CLI source and docs so the contract is complete; Hive has **not** wired or verified it end to end. Wiring it would need a small relay extension, because `flagsAfterCommand` cannot place `-p <prompt>` last after `--model`.
+
 ## 1. Six CLI Contract Facts
 
 ### Fact 1: Non-interactive invocation
+
+> **Status: documented upstream, not wired or verified by Hive** (see §0). Hive launches the interactive REPL (`omnigent run --server local`), not this path.
 
 Omnigent provides a non-interactive entry point via `omnigent run` with the `-p` / `--prompt` option. Without `-p`, `omnigent run` launches an interactive prompt_toolkit / Rich REPL and browser co-drive. With `-p "<prompt>"`, the CLI runs headlessly, sends one turn, writes the assistant text response to stdout, and exits.
 
@@ -16,7 +33,7 @@ Omnigent provides a non-interactive entry point via `omnigent run` with the `-p`
 omnigent run --harness codex -p "Implement the requested feature"
 ```
 
-Observed behavior:
+Per upstream source and docs:
 - Runs in headless mode (REPL and browser auto-open are bypassed when `-p` is set unless explicitly configured).
 - `--no-session` (ephemeral mode) runs in-process with a temporary SQLite database and artifact directory that are cleaned up on process exit.
 - `omnigent run <agent.yaml> -p "..."` runs the declared agent spec headlessly.
@@ -91,7 +108,7 @@ Error: no such option: --dangerously-bypass-everything
 [exit status: 2]
 ```
 
-Unattended mode is triggered by `-p` / `--prompt` (with no interactive REPL). Unattended runs must not configure policies that emit `ASK`, as an unanswered prompt in a headless container would stall.
+Unattended mode is triggered by `-p` / `--prompt` (with no interactive REPL). Unattended runs must not configure policies that emit `ASK`, as an unanswered prompt in a headless container would stall. Hive does not currently wire this mode (§0).
 
 ---
 
@@ -111,6 +128,8 @@ To provide honest credential detection, `detect_cli` in `bin/contributor-agent.s
 3. Omnigent session credentials: non-empty `${HOME}/.omnigent/auth_tokens.json` or `${HOME}/.omnigent/config.yaml`.
 
 If the binary exists but none of these credential paths are present, `detect_cli` outputs `NOT_AUTHED`.
+
+**Container staging is an allowlist, never the directory.** `just contribute-hive omnigent` stages only `~/.omnigent/auth_tokens.json` and `~/.omnigent/config.yaml` into the container's `~/.omnigent`. The rest of the directory — `omnigent.db` (every prior session and turn), `logs/` and `debug/` (Fact 4) — is the contributor's full Omnigent history and stays on the host, for the same reason `~/.claude` is staged as an allowlist (#7836). A `server:` key in the staged `config.yaml` is inert: the launch line's `--server local` overrides it (§0).
 
 ---
 
@@ -142,6 +161,7 @@ graph TD
 ### Precedence Rules
 
 1. **Hive policy strictly wins on GitHub writes.**
+   This holds only while the Omnigent server runs inside the Hive container, which is why every launch pins `--server local` (§0); a remote Omnigent server would route GitHub writes through its own runners and is unsupported.
    All repository interactions (pull request creation `POST /repos/{owner}/{repo}/pulls`, merge requests `PUT /repos/{owner}/{repo}/pulls/{n}/merge`, issue comments, releases, and Git pushes) are routed through Hive's egress proxy and GitHub App authentication broker.
    Even if an Omnigent policy (e.g. `github_policy`) or agent bundle permits a write, Hive's proxy checks (DCO trailers, ACMM tier gates, merge policy) remain authoritative. A proxy denial produces an HTTP 403 or push refusal that Omnigent cannot bypass.
 
