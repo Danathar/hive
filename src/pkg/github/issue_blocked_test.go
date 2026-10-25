@@ -234,6 +234,7 @@ func TestReviewBacklogFilesBlockedWhenFileMissingOnBase(t *testing.T) {
 func TestReconcileBlockedIssues(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
+	notes := map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		mu.Lock()
@@ -259,6 +260,13 @@ func TestReconcileBlockedIssues(t *testing.T) {
 		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/repos/o/r/issues/"):
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments"):
+			var body struct {
+				Body string `json:"body"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			notes[r.URL.Path] = body.Body
+			mu.Unlock()
 			_, _ = io.WriteString(w, `{"id":9}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -318,6 +326,14 @@ func TestReconcileBlockedIssues(t *testing.T) {
 	} {
 		if strings.Contains(joined, never) {
 			t.Errorf("unexpected call %q in:\n%s", never, joined)
+		}
+	}
+	// The unblocked notes promise a re-triage, not the agent queue: an
+	// issue project.issue_filter refuses never reaches the queue.
+	for _, issue := range []string{"10", "30", "70"} {
+		note := notes["/repos/o/r/issues/"+issue+"/comments"]
+		if !strings.HasPrefix(note, blockedUnblockedMarker+"\n") || !strings.Contains(note, "re-triaging") || strings.Contains(note, "actionable") {
+			t.Errorf("issue %s unblocked note = %q, want the marker and a re-triage, no actionable promise", issue, note)
 		}
 	}
 }

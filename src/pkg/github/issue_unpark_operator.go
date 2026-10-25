@@ -72,7 +72,7 @@ func (c *Client) RecordOperatorIssueDecision(ctx context.Context, repo string, n
 	if decision == "" {
 		decision = "go with the recommendation"
 	}
-	body := renderUnparkAcceptedReplyKeeping(actor, decision, removed, hasIssueNeedsHumanLabel(labels), needsHuman) +
+	body := renderUnparkAcceptedReplyFiltered(actor, decision, removed, hasIssueNeedsHumanLabel(labels), needsHuman, c.unparkIssueFilterNote(labels, removed)) +
 		"\n\n_Recorded from the hive dashboard._"
 	if err := c.postUnparkReply(ctx, owner, name, number, operatorDecisionMarkerID, body); err != nil {
 		return IssueUnparkEvent{}, err

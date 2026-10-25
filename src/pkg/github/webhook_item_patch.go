@@ -102,7 +102,7 @@ func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, labels []str
 		}
 	}
 	if !issueFilter.Admits(labels) {
-		return sidelined("filtered", "Project issue filter")
+		return sidelined("filtered", issueFilterReason)
 	}
 	return WebhookItemPatch{Bucket: WebhookBucketActionable, Issue: &Issue{
 		Repo:              repo,

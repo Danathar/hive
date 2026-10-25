@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/stageengine"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
@@ -872,6 +873,56 @@ func TestSweepIssueUnparkCommandsNeedsHumanOnlyApproveLifts(t *testing.T) {
 	}
 	if got := strings.Join(rec.added[12681], ","); got != HumanAckLabel+","+stagelabels.Actionable.Label() {
 		t.Fatalf("added = %v, want %s then the engine's %s", rec.added[12681], HumanAckLabel, stagelabels.Actionable.Label())
+	}
+}
+
+// `/hive approve` on an issue project.issue_filter refuses (projectbluefin
+// bluefin-bling#110: stage/010 written, then removed by the sweep two
+// minutes later as "outside the pipeline: filtered", under an "un-parked"
+// reply). The park lifts, but the engine re-reads the issue against the
+// filter and writes no stage — the result the sweep derives, so nothing is
+// added only to be taken off — and the reply names the label that would
+// admit it instead of promising the queue. The hive never adds that label.
+func TestSweepIssueUnparkCommandsApproveOnFilteredIssue(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		labels    []wireLabel
+		wantAdded string
+		wantNote  bool
+	}{
+		{"refused by the filter", []wireLabel{{Name: "needs-human"}, {Name: "kind/bug"}}, HumanAckLabel, true},
+		{"admitted by the filter", []wireLabel{{Name: "needs-human"}, {Name: "triage/accepted"}}, HumanAckLabel + "," + stagelabels.Actionable.Label(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := parkedIssue(110, humanComment(33, "owner", "/hive approve"))
+			issue.Labels = tc.labels
+			server, rec := newUnparkServer(t, "org", "repo", []unparkWireIssue{issue}, map[string]string{"owner": "write"})
+			c := newTestClient(t, server, "org", []string{"repo"})
+			c.SetIssueFilter(config.IssueFilterConfig{RequireLabels: []string{"triage/accepted"}})
+
+			if _, err := c.SweepIssueUnparkCommands(context.Background(), IssueUnparkSweepOptions{}); err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if got := strings.Join(rec.added[110], ","); got != tc.wantAdded {
+				t.Fatalf("added = %v, want %s", rec.added[110], tc.wantAdded)
+			}
+			var accepted string
+			for _, body := range rec.posted[110] {
+				if strings.Contains(body, "Un-parked by @owner") {
+					accepted = body
+				}
+			}
+			if accepted == "" {
+				t.Fatalf("no acceptance reply, got %v", rec.posted[110])
+			}
+			hasNote := strings.Contains(accepted, "still outside the agent queue") && strings.Contains(accepted, "`triage/accepted`")
+			if hasNote != tc.wantNote {
+				t.Fatalf("filter note present = %v, want %v:\n%s", hasNote, tc.wantNote, accepted)
+			}
+			if tc.wantNote && strings.Contains(accepted, "returns to the agent queue") {
+				t.Fatalf("reply promises the agent queue to an issue the filter refuses:\n%s", accepted)
+			}
+		})
 	}
 }
 

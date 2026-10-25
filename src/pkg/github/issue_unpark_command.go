@@ -519,7 +519,8 @@ func (c *Client) tryUnparkIssue(ctx context.Context, displayRepo, owner, repo st
 		return false, err
 	}
 	decision := unparkCommandDecisionText(command)
-	if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), renderUnparkAcceptedReplyKeeping(actor, decision, removed, hasNeedsHuman, needsHuman)); err != nil {
+	reply := renderUnparkAcceptedReplyFiltered(actor, decision, removed, hasNeedsHuman, needsHuman, c.unparkIssueFilterNote(labels, removed))
+	if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), reply); err != nil {
 		return false, err
 	}
 	if menu.releaseStep != nil {
@@ -681,7 +682,11 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 		return false, err
 	}
 	decision := unparkCommandDecisionText(command)
-	if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept)); err != nil {
+	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept)
+	if note := c.unparkIssueFilterNote(labels, removed); note != "" {
+		reply += "\n\n" + note
+	}
+	if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), reply); err != nil {
 		return false, err
 	}
 	event := IssueUnparkEvent{Repo: displayRepo, Number: number, Actor: actor, Decision: decision, CommentURL: candidate.GetHTMLURL()}
@@ -1091,6 +1096,18 @@ func renderUnparkAcceptedReply(actor, decision string, removed []string) string 
 // applier named, when a person added it or the timeline could not say
 // (hivecommons/hive#12680).
 func renderUnparkAcceptedReplyKeeping(actor, decision string, removed []string, needsHuman bool, outcome unparkNeedsHumanOutcome) string {
+	return renderUnparkAcceptedReplyFiltered(actor, decision, removed, needsHuman, outcome, "")
+}
+
+// renderUnparkAcceptedReplyFiltered is renderUnparkAcceptedReplyKeeping plus
+// filterNote (unparkIssueFilterNote): when project.issue_filter still refuses
+// the issue, a lifted `needs-human` does not send it to the agent queue, and
+// the reply says what will.
+func renderUnparkAcceptedReplyFiltered(actor, decision string, removed []string, needsHuman bool, outcome unparkNeedsHumanOutcome, filterNote string) string {
+	queued := "so the issue returns to the agent queue"
+	if filterNote != "" {
+		queued = "so it no longer holds the issue"
+	}
 	cleared := "No parking label was left to remove"
 	if len(removed) > 0 {
 		cleared = quoteLabels(removed) + " removed"
@@ -1105,11 +1122,48 @@ func renderUnparkAcceptedReplyKeeping(actor, decision string, removed []string, 
 	case !outcome.lift:
 		fmt.Fprintf(&b, " `%s` stays (Hive could not read who added it): this issue is held for a person and remains out of the agent queue until a person removes that label.", issueNeedsHumanLabel)
 	case outcome.applier == stageengine.NeedsHumanApplierPerson:
-		fmt.Fprintf(&b, " `%s` cleared (added by @%s): your command is the human input it waited for, so the issue returns to the agent queue; add `hold` to keep agents off it.", issueNeedsHumanLabel, outcome.actor)
+		fmt.Fprintf(&b, " `%s` cleared (added by @%s): your command is the human input it waited for, %s; add `hold` to keep agents off it.", issueNeedsHumanLabel, outcome.actor, queued)
 	default:
-		fmt.Fprintf(&b, " `%s` cleared: your command is the human input it waited for, so the issue returns to the agent queue; add `hold` to keep agents off it.", issueNeedsHumanLabel)
+		fmt.Fprintf(&b, " `%s` cleared: your command is the human input it waited for, %s; add `hold` to keep agents off it.", issueNeedsHumanLabel, queued)
+	}
+	if filterNote != "" {
+		b.WriteString("\n\n" + filterNote)
 	}
 	return b.String()
+}
+
+// unparkIssueFilterNote is the reply paragraph for an un-park that leaves
+// the issue refused by project.issue_filter (require_labels). Approval
+// lifts the park, but only a required label admits the issue to agent
+// work, and the hive does not add one on a comment's say-so; without this
+// the reply read as "accepted" while the issue stayed out of the queue.
+// labels are the issue's labels before the un-park and removed the ones it
+// took off; `approved-direction` is counted as applied. "" when the filter
+// admits the result.
+func (c *Client) unparkIssueFilterNote(labels, removed []string) string {
+	after := []string{HumanAckLabel}
+	for _, l := range labels {
+		if !labelPresent(removed, l) {
+			after = append(after, l)
+		}
+	}
+	filter := c.getIssueFilter()
+	if filter.Admits(after) {
+		return ""
+	}
+	var required []string
+	if notice, ok := filter.(IssueFilterNoticeConfig); ok {
+		required = notice.RequireLabelsForNotice()
+	}
+	const lead = "This issue is still outside the agent queue: `project.issue_filter` admits "
+	switch len(required) {
+	case 0:
+		return lead + "only issues carrying one of its required labels. A maintainer adding one admits it."
+	case 1:
+		return lead + "only issues labelled " + quoteLabels(required) + ". A maintainer adding it admits this one."
+	default:
+		return lead + "only issues carrying one of " + quoteLabels(required) + ". A maintainer adding one admits this one."
+	}
 }
 
 func renderUnparkHelpReply(issueBody string) string {
