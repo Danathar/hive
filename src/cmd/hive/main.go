@@ -2537,6 +2537,7 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		StageEngine:             stageEngineOptions(b.cfg, b.logger),
 		SentinelLabel:           func() string { return b.cfg.Sentinel.LabelOrDefault() },
 		SweepTrigger:            b.sweepTrigger,
+		MergeQueueBases:         hiveMergeQueueBases,
 	}
 	if forgeOpenPRs != nil {
 		autoMergeOpts.OpenPRs = forgeOpenPRs
@@ -9695,6 +9696,7 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 		RecordReviewHoldRelease: reviewHoldReleaseRecorder(logger),
 		StageLabelPolicy:        stageLabelPolicyFunc(cfg),
 		StageEngine:             stageEngineOptions(cfg, logger),
+		MergeQueueBases:         hiveMergeQueueBases,
 	}
 	syncStageEngineMode(cfg, ghClient, logger)
 	// hivecommons/hive#12436: the contribute hub is the stage-072 nudge sink

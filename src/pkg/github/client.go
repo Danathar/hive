@@ -910,12 +910,13 @@ type PullRequest struct {
 	// through the same branch-push surface used by in-place adoption and
 	// check-report repair decisions.
 	MaintainerCanModify bool `json:"maintainer_can_modify,omitempty"`
-	// BaseRef is the branch the PR targets. Display only: the merge-verdict
-	// reason names it ("has merge conflicts with v4 — needs a rebase") so a
-	// blocked pill says what to do rather than GitHub's enum
-	// (hivecommons/hive#7515). It comes from the list payload — no extra
-	// fetch — and stays empty on an abbreviated payload, where the wording
-	// falls back to "the base branch".
+	// BaseRef is the branch the PR targets. The merge-verdict reason names
+	// it ("has merge conflicts with v4 — needs a rebase") so a blocked pill
+	// says what to do rather than GitHub's enum (hivecommons/hive#7515), and
+	// the classifier looks it up in the sweeps' merge-queue base memory. It
+	// comes from the list payload — no extra fetch — and stays empty on an
+	// abbreviated payload, where the wording falls back to "the base branch"
+	// and no merge-queue base matches.
 	BaseRef string `json:"base_ref,omitempty"`
 	// FailingChecks names the completed check runs whose conclusion was
 	// failure/action_required. CIFailureExcerpt carries the raw error lines
