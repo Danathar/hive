@@ -65,6 +65,43 @@ func (c *Engine) headChecks(ctx context.Context, tracker *StageTracker, key stri
 	return summary, err == nil
 }
 
+// humanFenceEntry is one head's contributor-lane diff fence ("" when the
+// diff is clean).
+type humanFenceEntry struct {
+	head  string
+	fence string
+}
+
+// headDiffFence returns the contributor lane's diff fence for obs's head
+// (contributorLaneDiffReason: workflow / action files, tests removed), cached
+// per head: a head's diff does not change, and a push is a new head. ok is
+// false when it could not be read (transport error, incomplete file list, or
+// the PR's head moved past obs); nothing is cached then, so the next pass
+// tries again.
+func (c *Engine) headDiffFence(ctx context.Context, tracker *StageTracker, key string, obs stageObservation) (string, bool) {
+	tracker.mu.Lock()
+	entry, ok := tracker.fences[key]
+	tracker.mu.Unlock()
+	if ok && entry.head == obs.HeadSHA {
+		return entry.fence, true
+	}
+	fence, err := c.adoptionDiffRefusal(ctx, obs)
+	if err != nil {
+		c.warn("stage labels: diff fence read failed", "repo", obs.Display, "pr", obs.Number, "error", err)
+		return "", false
+	}
+	if fence == contributorLaneReasonFilesEvidence || fence == adoptionReasonHeadChanged {
+		return "", false
+	}
+	tracker.mu.Lock()
+	if tracker.fences == nil {
+		tracker.fences = map[string]humanFenceEntry{}
+	}
+	tracker.fences[key] = humanFenceEntry{head: obs.HeadSHA, fence: fence}
+	tracker.mu.Unlock()
+	return fence, true
+}
+
 // humanVerdict maps the reviewer verdict for the head to a VerdictState.
 func humanVerdict(v ContributorLaneVerdict) stagelabels.VerdictState {
 	v = normalizeContributorLaneVerdict(v)
@@ -118,6 +155,20 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		// An adopted head whose diff fence is the blocker: the 085 note
 		// says the hive repaired it and why it still will not merge it.
 		e.CauseReason = "the hive adopted this PR to repair CI, but " + e.CauseReason
+	}
+	if !e.ManualMerge && obs.Lane == stageLaneContributor && obs.HeadSHA != "" {
+		// The lane stops at the first thing that blocks a PR, and a
+		// sentinel alert, a hold label or a requires_human verdict is
+		// reached before the diff fence. A PR that edits workflow files
+		// was then asked for an approval that can never lead to a merge,
+		// and told it is manual-merge only once the first block cleared.
+		// Name the fence from the start.
+		if fence, ok := c.headDiffFence(ctx, tracker, key, obs); ok && manualMergeReason(fence) {
+			e.ManualMerge = true
+			if e.CauseReason == "" {
+				e.CauseReason = decisionCause(fence)
+			}
+		}
 	}
 	sentinel := c.sentinelLabelName()
 	if sentinel == "" {
