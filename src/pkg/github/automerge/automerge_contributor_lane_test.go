@@ -166,6 +166,10 @@ func newContributorLaneAPI(t *testing.T, fx *contributorLaneFixture) *httptest.S
 			json.NewEncoder(w).Encode(fx.issueComments)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/issues/7/comments":
 			json.NewEncoder(w).Encode(fx.prComments)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/issues/42":
+			// The linked issue the body closes, read by the linked-issue
+			// gate: open and unlabelled, so it never blocks.
+			json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "open", "labels": []any{}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/pulls/7/files":
 			if fx.filesStatus != 0 {
 				http.Error(w, "files error", fx.filesStatus)

@@ -29,12 +29,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/authorkind"
 	"github.com/hivecommons/hive/pkg/oktotest"
+	"github.com/hivecommons/hive/pkg/stageengine/prstage"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -383,6 +385,7 @@ var stageGoldenReasons = []string{
 	autoMergeReasonHumanMergePath, autoMergeReasonHumanMergePathEvidence, autoMergeReasonIntentUnauthorized, autoMergeReasonIntentEvidence,
 	"approval-desk-withheld", "author-permission-missing", "fork-non-member", "held", "label:hold", "label:needs-human", "exempt-label", "sentinel",
 	autoMergeReasonNoAppBotLogin, "self-authorization-hold-released", "excluded-label:do-not-merge",
+	"linked-issue:hold:#551:hold",
 	// fixing
 	"changes-requested", contributorLaneReasonChangesRequested, "conflicting", "not-mergeable", "label:needs-rebase", "label:rebase-me",
 	// CI red
@@ -1086,6 +1089,14 @@ func decisionCause(reason string) string {
 		return "GitHub Actions is waiting for workflow approval. Hive posted `" + workflowApprovalCommand + "`; install `" + oktotest.WorkflowPath + "` (`hivectl ok-to-test-template`) if the runs do not start, or manually approve them from the PR checks banner."
 	case reason == "approval-desk-withheld":
 		return "the approval desk withheld this merge"
+	case strings.HasPrefix(reason, "linked-issue:"):
+		if kind, issue, label, ok := prstage.ParseLinkedIssueReason(reason); ok {
+			ref := "#" + strconv.Itoa(issue)
+			if kind == prstage.LinkedIssueReasonHoldPrefix {
+				return "issue " + ref + ", which this PR closes, is on hold (`" + label + "`); remove `" + label + "` from " + ref + " to release this PR"
+			}
+			return "issue " + ref + ", which this PR closes, is parked for a decision (`" + label + "`); once it is decided, remove `" + label + "` from " + ref + " to release this PR"
+		}
 	case reason == "":
 		return ""
 	}

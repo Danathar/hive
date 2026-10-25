@@ -1002,6 +1002,9 @@ func (c *Engine) evaluateContributorLanePR(ctx context.Context, displayRepo, own
 	if humanReason, err := c.humanMergePathGate(ctx, displayRepo, owner, repo, pr); err != nil || humanReason != "" {
 		return eval, humanReason, err
 	}
+	if linkedReason, err := c.linkedIssueGate(ctx, owner, repo, pr); err != nil || linkedReason != "" {
+		return eval, linkedReason, err
+	}
 	// Current-base gate (hivecommons/hive#13634): only a green, soaked,
 	// approved head is worth an update-branch commit; a relay evaluation
 	// never updates the branch.

@@ -13,6 +13,7 @@ import (
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	gh "github.com/google/go-github/v72/github"
@@ -137,6 +138,10 @@ func newSelfSweepGuardAPI(t *testing.T, fx selfSweepFixture) *httptest.Server {
 				runs = append(runs, map[string]string{"name": "build", "status": "completed", "conclusion": "success"})
 			}
 			json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "check_runs": runs})
+		case r.Method == http.MethodGet && fx.body != "" && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/issues/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/repos/acme/widget/issues/"), "/"):
+			// An issue the body closes, read by the linked-issue gate: open
+			// and unlabelled, so it never blocks.
+			json.NewEncoder(w).Encode(map[string]any{"state": "open", "labels": []any{}})
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/widget/pulls/7/merge":
 			if fx.mergeCalls != nil {
 				*fx.mergeCalls++
