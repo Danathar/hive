@@ -602,6 +602,81 @@ func TestSweepLabelDrivenHiveApproveLiftsHiveNeedsHuman(t *testing.T) {
 	}
 }
 
+// A `/hive approve` that keeps someone else's `needs-human` leaves the issue
+// parked: the engine re-derives stage/045 from it (hivecommons/hive#12715),
+// so the reply must not claim the hive's stage/045 was removed. As seen on
+// projectbluefin/common#1416, where a lifecycle bot added `needs-human`.
+func TestSweepLabelDrivenHiveApproveKeptNeedsHumanKeepsStage(t *testing.T) {
+	issue := laIssue(46, "needs-human", NeedsDecisionStageLabel)
+	issue.Comments = []unparkWireComment{humanComment(602, laWriter, "/hive approve")}
+	c, rec := laServer(t, []unparkWireIssue{issue})
+	rec.timelines[46] = []unparkWireTimelineEvent{
+		labeledAt(1, laOtherBot, "needs-human", laBase),
+		labeledAt(2, laHive, NeedsDecisionStageLabel, laBase.Add(time.Minute)),
+	}
+	result := laSweep(t, c, true, laPolicyFn(laPolicy(), true))
+	if len(result.Unparked) != 1 {
+		t.Fatalf("expected un-park, got %+v", result.Unparked)
+	}
+	if len(rec.removed[46]) != 0 {
+		t.Fatalf("removed = %v, want nothing: needs-human is not the hive's and the stage is the engine's", rec.removed[46])
+	}
+	if len(rec.posted[46]) != 1 {
+		t.Fatalf("expected one reply, got %v", rec.posted[46])
+	}
+	reply := rec.posted[46][0]
+	if strings.Contains(reply, "Hive's own") {
+		t.Fatalf("reply claims a removal that did not happen: %s", reply)
+	}
+	for _, want := range []string{"`needs-human` (added by @" + laOtherBot + ")", "`" + NeedsDecisionStageLabel + "` stays"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply missing %q: %s", want, reply)
+		}
+	}
+}
+
+// With no other park label left, the engine lifts the hive's stage/045 and
+// the reply says so.
+func TestSweepLabelDrivenHiveApproveReportsLiftedStage(t *testing.T) {
+	issue := laIssue(47, NeedsDecisionStageLabel)
+	issue.Comments = []unparkWireComment{humanComment(603, laWriter, "/hive approve")}
+	c, rec := laServer(t, []unparkWireIssue{issue})
+	rec.timelines[47] = []unparkWireTimelineEvent{
+		labeledAt(1, laHive, NeedsDecisionStageLabel, laBase),
+	}
+	laSweep(t, c, true, laPolicyFn(laPolicy(), true))
+	if len(rec.posted[47]) != 1 {
+		t.Fatalf("expected one reply, got %v", rec.posted[47])
+	}
+	reply := rec.posted[47][0]
+	if !strings.Contains(reply, "Hive's own `"+NeedsDecisionStageLabel+"` removed") || strings.Contains(reply, "stays") {
+		t.Fatalf("reply must report the lifted stage, got %s", reply)
+	}
+}
+
+// A park label the hive could not remove gets no reply, so nothing claims
+// the removal; the next sweep retries the unanswered command.
+func TestSweepLabelDrivenHiveApproveRemovalErrorPostsNoReply(t *testing.T) {
+	issue := laIssue(48, "needs-decision", NeedsDecisionStageLabel)
+	issue.Comments = []unparkWireComment{humanComment(604, laWriter, "/hive approve")}
+	c, rec := laServer(t, []unparkWireIssue{issue})
+	rec.removeStatus = http.StatusInternalServerError
+	rec.timelines[48] = []unparkWireTimelineEvent{
+		labeledAt(1, laHive, "needs-decision", laBase),
+		labeledAt(2, laHive, NeedsDecisionStageLabel, laBase),
+	}
+	result, _ := c.SweepIssueUnparkCommands(context.Background(), IssueUnparkSweepOptions{
+		LabelDriven:   func(string) bool { return true },
+		LabelApproval: laPolicyFn(laPolicy(), true),
+	})
+	if result != nil && len(result.Unparked) != 0 {
+		t.Fatalf("a failed removal must not count as an un-park: %+v", result.Unparked)
+	}
+	if len(rec.posted[48]) != 0 || len(rec.added[48]) != 0 {
+		t.Fatalf("failed removal still replied or applied approval: posted=%v added=%v", rec.posted[48], rec.added[48])
+	}
+}
+
 // laSupersedePolicy lists the lifecycle bot whose park labels a later
 // trusted acceptance supersedes (hivecommons/hive#13605).
 func laSupersedePolicy() LabelApprovalPolicy {
