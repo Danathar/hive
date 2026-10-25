@@ -46,7 +46,8 @@ func runHardSuppressReconcileWith(ctx context.Context, cfg *config.Config, ghCli
 		return
 	}
 	result, err := ghClient.ReconcileHiveHardSuppress(ctx, github.HardSuppressReconcileConfig{
-		Repos: ghClient.Repositories(),
+		Repos:    ghClient.Repositories(),
+		AIAuthor: cfg.EffectiveAIAuthor(),
 	})
 	if err != nil {
 		logger.Warn("hard-suppress reconcile incomplete", "error", err)

@@ -19,6 +19,8 @@ type hardSuppressFixture struct {
 	timeline []map[string]any
 	// blockedBy is the native "blocked by" dependency payload; nil serves [].
 	blockedBy []map[string]any
+	// aiAuthor is HardSuppressReconcileConfig.AIAuthor.
+	aiAuthor string
 }
 
 func blocker(number int, state string) map[string]any {
@@ -37,8 +39,14 @@ func labelEvent(kind, actor, at, label string) map[string]any {
 	}
 }
 
+// crossRefMergedPR is a cross-reference from an App-authored PR in the
+// configured repo.
 func crossRefMergedPR(number int, mergedAt string) map[string]any {
-	pr := map[string]any{"url": "https://api.github.com/repos/testorg/console/pulls/" + fmt.Sprint(number)}
+	return crossRefMergedPRBy(number, mergedAt, testHiveAppBotLogin, "testorg/console")
+}
+
+func crossRefMergedPRBy(number int, mergedAt, author, repoFullName string) map[string]any {
+	pr := map[string]any{"url": "https://api.github.com/repos/" + repoFullName + "/pulls/" + fmt.Sprint(number)}
 	if mergedAt != "" {
 		pr["merged_at"] = mergedAt
 	}
@@ -46,8 +54,13 @@ func crossRefMergedPR(number int, mergedAt string) map[string]any {
 		"event":      "cross-referenced",
 		"created_at": "2026-10-14T19:00:00Z",
 		"source": map[string]any{
-			"type":  "issue",
-			"issue": map[string]any{"number": number, "pull_request": pr},
+			"type": "issue",
+			"issue": map[string]any{
+				"number":       number,
+				"pull_request": pr,
+				"user":         map[string]any{"login": author},
+				"repository":   map[string]any{"full_name": repoFullName},
+			},
 		},
 	}
 }
@@ -108,7 +121,7 @@ func runHardSuppressFixture(t *testing.T, appBot string, fx hardSuppressFixture)
 	defer server.Close()
 	c := newTestClient(t, server, org, []string{repo})
 	c.SetAppBotLogin(appBot)
-	res, err := c.ReconcileHiveHardSuppress(context.Background(), HardSuppressReconcileConfig{Repos: []string{repo}})
+	res, err := c.ReconcileHiveHardSuppress(context.Background(), HardSuppressReconcileConfig{Repos: []string{repo}, AIAuthor: fx.aiAuthor})
 	if err != nil {
 		t.Fatalf("ReconcileHiveHardSuppress: %v", err)
 	}
@@ -241,6 +254,49 @@ func TestReconcileHiveHardSuppress(t *testing.T) {
 				events:    []map[string]any{labelEvent("labeled", testHiveAppBotLogin, "2026-10-13T12:00:00Z", "hold")},
 				comments:  []wireComment{shaNotice},
 				blockedBy: []map[string]any{blocker(2, "closed")},
+			},
+		},
+		{
+			// projectbluefin/common#1367: a person's intake PR that listed
+			// the issue in a table merged, and lifted `blocked` from issues
+			// parked on outside dependencies.
+			name:   "merged PR by a person that only mentions the issue does not lift",
+			appBot: testHiveAppBotLogin,
+			fx: hardSuppressFixture{
+				number: 1120, label: "blocked",
+				events:   []map[string]any{labelEvent("labeled", testHiveAppBotLogin, "2026-09-23T17:19:17Z", "blocked")},
+				timeline: []map[string]any{crossRefMergedPRBy(1367, "2026-10-03T16:15:03Z", "castrojo", "testorg/console")},
+			},
+		},
+		{
+			name:   "merged PR by the configured AI author lifts",
+			appBot: testHiveAppBotLogin,
+			fx: hardSuppressFixture{
+				number: 1, label: "blocked",
+				events:   []map[string]any{labelEvent("labeled", testHiveAppBotLogin, "2026-10-14T18:12:08Z", "blocked")},
+				timeline: []map[string]any{crossRefMergedPRBy(2, "2026-10-15T01:00:00Z", "hive-agent", "testorg/console")},
+				aiAuthor: "hive-agent",
+			},
+			wantRemoved: []string{"blocked"},
+			wantLifted:  1,
+		},
+		{
+			name:   "App PR in a repo the hive does not watch does not lift",
+			appBot: testHiveAppBotLogin,
+			fx: hardSuppressFixture{
+				number: 1, label: "hold",
+				events:   []map[string]any{labelEvent("labeled", testHiveAppBotLogin, "2026-10-13T12:00:00Z", "hold")},
+				comments: []wireComment{shaNotice},
+				timeline: []map[string]any{crossRefMergedPRBy(2, "2026-10-14T20:00:00Z", testHiveAppBotLogin, "elsewhere/fork")},
+			},
+		},
+		{
+			name:   "cross-reference with no author or repo fails closed",
+			appBot: testHiveAppBotLogin,
+			fx: hardSuppressFixture{
+				number: 1, label: "blocked",
+				events:   []map[string]any{labelEvent("labeled", testHiveAppBotLogin, "2026-10-14T18:12:08Z", "blocked")},
+				timeline: []map[string]any{crossRefMergedPRBy(2, "2026-10-15T01:00:00Z", "", "")},
 			},
 		},
 		{
