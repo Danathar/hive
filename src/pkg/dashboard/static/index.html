@@ -52590,7 +52590,7 @@ function burnAreaChart() {
             <div class="config-field mt-4" id="am-human-merge-paths">
               <label>Paths a person must merge ${yamlHint('auto_merge.human_merge_paths')} ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', 'Paths a person must merge', `Comma-separated glob patterns per repo (same syntax as intent.guardrail_path_patterns), for example .github/workflows/**. Every App merge path refuses a PR touching one, adds hold and posts one comment; a person must merge it. Leave a repo empty for no such paths.`)}</label>
               ${amHumanMergePathRepos.length ? amHumanMergePathRepos.map(r => `<div class="config-field mt-3 am-human-merge-path-row" data-repo="${esc(r)}">
-                <label><code>${esc(r)}</code></label>
+                <label><code>${esc(r)}</code> ${settingHelpMark('operator-reference', 'app-self-merge-sweep-auto_merge', r, `Comma-separated glob patterns for ${esc(r)}. A PR there that touches a matching path is held, and a person must merge it. Leave empty for no such paths.`)}</label>
                 <input type="text" class="am-human-merge-path-input" value="${esc(amHumanMergePathsFor(r).join(', '))}" placeholder=".github/workflows/**, CODEOWNERS" data-change-action="markDirtyAutoMergeRepoPolicy">
               </div>`).join('') : '<p class="am-trusted-authors-note">No repositories in project.repos yet.</p>'}
             </div>
