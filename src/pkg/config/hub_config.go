@@ -247,8 +247,11 @@ type HubConfig struct {
 	// default is comment + label, so maintainers can close after reviewing.
 	ContributeCloseAlreadyDone *bool `yaml:"contribute_close_already_done,omitempty"`
 	// ContributeAlreadyDoneLabel is applied to issues a contributor found already
-	// resolved. It is also in the default contribute skip label set, so labelled
-	// issues stay out of the offer queue until a maintainer removes it.
+	// resolved when the cited PR verifies as merged. An "already done" verdict
+	// with no cited PR/commit, or one that fails verification, gets a comment and
+	// the ContributeAlreadyDoneHoldDays hold instead, never this label. It is also
+	// in the default contribute skip label set, so labelled issues stay out of
+	// the offer queue until a maintainer removes it.
 	ContributeAlreadyDoneLabel string `yaml:"contribute_already_done_label,omitempty"`
 	// ContributeAlreadyDoneHoldDays is the longer offer suppression for
 	// an "already done" verdict while the label/comment path is pending or if

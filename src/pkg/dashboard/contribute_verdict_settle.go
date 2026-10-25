@@ -228,6 +228,32 @@ func (h *ContributeWSHub) markIssuePRClaim(ctx context.Context, repo string, num
 	return h.server.deps.GHClient.AddLabels(ctx, repo, number, []string{label})
 }
 
+// noteAlreadyDoneUnverified posts the claim-worded comment for an already-done
+// verdict with no verifiable evidence. It applies no label: the already-done
+// label means verified, and hive/likely-done means an API-verified merged PR
+// (the claim-label sync removes it from any issue without one).
+func (h *ContributeWSHub) noteAlreadyDoneUnverified(ctx context.Context, repo string, number int, reporter string, hold time.Duration) error {
+	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.GHClient == nil {
+		return ghpkg.ErrNoGitHubClient
+	}
+	label := config.HubConfig{}.ContributeAlreadyDoneLabelOrDefault()
+	if h.server.deps.Config != nil {
+		label = h.server.deps.Config.Hub.ContributeAlreadyDoneLabelOrDefault()
+	}
+	who := "a contributor"
+	if r := strings.TrimSpace(reporter); r != "" {
+		who = "contributor " + r
+	}
+	body := fmt.Sprintf("Hive: %s reports this issue may already be resolved, but cited no PR or commit the hive could verify, so it is not labelled `%s`. "+
+		"It is withheld from contributor offers for up to %d days (new activity on the issue lifts that hold sooner); a maintainer should confirm whether work remains.",
+		who, label, int(hold.Hours()/24))
+	ok, err := h.server.deps.GHClient.IssueCommentsContain(ctx, repo, number, body)
+	if err != nil || ok {
+		return err
+	}
+	return h.server.deps.GHClient.CreateIssueComment(ctx, repo, number, body)
+}
+
 func (h *ContributeWSHub) markAlreadyDoneIssue(ctx context.Context, repo string, number int, claim ghpkg.IssueClaim, reporter string, closeIssue bool) error {
 	if h != nil && h.alreadyDoneMarker != nil {
 		return h.alreadyDoneMarker(ctx, repo, number, claim, reporter, closeIssue)
