@@ -7693,6 +7693,7 @@ func runEvalCycle(
 			)
 		}
 		runHardSuppressReconcile(ctx, cfg, ghClient, logger)
+		runParkRecheck(ctx, cfg, ghClient, logger)
 	}
 
 	// Refresh budget spend from lifetime token totals before Evaluate so

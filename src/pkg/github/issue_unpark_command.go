@@ -409,6 +409,23 @@ func (c *Client) issueOwnerStepProposed(issue *gh.Issue, comments []*gh.IssueCom
 	return false
 }
 
+// unparkTextsProposeOwnerStep reports whether the issue body or any comment
+// carries an owner-step marker, whoever authored it: `/hive approve` there
+// accepts the proposed step and keeps its legacy meaning (the menu credits
+// the marker only on hive-authored text; this check only decides whether
+// approve still needs a recommendation).
+func unparkTextsProposeOwnerStep(issue *gh.Issue, comments []*gh.IssueComment) bool {
+	if hasOwnerStepMarker(issue.GetBody()) {
+		return true
+	}
+	for _, cm := range comments {
+		if cm != nil && hasOwnerStepMarker(cm.GetBody()) {
+			return true
+		}
+	}
+	return false
+}
+
 // tryUnparkIssue handles one parked issue: keep its "What to reply" comment
 // current, then answer the newest eligible command on it. On a label-driven
 // repo there is no notice; without label approval configured there is no
@@ -466,6 +483,25 @@ func (c *Client) tryUnparkIssue(ctx context.Context, displayRepo, owner, repo st
 
 	if command.Kind == unparkCommandFixed {
 		return c.closeParkedIssueAsFixed(ctx, displayRepo, owner, repo, issue, candidate, command, labelDriven, result, closedAudit)
+	}
+
+	// `/hive approve` records what the menu says it accepts, and is refused
+	// when there is nothing to accept. A typed release proposal and the
+	// label-driven pointer reply (no label approval) answer it themselves.
+	// Approve needs no recommendation on a `blocked` park, where it means
+	// "the blocker is cleared" (hivecommons/hive#12376), or on an owner
+	// step, where it accepts the step the hive proposed.
+	if command.Kind == unparkCommandApprove && !(releasePolicy.enabled && menu.releaseStep != nil) && (!labelDriven || la.enabled) &&
+		!menu.ownerStep && menu.releaseStep == nil && !unparkTextsProposeOwnerStep(issue, comments) && !labelPresent(issueLabelNames(issue.Labels), issueBlockedLabel) {
+		decision, ok := menu.approveDecision()
+		if !ok {
+			if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), unparkApproveNothingReply); err != nil {
+				return false, err
+			}
+			result.Replies++
+			return true, nil
+		}
+		command.Decision = decision
 	}
 
 	if labelDriven {
