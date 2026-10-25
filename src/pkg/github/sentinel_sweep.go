@@ -419,6 +419,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 		return SentinelSweepEvent{}, false, nil
 	}
 	event := SentinelSweepEvent{Number: number, Author: author, Title: pr.GetTitle(), HeadSHA: head, Findings: findings, Blocked: decision.Block, TrustedReason: decision.TrustedReason}
+	digest := sentinelFlaggedDigest(findings, files)
 	marker := SentinelMarker + " " + head
 	comment, posted, err := c.findOwnMarkerComment(ctx, owner, repo, number, marker)
 	if err != nil {
@@ -445,15 +446,28 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 		if err != nil {
 			return SentinelSweepEvent{}, false, err
 		}
+		note := sentinelClearedNote
+		if !cleared {
+			// The removal came before this head, but a push that leaves
+			// every flagged change as reviewed (a merge of the base branch,
+			// typically the hive's own keep-mergeable step or "Update
+			// branch") gives the maintainer nothing new to review.
+			cleared, clearedBy, err = c.sentinelClearanceCarriesOver(ctx, owner, repo, number, head, label, digest)
+			if err != nil {
+				return SentinelSweepEvent{}, false, err
+			}
+			note = sentinelCarriedNote
+		}
 		if cleared {
-			if err := c.recordSentinelClearance(ctx, owner, repo, number, label, clearedBy, SentinelComment(decision, head, author, findings)); err != nil {
+			alert := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
+			if err := c.recordSentinelClearance(ctx, owner, repo, number, fmt.Sprintf(note, clearedBy, label), alert); err != nil {
 				return SentinelSweepEvent{}, false, err
 			}
 			return SentinelSweepEvent{}, false, nil
 		}
 	}
 	if !decision.Block {
-		body := SentinelComment(decision, head, author, findings)
+		body := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
 		if hasAlertLabel {
 			if !posted {
 				return SentinelSweepEvent{}, false, nil
@@ -479,7 +493,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{label}); err != nil {
 		return SentinelSweepEvent{}, false, fmt.Errorf("adding %s label: %w", label, err)
 	}
-	body := SentinelComment(decision, head, author, findings)
+	body := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
 	if posted {
 		if _, _, err := c.client.Issues.EditComment(ctx, owner, repo, comment.GetID(), &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
 			return SentinelSweepEvent{}, false, fmt.Errorf("updating sentinel alert: %w", err)
