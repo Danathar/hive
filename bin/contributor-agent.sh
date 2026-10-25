@@ -459,6 +459,12 @@ GOOSECFG
       ln -sf "$agent_md" "${HOME}/AGENTS.md"
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
+    omnigent)
+      # Omnigent orchestrates Claude, Codex, Cursor, Pi, and custom harnesses.
+      # Link both AGENTS.md and CLAUDE.md for harness compatibility.
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
     *)
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
@@ -721,6 +727,21 @@ detect_cli() {
       if ! muse --version &>/dev/null; then
         echo "NOT_AUTHED"
       elif [[ -n "${META_API_KEY:-}" || -s "${HOME}/.config/muse/auth.json" ]]; then
+        echo "OK"
+      else
+        echo "NOT_AUTHED"
+      fi
+      ;;
+    omnigent)
+      # `omnigent --version` is a Click version action: it exits 0 with
+      # no credential at all, so the binary alone proves nothing. Probe the
+      # credential Omnigent documents: ambient provider keys (ANTHROPIC_API_KEY,
+      # OPENAI_API_KEY, GEMINI_API_KEY), Databricks auth (~/.databrickscfg,
+      # DATABRICKS_TOKEN), or persisted session tokens (~/.omnigent/auth_tokens.json
+      # or ~/.omnigent/config.yaml).
+      if ! omnigent --version &>/dev/null; then
+        echo "NOT_AUTHED"
+      elif [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" || -n "${GEMINI_API_KEY:-}" || -n "${DATABRICKS_TOKEN:-}" || -n "${OMNIGENT_API_KEY:-}" || -s "${HOME}/.omnigent/auth_tokens.json" || -s "${HOME}/.omnigent/config.yaml" || -s "${HOME}/.databrickscfg" ]]; then
         echo "OK"
       else
         echo "NOT_AUTHED"

@@ -142,8 +142,9 @@ Actions, like gh-aw; Jules itself is a possible backend.
 
 **[Omnigent](https://github.com/omnigent-ai/omnigent)** (Apache-2.0) is an
 open-source "meta-harness" over Claude Code, Codex, Cursor, Pi and others
-with policy and sandboxing. Both: a competitor at single-team scale and a
-backend candidate.
+with policy and sandboxing. Registered as a T3 experimental CLI backend (#14094);
+Omnigent's own policies and sandboxing are additive, with Hive's egress proxy
+deciding all GitHub writes.
 
 **[Zeron](https://github.com/zeronsh/zeron)** (MIT) is a local-first control
 plane for coding agents. Orchestrator for one developer or VPS; no
@@ -155,7 +156,7 @@ work-source adapters.
 | Work source | GitHub issues and PRs | None built in | Chat and terminal sessions |
 | Policy | Enterprise controls, agentic review | Scoped permissions, vaults | Omnigent policies; Zeron local |
 | Isolation | Vendor-run | Managed or self-hosted sandbox | Omnigent sandboxing; Zeron none stated |
-| Role for Hive | Competitor; Copilot backend | Backend / hosting | Both / competitor |
+| Role for Hive | Competitor; Copilot backend | Backend / hosting | Backend (T3) / competitor |
 
 ## Agent isolation
 

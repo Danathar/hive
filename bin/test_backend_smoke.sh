@@ -135,7 +135,7 @@ $k
     esac
   done
   check "backends without a headless mode are exactly the documented set" \
-        "aider bob omp" "$(echo "$NON_HEADLESS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//')"
+        "aider bob omnigent omp" "$(echo "$NON_HEADLESS" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//')"
 fi
 
 echo ""
