@@ -598,7 +598,14 @@ sweep's own red-PR route: the superseding App PR it opens from `hive/adopt-<n>`
 is red with the contributor's failures, lands in `ci-failing.json` like any
 hive-authored red PR, and the scanner's FIX-BEFORE-NEW kick rebases and fixes
 it on that branch (never a replacement PR), after which it follows the normal
-`050 → 100` path. When adoption is in-place on the contributor PR's own
+`050 → 100` path. A **fork** PR (or one whose head repository is unknown)
+is never superseded or re-homed into `hive/adopt-<n>`: a branch in the base
+repository makes a same-repository PR, which runs with the repository's
+secrets and write tokens and skips its fork-only guards, so unreviewed fork
+code would run as trusted. The hive records the refusal and the next pass
+parks the PR at `085` as `adoption-stalled:fork-rehome-refused` with a
+maintainer ask; in-place adoption on the fork's own branch (when the
+contributor allows maintainer edits) is unchanged. When adoption is in-place on the contributor PR's own
 branch, a changed head stays adopted only with hive-controlled evidence
 (GitHub-linked App commit metadata; the stage store only remembers SHAs that
 already passed that check);

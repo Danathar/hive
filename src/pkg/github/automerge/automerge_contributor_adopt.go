@@ -469,6 +469,9 @@ func adoptionBlockerText(obs stageObservation, rec stagelabels.Record) string {
 			msg += ": " + q
 		}
 		return msg + "."
+	case rec.ForkRehomeRefused(obs.HeadSHA):
+		return fmt.Sprintf("this PR comes from a fork (`%s`) and the hive cannot finish it on the fork's own branch. Moving its commits to `%s%d` in this repository would run code no maintainer has reviewed with the repository's trusted CI (secrets, write tokens, no fork guards), so the hive did not. "+
+			"**Ask (maintainer):** review the change; if it should land, bring it into the repository yourself or follow the repository's process for fork pull requests, otherwise close it.", nonEmpty(obs.HeadRepo, "unknown"), adoptBranchPrefix, obs.Number)
 	case rec.AdoptionAttemptedNothingOpened(obs.HeadSHA):
 		return fmt.Sprintf("the hive tried to re-home this PR onto `%s%d` (`%s`) and could not open the superseding PR.", adoptBranchPrefix, obs.Number, rec.AdoptReason)
 	}
@@ -622,6 +625,14 @@ func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Stor
 		// a maintainer's PR is never closed in favour of a hive copy.
 		store.ClearAdoption(key)
 		c.info("stage labels: not superseding a repository maintainer's PR; adoption released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "reason", reason)
+		return 0, nil
+	}
+	if adoptionFromFork(obs) {
+		// Every supersede path (grace, offline, dco-rehome,
+		// in-place-stalled) ends here. The escalation pass parks the PR
+		// at 085 with adoptionBlockerText's maintainer ask.
+		store.MarkForkRehomeRefused(key, obs.HeadSHA)
+		c.info("stage labels: not re-homing a fork PR into the base repository", "repo", obs.Display, "pr", obs.Number, "head_repo", obs.HeadRepo, "head", obs.HeadSHA, "reason", reason)
 		return 0, nil
 	}
 	owner, repo, number := obs.Owner, obs.Repo, obs.Number
@@ -813,6 +824,22 @@ func (c *Engine) authorMaintainsRepo(ctx context.Context, obs stageObservation, 
 	c.maintainerPerm[key] = maintainerPermEntry{maintainer: maintainer, at: now}
 	c.maintainerPermMu.Unlock()
 	return maintainer
+}
+
+// adoptStallForkRehomeRefused is the adoption-stalled suffix for a fork PR
+// the hive would not move into the base repository.
+const adoptStallForkRehomeRefused = "fork-rehome-refused"
+
+// adoptionFromFork reports whether the PR's head is outside the base
+// repository, or unknown (a deleted fork), which is treated the same.
+// Superseding such a PR pushes its commits to a hive branch inside the base
+// repository, where a pull_request run is a same-repository run: secrets,
+// write tokens, and none of the repository's fork-only guards. Unreviewed
+// fork code then runs as trusted (projectbluefin/utah-packages#609, re-homed
+// as #626, published and signed a canary image), so the hive never does it;
+// an in-place adoption on the fork's own branch stays a fork run.
+func adoptionFromFork(obs stageObservation) bool {
+	return !strings.EqualFold(strings.TrimSpace(obs.HeadRepo), obs.Owner+"/"+obs.Repo)
 }
 
 // canPushToPRBranch reports whether the App can push to the PR's head: a
@@ -1085,6 +1112,9 @@ func inPlaceRehomeReason(obs stageObservation, rec stagelabels.Record, policy St
 func adoptionStalledReason(obs stageObservation, rec stagelabels.Record, policy StageLabelPolicy, now time.Time) string {
 	if rec.AdoptedBy > 0 || obs.HeadSHA == "" {
 		return ""
+	}
+	if rec.ForkRehomeRefused(obs.HeadSHA) {
+		return stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
 	}
 	if rec.AdoptionAttemptedNothingOpened(obs.HeadSHA) {
 		return stagelabels.LaneReasonAdoptionStalledPrefix + "supersede-failed:" + nonEmpty(rec.AdoptReason, obs.Reason)

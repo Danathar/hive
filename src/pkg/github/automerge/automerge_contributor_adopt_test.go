@@ -232,11 +232,20 @@ func (a *adoptAPI) setSuperseder(n int, state string, merged bool) {
 	a.superseders[n] = map[string]any{"number": n, "state": state, "merged": merged}
 }
 
+// adoptPR is a contributor PR from a branch of the base repository: the
+// shape the hive may supersede or re-home (adoptionFromFork). forkPR is the
+// same PR from mallory's fork.
 func adoptPR(number int, head string, labels ...string) *gh.PullRequest {
 	pr := nudgePR(number, head, labels...)
 	pr.Base = &gh.PullRequestBranch{Ref: gh.Ptr("v5")}
-	pr.Head.Repo = &gh.Repository{FullName: gh.Ptr("mallory/widget")}
+	pr.Head.Repo = &gh.Repository{FullName: gh.Ptr("acme/widget")}
 	pr.Body = gh.Ptr("Fixes the widget.\n\nCloses #12\nfixes #13\n\n— hive: backend=pi model=gpt-6\n")
+	return pr
+}
+
+func forkPR(number int, head string, labels ...string) *gh.PullRequest {
+	pr := adoptPR(number, head, labels...)
+	pr.Head.Repo = &gh.Repository{FullName: gh.Ptr("mallory/widget")}
 	return pr
 }
 
@@ -476,7 +485,7 @@ func TestAdoptionOnlineGraceThenAdopt(t *testing.T) {
 	body, _ := pull["body"].(string)
 	for _, want := range []string{
 		"Supersedes #7 (adopted after CI went red and the contributor was unavailable; original commits by @mallory preserved)",
-		"Closes #12", "fixes #13", "fork `mallory/widget`", "rebase this branch on `v5`", "`check-failing:unit`", "Do not open another PR",
+		"Closes #12", "fixes #13", "rebase this branch on `v5`", "`check-failing:unit`", "Do not open another PR",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("superseding body missing %q:\n%s", want, body)
@@ -1045,7 +1054,11 @@ func TestAlreadyAdoptedInPlaceForgedLaneEmailDCOFailureRehomes(t *testing.T) {
 
 // Without push access even App-owned unsigned commits cannot be rewritten
 // on the contributor branch, so the adopted PR re-homes.
-func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureWithoutPushRehomes(t *testing.T) {
+// projectbluefin/utah-packages#609 → #626: an in-place adoption on a fork
+// whose head needs a DCO re-home. Re-homing would move the fork's commits
+// into the base repository and run them as trusted, so nothing is pushed or
+// closed, and the next pass parks the PR at 085 for a maintainer.
+func TestAlreadyAdoptedInPlaceForkDCOFailureIsNotRehomed(t *testing.T) {
 	p := adoptPolicy()
 	p.AdoptInPlace = true
 	p.DCORequired = func(string) (bool, bool) { return true, true }
@@ -1055,6 +1068,59 @@ func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureWithoutPushRehomes(t *testing
 	h.api.commitDetails = map[int][]stageCommitFixture{7: {
 		{message: "fix: unsigned hive fixer", authorLogin: testHiveAppBotLogin, authorName: "architect", authorEmail: "12345+hive[bot]@users.noreply.github.com"},
 	}}
+	h.observe(forkPR(7, "aaa"), "check-failing:DCO")
+	key := stageKey("acme", "widget", 7)
+	h.e.stageStoreOrShared().MarkAdoptedInPlace(key, "aaa", AdoptReasonOffline, h.clock.at)
+
+	h.api.reset()
+	h.clock.advance(time.Minute)
+	labels := []string{"stage/074-adopted-by-hive", "role/contributor", "author/clanker", stagelabels.NoDCOLabel}
+	h.observe(forkPR(7, "aaa", labels...), "check-failing:DCO")
+	if len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 || len(h.adopt.prEdits) != 0 {
+		t.Fatalf("fork PR re-homed into the base repo: pulls=%v refs=%v edits=%v", h.adopt.pulls, h.adopt.refs, h.adopt.prEdits)
+	}
+	if rec, _ := h.e.stageStoreOrShared().Get(key); !rec.ForkRehomeRefused("aaa") {
+		t.Fatalf("refusal not recorded: %+v", rec)
+	}
+	assertForkRehomeParked(t, h, forkPR(7, "aaa", labels...), "check-failing:DCO")
+}
+
+// assertForkRehomeParked runs the next pass and checks the PR is at 085 with
+// the fork-rehome maintainer ask, still never re-homed.
+func assertForkRehomeParked(t *testing.T, h *adoptHarness, pr *gh.PullRequest, reason string) {
+	t.Helper()
+	h.clock.advance(time.Minute)
+	h.observe(pr, reason)
+	rec, _ := h.e.stageStoreOrShared().Get(stageKey("acme", "widget", pr.GetNumber()))
+	want := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+	if rec.Stage != stagelabels.NeedsDecision || rec.Reason != want {
+		t.Fatalf("record %+v, want 085 on %s", rec, want)
+	}
+	notes := stalledComments(h.api)
+	if len(notes) != 1 {
+		t.Fatalf("stall note: %v", h.api.comments)
+	}
+	for _, s := range []string{"reason=" + want, "comes from a fork (`mallory/widget`)", "trusted CI", "**Ask (maintainer):**"} {
+		if !strings.Contains(notes[0], s) {
+			t.Fatalf("note missing %q:\n%s", s, notes[0])
+		}
+	}
+	if len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+		t.Fatalf("re-homed after parking: pulls=%v refs=%v", h.adopt.pulls, h.adopt.refs)
+	}
+}
+
+// The same head from a branch in the base repository is still re-homed:
+// its code already runs with the repository's trust.
+func TestAlreadyAdoptedInPlaceInRepoDCOFailureWithoutPushRehomes(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	p.DCORequired = func(string) (bool, bool) { return true, true }
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.api.commitDetails = map[int][]stageCommitFixture{7: {
+		{message: "fix: unsigned contributor commit", authorLogin: "mallory", authorName: "Mallory", authorEmail: "mallory@example.com"},
+	}}
 	h.observe(adoptPR(7, "aaa"), "check-failing:DCO")
 	key := stageKey("acme", "widget", 7)
 	h.e.stageStoreOrShared().MarkAdoptedInPlace(key, "aaa", AdoptReasonOffline, h.clock.at)
@@ -1063,7 +1129,7 @@ func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureWithoutPushRehomes(t *testing
 	h.clock.advance(time.Minute)
 	h.observe(adoptPR(7, "aaa", "stage/074-adopted-by-hive", "role/contributor", "author/clanker", stagelabels.NoDCOLabel), "check-failing:DCO")
 	if len(h.adopt.pulls) != 1 || len(h.adopt.prEdits) != 1 || h.adopt.prEdits[0] != "7:closed" {
-		t.Fatalf("maintainer edits revoked must re-home: pulls=%v edits=%v", h.adopt.pulls, h.adopt.prEdits)
+		t.Fatalf("in-repo DCO failure must re-home: pulls=%v edits=%v", h.adopt.pulls, h.adopt.prEdits)
 	}
 }
 
@@ -1324,20 +1390,50 @@ func TestAdoptionSupersedePersistsAtAdoptedHead(t *testing.T) {
 }
 
 // In-place requested but the fork forbids maintainer edits: supersede.
-func TestAdoptionInPlaceFallsBackToSupersede(t *testing.T) {
+// A fork PR the hive cannot push to (no "allow edits by maintainers") used
+// to fall back to a supersede on a branch in the base repository. It is
+// never moved there: no branch, no superseding PR, and 085 next pass.
+func TestAdoptionForkWithoutPushIsNotSuperseded(t *testing.T) {
 	p := adoptPolicy()
 	p.AdoptInPlace = true
 	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
 	defer done()
 	h.adopt.allowMaintainerEdits(7, false)
-	h.observe(adoptPR(7, "aaa"), "check-failing:unit")
+	h.observe(forkPR(7, "aaa"), "check-failing:unit")
 	h.clock.advance(30 * time.Minute)
-	h.observe(adoptPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
-	if len(h.adopt.pulls) != 1 {
-		t.Fatalf("expected superseding PR: pulls=%d comments=%v", len(h.adopt.pulls), h.api.comments)
+	labels := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
+	h.observe(forkPR(7, "aaa", labels...), "check-failing:unit")
+	if len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+		t.Fatalf("fork PR superseded into the base repo: pulls=%v refs=%v", h.adopt.pulls, h.adopt.refs)
 	}
-	if c := adoptionComments(h.api); len(c) != 1 || !strings.Contains(c[0], "mode=supersede") {
-		t.Fatalf("comment: %v", h.api.comments)
+	h.api.reset()
+	assertForkRehomeParked(t, h, forkPR(7, "aaa", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")
+}
+
+// A fork PR the hive can push to is still adopted in place: the fix lands
+// on the fork's own branch and CI keeps treating it as a fork.
+func TestAdoptionForkWithPushStaysInPlace(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.adopt.allowMaintainerEdits(7, true)
+	h.observe(forkPR(7, "aaa"), "check-failing:unit")
+	h.clock.advance(30 * time.Minute)
+	h.observe(forkPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker"), "check-failing:unit")
+	if c := adoptionComments(h.api); len(c) != 1 || !strings.Contains(c[0], "mode=in-place") || len(h.adopt.pulls) != 0 {
+		t.Fatalf("fork with maintainer edits not adopted in place: comments=%v pulls=%v", h.api.comments, h.adopt.pulls)
+	}
+}
+
+func TestAdoptionFromFork(t *testing.T) {
+	for _, tc := range []struct {
+		head string
+		want bool
+	}{{"acme/widget", false}, {"ACME/Widget", false}, {"mallory/widget", true}, {"", true}} {
+		if got := adoptionFromFork(stageObservation{Owner: "acme", Repo: "widget", HeadRepo: tc.head}); got != tc.want {
+			t.Errorf("adoptionFromFork(%q) = %v, want %v", tc.head, got, tc.want)
+		}
 	}
 }
 
