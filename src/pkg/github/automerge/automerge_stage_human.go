@@ -103,6 +103,9 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		// says the hive repaired it and why it still will not merge it.
 		e.CauseReason = "the hive adopted this PR to repair CI, but " + e.CauseReason
 	}
+	if strings.HasPrefix(obs.Reason, stageReasonForkGuard) {
+		e.ForkGuard = append([]string(nil), obs.ForkGuardChecks...)
+	}
 	sentinel := c.sentinelLabelName()
 	if sentinel == "" {
 		sentinel = defaultSentinelLabel
@@ -157,6 +160,9 @@ func decisionActions(obs stageObservation, e stagelabels.Evidence) ([]string, bo
 		return []string{"A maintainer must review and merge this PR manually; a GitHub Approve review or `/hive approve` reply cannot override this lane's manual-merge rule."}, true
 	}
 	var actions []string
+	if len(e.ForkGuard) > 0 {
+		actions = append(actions, "A maintainer must push this branch to the repository (or approve the guarded run as the repository requires); the contributor cannot clear a fork guard by pushing to the fork, and the hive does not adopt it.")
+	}
 	if e.Verdict == stagelabels.VerdictRequiresHuman {
 		action := "After reading the verdict, a trusted merger can submit a GitHub **Approve** review for the current head and the lane clears the hold on its next pass; `/hive approve` replies on a PR are acknowledged but not consumed."
 		if obs.Lane == stageLaneContributor {
@@ -214,6 +220,9 @@ func decisionCause(reason string) string {
 		return "the PR edits CI workflow / action files, which the lane never merges unattended"
 	case reason == contributorLaneReasonTestsRemoved:
 		return "the PR removes tests, which the lane never merges unattended"
+	case strings.HasPrefix(reason, stageReasonForkGuard):
+		// RouteHuman names the fork-guard checks from the evidence.
+		return ""
 	case reason == contributorLaneReasonNoReviewer, reason == stageReasonVerdictRequiresHuman, reason == stageReasonDecisionRequested:
 		// RouteHuman renders the verdict itself from the evidence.
 		return ""
@@ -231,6 +240,10 @@ func decisionCause(reason string) string {
 		return "GitHub Actions is waiting for workflow approval. Hive posted `" + workflowApprovalCommand + "`; install `" + oktotest.WorkflowPath + "` (`hivectl ok-to-test-template`) if the runs do not start, or manually approve them from the PR checks banner."
 	case reason == "approval-desk-withheld":
 		return "the approval desk withheld this merge"
+	case reason == autoMergeReasonMergeRefusedReview:
+		return "GitHub refused the merge: branch protection requires an approving review from someone with write access, and the Hive App cannot give it. A GitHub **Approve** review on this head (or an App bypass in the branch rules) lets the hive merge it; the hive retries once GitHub reports the PR unblocked, or within 30 minutes"
+	case reason == autoMergeReasonMergeRefusedMethod:
+		return "GitHub refused the merge: the repository does not allow the merge method the hive chose for this PR. The hive does not switch methods on its own: a forward merge or a `" + stagelabels.MergeCommitLabel + "` PR must never be squashed. Merge it by hand with an allowed method, or allow the method in the repository settings and the hive retries within 30 minutes"
 	case reason == "":
 		return ""
 	}

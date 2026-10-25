@@ -23,11 +23,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hivecommons/hive/crux"
+	"github.com/hivecommons/hive/crux/agent"
 	"github.com/hivecommons/hive/crux/api"
 	"github.com/hivecommons/hive/crux/config"
 )
@@ -54,6 +57,14 @@ const (
 	streamWindow = 200
 	// defaultLogLines is the default -n for `logs`.
 	defaultLogLines = 100
+	// DefsEnvVar is the environment default for --defs / --config: the
+	// definition source the host's DefinitionLoader reads when neither flag
+	// is given (a directory or file of agent definitions for the module's
+	// own loader, a hive.yaml for the Hive-backed one).
+	DefsEnvVar = "CRUX_DEFS"
+	// DefaultVersion is what --version reports when the host did not set
+	// Env.Version (a `go build` without -ldflags "-X main.version=...").
+	DefaultVersion = "dev"
 )
 
 // globalOptions are the flags that precede the subcommand.
@@ -62,6 +73,7 @@ type globalOptions struct {
 	config  string
 	socket  string
 	local   bool
+	version bool
 	// server and token select remote mode: drive a `crux serve` over the
 	// Crux API instead of an in-process runtime.
 	server string
@@ -85,6 +97,9 @@ type Env struct {
 	// Loader reads --config and definition files. Nil means this build cannot
 	// read them (see noLoader); cmd/crux wires the Hive-backed one.
 	Loader DefinitionLoader
+	// Version is what --version prints; empty means DefaultVersion. Hosts set
+	// it from their ldflags-injected main.version.
+	Version string
 
 	newRuntime runtimeFactory
 	ticker     tickerFactory
@@ -110,17 +125,23 @@ func (e *Env) Run(ctx context.Context, args []string) int {
 	fs.SetOutput(e.Stderr)
 	var opts globalOptions
 	fs.StringVar(&opts.workDir, "workdir", "", "agent work dir (default $HIVE_WORK_DIR, then $HOME/"+defaultWorkDirName+")")
-	fs.StringVar(&opts.config, "config", "", "hive.yaml whose agents define the runtime")
+	fs.StringVar(&opts.config, "config", "", "definition source the loader reads (a hive.yaml for the hive-backed crux; default $"+DefsEnvVar+")")
+	fs.StringVar(&opts.config, "defs", "", "synonym of -config: a directory or file of agent definitions for this build's loader (default $"+DefsEnvVar+")")
 	fs.StringVar(&opts.socket, "socket", "", "control socket path (default <workdir>/"+controlSocketName+")")
 	fs.BoolVar(&opts.local, "local", false, "never use a running `crux run` control socket; build a fresh runtime")
 	fs.StringVar(&opts.server, "server", "", "drive a `crux serve` at this address (unix socket path, unix:///path, host:port or http://…) instead of an in-process runtime (default $"+config.ServerEnvVar+")")
 	fs.StringVar(&opts.token, "token", "", "bearer token for --server (default $"+config.ServeTokenEnvVar+")")
+	fs.BoolVar(&opts.version, "version", false, "print the crux version and exit")
 	fs.Usage = func() { e.usage(fs) }
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitOK
 		}
 		return ExitUsage
+	}
+	if opts.version {
+		fmt.Fprintln(e.Stdout, "crux", e.version())
+		return ExitOK
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
@@ -133,9 +154,10 @@ func (e *Env) Run(ctx context.Context, args []string) int {
 	}
 	if opts.remoteSelected() {
 		switch rest[0] {
-		case "help", "-h", "--help", "serve":
+		case "help", "-h", "--help", "serve", agent.AgyTurnSubcommand:
 			// serve is where the runtime lives; a CRUX_SERVER left in a shell
-			// profile must not stop a local server from starting.
+			// profile must not stop a local server from starting. agy-turn is
+			// the pane-side subprocess the serving runtime itself spawns.
 		default:
 			return e.remote(ctx, opts, rest[0], rest[1:])
 		}
@@ -160,6 +182,14 @@ func (e *Env) dispatch(ctx context.Context, opts globalOptions, name string, arg
 			return ExitUsage
 		}
 		return e.cmdServe(ctx, opts, args)
+	case agent.AgyTurnSubcommand:
+		if remote {
+			fmt.Fprintf(e.Stderr, "crux: %s is not available over the control socket\n", name)
+			return ExitUsage
+		}
+		// The manager types `<own executable> agy-turn …` into a headless agy
+		// pane; under `crux serve` that executable is crux.
+		return agent.RunAgyTurn(args, e.Stdout, e.Stderr)
 	case "ps", "logs", "kick", "stop":
 		if !remote && !opts.local {
 			if code, ok := e.forward(ctx, opts, append([]string{name}, args...)); ok {
@@ -240,9 +270,27 @@ func (e *Env) defaults() {
 	}
 }
 
-// resolve fills the work dir and socket defaults and exports the work dir to
-// the manager through HIVE_WORK_DIR.
+func (e *Env) version() string {
+	if e.Version == "" {
+		return DefaultVersion
+	}
+	return e.Version
+}
+
+// SignalContext returns a context that ends on SIGINT or SIGTERM, so a
+// foreground `crux run` or `crux serve` stops its agents before exiting. Both
+// hosts (cmd/crux in the root module, crux/cmd/crux in this one) hand it to
+// Env.Run.
+func SignalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+// resolve fills the work dir and socket defaults, the definition source from
+// CRUX_DEFS, and exports the work dir to the manager through HIVE_WORK_DIR.
 func (o *globalOptions) resolve() error {
+	if o.config == "" {
+		o.config = os.Getenv(DefsEnvVar)
+	}
 	if o.workDir == "" {
 		o.workDir = os.Getenv(envWorkDir)
 	}
@@ -275,6 +323,8 @@ Commands (each maps onto crux.Runtime):
   stop <agent>                    Lifecycle.Stop
   serve                           expose the runtime over the Crux API (HTTP+JSON
                                   on a unix socket; --listen adds TCP with --token)
+  agy-turn                        one headless agy turn; typed into a pane by the
+                                  runtime that spawned it, not run by hand
 
 While 'crux run' is in the foreground it serves <workdir>/crux.sock; ps, logs,
 kick and stop use that socket when present so they act on the live runtime.
@@ -283,6 +333,10 @@ With --server ADDR (or CRUX_SERVER set) run, ps, logs, kick and stop drive that
 server over the API instead of an in-process runtime; --token / CRUX_TOKEN
 carries its bearer token, and 'logs -f' follows the agent's output. 'serve'
 itself always runs locally, whatever CRUX_SERVER says.
+
+--config and --defs name the same thing: where this build's definition loader
+reads agents from (default $CRUX_DEFS). The hive-backed crux reads a hive.yaml;
+the module's own crux reads a directory or file of agent definition YAML.
 
 Global flags:
 `)

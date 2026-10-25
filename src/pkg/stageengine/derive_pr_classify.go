@@ -1,6 +1,7 @@
 package stageengine
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -32,6 +33,8 @@ const (
 	autoMergeReasonIntentEvidence          = prstage.AutoMergeReasonIntentEvidence
 	autoMergeReasonIntentUnauthorized      = prstage.AutoMergeReasonIntentUnauthorized
 	autoMergeReasonMergeQueueRequired      = prstage.AutoMergeReasonMergeQueueRequired
+	autoMergeReasonMergeRefusedMethod      = prstage.AutoMergeReasonMergeRefusedMethod
+	autoMergeReasonMergeRefusedReview      = prstage.AutoMergeReasonMergeRefusedReview
 	autoMergeReasonNoAppBotLogin           = prstage.AutoMergeReasonNoAppBotLogin
 	autoMergeReasonReviewGatePrefix        = prstage.AutoMergeReasonReviewGatePrefix
 	contributorLaneReasonAppAuthored       = prstage.ContributorLaneReasonAppAuthored
@@ -57,6 +60,7 @@ const (
 	stageLaneSelf                          = prstage.StageLaneSelf
 	stageLaneTrusted                       = prstage.StageLaneTrusted
 	stageReasonBaseBranchRed               = prstage.StageReasonBaseBranchRed
+	stageReasonForkGuard                   = prstage.StageReasonForkGuard
 	stageReasonSharedCIIncident            = prstage.StageReasonSharedCIIncident
 	trustedBotLaneSkipReason               = prstage.TrustedBotLaneSkipReason
 	workflowApprovalRequiredPrefix         = prstage.WorkflowApprovalRequiredPrefix
@@ -222,6 +226,11 @@ var stageNeedsHumanReasons = map[string]bool{
 	"approval-desk-withheld": true, "author-permission-missing": true, "fork-non-member": true,
 	"held": true, "label:hold": true, "label:needs-human": true, "exempt-label": true, "sentinel": true,
 	autoMergeReasonNoAppBotLogin: true, "self-authorization-hold-released": true,
+	// GitHub refused the merge for a reason no retry cures: branch
+	// protection wants a person's approving review, or the repository has
+	// the chosen merge method switched off. The merge is not imminent, and
+	// a person has to act (approve, change the setting, or merge by hand).
+	autoMergeReasonMergeRefusedReview: true, autoMergeReasonMergeRefusedMethod: true,
 }
 
 // stageMergeQueueReasons are reasons reached only after every gate passed,
@@ -266,6 +275,9 @@ func ClassifyStage(o stageObservation) stageVerdict {
 			return v
 		}
 		if v, ok := BaseBranchRedStage(o); ok {
+			return v
+		}
+		if v, ok := ForkGuardStage(o); ok {
 			return v
 		}
 		if name := o.Detail.RedCheck(o.HeadSHA); name != "" {
@@ -333,6 +345,10 @@ func ClassifyStage(o stageObservation) stageVerdict {
 	}
 	if v, ok := BaseBranchRedStage(o); ok {
 		// The red is the base branch's, not the head's.
+		return v
+	}
+	if v, ok := ForkGuardStage(o); ok {
+		// The red is the fork guard's: only a maintainer can clear it.
 		return v
 	}
 	if ClassifyCIReason(reason) == CIReasonRed {
@@ -513,6 +529,35 @@ func BaseBranchRedStage(o stageObservation) (stageVerdict, bool) {
 		stage = stagelabels.Reviewed
 	}
 	return stageVerdict{Stage: stage, Rank: stageRankOwned, Reason: BaseBranchRedReason(o.BaseRedChecks)}, true
+}
+
+// ForkGuardReason formats the recorded reason for checks.
+func ForkGuardReason(checks []string) string {
+	return stageReasonForkGuard + strings.Join(checks, ",")
+}
+
+// ForkGuardStage parks a red fork PR whose every failing check refuses it
+// only because it is from a fork (a fork-publication or fork-secrets guard)
+// at 085 for a maintainer, with the checks named in the recorded reason:
+// neither its author nor an in-place adoption can turn such a check green,
+// both push to the same fork branch (hivecommons/hive#14273). Like
+// BaseBranchRedStage it only applies when the lane's red is CI, and only
+// when every red optional check on the head is one of the guard's.
+func ForkGuardStage(o stageObservation) (stageVerdict, bool) {
+	if len(o.ForkGuardChecks) == 0 {
+		return stageVerdict{}, false
+	}
+	if ClassifyCIReason(o.Reason) != CIReasonRed && o.Detail.RedCheck(o.HeadSHA) == "" {
+		return stageVerdict{}, false
+	}
+	if o.Detail.RedCheck(o.HeadSHA) != "" {
+		for _, name := range o.Detail.RedChecks {
+			if !slices.Contains(o.ForkGuardChecks, name) {
+				return stageVerdict{}, false
+			}
+		}
+	}
+	return stageVerdict{Stage: stagelabels.NeedsDecision, Rank: stageRankOwned, Human: true, Reason: ForkGuardReason(o.ForkGuardChecks)}, true
 }
 
 // SharedCIDeferredStage keeps a red PR whose failure is the shared incident's

@@ -115,6 +115,14 @@ type StageLabelPolicy struct {
 	// reason `base-branch-red:<checks>` and never nudged: the red is the
 	// base branch's, not the author's. nil = unknown (no deferral).
 	BaseBranchRed func(repo string, number int, head string) []string
+	// ForkGuard returns the failing checks on a fork PR head (repo
+	// "owner/name", number, head SHA) that refuse it only because it is from
+	// a fork, when EVERY failing check does —
+	// hgithub.PullRequest.ForkGuardChecks. Such a PR is parked for a
+	// maintainer at 085 with reason `fork-guard:<checks>`: neither its author
+	// nor an adoption can turn the check green (hivecommons/hive#14273).
+	// nil = unknown (no park).
+	ForkGuard func(repo string, number int, head string) []string
 }
 
 // ownershipRoutingPrefix is the lane routing label family. `agent/<lane>`
@@ -402,6 +410,7 @@ func (c *Engine) recordStage(lane, displayRepo, owner, repo string, pr *gh.PullR
 	obs.OpenedAt = pr.GetCreatedAt().Time
 	obs.SharedCIIncident = stageSharedCIIncident(policy, owner, repo, obs.Number, obs.HeadSHA)
 	obs.BaseRedChecks = stageBaseBranchRed(policy, owner, repo, obs.Number, obs.HeadSHA)
+	obs.ForkGuardChecks = stageForkGuard(policy, owner, repo, obs.Number, obs.HeadSHA)
 	c.stageTrackerOrShared().record(obs)
 }
 
@@ -948,13 +957,20 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 		transitions, _ = reconciler.ReconcileBatch(ctx, facts)
 	}
 	for i, p := range pending {
+		if i >= len(transitions) {
+			// A context or writer deadline stopped the batch. The tail
+			// was never attempted and must not trigger public side effects.
+			if firstErr == nil {
+				firstErr = ctx.Err()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("stage labels: batch stopped before %s#%d", p.obs.Display, p.obs.Number)
+				}
+			}
+			break
+		}
 		obs, key, role, want, tr := p.obs, p.key, p.role, p.want, p.tr
 		commentsBefore := result.Comments
-		var out stagelabels.Outcome
-		err := ctx.Err()
-		if i < len(transitions) {
-			out, err = transitions[i].Outcome, transitions[i].Err
-		}
+		out, err := transitions[i].Outcome, transitions[i].Err
 		if err != nil {
 			c.warn("stage labels: write failed", "repo", obs.Display, "pr", obs.Number, "stage", want.Stage.String(), "error", err)
 			if firstErr == nil {

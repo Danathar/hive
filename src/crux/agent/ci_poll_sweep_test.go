@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,9 +64,11 @@ func TestCountRepeatedCIPollCommandsSinceBaseline(t *testing.T) {
 		{name: "two new reads after old repeats", baseline: poll + poll, pane: strings.Repeat(poll, 4), want: 2},
 		{name: "unchanged scrollback", baseline: poll + poll, pane: poll + poll, want: 0},
 		{name: "old target scrolled out, new target repeats", baseline: poll + poll, pane: "gh pr checks 8\ngh pr checks 8\n", want: 2},
+		{name: "old reads scrolled out, same target read again", baseline: poll + poll + "gh pr checks 8\n", pane: poll + poll, want: 2},
+		{name: "partial scroll-out keeps only new reads", baseline: "gh pr checks 1\ngh pr checks 2\ngh pr checks 3\n", pane: "gh pr checks 3\ngh pr checks 4\ngh pr checks 4\n", want: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := countRepeatedCIPollCommands(tt.pane, ciPollCommandCounts(tt.baseline)); got != tt.want {
+			if got := countRepeatedCIPollCommands(tt.pane, ciPollCommands(tt.baseline)); got != tt.want {
 				t.Errorf("repeated reads since baseline = %d, want %d", got, tt.want)
 			}
 		})
@@ -185,5 +188,19 @@ func TestCIPollSweep(t *testing.T) {
 		if got := ciPollSweep(tt.polls, tt.repeats); got != tt.want {
 			t.Errorf("ciPollSweep(%d, %d) = %v, want %v", tt.polls, tt.repeats, got, tt.want)
 		}
+	}
+}
+
+func TestRepeatedCIPollCommandLines(t *testing.T) {
+	pane := "hive-gh pr checks 7\ngh pr checks 8\ngh pr checks 9\nhive-gh pr checks 7\ngh pr checks 9\nhive-gh pr checks 7\ngh pr view 1"
+	got := repeatedCIPollCommandLines(pane, nil)
+	// ciPollCommands captures from the regex match, so the hive-gh wrapper
+	// prefix is not part of the recorded command line.
+	want := []string{"3× gh pr checks 7", "2× gh pr checks 9"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if got := repeatedCIPollCommandLines("gh pr checks 1\ngh pr checks 2", nil); len(got) != 0 {
+		t.Fatalf("sweep listed as repeated: %q", got)
 	}
 }
