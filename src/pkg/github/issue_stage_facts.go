@@ -110,9 +110,10 @@ func resolveIssueLabelFacts(in IssueStageInput, f *stageengine.Facts) {
 
 // issueInputFrom rebuilds the label/bucket view of an out-of-cycle Facts
 // (a FactSink submission enriched with a fresh read) so the same label
-// resolution applies to it as to an enumerated issue.
+// resolution applies to it as to an enumerated issue. An un-park fact is
+// resolved without the park labels it lifts (unparkDerivationLabels).
 func issueInputFrom(f stageengine.Facts) IssueStageInput {
-	in := IssueStageInput{Repo: f.Ref.FullRepo(), Number: f.Ref.Number, Labels: f.Labels, AuthorKind: f.Author.Kind}
+	in := IssueStageInput{Repo: f.Ref.FullRepo(), Number: f.Ref.Number, Labels: unparkDerivationLabels(f), AuthorKind: f.Author.Kind}
 	if f.Issue != nil {
 		if f.Issue.Bucket != stageengine.BucketActionable {
 			in.Bucket = string(f.Issue.Bucket)

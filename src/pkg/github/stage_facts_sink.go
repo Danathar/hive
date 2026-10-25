@@ -100,10 +100,15 @@ func (c *Client) PRStageRef(repo string, number int) stageengine.Ref {
 // the minimal Facts up with what GitHub has now — its labels (the park
 // family, likely-done, the current stage), whether it is still open, and
 // whether the "issue" is really a pull request (a Ref built from an issue
-// number can name either; the stage families differ). An un-park fact
-// drops the decision-park labels from the labels it reports, since the
-// caller removes them in the same breath and the derivation must not see
-// the item as still parked.
+// number can name either; the stage families differ). An un-park fact is
+// derived without the decision-park labels (unparkDerivationLabels), since
+// the caller removes them in the same breath and the derivation must not
+// see the item as still parked. On an issue Facts.Labels still carries
+// them: it is also the writer's plan hint, and a hint without the
+// stage/045 the issue wears plans nothing to remove when the issue derives
+// no stage (project.issue_filter refuses it), so the writer never re-read
+// the issue and the park label stayed on under an "un-parked" reply
+// (projectbluefin/website#926).
 func (c *Client) enrichStageFacts(ctx context.Context, f stageengine.Facts) (stageengine.Facts, error) {
 	if c == nil || c.client == nil {
 		return f, ErrNoGitHubClient
@@ -112,11 +117,7 @@ func (c *Client) enrichStageFacts(ctx context.Context, f stageengine.Facts) (sta
 	if err != nil {
 		return f, err
 	}
-	fresh := extractLabels(issue.Labels)
-	if f.Park.ApprovedDirection {
-		fresh = withoutLabels(fresh, unparkRemovableLabels)
-	}
-	f.Labels = unionLabels(fresh, f.Labels)
+	f.Labels = unionLabels(extractLabels(issue.Labels), f.Labels)
 	f.Open = !strings.EqualFold(issue.GetState(), "closed")
 	f.Merged = !issue.GetPullRequestLinks().GetMergedAt().IsZero()
 	if issue.IsPullRequest() && f.Ref.Kind != stagelabels.PRItem {
@@ -126,10 +127,15 @@ func (c *Client) enrichStageFacts(ctx context.Context, f stageengine.Facts) (sta
 			f.PR = &stageengine.PRFacts{}
 		}
 	}
-	f.Park.Holds = stagelabels.Holds(f.Labels)
-	f.Park.NeedsHuman = f.Park.NeedsHuman || hasIssueNeedsHumanLabel(f.Labels)
+	if f.Ref.Kind == stagelabels.PRItem {
+		// A PR's deriver reads Facts.Labels itself: it keeps the view.
+		f.Labels = unparkDerivationLabels(f)
+	}
+	labels := unparkDerivationLabels(f)
+	f.Park.Holds = stagelabels.Holds(labels)
+	f.Park.NeedsHuman = f.Park.NeedsHuman || hasIssueNeedsHumanLabel(labels)
 	if f.Park.DecisionLabel == "" {
-		if label := hardSuppressIssueLabel(f.Labels); label != "" && !strings.EqualFold(label, issueNeedsHumanLabel) && !strings.EqualFold(label, PossiblyExistsStageLabel) {
+		if label := hardSuppressIssueLabel(labels); label != "" && !strings.EqualFold(label, issueNeedsHumanLabel) && !strings.EqualFold(label, PossiblyExistsStageLabel) {
 			f.Park.DecisionLabel = label
 		}
 	}
@@ -138,7 +144,7 @@ func (c *Client) enrichStageFacts(ctx context.Context, f stageengine.Facts) (sta
 	// way the enumeration would place it: a refused issue is filtered and
 	// derives no stage, instead of a 010 / 015 the next sweep takes off
 	// again. Exempt issues keep the fact's bucket, as before.
-	if f.Issue != nil && f.Issue.Bucket == stageengine.BucketActionable && !c.isExempt(f.Labels) && !c.getIssueFilter().Admits(f.Labels) {
+	if f.Issue != nil && f.Issue.Bucket == stageengine.BucketActionable && !c.isExempt(labels) && !c.getIssueFilter().Admits(labels) {
 		f.Issue.Bucket = stageengine.BucketFiltered
 		f.Issue.FilteredReason = issueFilterReason
 	}
@@ -249,6 +255,16 @@ func unionLabels(fresh, extra []string) []string {
 		}
 	}
 	return out
+}
+
+// unparkDerivationLabels is the label view an out-of-cycle fact is derived
+// from: Facts.Labels, minus the decision-park labels on an un-park fact
+// (unparkRemovableLabels).
+func unparkDerivationLabels(f stageengine.Facts) []string {
+	if !f.Park.ApprovedDirection {
+		return f.Labels
+	}
+	return withoutLabels(f.Labels, unparkRemovableLabels)
 }
 
 // withoutLabels is labels minus any (case-insensitive) member of drop.

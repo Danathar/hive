@@ -243,13 +243,22 @@ func TestEnrichStageFacts(t *testing.T) {
 		t.Fatalf("labels = %v, want the fact's stage spelling dropped (GitHub's labels are the current stage)", f.Labels)
 	}
 
-	// An un-park fact drops the decision-park labels its caller removes.
+	// An un-park fact is derived without the decision-park labels its
+	// caller removes, but Facts.Labels — the writer's plan hint — keeps
+	// the stage/045 the issue wears, so the writer takes it off
+	// (projectbluefin/website#926).
 	f, err = c.enrichStageFacts(context.Background(), stageengine.Facts{Ref: ref, Park: stageengine.ParkFacts{ApprovedDirection: true}, Issue: &stageengine.IssueFacts{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issueHasLabel(f.Labels, NeedsDecisionStageLabel) || issueHasLabel(f.Labels, issueNeedsDirectionLabel) || strings.Join(f.Park.Holds, ",") != "hold" {
-		t.Fatalf("un-park enriched = %+v, want decision-park labels gone and the hold kept", f)
+	if f.Park.DecisionLabel != "" || strings.Join(f.Park.Holds, ",") != "hold" {
+		t.Fatalf("un-park enriched = %+v, want no decision park and the hold kept", f)
+	}
+	if !issueHasLabel(f.Labels, NeedsDecisionStageLabel) {
+		t.Fatalf("un-park labels = %v, want the worn %s kept for the writer", f.Labels, NeedsDecisionStageLabel)
+	}
+	if in := issueInputFrom(f); issueHasLabel(in.Labels, NeedsDecisionStageLabel) || issueHasLabel(in.Labels, issueNeedsDirectionLabel) || !issueHasLabel(in.Labels, "hold") {
+		t.Fatalf("un-park derivation labels = %v, want decision-park labels gone and the hold kept", in.Labels)
 	}
 
 	// hivecommons/hive#13268: the author kind is filled in from the issue
