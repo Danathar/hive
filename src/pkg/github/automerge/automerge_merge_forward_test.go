@@ -36,6 +36,7 @@ func mergeForwardPR(fork bool, labels ...string) *gh.PullRequest {
 type mergeForwardAPI struct {
 	mu            sync.Mutex
 	mergeStatus   int
+	mergeMessage  string
 	compareStatus int
 	merges        int
 	comments      []string
@@ -57,7 +58,11 @@ func newMergeForwardServer(t *testing.T, a *mergeForwardAPI) *httptest.Server {
 				_, _ = w.Write([]byte(`{"sha":"sha-merge"}`))
 			case http.StatusNoContent:
 			default:
-				_, _ = w.Write([]byte(`{"message":"merge refused"}`))
+				msg := a.mergeMessage
+				if msg == "" {
+					msg = "merge refused"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/compare/main..."+mergeForwardHead:
 			if a.compareStatus != 0 {
@@ -91,6 +96,7 @@ func TestMergeForwardOrConflict(t *testing.T) {
 		optIn         bool
 		pr            *gh.PullRequest
 		mergeStatus   int
+		mergeMessage  string
 		compareStatus int
 		wantReason    string
 		wantErr       bool
@@ -109,11 +115,12 @@ func TestMergeForwardOrConflict(t *testing.T) {
 		{name: "conflict posts the files note", optIn: true, pr: mergeForwardPR(false, "author/human"), mergeStatus: http.StatusConflict, wantReason: "conflicting", wantMerges: 1, wantComment: true, wantFiles: true},
 		{name: "conflict note without files when compare fails", optIn: true, pr: mergeForwardPR(false, "author/human"), mergeStatus: http.StatusConflict, compareStatus: http.StatusInternalServerError, wantReason: "conflicting", wantMerges: 1, wantComment: true},
 		{name: "forbidden keeps the hold", optIn: true, pr: mergeForwardPR(false, "author/human"), mergeStatus: http.StatusForbidden, wantReason: "conflicting", wantMerges: 1},
+		{name: "workflow permission refusal is not a conflict", optIn: true, pr: mergeForwardPR(false, "author/human"), mergeStatus: http.StatusForbidden, mergeMessage: workflowPermissionRefusal, wantReason: autoMergeReasonWorkflowPermission, wantMerges: 1},
 		{name: "other failure surfaces", optIn: true, pr: mergeForwardPR(false, "author/human"), mergeStatus: http.StatusUnprocessableEntity, wantReason: "merge-forward", wantErr: true, wantMerges: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			api := &mergeForwardAPI{mergeStatus: tc.mergeStatus, compareStatus: tc.compareStatus}
+			api := &mergeForwardAPI{mergeStatus: tc.mergeStatus, mergeMessage: tc.mergeMessage, compareStatus: tc.compareStatus}
 			srv := newMergeForwardServer(t, api)
 			defer srv.Close()
 			c := newAutoMergeSweepClient(srv.URL)
@@ -172,6 +179,40 @@ func TestMergeForwardOrConflictOncePerHead(t *testing.T) {
 	defer api.mu.Unlock()
 	if api.merges != 1 || len(api.comments) != 1 {
 		t.Fatalf("merges, comments = %d, %d; want 1, 1", api.merges, len(api.comments))
+	}
+}
+
+// TestMergeForwardWorkflowRefusalHoldsPerHead: the ticks after the one
+// refused attempt keep reporting workflow-permission for that head rather than
+// "conflicting", so the PR does not flap 085 -> 070 (utah#873).
+func TestMergeForwardWorkflowRefusalHoldsPerHead(t *testing.T) {
+	api := &mergeForwardAPI{mergeStatus: http.StatusForbidden, mergeMessage: workflowPermissionRefusal}
+	srv := newMergeForwardServer(t, api)
+	defer srv.Close()
+	c := newAutoMergeSweepClient(srv.URL)
+	c.mergeForwardTrustedHuman = func(string) bool { return true }
+	pr := mergeForwardPR(false, "author/human")
+	for i := 0; i < 3; i++ {
+		if _, reason, err := c.mergeForwardOrConflict(context.Background(), "acme/widget", "acme", "widget", pr, 7); reason != autoMergeReasonWorkflowPermission || err != nil {
+			t.Fatalf("tick %d: reason, err = %q, %v; want %q", i, reason, err, autoMergeReasonWorkflowPermission)
+		}
+	}
+	api.mu.Lock()
+	if api.merges != 1 || len(api.comments) != 0 {
+		api.mu.Unlock()
+		t.Fatalf("merges, comments = %d, %d; want 1, 0", api.merges, len(api.comments))
+	}
+	api.mu.Unlock()
+
+	// A new head is a new attempt; the refusal for the old head does not carry.
+	api.mu.Lock()
+	api.mergeStatus = http.StatusCreated
+	api.mergeMessage = ""
+	api.mu.Unlock()
+	moved := mergeForwardPR(false, "author/human")
+	moved.Head.SHA = gh.Ptr("sha-human-2")
+	if _, reason, err := c.mergeForwardOrConflict(context.Background(), "acme/widget", "acme", "widget", moved, 7); reason != "check-pending" || err != nil {
+		t.Fatalf("new head reason, err = %q, %v; want check-pending", reason, err)
 	}
 }
 

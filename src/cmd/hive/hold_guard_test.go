@@ -87,6 +87,9 @@ type holdGuardServer struct {
 	// (#10437: keeping a held PR mergeable).
 	updateBranchCalls map[int]int
 	failUpdateBranch  bool
+	// workflowRefused answers update-branch with GitHub's 403 for an App
+	// without the workflows permission.
+	workflowRefused bool
 }
 
 func (s *holdGuardServer) handler(t *testing.T) http.Handler {
@@ -146,6 +149,10 @@ func (s *holdGuardServer) handler(t *testing.T) http.Handler {
 				s.updateBranchCalls = map[int]int{}
 			}
 			s.updateBranchCalls[number]++
+			if s.workflowRefused {
+				http.Error(w, `{"message":"refusing to allow a GitHub App to create or update workflow `+"`.github/workflows/docs-validate.yml`"+` without `+"`workflows`"+` permission"}`, http.StatusForbidden)
+				return
+			}
 			if s.failUpdateBranch {
 				http.Error(w, `{"message":"Merge conflict"}`, http.StatusUnprocessableEntity)
 				return

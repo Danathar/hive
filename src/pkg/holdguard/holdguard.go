@@ -116,6 +116,11 @@ type Entry struct {
 	// merge-from-base succeeds — the conflict that earned the notice is
 	// gone, so a stale "can't merge" comment must not linger unexplained.
 	ConflictNoted bool `json:"conflict_noted,omitempty"`
+	// WorkflowRefusedHeadSHA is the PR head GitHub refused to update from its
+	// base because the base changed .github/workflows/ and the App lacks the
+	// workflows permission. The same head gets the same refusal, so the
+	// guard does not ask again until the head moves.
+	WorkflowRefusedHeadSHA string `json:"workflow_refused_head_sha,omitempty"`
 	// ObservedHeldHeadSHA is the latest head the hive itself observed on the
 	// PR while the hold gate was still on (#13603). A current head equal to
 	// it provably predates the gate lift, so a trusted human's lift reviewed
@@ -314,6 +319,22 @@ func (s *Store) MarkConflictNoted(repo string, number int) {
 	defer s.mu.Unlock()
 	if e := s.entries[Key(repo, number)]; e != nil {
 		e.ConflictNoted = true
+		e.UpdatedAt = s.now()
+		s.saveLocked()
+	}
+}
+
+// MarkWorkflowRefused records that GitHub refused to update the PR at headSHA
+// from its base for lack of the workflows permission. No-op for an untracked
+// PR or an empty head.
+func (s *Store) MarkWorkflowRefused(repo string, number int, headSHA string) {
+	if headSHA == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[Key(repo, number)]; e != nil {
+		e.WorkflowRefusedHeadSHA = headSHA
 		e.UpdatedAt = s.now()
 		s.saveLocked()
 	}

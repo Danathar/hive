@@ -529,6 +529,26 @@ func (c *Client) reconcileMerge(ctx context.Context, boundary effects.Boundary, 
 	return effects.Execute(ctx, boundary, claim, merge)
 }
 
+// WorkflowPermissionRefusalPattern matches GitHub's refusal of an App-token
+// write that would create or update a .github/workflows file while the
+// installation lacks the workflows permission (#6804). The same text comes back
+// as a git push rejection, a failed workflow run's log, and a 403 from the
+// update-branch and merges APIs when the base changed workflow files.
+var WorkflowPermissionRefusalPattern = regexp.MustCompile("(?i)refusing to allow a github app to create or update workflow|without [`']?workflows[`']? permission")
+
+// IsWorkflowPermissionRefusal reports whether err is GitHub's 403 refusing an
+// App write that would update a workflow file. It looks through wrapping (the
+// mutation ledger wraps the API error), and matches only a 403 so other
+// permission failures keep their own handling. Retrying with the same token
+// gets the same answer until the head or the App's grant changes.
+func IsWorkflowPermissionRefusal(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if !errors.As(err, &ghErr) || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	return WorkflowPermissionRefusalPattern.MatchString(ghErr.Message)
+}
+
 // UpdateBranch syncs a PR's head branch with its base (PUT
 // /repos/{owner}/{repo}/pulls/{n}/update-branch), resolving the common
 // "behind main" case before a merge. Like MergePR it goes over REST as the App.

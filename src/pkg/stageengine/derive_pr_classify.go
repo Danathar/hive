@@ -35,6 +35,7 @@ const (
 	autoMergeReasonMergeRefusedReview      = prstage.AutoMergeReasonMergeRefusedReview
 	autoMergeReasonNoAppBotLogin           = prstage.AutoMergeReasonNoAppBotLogin
 	autoMergeReasonReviewGatePrefix        = prstage.AutoMergeReasonReviewGatePrefix
+	autoMergeReasonWorkflowPermission      = prstage.AutoMergeReasonWorkflowPermission
 	contributorLaneReasonAppAuthored       = prstage.ContributorLaneReasonAppAuthored
 	contributorLaneReasonAuthorAssociation = prstage.ContributorLaneReasonAuthorAssociation
 	contributorLaneReasonChangesRequested  = prstage.ContributorLaneReasonChangesRequested
@@ -219,7 +220,7 @@ var stageNeedsHumanReasons = map[string]bool{
 	contributorLaneReasonNoReviewer: true, contributorLaneReasonReporterTrustHold: true, contributorLaneReasonSentinelBlocked: true,
 	contributorLaneReasonNoAppBotLogin: true, contributorLaneReasonFilesEvidence: true,
 	autoMergeReasonHumanMergePath: true, autoMergeReasonHumanMergePathEvidence: true,
-	autoMergeReasonIntentUnauthorized: true, autoMergeReasonIntentEvidence: true,
+	autoMergeReasonIntentUnauthorized: true, autoMergeReasonIntentEvidence: true, autoMergeReasonWorkflowPermission: true,
 	"approval-desk-withheld": true, "author-permission-missing": true, "fork-non-member": true,
 	"held": true, "label:hold": true, "label:needs-human": true, "exempt-label": true, "sentinel": true,
 	autoMergeReasonNoAppBotLogin: true, "self-authorization-hold-released": true,

@@ -15,6 +15,7 @@ import (
 	"github.com/hivecommons/hive/pkg/github/automerge"
 	"github.com/hivecommons/hive/pkg/holdguard"
 	"github.com/hivecommons/hive/pkg/intent"
+	"github.com/hivecommons/hive/pkg/stageengine/prstage"
 )
 
 var (
@@ -254,7 +255,10 @@ func enforceHoldGuard(
 // push as drift. On failure (a real conflict the hive cannot resolve), a
 // one-time comment tells the human before they open the review, deduplicated
 // through the ledger's ConflictNoted bit exactly like the drift comment
-// dedupes through Commented.
+// dedupes through Commented. GitHub's 403 refusing the update because the base
+// changed .github/workflows/ and the App lacks the workflows permission is
+// neither: it is recorded against the head (WorkflowRefusedHeadSHA) and not
+// retried until the head moves, since the same token gets the same answer.
 //
 // PRs the guard has not snapshotted yet are skipped — the snapshot step (1)
 // runs first every tick, so this only ever sees a PR after its baseline is
@@ -283,7 +287,17 @@ func maintainHeldPRMergeability(
 		if state != "behind" && state != "dirty" {
 			continue
 		}
+		if pr.HeadSHA != "" && rec.WorkflowRefusedHeadSHA == pr.HeadSHA {
+			continue
+		}
 		if err := ghClient.UpdateBranch(ctx, pr.Repo, pr.Number); err != nil {
+			if github.IsWorkflowPermissionRefusal(err) {
+				store.MarkWorkflowRefused(repo, pr.Number, pr.HeadSHA)
+				logger.Warn("hold guard: GitHub refused to update held PR from its base; the base changed workflow files and the App lacks the workflows permission, so a person must update the branch",
+					"repo", repo, "pr", pr.Number, "head", pr.HeadSHA, "mergeable_state", state,
+					"reason", prstage.AutoMergeReasonWorkflowPermission, "error", err)
+				continue
+			}
 			if state != "dirty" {
 				// "behind" is expected to be a trivial fast-forward; a
 				// failure here is an anomaly (race, API hiccup), not the

@@ -134,3 +134,52 @@ func TestMaintainHeldPRMergeabilityIgnoresCleanPR(t *testing.T) {
 		t.Fatalf("update-branch calls for a clean held PR = %d, want 0", calls)
 	}
 }
+
+// A held PR GitHub refuses to update because the base changed workflow files
+// and the App lacks the workflows permission (projectbluefin/testsuite#991,
+// retried every pass for six hours) gets one attempt per head: the refusal is
+// recorded, no conflict notice is posted, and only a new head retries.
+func TestMaintainHeldPRMergeabilityStopsOnWorkflowPermissionRefusal(t *testing.T) {
+	for _, state := range []string{"behind", "dirty"} {
+		t.Run(state, func(t *testing.T) {
+			store := newTestHoldGuardStore(t)
+			fake := &holdGuardServer{
+				workflowRefused: true,
+				commits:         map[int][]map[string]any{7: {ghCommit("c1", "strategist-bot", "docs: plan")}},
+			}
+			client := newHoldGuardClient(t, fake)
+			cfg := escalationTestConfig()
+			store.Snapshot("acme/widgets", 7, "c1", nil)
+
+			held := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c1", MergeableState: state})
+			for i := 0; i < 3; i++ {
+				_ = enforceHoldGuard(context.Background(), cfg, client, client, held, discardLogger())
+			}
+
+			fake.mu.Lock()
+			calls := fake.updateBranchCalls[7]
+			comments := len(fake.comments)
+			fake.mu.Unlock()
+			if calls != 1 {
+				t.Fatalf("update-branch calls for a refused head = %d, want 1", calls)
+			}
+			if comments != 0 {
+				t.Fatalf("a workflows-permission refusal is not a conflict; saw %d comments", comments)
+			}
+			rec, ok := store.Recorded("acme/widgets", 7)
+			if !ok || rec.WorkflowRefusedHeadSHA != "c1" || rec.ConflictNoted {
+				t.Fatalf("snapshot = %+v ok=%v, want WorkflowRefusedHeadSHA=c1 and no conflict noted", rec, ok)
+			}
+
+			// The head moves (a person pushed); the guard tries again.
+			movedHead := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c2", MergeableState: state})
+			_ = enforceHoldGuard(context.Background(), cfg, client, client, movedHead, discardLogger())
+			fake.mu.Lock()
+			calls = fake.updateBranchCalls[7]
+			fake.mu.Unlock()
+			if calls != 2 {
+				t.Fatalf("update-branch calls after the head moved = %d, want 2", calls)
+			}
+		})
+	}
+}

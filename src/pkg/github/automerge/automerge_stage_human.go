@@ -247,6 +247,8 @@ func decisionCause(reason string) string {
 		return "the PR touches a human-merge path (auto_merge.human_merge_paths)"
 	case reason == autoMergeReasonIntentUnauthorized, reason == autoMergeReasonIntentEvidence:
 		return "the merge intent could not be authorized"
+	case reason == autoMergeReasonWorkflowPermission:
+		return "GitHub refused to bring the branch up to date: the base changed `.github/workflows/` files and the Hive App lacks the Workflows permission, so no hive agent can push that update. A person must merge or rebase the base into the branch and push, or grant the App Workflows: write"
 	case strings.HasPrefix(reason, workflowApprovalUntrustedPrefix):
 		return "GitHub Actions is holding the workflow runs for approval and Hive cannot start them: `" + workflowApprovalCommand + "` on this repository belongs to Prow, which does not trust the Hive App. A maintainer must comment `" + workflowApprovalCommand + "` (and `/lgtm` + `/approve` for tide), or install `" + oktotest.WorkflowPath + "` (`hivectl ok-to-test-template`) so the repository GITHUB_TOKEN approves trusted same-repo bot runs on Hive's command."
 	case strings.HasPrefix(reason, workflowApprovalWorkflowMissingPrefix):
