@@ -337,7 +337,15 @@ var repoPathPrefix = regexp.MustCompile(`^(?:/api/v1)?/repos/([^/]+/[^/]+)`)
 
 var gitPathPrefix = regexp.MustCompile(`^/([^/]+/[^/]+)\.git/`)
 
-var gitLabProjectPathPrefix = regexp.MustCompile(`^(?:/api/v4)?/projects/([^/]+(?:/[^/]+)?)`)
+// gitLabProjectPathPrefix captures the project segment of a GitLab API path.
+// GitLab addresses a project either by its URL-encoded "namespace%2Fproject"
+// path (one segment) or by its numeric id; the optional second group only
+// matters for the unencoded "namespace/project" spelling, so ExtractRepo must
+// decide which form it is looking at before it consumes a second segment —
+// otherwise a sub-resource such as /issues is mistaken for the project name.
+var gitLabProjectPathPrefix = regexp.MustCompile(`^(?:/api/v4)?/projects/([^/]+)(?:/([^/]+))?`)
+
+var gitLabNumericProjectID = regexp.MustCompile(`^\d+$`)
 
 // gitUploadPackPath matches the git FETCH endpoint. It is a POST that reads —
 // the same exception the mode rule table makes for it a few lines up — so the
@@ -361,13 +369,17 @@ func ExtractRepo(path string) string {
 	if m := gitPathPrefix.FindStringSubmatch(path); len(m) > 1 {
 		return m[1]
 	}
-	if m := gitLabProjectPathPrefix.FindStringSubmatch(path); len(m) > 1 {
-		raw := m[1]
-		if unescaped, err := url.PathUnescape(raw); err == nil && strings.Contains(unescaped, "/") {
+	if m := gitLabProjectPathPrefix.FindStringSubmatch(path); len(m) > 2 {
+		first := m[1]
+		if unescaped, err := url.PathUnescape(first); err == nil && strings.Contains(unescaped, "/") {
 			return unescaped
 		}
-		if strings.Contains(raw, "/") {
-			return raw
+		if gitLabNumericProjectID.MatchString(first) {
+			// Numeric project id: the repo slug is not recoverable from the path.
+			return ""
+		}
+		if m[2] != "" {
+			return first + "/" + m[2]
 		}
 	}
 	return ""
