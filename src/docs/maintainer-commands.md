@@ -64,8 +64,26 @@ rather than the body, the notice opens with
 `The options are in this comment.`, where "this comment" is a Markdown link
 to that comment's URL, so a reader can find them.
 `/hive approve` picks the recommended option when the text names one, else the
-first option. When there are no options and no recommendation, the notice
-offers only `/hive decision <your instructions>`.
+first option, and records that choice as the decision ("go with the
+recommendation (option B: …)", "go with option A: …"). When there are no
+options and no recommendation, the notice offers only `/hive decision <your
+instructions>`, and a `/hive approve` gets a reply saying the park names no
+recommendation; the issue stays parked. On a `blocked` park and on an owner
+step `/hive approve` keeps its meaning (the blocker is cleared; accept the
+proposed step) and needs no recommendation.
+
+### When a park's premise moves
+
+A park is written once, often by a contributor relay, and names the work it
+waits on ("#722 is in progress", "the precedent has not been set"). At the
+hard-suppress reconcile cadence (`issues.hard_suppress_reconcile_interval`,
+default 30m) Hive re-reads every open issue at `stage/045-needs-decision`.
+When, after the park began, a PR or issue the park text names merged or
+closed, or a PR that refers to the issue ("Refs #N", a closing keyword, "part
+of", …, a list of at most 10 references) merged, Hive posts one note
+(`<!-- hive:park-recheck -->`) listing what changed, and edits it in place as
+more moves. The note never un-parks the issue: leaving 045 stays a
+maintainer's reply.
 
 The on-demand `/hive help` workflow uses the same first-line command shape, is
 ignored for bot comments, and allows `triage`, `write`, `maintain`, or `admin`

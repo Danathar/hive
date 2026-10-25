@@ -199,6 +199,28 @@ func (m unparkMenu) bulletsFor(releaseOnApprove bool) string {
 	return b.String()
 }
 
+// approveDecision is what `/hive approve` accepts on this menu, worded as the
+// "What to reply" notice words it, and false when there is nothing for it to
+// accept: no recommendation and no options. Recording "go with the
+// recommendation" there would hand the agent a decision that does not exist
+// (projectbluefin/server#385, whose park ended "maintainers should decide
+// whether to adopt this tooling or keep the existing model").
+func (m unparkMenu) approveDecision() (string, bool) {
+	switch {
+	case len(m.options) > 0 && m.recommended != "":
+		return "go with the recommendation (option " + m.recommended + m.summaryFor(m.recommended) + ")", true
+	case m.hasRecommendation:
+		return "go with the recommendation", true
+	case len(m.options) > 0:
+		return "go with option " + m.options[0] + m.summaryFor(m.options[0]), true
+	}
+	return "", false
+}
+
+// unparkApproveNothingReply answers `/hive approve` on a park with no
+// recommendation and no options; the park stays.
+const unparkApproveNothingReply = "`/hive approve` accepts the recommendation a park names, and this one names none: neither the issue nor the hive's comments on it recommend an option. The issue stays parked. Reply `/hive decision <your instructions>` to un-park it with your own instructions, or `/hive help` for the commands."
+
 // unparkCommandDecisionText is the decision recorded for an accepted command.
 func unparkCommandDecisionText(command unparkCommand) string {
 	if command.Kind == unparkCommandDone {
