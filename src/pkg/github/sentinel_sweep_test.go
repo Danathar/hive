@@ -634,6 +634,172 @@ func TestSweepSentinelClearanceOnNewerHeadRejected(t *testing.T) {
 	}
 }
 
+const (
+	sentinelOwnersPatch      = "@@ -1,2 +1,3 @@\n approvers:\n   - alice\n+  - eve\n"
+	sentinelOwnersPatchOther = "@@ -1,2 +1,3 @@\n approvers:\n   - alice\n+  - mallory\n"
+)
+
+// sentinelClearedFixture runs the sweep on head hA so the hive posts its own
+// alert (with the flagged-content digest) and labels the PR, then moves the
+// PR to head hB as a push that GitHub stamped at 03:00, after a maintainer
+// removed the label at 02:00 by remover (a "User" unless it ends in [bot]).
+// filesB are hB's PR files. The PR files of hA are one OWNERS change.
+func sentinelClearedFixture(t *testing.T, remover string, filesB []map[string]any) (*sentinelFixture, func() *Client) {
+	t.Helper()
+	f := &sentinelFixture{
+		prs:         []map[string]any{sentinelPR(9, "eve", "hA")},
+		files:       map[int][]map[string]any{9: {{"filename": "OWNERS", "status": "modified", "patch": sentinelOwnersPatch}}},
+		labelExists: true,
+	}
+	srv := newSentinelServer(t, f)
+	t.Cleanup(srv.Close)
+	client := func() *Client {
+		c := newTestClient(t, srv, "o", []string{"o/r"})
+		c.SetAppBotLogin("hive[bot]")
+		return c
+	}
+	res, err := client().SweepSentinel(context.Background(), defaultSentinelOpts(nil))
+	if err != nil || len(res.Flagged) != 1 || len(f.comments[9]) != 1 || !strings.Contains(f.comments[9][0], sentinelContentPrefix) {
+		t.Fatalf("hA must be alerted with a content digest: res=%+v err=%v comments=%v", res, err, f.comments[9])
+	}
+	removerType := "User"
+	if strings.HasSuffix(remover, "[bot]") {
+		removerType = "Bot"
+	}
+	f.mu.Lock()
+	f.commentUsers = map[int][]string{9: {"hive[bot]"}}
+	f.prs[0] = sentinelPR(9, "eve", "hB")
+	f.files[9] = filesB
+	f.timeline = map[int][]map[string]any{9: {
+		sentinelTimelineLabel("labeled", "hive[bot]", "Bot", "2026-10-25T01:00:00Z"),
+		sentinelTimelineLabel("unlabeled", remover, removerType, "2026-10-25T02:00:00Z"),
+	}}
+	f.checkSuites = map[string][]string{"hB": {"2026-10-25T03:00:00Z"}}
+	f.mu.Unlock()
+	return f, client
+}
+
+// A maintainer clears the alert on hA, then a push (here a merge of the base
+// branch) moves the PR to hB. The removal predates hB, so #13602's rule does
+// not apply, but every flagged change on hB is byte-for-byte the one that was
+// reviewed: the clearance carries over, no label and no new alert, and the
+// hive's marker comment is rewritten as the cleared alert for hB so the next
+// pass (a fresh client, as after a restart) stays quiet too. A later push that
+// changes the flagged file re-alerts.
+func TestSweepSentinelClearanceCarriesOverUnchangedFlaggedChanges(t *testing.T) {
+	filesB := []map[string]any{{"filename": "OWNERS", "status": "modified", "patch": sentinelOwnersPatch}}
+	f, client := sentinelClearedFixture(t, "danathar", filesB)
+	for pass := 0; pass < 2; pass++ {
+		res, err := client().SweepSentinel(context.Background(), defaultSentinelOpts(nil))
+		if err != nil || len(res.Flagged) != 0 || res.Skipped != 1 {
+			t.Fatalf("pass %d: unchanged flagged changes must stay cleared: res=%+v err=%v", pass, res, err)
+		}
+		if got := f.labels[9]; len(got) != 1 {
+			t.Fatalf("pass %d: label must not be re-applied (only hA's alert labelled): %v", pass, got)
+		}
+		if len(f.comments[9]) != 1 {
+			t.Fatalf("pass %d: no new alert comment may be posted: %v", pass, f.comments[9])
+		}
+		body := f.comments[9][0]
+		if !strings.Contains(body, SentinelMarker+" hB") || !strings.Contains(body, sentinelAlertHeading) ||
+			!strings.Contains(body, "@danathar removed the `sentinel-alert` label after reviewing an earlier head") ||
+			!strings.Contains(body, sentinelContentPrefix) {
+			t.Fatalf("pass %d: marker comment must be the carried, cleared alert for hB: %q", pass, body)
+		}
+	}
+
+	f.mu.Lock()
+	f.prs[0] = sentinelPR(9, "eve", "hC")
+	f.files[9] = []map[string]any{{"filename": "OWNERS", "status": "modified", "patch": sentinelOwnersPatchOther}}
+	f.checkSuites["hC"] = []string{"2026-10-25T04:00:00Z"}
+	f.mu.Unlock()
+	res, err := client().SweepSentinel(context.Background(), defaultSentinelOpts(nil))
+	if err != nil || len(res.Flagged) != 1 || len(f.labels[9]) != 2 || len(f.comments[9]) != 2 || !strings.Contains(f.comments[9][1], SentinelMarker+" hC") {
+		t.Fatalf("a changed flagged file must re-alert: res=%+v err=%v labels=%v comments=%d", res, err, f.labels[9], len(f.comments[9]))
+	}
+}
+
+// The carry-over needs the same flagged content and a human's removal. A
+// changed patch, an added flagged file, a flagged file GitHub returns with
+// no patch, and a removal by a bot each leave the existing behaviour: hB is
+// alerted on and labelled.
+func TestSweepSentinelClearanceCarryOverRejected(t *testing.T) {
+	owners := map[string]any{"filename": "OWNERS", "status": "modified", "patch": sentinelOwnersPatch}
+	cases := []struct {
+		name    string
+		remover string
+		filesB  []map[string]any
+	}{
+		{"flagged patch changed", "danathar", []map[string]any{{"filename": "OWNERS", "status": "modified", "patch": sentinelOwnersPatchOther}}},
+		{"another flagged file", "danathar", []map[string]any{owners, {"filename": "CODEOWNERS", "status": "added", "patch": "@@ -0,0 +1 @@\n+* @eve\n"}}},
+		{"flagged file has no patch", "danathar", []map[string]any{{"filename": "OWNERS", "status": "modified"}}},
+		{"removed by a bot", "renovate[bot]", []map[string]any{owners}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, client := sentinelClearedFixture(t, tc.remover, tc.filesB)
+			res, err := client().SweepSentinel(context.Background(), defaultSentinelOpts(nil))
+			if err != nil || len(res.Flagged) != 1 {
+				t.Fatalf("hB must re-alert: res=%+v err=%v", res, err)
+			}
+			if got := f.labels[9]; len(got) != 2 {
+				t.Fatalf("label must be applied again: %v", got)
+			}
+			if len(f.comments[9]) != 2 || !strings.Contains(f.comments[9][1], SentinelMarker+" hB") {
+				t.Fatalf("a fresh alert for hB must be posted: %v", f.comments[9])
+			}
+		})
+	}
+}
+
+func TestSentinelFlaggedDigest(t *testing.T) {
+	findings := []sentinel.Finding{{Rule: "sensitive_path", Summary: "x", Paths: []string{"b", "a"}}}
+	files := []sentinel.File{{Path: "a", Status: "modified", Patch: "+1\n"}, {Path: "b", Status: "added", Patch: "+2\n"}, {Path: "c", Patch: "+3\n"}}
+	d := sentinelFlaggedDigest(findings, files)
+	if len(d) != 64 {
+		t.Fatalf("digest = %q", d)
+	}
+	reordered := []sentinel.Finding{{Rule: "sensitive_path", Summary: "other wording", Paths: []string{"a", "b"}}}
+	if got := sentinelFlaggedDigest(reordered, []sentinel.File{files[2], files[1], files[0]}); got != d {
+		t.Fatalf("path order, file order and summary must not matter: %q != %q", got, d)
+	}
+	unflagged := append([]sentinel.File(nil), files...)
+	unflagged[2].Patch = "+changed\n"
+	if got := sentinelFlaggedDigest(findings, unflagged); got != d {
+		t.Fatalf("a change to an unflagged file must not matter")
+	}
+	for name, mutate := range map[string]func([]sentinel.File){
+		"patch":  func(fs []sentinel.File) { fs[0].Patch = "+9\n" },
+		"status": func(fs []sentinel.File) { fs[1].Status = "modified" },
+	} {
+		changed := append([]sentinel.File(nil), files...)
+		mutate(changed)
+		if sentinelFlaggedDigest(findings, changed) == d {
+			t.Fatalf("a flagged file's %s change must change the digest", name)
+		}
+	}
+	if sentinelFlaggedDigest([]sentinel.Finding{{Rule: "other_rule", Paths: []string{"a", "b"}}}, files) == d {
+		t.Fatal("a different rule must change the digest")
+	}
+	for name, tc := range map[string]struct {
+		findings []sentinel.Finding
+		files    []sentinel.File
+	}{
+		"no findings":           {nil, files},
+		"finding with no path":  {[]sentinel.Finding{{Rule: "title"}}, files},
+		"flagged file missing":  {findings, files[:1]},
+		"flagged file no patch": {findings, []sentinel.File{{Path: "a", Patch: "+1\n"}, {Path: "b"}}},
+	} {
+		if got := sentinelFlaggedDigest(tc.findings, tc.files); got != "" {
+			t.Fatalf("%s: digest must be empty (no carry-over), got %q", name, got)
+		}
+	}
+	body := sentinelWithDigest("alert\n", d)
+	if sentinelCommentDigest(body) != d || sentinelCommentDigest("alert\n") != "" || sentinelWithDigest("alert\n", "") != "alert\n" {
+		t.Fatalf("digest line must round-trip: %q", body)
+	}
+}
+
 // A trusted-author notice for the head is not a clearance: when the operator
 // turns on trusted_authors_block, the head still gets the label, and the
 // existing marker comment is rewritten as the alert rather than reposted.
