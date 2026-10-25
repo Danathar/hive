@@ -9466,6 +9466,35 @@ func runSharedCIRerunSweepIfDue(ctx context.Context, ghClient *github.Client, cf
 	}
 }
 
+// blockedIssuesSweepInterval is how often the periodic sweep reconciles open
+// issues carrying the `blocked` label.
+const blockedIssuesSweepInterval = 5 * time.Minute
+
+func runBlockedIssuesSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < blockedIssuesSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	var repos []string
+	if cfg != nil {
+		repos = cfg.Project.Repos
+	}
+	res, err := ghClient.SweepBlockedIssues(ctx, github.BlockedSweepOptions{Repos: repos})
+	if err != nil {
+		logger.Warn("blocked issues reconciliation sweep failed", "error", err)
+		return
+	}
+	if res.Unblocked+res.Retargeted+res.Stripped+res.Errors > 0 {
+		logger.Info("blocked issues reconciliation sweep complete", "items", res.Items, "unblocked", res.Unblocked, "retargeted", res.Retargeted, "help_wanted_stripped", res.Stripped, "errors", res.Errors)
+	}
+}
+
 // runDuplicateSweepIfDue clusters open PRs by changed-file set and suggests
 // which one to keep, at most once per duplicateSweepInterval
 // (hivecommons/hive#7469 capability B).
@@ -9969,8 +9998,8 @@ func applyDuplicatePRGuard(
 	if rb := github.ReconcileReviewBacklogBlocks(blockedCtx, ghClient, logger); rb.Lifted+rb.Retriaged+rb.Errors > 0 {
 		logger.Info("review backlog blocks reconciled", "checked", rb.Checked, "lifted", rb.Lifted, "retriaged", rb.Retriaged, "errors", rb.Errors)
 	}
-	if br := github.ReconcileBlockedIssues(blockedCtx, ghClient, actionable, logger); br.Unblocked+br.Stripped+br.SoakTriaged+br.Errors > 0 {
-		logger.Info("blocked issues reconciled", "items", br.Items, "unblocked", br.Unblocked, "help_wanted_stripped", br.Stripped, "soak_triaged", br.SoakTriaged, "errors", br.Errors)
+	if br := github.ReconcileBlockedIssues(blockedCtx, ghClient, actionable, logger); br.Unblocked+br.Retargeted+br.Stripped+br.SoakTriaged+br.Errors > 0 {
+		logger.Info("blocked issues reconciled", "items", br.Items, "unblocked", br.Unblocked, "retargeted", br.Retargeted, "help_wanted_stripped", br.Stripped, "soak_triaged", br.SoakTriaged, "errors", br.Errors)
 	}
 	blockedCancel()
 	// Closing an issue is irreversible: refuse while the snapshot is stale and

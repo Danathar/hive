@@ -224,6 +224,7 @@ type boot struct {
 	lastDuplicateSweep     time.Time
 	lastSupersessionSweep  time.Time
 	lastSharedCIRerunSweep time.Time
+	lastBlockedIssuesSweep time.Time
 	lastIssueUnparkSweep   time.Time
 	lastClosedIssueSweep   time.Time
 	// lastClarityResumeSweep gates runClarityGateResumeSweepIfDue
