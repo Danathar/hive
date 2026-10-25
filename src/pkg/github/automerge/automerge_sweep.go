@@ -263,6 +263,10 @@ type Engine struct {
 	// (automerge_merge_refusal.go).
 	mergeRefusalsMu sync.Mutex
 	mergeRefusals   map[string]mergeRefusal
+	// adoptionOriginalChecks throttles the self lane's lookup of an
+	// adoption PR's original (automerge_adoption_original.go).
+	adoptionOriginalChecksMu sync.Mutex
+	adoptionOriginalChecks   map[string]time.Time
 
 	stageLabelPolicy  func() StageLabelPolicy
 	stageTracker      *StageTracker
@@ -1627,6 +1631,11 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	}
 	if c.transport.IsExemptLabels(selfLabels) {
 		return reject("exempt-label")
+	}
+	if lane == "self-authored" {
+		if c.closeAdoptionPRIfOriginalMerged(ctx, displayRepo, owner, repo, pr) {
+			return AutoMergeSweepEvent{}, "closed", nil
+		}
 	}
 
 	evaluatedHeadSHA := ""

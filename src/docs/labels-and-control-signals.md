@@ -1022,6 +1022,11 @@ When a clanker-authored contributor PR goes red the hive does not just relabel i
    every 10 minutes: merged → one `<!-- hive:adopted-merged -->` note and the
    original is closed; closed unmerged (a maintainer declined) → the adoption
    is forgotten and the original returns to 072 (not a regression).
+   If a person merges the original instead, the self-authored lane closes
+   the `hive/adopt-<n>` PR with one `<!-- hive:adoption-original-merged -->`
+   note when the original merged at the adoption PR's own head (checked at
+   most every 10 minutes); an adoption PR carrying extra hive commits stays
+   open for a person.
    If an adopted head is DCO-red, an empty signed commit is never enough.
    "Hive-authored" is decided the same way as head attribution above: an
    unsigned commit is the hive's own only when GitHub links its author or
