@@ -74,7 +74,7 @@ words this feature needs — "An ADVISORY agent with Converse can reply on a
 thread it was mentioned in; it still cannot file, edit or relabel anything"
 (`src/crux/agent/capabilities.go:32`). It is enforced at the MITM proxy as an
 additional grant beside the mode ladder (`proxy.AllowedByModeCaps`,
-`src/crux/proxy/rules.go:152,170`), and the issue-request watcher already carries a
+`src/crux/proxy/rules.go:160,189`), and the issue-request watcher already carries a
 `Kind: "comment"` request that posts a comment as the App bot
 (`src/pkg/github/issue_request_watcher.go:70`). Outbound comment text is
 canary-scanned and secret-scrubbed on the way out
@@ -345,7 +345,7 @@ the decision follows each one, with the code on `v6` that now carries it.
 - `src/pkg/linearagent/responder.go` — ack-first, resolve, kick, track.
 - `src/pkg/linearagent/oauth.go:56` — `app:mentionable`.
 - `src/crux/agent/capabilities.go:32` — `Converse`, documented for mentions.
-- `src/crux/proxy/rules.go:152,170` — where `Converse` is enforced.
+- `src/crux/proxy/rules.go:160,189` — where `Converse` is enforced.
 - `src/pkg/config/config.go:1716` — `linear.session_agent` resolution rule.
 - `src/pkg/config/config.go:5538` — the removed declarative channel types (#5591).
 - `src/pkg/config/review_bots.go:33` — `classification.review_bots`, the loop

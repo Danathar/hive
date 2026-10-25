@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -139,38 +140,58 @@ var rules = []ProxyRule{
 	// so it was refused even at ISSUES_PRS_MERGE. It is gated at the same level
 	// as the merge itself — it writes to the PR's head branch, nothing more.
 	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/pulls/\d+/update-branch$`), Method: "PUT", MinMode: agent.ModeIssuesPRsMerge},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/pulls/\d+/update(?:-branch)?$`), Method: "POST", MinMode: agent.ModeIssuesPRsMerge},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/pulls/\d+/update-branch$`), Method: "PUT", MinMode: agent.ModeIssuesPRsMerge},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+/rebase$`), Method: "PUT", MinMode: agent.ModeIssuesPRsMerge},
 
 	// ── PR operations — ISSUES_AND_PRS and above ──
 	// NOTE: direct PR creation (POST /pulls) is NOT here — it is a HARD DENY for
 	// every mode, handled by denyRules below, so agents route through hive-open-pr
 	// (App-bot authorship) instead of `gh pr create` / the GitHub MCP create_pull_request.
 	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/pulls/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^/api/v1/repos/[^/]+/[^/]+/pulls/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+$`), Method: "PUT", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesAndPRs},
 	// Leaving review commentary is conversation, not code. It sat behind
 	// ModeIssuesAndPRs only because it lives under /pulls/, which meant an agent
 	// had to be able to push branches and open PRs before it could say "this
 	// looks wrong" (#4492). The tier is unchanged for everyone; `converse` is an
 	// additional way in.
 	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/pulls/\d+/reviews`), Method: "POST", MinMode: agent.ModeIssuesAndPRs, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/pulls/\d+/reviews`), Method: "POST", MinMode: agent.ModeIssuesAndPRs, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+/notes`), Method: "POST", MinMode: agent.ModeIssuesAndPRs, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+/discussions`), Method: "POST", MinMode: agent.ModeIssuesAndPRs, Capability: agent.AgentCapabilities.CanConverse},
 
 	// ── Git fetch — all modes (read-only, despite using POST) ──
 	{PathPattern: regexp.MustCompile(`\.git/git-upload-pack$`), Method: "POST", MinMode: agent.ModeAdvisory},
 
 	// ── Git push operations — ISSUES_AND_PRS and above ──
 	{PathPattern: regexp.MustCompile(`\.git/git-receive-pack$`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/git/refs$`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/git/commits$`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/git/refs/`), Method: "DELETE", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/git/refs$`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/git/commits$`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/git/refs/`), Method: "DELETE", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/branches`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/branches/`), Method: "DELETE", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/repository/branches`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/repository/branches/`), Method: "DELETE", MinMode: agent.ModeIssuesAndPRs},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/repository/commits`), Method: "POST", MinMode: agent.ModeIssuesAndPRs},
 
 	// ── Issue operations — ISSUES_ONLY and above ──
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/issues$`), Method: "POST", MinMode: agent.ModeIssuesOnly},
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/issues/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/issues$`), Method: "POST", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/issues$`), Method: "POST", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/issues/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/issues/\d+$`), Method: "PUT", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/issues/\d+$`), Method: "PATCH", MinMode: agent.ModeIssuesOnly},
 	// Commenting is conversation; creating, editing and relabelling are artifact
 	// production. Bundling them at one tier meant an ADVISORY agent that noticed
 	// something on a thread could not reply — only emit a bead the reporter never
 	// sees (#4492). The tier is unchanged; `converse` is an additional way in.
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/issues/\d+/comments`), Method: "POST", MinMode: agent.ModeIssuesOnly, Capability: agent.AgentCapabilities.CanConverse},
-	{PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/issues/\d+/labels`), Method: "POST", MinMode: agent.ModeIssuesOnly},
-
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/issues/\d+/comments`), Method: "POST", MinMode: agent.ModeIssuesOnly, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/issues/\d+/notes`), Method: "POST", MinMode: agent.ModeIssuesOnly, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/issues/\d+/discussions`), Method: "POST", MinMode: agent.ModeIssuesOnly, Capability: agent.AgentCapabilities.CanConverse},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/issues/\d+/labels`), Method: "POST", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/labels`), Method: "POST", MinMode: agent.ModeIssuesOnly},
+	{PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/issues/\d+/labels`), Method: "DELETE", MinMode: agent.ModeIssuesOnly},
 	// ── Read operations — ADVISORY and above ──
 	// Catch-all: any GET/HEAD/OPTIONS on any path.
 	{PathPattern: regexp.MustCompile(`.*`), Method: "GET", MinMode: agent.ModeAdvisory},
@@ -214,6 +235,7 @@ type denyRule struct {
 // agent proxy — it originates from the hive process (owner UID), which the
 // forced-egress iptables redirect exempts — so the relay is unaffected.
 var denyRules = []denyRule{
+	// ── GitHub ──
 	{
 		PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/pulls$`),
 		Method:      "POST",
@@ -223,6 +245,40 @@ var denyRules = []denyRule{
 		PathPattern: regexp.MustCompile(`^/repos/[^/]+/[^/]+/pulls/\d+/merge$`),
 		Method:      "PUT",
 		Msg:         "direct PR merge is disabled for agents — use `hive-merge --repo <owner/repo> --number <n> --expect-sha <head-sha>` so the hive merges as the App bot with the SHA-pin + merge-eligible binding enforced. Do NOT use `gh api -X PUT .../merge`, `gh pr merge`, or the GitHub MCP merge_pull_request.",
+	},
+
+	// ── GitLab ──
+	{
+		PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests$`),
+		Method:      "POST",
+		Msg:         "direct MR creation is disabled for agents — use the request-file path so the hive opens the MR as the App/bot identity. Do NOT use direct GitLab API calls.",
+	},
+	{
+		PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+/merge$`),
+		Method:      "PUT",
+		Msg:         "direct MR merge is disabled for agents — use the request-file path so the hive merges as the App/bot identity with bindings enforced. Do NOT use direct GitLab API calls.",
+	},
+	{
+		PathPattern: regexp.MustCompile(`^(?:/api/v4)?/projects/.+?/merge_requests/\d+/merge$`),
+		Method:      "POST",
+		Msg:         "direct MR merge is disabled for agents — use the request-file path so the hive merges as the App/bot identity with bindings enforced. Do NOT use direct GitLab API calls.",
+	},
+
+	// ── Gitea / Forgejo ──
+	{
+		PathPattern: regexp.MustCompile(`^/api/v1/repos/[^/]+/[^/]+/pulls$`),
+		Method:      "POST",
+		Msg:         "direct PR creation is disabled for agents — use the request-file path so the hive opens the PR as the App/bot identity. Do NOT use direct Gitea API calls.",
+	},
+	{
+		PathPattern: regexp.MustCompile(`^(?:/api/v1)?/repos/[^/]+/[^/]+/pulls/\d+/merge$`),
+		Method:      "POST",
+		Msg:         "direct PR merge is disabled for agents — use the request-file path so the hive merges as the App/bot identity with bindings enforced. Do NOT use direct Gitea API calls.",
+	},
+	{
+		PathPattern: regexp.MustCompile(`^/api/v1/repos/[^/]+/[^/]+/pulls/\d+/merge$`),
+		Method:      "PUT",
+		Msg:         "direct PR merge is disabled for agents — use the request-file path so the hive merges as the App/bot identity with bindings enforced. Do NOT use direct Gitea API calls.",
 	},
 }
 
@@ -277,9 +333,19 @@ func DeniedMessage(method, path string) (string, bool) {
 	return "", false
 }
 
-var repoPathPrefix = regexp.MustCompile(`^/repos/([^/]+/[^/]+)`)
+var repoPathPrefix = regexp.MustCompile(`^(?:/api/v1)?/repos/([^/]+/[^/]+)`)
 
 var gitPathPrefix = regexp.MustCompile(`^/([^/]+/[^/]+)\.git/`)
+
+// gitLabProjectPathPrefix captures the project segment of a GitLab API path.
+// GitLab addresses a project either by its URL-encoded "namespace%2Fproject"
+// path (one segment) or by its numeric id; the optional second group only
+// matters for the unencoded "namespace/project" spelling, so ExtractRepo must
+// decide which form it is looking at before it consumes a second segment —
+// otherwise a sub-resource such as /issues is mistaken for the project name.
+var gitLabProjectPathPrefix = regexp.MustCompile(`^(?:/api/v4)?/projects/([^/]+)(?:/([^/]+))?`)
+
+var gitLabNumericProjectID = regexp.MustCompile(`^\d+$`)
 
 // gitUploadPackPath matches the git FETCH endpoint. It is a POST that reads —
 // the same exception the mode rule table makes for it a few lines up — so the
@@ -302,6 +368,19 @@ func ExtractRepo(path string) string {
 	}
 	if m := gitPathPrefix.FindStringSubmatch(path); len(m) > 1 {
 		return m[1]
+	}
+	if m := gitLabProjectPathPrefix.FindStringSubmatch(path); len(m) > 2 {
+		first := m[1]
+		if unescaped, err := url.PathUnescape(first); err == nil && strings.Contains(unescaped, "/") {
+			return unescaped
+		}
+		if gitLabNumericProjectID.MatchString(first) {
+			// Numeric project id: the repo slug is not recoverable from the path.
+			return ""
+		}
+		if m[2] != "" {
+			return first + "/" + m[2]
+		}
 	}
 	return ""
 }
