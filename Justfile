@@ -308,6 +308,21 @@ contribute-check-backend backend="claude":
           echo "ERROR: OMP CLI not found. Install: https://github.com/can1357/oh-my-pi"
           exit 1
         fi
+      omnigent)
+        if command -v omnigent &>/dev/null; then
+          echo "Omnigent CLI detected ($(omnigent --version 2>&1 | head -1))"
+          echo "  Meta-harness for Claude Code, Codex, Cursor, Pi, and custom agents."
+          echo "  Auth: export ANTHROPIC_API_KEY=..., OPENAI_API_KEY=..., or run 'omnigent login <url>'"
+          echo "        (credentials stored at ~/.omnigent/auth_tokens.json or ~/.omnigent/config.yaml)"
+          echo "  omnigent has NO OS sandbox on the local CLI path; local mode refuses to launch without"
+          echo "  HIVE_OMNIGENT_DANGEROUSLY_RUN_UNCONFINED=1."
+          if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && -z "${DATABRICKS_TOKEN:-}" && ! -s "$HOME/.omnigent/auth_tokens.json" && ! -s "$HOME/.omnigent/config.yaml" ]]; then
+            echo "  WARNING: no provider API key and no ~/.omnigent credentials found — omnigent may fail at task time."
+          fi
+        else
+          echo "ERROR: omnigent CLI not found. Install: https://github.com/omnigent-ai/omnigent"
+          exit 1
+        fi
         ;;
       *)
         echo "ERROR: Unknown backend '{{backend}}'. Supported: ${KNOWN_BACKENDS// /, }"
@@ -1172,9 +1187,9 @@ contribute-hive backend="" mode="docker": check-version
         codex)
           PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
           ;;
-        goose|agy|bob|pi|aider|kilo|omp|openhands)
+        goose|agy|bob|pi|aider|kilo|omp|openhands|omnigent)
           # No sandbox, filesystem allowlist, or command deny-list exists for
-          # any of these eight (see the "no confinement mechanism at all"
+          # any of these nine (see the "no confinement mechanism at all"
           # block in backends.conf) — refuse to launch unconfined by
           # default rather than silently grant full host access (#4918).
           if ! PERM_FLAG=$(unconfined_local_perm_flag_shell "$BACKEND"); then
@@ -1765,6 +1780,14 @@ contribute-hive backend="" mode="docker": check-version
           if [ -f "${OPENHANDS_DIR}/settings.json" ]; then
             stage_copy "${OPENHANDS_DIR}" ".openhands"
             CLI_MOUNTS="-v ${CLI_STAGE}/.openhands:/home/dev/.openhands${VOLSUF}"
+          fi
+          ;;
+        omnigent)
+          # Omnigent stores server auth tokens and configuration under ~/.omnigent.
+          # Stage it when present.
+          if [ -d "${HOME}/.omnigent" ]; then
+            stage_copy "${HOME}/.omnigent" ".omnigent"
+            CLI_MOUNTS="-v ${CLI_STAGE}/.omnigent:/home/dev/.omnigent${VOLSUF}"
           fi
           ;;
       esac

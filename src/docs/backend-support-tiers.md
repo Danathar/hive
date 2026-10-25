@@ -15,14 +15,14 @@ implementation.
 
 ## The three tiers
 
-The 12 shell-known CLIs (`KNOWN_BACKENDS` in `config/backends.conf`) already
+The 15 shell-known CLIs (`KNOWN_BACKENDS` in `config/backends.conf`) already
 fall into three classes that are enforced in code. This document names them.
 
 | Tier | Meaning | Backends today | Enforcement point |
 | --- | --- | --- | --- |
 | **T1 - core (headless-pod)** | Runs unattended in a TTY-less pod from staged or env-injected credentials | `claude`, `litellm`, `copilot`, `codex`, `goose` | `HEADLESS_BACKENDS` in the `Justfile` (`contribute-k8s`) and `K8S_HEADLESS_BACKENDS` in `src/pkg/dashboard/api_contribute.go` |
 | **T2 - supported (confined)** | Has a confinement floor hive can wire on the contributor local path: an OS sandbox, or at least a host-state deny-list | `claude`/`litellm`, `codex`, `copilot`, `muse` (sandboxed); `opencode` (deny-listed) | `backend_perm_flag` and the `*_local_perm_flag_shell` helpers in `config/backends.conf` |
-| **T3 - experimental (unconfined)** | No confinement hive can wire; local mode refuses to launch without a per-backend opt-in, container mode is the default | `goose`, `agy`, `bob`, `pi`, `aider`, `kilo`, `omp` | `unconfined_local_perm_flag_shell` and `HIVE_<BACKEND>_DANGEROUSLY_RUN_UNCONFINED=1` (#4918) |
+| **T3 - experimental (unconfined)** | No confinement hive can wire; local mode refuses to launch without a per-backend opt-in, container mode is the default | `goose`, `agy`, `bob`, `pi`, `aider`, `kilo`, `omp`, `openhands`, `omnigent` | `unconfined_local_perm_flag_shell` and `HIVE_<BACKEND>_DANGEROUSLY_RUN_UNCONFINED=1` (#4918) |
 
 Tier assignment is per launch path. `goose` is T1 on the pod path (it has a
 one-shot `goose run` and an env-key credential) and T3 on the local path (no
@@ -34,6 +34,8 @@ tier it claims for each path it wires.
 Upstream considers that CLI/headless path legacy and no longer actively
 maintained (OpenHands/OpenHands#18046), and Hive will not promote OpenHands
 beyond T3 on that surface.
+
+`omnigent` is T3 experimental (open-source meta-harness over Claude Code, Codex, Cursor, Pi, and custom agents). On the contributor local launch path, the bare CLI runs with no OS sandbox wired by Hive, so local launches refuse by default without `HIVE_OMNIGENT_DANGEROUSLY_RUN_UNCONFINED=1`. While Omnigent has its own internal policy engine and optional agent sandboxing (`enforce_sandbox`), Hive treats these as additive: Hive's API/egress proxy strictly decides and controls all GitHub writes (`POST /repos/{owner}/{repo}/pulls`, `PUT /repos/{owner}/{repo}/pulls/{n}/merge`, Git pushes), and Omnigent policies can never override or bypass Hive proxy denials. See [backend-omnigent-cli-contract.md](backend-omnigent-cli-contract.md).
 
 The T3 tier also bounds what an already-running OMP workbench may take as an
 external host (#8361 step 9, #6899): it is admissible only in report-only and

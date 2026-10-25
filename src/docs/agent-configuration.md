@@ -106,7 +106,7 @@ older overlays, but new configs should use `bob.session_label`.
 
 ```yaml
     backend: copilot             # the method: claude | copilot | goose | codex | pi |
-                                 #   bob | aider | omp, or an inference backend:
+                                 #   bob | aider | omp | openhands | omnigent, or an inference backend:
                                  #   vllm | llm-d | litellm | watsonx | named gateway
     model: claude-sonnet-4-6     # model id for that method
     reasoning_effort: high       # reasoning effort, for methods that have one:
@@ -135,6 +135,10 @@ The dashboard shows a reasoning-effort dropdown next to the model picker for eve
 
 `backend: omp` launches the OMP CLI as a first-class dashboard method. Hive gives each agent its own durable HOME under `/data/home/agents/<name>`, so `~/.omp/agent/agent.db` can hold several provider sign-ins for that one agent (for example `openai-codex` for the primary model and `anthropic` for an advisor) without sharing refresh-token writers across agents. Select models with their provider prefix (`provider/model`). The dashboard model probe runs `omp models --json` and uses each model's `thinking` list for the effort dropdown. At launch Hive passes `--approval-mode ${HIVE_OMP_APPROVAL_MODE:-yolo}`, `--model <id>`, and `--thinking <effort>` when set.
 
+
+#### Omnigent (`omnigent`) agents
+
+`backend: omnigent` launches the Omnigent CLI as an experimental T3 backend. Omnigent provides an open-source meta-harness layer orchestrating underlying agent engines (Claude Code, Codex, Cursor, Pi, and custom harnesses). On contributor local launches, Omnigent has no OS sandbox wired by Hive, so local mode refuses by default without `HIVE_OMNIGENT_DANGEROUSLY_RUN_UNCONFINED=1`. Container mode is the default and recommended boundary. Omnigent's internal policy engine and sandbox evaluate additively, while Hive's proxy remains authoritative on all repository writes. See [`backend-omnigent-cli-contract.md`](backend-omnigent-cli-contract.md).
 
 > The dashboard also offers **gemini** as a live method (with live model discovery); as a persisted `backend:` value in `hive.yaml`, stick to the validated list above.
 

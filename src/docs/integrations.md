@@ -38,7 +38,7 @@ container mode by default; local mode needs an explicit opt-in.
 <tr><td><img src="assets/logos/openhands-badge.svg" height="40" alt="OpenHands"></td><td>OpenHands (legacy CLI)</td><td>Opt-in</td><td>T3</td><td><a href="backend-support-tiers.md#the-three-tiers">backend-support-tiers.md</a></td></tr>
 <tr><td><img src="assets/logos/claude.svg" height="40" alt="Claude logo"></td><td>Claude Managed Agents</td><td>Planned</td><td>—</td><td><a href="https://github.com/hivecommons/hive/issues/14093">#14093</a></td></tr>
 <tr><td><img src="assets/logos/openai-agents-badge.svg" height="40" alt="OpenAI Agents"></td><td>OpenAI Agents API</td><td>Planned</td><td>—</td><td><a href="https://github.com/hivecommons/hive/issues/14093">#14093</a></td></tr>
-<tr><td><img src="assets/logos/omnigent-badge.svg" height="40" alt="Omnigent"></td><td>Omnigent</td><td>Planned</td><td>T3 (proposed)</td><td><a href="https://github.com/hivecommons/hive/issues/14094">#14094</a></td></tr>
+<tr><td><img src="assets/logos/omnigent-badge.svg" height="40" alt="Omnigent"></td><td>Omnigent</td><td>Opt-in</td><td>T3</td><td><a href="backend-support-tiers.md#the-three-tiers">backend-support-tiers.md</a></td></tr>
 </table>
 
 ## Work sources and trackers

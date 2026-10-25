@@ -116,6 +116,7 @@ var localBackendPostures = map[string]localConfinementPosture{
 	"muse":      postureSandboxed,
 	"omp":       postureRefusalGated,
 	"openhands": postureRefusalGated,
+	"omnigent":  postureRefusalGated,
 }
 
 func shellKnownLocalBackends(t *testing.T) []string {
@@ -513,7 +514,7 @@ func TestLocalModeBannerNamesCopilotSandbox(t *testing.T) {
 func TestBackendsConfDocumentsWhyUnconfinedBackendsHaveNoWiring(t *testing.T) {
 	src := backendsConfSource(t)
 	for _, want := range []string{
-		"goose, agy, bob, pi, aider, kilo, omp, and openhands expose no OS-level sandbox",
+		"goose, agy, bob, pi, aider, kilo, omp, openhands, and omnigent expose no OS-level sandbox",
 		"unconfined_local_backend_env_var",
 		"unconfined_local_perm_flag_shell",
 	} {
