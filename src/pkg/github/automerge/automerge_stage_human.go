@@ -11,12 +11,14 @@ package automerge
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/oktotest"
+	"github.com/hivecommons/hive/pkg/stageengine/prstage"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -201,6 +203,14 @@ func decisionCause(reason string) string {
 		return "GitHub Actions is waiting for workflow approval. Hive posted `" + workflowApprovalCommand + "`; install `" + oktotest.WorkflowPath + "` (`hivectl ok-to-test-template`) if the runs do not start, or manually approve them from the PR checks banner."
 	case reason == "approval-desk-withheld":
 		return "the approval desk withheld this merge"
+	case strings.HasPrefix(reason, "linked-issue:"):
+		if kind, issue, label, ok := prstage.ParseLinkedIssueReason(reason); ok {
+			ref := "#" + strconv.Itoa(issue)
+			if kind == linkedIssueReasonHoldPrefix {
+				return "issue " + ref + ", which this PR closes, is on hold (`" + label + "`); remove `" + label + "` from " + ref + " to release this PR"
+			}
+			return "issue " + ref + ", which this PR closes, is parked for a decision (`" + label + "`); once it is decided, remove `" + label + "` from " + ref + " to release this PR"
+		}
 	case reason == "":
 		return ""
 	}

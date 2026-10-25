@@ -1716,6 +1716,15 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		return AutoMergeSweepEvent{}, intentReason, nil
 	}
 
+	// Linked-issue gate: an issue this PR closes that is held or parked on
+	// a person holds the PR too. Read only for a head that would otherwise
+	// merge, and before the current-base gate so a held PR is not updated.
+	if linkedReason, err := c.linkedIssueGate(ctx, owner, repo, pr); err != nil {
+		return AutoMergeSweepEvent{}, linkedReason, err
+	} else if linkedReason != "" {
+		return reject(linkedReason)
+	}
+
 	// Current-base gate (hivecommons/hive#13634). Consulted only once the
 	// head is green and every policy gate above has passed: a red or pending
 	// head is the author's to fix and must not be re-based under them, and a
@@ -2257,6 +2266,9 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	if humanReason, err := c.humanMergePathGate(ctx, displayRepo, owner, repo, pr); err != nil || humanReason != "" {
 		return AutoMergeSweepEvent{}, humanReason, err
 	}
+	if linkedReason, err := c.linkedIssueGate(ctx, owner, repo, pr); err != nil || linkedReason != "" {
+		return AutoMergeSweepEvent{}, linkedReason, err
+	}
 	// Current-base gate (hivecommons/hive#13634): only a green head that
 	// every gate above lets through is worth an update-branch commit.
 	if ev, reason, stop, err := c.currentBaseGate(ctx, displayRepo, owner, repo, number, baseBranch, headSHA, true, "behind", c.isForkPR(pr)); stop {
@@ -2620,6 +2632,13 @@ func (c *Engine) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 	}
 	if humanReason, err := c.humanMergePathGate(ctx, displayRepo, owner, repo, pr); err != nil || humanReason != "" {
 		return AutoMergeSweepEvent{}, humanReason, err
+	}
+	// A hold on an issue the PR closes outranks the merger queue, as a hold
+	// on the PR does.
+	if linkedReason, err := c.linkedIssueGate(ctx, owner, repo, pr); err != nil {
+		return AutoMergeSweepEvent{}, linkedReason, err
+	} else if linkedReason != "" {
+		return reject(linkedReason)
 	}
 
 	// Approval desk (RFC #4000) for the trusted human merge-queue lane.

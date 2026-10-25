@@ -1,5 +1,10 @@
 package prstage
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Lane reasons are shared by the producers and the stage classifier.
 const (
 	ReviewGateOutcomeAwaiting              = "awaiting-review-approval"
@@ -33,6 +38,9 @@ const (
 	ContributorLaneReasonSoaking           = "contributor-lane:soaking"
 	ContributorLaneReasonTestsRemoved      = "contributor-lane:tests-removed"
 	ContributorLaneReasonWorkflowPath      = "contributor-lane:workflow-path"
+	LinkedIssueReasonCheck                 = "linked-issue-check"
+	LinkedIssueReasonHoldPrefix            = "linked-issue:hold:"
+	LinkedIssueReasonNeedsDecisionPrefix   = "linked-issue:needs-decision:"
 	StageLaneContributor                   = "contributor-lane"
 	StageLaneSelf                          = "self-authored"
 	StageLaneTrusted                       = "trusted-author"
@@ -42,3 +50,36 @@ const (
 	TrustedBotLaneSkipReason               = "trusted-bot-lane"
 	WorkflowApprovalRequiredPrefix         = "workflow-approval-required:"
 )
+
+// LinkedIssueReason formats the refusal for an open issue the PR closes that
+// carries label: kindPrefix is LinkedIssueReasonHoldPrefix or
+// LinkedIssueReasonNeedsDecisionPrefix, so the result reads
+// `linked-issue:hold:#551:hold`.
+func LinkedIssueReason(kindPrefix string, issue int, label string) string {
+	return kindPrefix + "#" + strconv.Itoa(issue) + ":" + label
+}
+
+// ParseLinkedIssueReason splits a LinkedIssueReason back into its kind
+// prefix, issue number and label. ok is false for any other reason,
+// including the fail-closed LinkedIssueReasonCheck.
+func ParseLinkedIssueReason(reason string) (kindPrefix string, issue int, label string, ok bool) {
+	var rest string
+	switch {
+	case strings.HasPrefix(reason, LinkedIssueReasonHoldPrefix):
+		kindPrefix, rest = LinkedIssueReasonHoldPrefix, strings.TrimPrefix(reason, LinkedIssueReasonHoldPrefix)
+	case strings.HasPrefix(reason, LinkedIssueReasonNeedsDecisionPrefix):
+		kindPrefix, rest = LinkedIssueReasonNeedsDecisionPrefix, strings.TrimPrefix(reason, LinkedIssueReasonNeedsDecisionPrefix)
+	default:
+		return "", 0, "", false
+	}
+	rest, found := strings.CutPrefix(rest, "#")
+	if !found {
+		return "", 0, "", false
+	}
+	num, label, _ := strings.Cut(rest, ":")
+	n, err := strconv.Atoi(num)
+	if err != nil || n <= 0 {
+		return "", 0, "", false
+	}
+	return kindPrefix, n, label, true
+}

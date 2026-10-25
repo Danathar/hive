@@ -303,7 +303,12 @@ func ClassifyStage(o stageObservation) stageVerdict {
 	if strings.HasPrefix(reason, workflowApprovalRequiredPrefix) {
 		return stageVerdict{Stage: stagelabels.NeedsDecision, Rank: stageRankOwned, Human: true}
 	}
-	if strings.HasPrefix(reason, "excluded-label:") || stageNeedsHumanReasons[reason] {
+	// An open issue the PR closes is held or parked on a person
+	// (linked-issue:hold:#N:<label> / linked-issue:needs-decision:#N:<label>):
+	// the decision is owed on the issue, and removing its label releases
+	// the PR on the next sweep.
+	if _, _, _, linked := prstage.ParseLinkedIssueReason(reason); linked ||
+		strings.HasPrefix(reason, "excluded-label:") || stageNeedsHumanReasons[reason] {
 		if HasLabelFold(o.Labels, "needs-rebase") {
 			return stageVerdict{Stage: fixing, Rank: stageRankOwned}
 		}
