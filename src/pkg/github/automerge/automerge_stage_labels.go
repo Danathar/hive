@@ -196,11 +196,12 @@ type StageTracker struct {
 	details map[string]stageDetail                 // key → detail noted by trySweep*
 	ensured map[string]bool                        // repo → labels provisioned this process
 	checks  map[string]humanChecksEntry            // key → head check digest (human routing)
+	fences  map[string]humanFenceEntry             // key → head diff fence (human routing)
 }
 
 // NewStageTracker returns an empty tracker.
 func NewStageTracker() *StageTracker {
-	return &StageTracker{obs: map[string]map[string]stageObservation{}, details: map[string]stageDetail{}, ensured: map[string]bool{}, checks: map[string]humanChecksEntry{}}
+	return &StageTracker{obs: map[string]map[string]stageObservation{}, details: map[string]stageDetail{}, ensured: map[string]bool{}, checks: map[string]humanChecksEntry{}, fences: map[string]humanFenceEntry{}}
 }
 
 var sharedStageTracker = NewStageTracker()

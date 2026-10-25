@@ -42,6 +42,12 @@ type stageAPI struct {
 	commits       map[int][]string
 	commitDetails map[int][]stageCommitFixture
 	commitReads   int
+	// prFiles is what GET /pulls/N/files answers for the head "sha" (GET
+	// /pulls/N reports that head). A PR not listed answers 404, so the human
+	// routing's diff-fence read fails quietly and leaves the evidence as the
+	// lane's reason alone states it.
+	prFiles   map[int][]string
+	fileReads int
 	// extra handles routes beyond labels/comments (returns true when it
 	// served the request); the adoption tests use it for refs and pulls.
 	extra func(w http.ResponseWriter, r *http.Request) bool
@@ -100,6 +106,25 @@ func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
 			}
 			stagePRTruthMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"number": n, "labels": labels})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/pulls/") &&
+			(strings.HasSuffix(path, "/files") || !strings.Contains(strings.TrimPrefix(path, "/repos/acme/widget/pulls/"), "/")):
+			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/pulls/"), "/files"))
+			files, ok := api.prFiles[n]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			if !strings.HasSuffix(path, "/files") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"number": n, "head": map[string]string{"sha": "sha"}, "changed_files": len(files)})
+				return
+			}
+			api.fileReads++
+			out := []map[string]any{}
+			for _, f := range files {
+				out = append(out, map[string]any{"filename": f, "status": "modified"})
+			}
+			_ = json.NewEncoder(w).Encode(out)
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/pulls/") && strings.HasSuffix(path, "/commits"):
 			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/pulls/"), "/commits"))
 			api.commitReads++
