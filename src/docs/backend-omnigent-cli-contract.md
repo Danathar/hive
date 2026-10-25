@@ -129,7 +129,7 @@ To provide honest credential detection, `detect_cli` in `bin/contributor-agent.s
 
 If the binary exists but none of these credential paths are present, `detect_cli` outputs `NOT_AUTHED`.
 
-**Container staging is an allowlist, never the directory.** `just contribute-hive omnigent` stages only `~/.omnigent/auth_tokens.json` and `~/.omnigent/config.yaml` into the container's `~/.omnigent`. The rest of the directory — `omnigent.db` (every prior session and turn), `logs/` and `debug/` (Fact 4) — is the contributor's full Omnigent history and stays on the host, for the same reason `~/.claude` is staged as an allowlist (#7836). A `server:` key in the staged `config.yaml` is inert: the launch line's `--server local` overrides it (§0).
+**Container staging is an allowlist, never the directory.** `just contribute-hive omnigent` stages only `~/.omnigent/auth_tokens.json` and `~/.omnigent/config.yaml` into the container's `~/.omnigent`, plus `~/.databrickscfg` as a single file when present, and forwards `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DATABRICKS_TOKEN` and `OMNIGENT_API_KEY` by name — exactly the sources `detect_cli` accepts, so the container's verdict matches the host preflight. The rest of the directory — `omnigent.db` (every prior session and turn), `logs/` and `debug/` (Fact 4) — is the contributor's full Omnigent history and stays on the host, for the same reason `~/.claude` is staged as an allowlist (#7836). A `server:` key in the staged `config.yaml` is inert: the launch line's `--server local` overrides it (§0).
 
 ---
 

@@ -319,7 +319,7 @@ contribute-check-backend backend="claude":
           echo "  'omnigent login <url>' is NOT honoured — remote-server mode is unsupported."
           echo "  omnigent has NO OS sandbox on the local CLI path; local mode refuses to launch without"
           echo "  HIVE_OMNIGENT_DANGEROUSLY_RUN_UNCONFINED=1."
-          if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && -z "${DATABRICKS_TOKEN:-}" && ! -s "$HOME/.omnigent/auth_tokens.json" && ! -s "$HOME/.omnigent/config.yaml" ]]; then
+          if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" && -z "${GEMINI_API_KEY:-}" && -z "${DATABRICKS_TOKEN:-}" && -z "${OMNIGENT_API_KEY:-}" && ! -s "$HOME/.omnigent/auth_tokens.json" && ! -s "$HOME/.omnigent/config.yaml" && ! -s "$HOME/.databrickscfg" ]]; then
             echo "  WARNING: no provider API key and no ~/.omnigent credentials found — omnigent may fail at task time."
           fi
         else
@@ -1807,6 +1807,13 @@ contribute-hive backend="" mode="docker": check-version
             echo "Staged:    ${staged:-nothing} from ${HOME}/.omnigent (allowlist: auth_tokens.json config.yaml; omnigent.db, logs/ and debug/ stay on the host)"
           fi
           CLI_MOUNTS="-v ${CLI_STAGE}/.omnigent:/home/dev/.omnigent${VOLSUF}"
+          # ~/.databrickscfg is the one credential file outside ~/.omnigent that
+          # detect_cli (bin/contributor-agent.sh) accepts; stage that single
+          # file so the container's verdict matches the host preflight.
+          if [ -s "${HOME}/.databrickscfg" ] && cp -p "${HOME}/.databrickscfg" "${CLI_STAGE}/.databrickscfg" 2>/dev/null; then
+            echo "Staged:    .databrickscfg from ${HOME}"
+            CLI_MOUNTS="${CLI_MOUNTS} -v ${CLI_STAGE}/.databrickscfg:/home/dev/.databrickscfg${VOLSUF}"
+          fi
           ;;
       esac
       CONTAINER_NAME="hive-contributor-${BACKEND}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ')"
@@ -1826,7 +1833,7 @@ contribute-hive backend="" mode="docker": check-version
           if [[ -n "$name" ]]; then add_provider_env "$name"; fi
         done < <(node bin/pi-backend.js --env-names "${AGENT_MODEL}")
       else
-        for name in ANTHROPIC_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY OPENAI_HOST OPENAI_BASE_PATH GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL KIRO_API_KEY BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID META_API_KEY LLM_API_KEY LLM_BASE_URL LLM_MODEL; do
+        for name in ANTHROPIC_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY OPENAI_HOST OPENAI_BASE_PATH GOOGLE_API_KEY GEMINI_API_KEY DATABRICKS_TOKEN OMNIGENT_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL KIRO_API_KEY BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID META_API_KEY LLM_API_KEY LLM_BASE_URL LLM_MODEL; do
           add_provider_env "$name"
         done
       fi
