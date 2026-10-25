@@ -774,23 +774,25 @@ func (h *ContributeWSHub) markTaskCompletedVerdict(repo string, number int, prUR
 	h.markTaskCompletedVerdictKey(worksource.Ref{Repo: repo, Number: number}.Key(), prURL, verdict, reporter, reason)
 }
 
+// markAlreadyDoneUnverified handles an "already done" verdict whose cited PR
+// or commit is missing or did not verify. The contributor's word is a claim,
+// not a fact: the issue gets a claim-worded comment and the longer offer hold,
+// but never the already-done label. That label is reserved for verified
+// evidence; it is a contributor skip label, so on an unverified claim it kept
+// unfinished work out of the queue until a maintainer noticed
+// (projectbluefin/chairlift#591, fixed later by chairlift#626).
 func (h *ContributeWSHub) markAlreadyDoneUnverified(repo string, number int, reporter, reason string, evidence *VerdictEvidence) {
 	if h == nil || repo == "" || number <= 0 {
 		return
 	}
 	reason = truncateReasonBytes(reason)
-	claim := ghpkg.IssueClaim{Repo: repo, Issue: number, Source: ghpkg.ClaimSourceVerdict, SourceReporter: reporter}
-	if evidence != nil {
-		claim.PRNumber = evidence.PR
-		if evidence.PR > 0 {
-			claim.PRRepo = repo
-		}
-	}
-	if err := h.markAlreadyDoneIssue(context.Background(), repo, number, claim, reporter, false); err != nil && h.logger != nil && err != ghpkg.ErrNoGitHubClient {
-		h.logger.Warn("[contribute-ws] already-done verdict label failed",
+	hold := h.configuredAlreadyDoneUnverifiedHold()
+	// The comment goes out before the hold is booked so the hive's own
+	// comment does not count as newer issue activity that lifts the hold.
+	if err := h.noteAlreadyDoneUnverified(context.Background(), repo, number, reporter, hold); err != nil && h.logger != nil && err != ghpkg.ErrNoGitHubClient {
+		h.logger.Warn("[contribute-ws] unverified already-done verdict comment failed",
 			"repo", repo, "number", number, "error", err.Error())
 	}
-	hold := h.configuredAlreadyDoneUnverifiedHold()
 	rec := noWorkVerdictRecord{
 		RecordedAt:            time.Now(),
 		SuppressHours:         hold.Hours(),
