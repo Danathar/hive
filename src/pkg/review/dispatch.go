@@ -507,6 +507,7 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 	}
 	state.GeneratedAt = now
 	state = pruneState(state, prs, opts.ProjectOrg)
+	state.Pending = pruneUnconfiguredAgents(state.Pending, opts.Agents)
 	plan := DispatchPlan{State: state}
 	if !opts.RequireApproval || !opts.FanOut {
 		return plan
@@ -655,7 +656,7 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		// however many perspectives it covers. Applying it anyway would drop
 		// perspectives to buy quiet that has already been bought.
 		if opts.CombinedPerspectives {
-			reviewer, free := freeReviewer(prReviewers, plan.State.Pending)
+			reviewer, free := freeReviewer(prReviewers, plan.inFlight(opts, now))
 			if !free {
 				continue
 			}
@@ -727,7 +728,7 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 			limit = availableSlots
 		}
 		for i := 0; i < limit; i++ {
-			reviewer, free := freeReviewer(prReviewers, plan.State.Pending)
+			reviewer, free := freeReviewer(prReviewers, plan.inFlight(opts, now))
 			if !free {
 				break
 			}
@@ -841,6 +842,71 @@ func freeReviewer(reviewers []AgentCapability, pending []PendingReview) (AgentCa
 		}
 	}
 	return AgentCapability{}, false
+}
+
+// inFlight is the subset of pending entries that still mean "this agent is
+// working on a kick", the only ones freeReviewer may count. A pending entry is
+// also the lifetime record of what a head was asked, and two kinds outlive the
+// work they stood for (hivecommons/hive#14361):
+//
+//   - entries of a head whose redispatch budget is exhausted: expirePending
+//     deliberately leaves them in place so the head is never re-kicked, and
+//     holds the PR for a human;
+//   - entries older than pending_ttl that expirePending has not dropped,
+//     because the planner did not reach their PR this cycle.
+//
+// Counted as load, they pinned every replica of every head (and the decision
+// agent) indefinitely: three PRs that ran out of redispatches left 13 entries
+// behind and the swarm dispatched nothing for any PR for ~36 hours while every
+// reviewer sat idle. They stay in state for their bookkeeping; they just do not
+// make anyone busy. An entry with no dispatched_at has no measurable age and
+// still counts, as before.
+func (p *DispatchPlan) inFlight(opts DispatchOptions, now time.Time) []PendingReview {
+	ttl := opts.effectivePendingTTL()
+	out := make([]PendingReview, 0, len(p.State.Pending))
+	for _, e := range p.State.Pending {
+		if ttl > 0 && !e.Dispatched.IsZero() && now.Sub(e.Dispatched) >= ttl {
+			continue
+		}
+		if p.headExhausted(e.Repo, e.Number, e.HeadSHA) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// headExhausted is redispatchExhausted keyed on a pending entry's PR head.
+func (p *DispatchPlan) headExhausted(repo string, number int, headSHA string) bool {
+	for _, h := range p.State.Human {
+		if samePRHead(h.Repo, h.Number, h.HeadSHA, repo, number, headSHA) && strings.HasPrefix(h.Reason, HoldReasonDispatchExhausted) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneUnconfiguredAgents drops pending entries for agents the hive no longer
+// runs, such as a replica or review head removed by lowering `replicas`. Their
+// verdict can never arrive, so the entry would only hold its perspective as
+// "asked" forever. A pruned perspective is simply asked again. With no agent
+// list (callers that plan without one) nothing is pruned.
+func pruneUnconfiguredAgents(pending []PendingReview, agents []AgentCapability) []PendingReview {
+	if len(agents) == 0 {
+		return pending
+	}
+	known := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		known[a.Name] = true
+	}
+	kept := pending[:0]
+	for _, e := range pending {
+		if e.Agent != "" && !known[e.Agent] {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // agentBase resolves an agent's base lane from the full configured set, so an

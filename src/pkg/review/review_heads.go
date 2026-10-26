@@ -163,7 +163,7 @@ func (p *DispatchPlan) dispatchHeads(pr PullRequest, reviewers []AgentCapability
 		if availableSlots <= 0 {
 			break
 		}
-		reviewer, free := freeReviewer(groups[m.Head], p.State.Pending)
+		reviewer, free := freeReviewer(groups[m.Head], p.inFlight(opts, now))
 		if !free {
 			// Every replica of this head is mid-review; a later cycle asks
 			// the first one to free up. Other heads may still have room.

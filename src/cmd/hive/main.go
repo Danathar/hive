@@ -7416,6 +7416,7 @@ func runEvalCycle(
 	if ghClient != nil {
 		applyReviewPriorityLabels(ctx, cfg, ghClient, reviewQueue, logger)
 		applyReviewVerdictLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
+		sweepClosedPRVerdictLabels(ctx, cfg, ghClient, time.Now(), logger)
 	}
 	messages, messageSkips := sched.BuildKickMessagesWithSkips(kickActionable, agentsDue)
 	agentsSkipped = append(agentsSkipped, messageSkips...)

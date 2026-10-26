@@ -92,9 +92,17 @@ func (s VerdictLabelSet) desiredFor(pr PullRequest, artifact Artifact, state Dis
 		case VerdictRequiresHuman, VerdictReject:
 			return s.RequiresHuman
 		default:
-			// incomplete: some perspectives (or heads) are still out.
+			// incomplete: some perspectives (or heads) are still out,
+			// unless the head ran out of redispatches and now waits on a
+			// person (hivecommons/hive#14361).
+			if dispatchExhausted(state, pr) {
+				return s.RequiresHuman
+			}
 			return s.Reviewing
 		}
+	}
+	if dispatchExhausted(state, pr) {
+		return s.RequiresHuman
 	}
 	for _, p := range state.Pending {
 		if p.Number == pr.Number && sameRepoLoose(p.Repo, pr.Repo) && SameHeadSHA(p.HeadSHA, pr.HeadSHA) {
@@ -139,6 +147,20 @@ func sameRepoLoose(a, b string) bool {
 	}
 	if !strings.Contains(b, "/") {
 		return strings.HasSuffix(a, "/"+b)
+	}
+	return false
+}
+
+// dispatchExhausted reports whether pr's current head was held for a human
+// after its review dispatches kept ending without a verdict. Its pending
+// entries stay in state, so without this the head would show "reviewing"
+// forever (hivecommons/hive#14361).
+func dispatchExhausted(state DispatchState, pr PullRequest) bool {
+	for _, h := range state.Human {
+		if h.Number == pr.Number && sameRepoLoose(h.Repo, pr.Repo) && SameHeadSHA(h.HeadSHA, pr.HeadSHA) &&
+			strings.HasPrefix(h.Reason, HoldReasonDispatchExhausted) {
+			return true
+		}
 	}
 	return false
 }

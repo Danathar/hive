@@ -207,7 +207,7 @@ func (p *DispatchPlan) dispatchDecision(pr PullRequest, agg Aggregate, bases []A
 	if len(perspectives) == 0 {
 		return availableSlots
 	}
-	base, free := freeReviewer(bases, p.State.Pending)
+	base, free := freeReviewer(bases, p.inFlight(opts, now))
 	if !free {
 		return availableSlots
 	}
