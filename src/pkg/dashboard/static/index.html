@@ -1946,6 +1946,23 @@
     .prt-trend-svg .area.other { fill:var(--prt-actor-other); opacity:.52; }
     .prt-trend-svg .area.human { fill:var(--prt-actor-human); opacity:.62; }
     .prt-trend-svg .area.hive { fill:var(--prt-actor-hive); opacity:.72; }
+    .prt-trend-plot { position:relative; height:180px; margin:var(--sp-3) 0 1.5rem 2.2rem; }
+    .prt-trend-plot .prt-trend-svg { display:block; width:100%; height:100%; overflow:visible; }
+    .prt-trend-svg .bar.hive { fill:var(--prt-actor-hive); }
+    .prt-trend-svg .bar.human { fill:var(--prt-actor-human); }
+    .prt-trend-svg .bar.other { fill:var(--prt-actor-other); }
+    .prt-trend-svg .grid { stroke:var(--border); stroke-width:1; }
+    .prt-trend-svg .ref { stroke:var(--muted); stroke-width:1; stroke-dasharray:3 4; }
+    .prt-trend-svg .share-line { fill:none; stroke:var(--prt-actor-hive); stroke-width:2; stroke-linejoin:round; }
+    .prt-trend-svg .hit { fill:transparent; }
+    .prt-trend-svg .hit:hover { fill:color-mix(in srgb, var(--text) 8%, transparent); }
+    .prt-trend-y, .prt-trend-x { position:absolute; font-size:var(--fs-2xs); color:var(--muted); pointer-events:none; }
+    .prt-trend-y { left:-2.2rem; top:0; bottom:0; width:1.9rem; }
+    .prt-trend-y span { position:absolute; right:0; transform:translateY(50%); }
+    .prt-trend-x { left:0; right:0; top:100%; height:1.2rem; }
+    .prt-trend-x span { position:absolute; top:.2rem; white-space:nowrap; }
+    @media (max-width: 600px) { .prt-trend-x span:nth-child(even) { display:none; } }
+    .prt-trend-controls { display:flex; gap:var(--sp-2); flex-wrap:wrap; justify-content:flex-end; }
     /* Panels tile like .prt-attribution: side by side on wide screens, one
        column on phones. The card's head row always spans the full width. */
     .evidence-card { margin-top: var(--sp-4); display:grid; grid-template-columns:repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap:var(--sp-3); }
@@ -2082,7 +2099,7 @@
     .ev-grade.good { color:var(--blue); border-color:var(--blue); }
     .ev-grade.fair { color:var(--amber); border-color:var(--amber); }
     .ev-grade.weak { color:var(--red); border-color:var(--red); }
-    .prt-trend-head { display:flex; justify-content:space-between; gap:var(--sp-2); align-items:center; margin-bottom:var(--sp-2); }
+    .prt-trend-head { display:flex; flex-wrap:wrap; justify-content:space-between; gap:var(--sp-2); align-items:center; margin-bottom:var(--sp-2); }
     .prt-role-select { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--r-sm); padding:var(--sp-1) var(--sp-3); font-size:var(--fs-xs); }
     .prt-legend { display:flex; gap:var(--sp-3); font-size:var(--fs-2xs); color:var(--muted); align-items:center; margin-top:var(--sp-1); }
     .prt-legend i { display:inline-block; width:8px; height:8px; border-radius:var(--r-pill); margin-right:var(--sp-1); vertical-align:middle; }
@@ -27965,6 +27982,9 @@ function burnAreaChart() {
     let prtRole = 'merged';
     let prtRepo = (() => { try { return localStorage.getItem(PRT_REPO_STORAGE_KEY) || ''; } catch { return ''; } })();
     let prtLast = null;
+    const PRT_TREND_VIEWS = [['counts', 'Counts'], ['share', 'Hive share %'], ['area', 'Share area']];
+    const PRT_TREND_VIEW_STORAGE_KEY = 'hive.prThroughput.trendView';
+    let prtTrendView = (() => { try { const v = localStorage.getItem(PRT_TREND_VIEW_STORAGE_KEY); return PRT_TREND_VIEWS.some(([k]) => k === v) ? v : 'counts'; } catch { return 'counts'; } })();
 
     // Mirrors lcWindowLabel: counts are honest only relative to how much
     // history backs them, so say so when the data is shorter than the window.
@@ -28174,6 +28194,107 @@ function burnAreaChart() {
       const label = opts.ariaLabel || '100% stacked area trend for hive, human, and other automation actor shares';
       return `<svg class="prt-trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(label)}">${['other','human','hive'].map(area).join('')}</svg>`;
     }
+    // Hive vs human trend views. The share area above scales every bucket to
+    // 100%, so one merge and sixteen look the same and empty buckets drop to
+    // zero; "counts" (default) stacks the real counts per bucket and "share"
+    // draws the hive share over a trailing window. Both get axes and a hover
+    // title per bucket. The plot SVG stretches to its box, so labels are HTML.
+    function prtTrendBucketSeconds(dto, series) {
+      const s = Number(dto && dto.bucket_seconds);
+      if (s > 0) return s;
+      const t0 = Date.parse(series[0] && series[0].t), t1 = Date.parse(series[1] && series[1].t);
+      return isFinite(t0) && isFinite(t1) && t1 > t0 ? (t1 - t0) / 1000 : 3600;
+    }
+    function prtDurationLabel(sec) {
+      if (sec >= 86400 && sec % 86400 === 0) return `${sec / 86400}d`;
+      const min = Math.round(sec / 60);
+      if (min < 60) return `${min}m`;
+      return min % 60 ? `${Math.floor(min / 60)}h ${min % 60}m` : `${min / 60}h`;
+    }
+    function prtTrendTimeLabel(ms, bucketSec, spanSec) {
+      if (!isFinite(ms)) return '';
+      const d = new Date(ms);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      // Day buckets are UTC days on the server: name them by their UTC date,
+      // which local time would shift to the day before west of UTC.
+      if (bucketSec >= 86400) return months[d.getUTCMonth()] + ' ' + d.getUTCDate();
+      const day = months[d.getMonth()] + ' ' + d.getDate();
+      const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+      return spanSec > 86400 ? `${day} ${hm}` : hm;
+    }
+    function prtTrendRangeLabel(startMs, endMs, bucketSec, spanSec) {
+      const a = prtTrendTimeLabel(startMs, bucketSec, spanSec), b = prtTrendTimeLabel(endMs, bucketSec, spanSec);
+      return a === b || !b ? a : `${a}–${b}`;
+    }
+    function prtNiceTicks(max) {
+      if (!(max > 0)) return [0, 1];
+      const raw = max / 4;
+      const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      const step = Math.max(1, [1, 2, 5, 10].map(m => m * mag).find(s => s >= raw));
+      const ticks = [];
+      for (let v = 0; v < max + step; v += step) ticks.push(v);
+      return ticks;
+    }
+    function prtTrendPlot(series, dto, view) {
+      if (!Array.isArray(series) || series.length < 2) return '';
+      const n = series.length, W = 1000, H = 100, cw = W / n;
+      const bucketSec = prtTrendBucketSeconds(dto, series);
+      const spanSec = bucketSec * n;
+      const times = series.map(p => Date.parse(p && p.t));
+      const range = i => prtTrendRangeLabel(times[i], times[i] + bucketSec * 1000, bucketSec, spanSec);
+      const vals = series.map(p => ({ hive: Math.max(0, Number(p && p.hive) || 0), human: Math.max(0, Number(p && p.human) || 0), other: Math.max(0, Number(p && p.other) || 0) }));
+      const yOf = (v, top) => H - (v / top) * H;
+      let ticks, marks = '', titles, label, note;
+      if (view === 'share') {
+        const win = Math.max(1, Math.round(n / 6));
+        const winLabel = prtDurationLabel(bucketSec * win);
+        const pts = vals.map((_, i) => {
+          let hive = 0, total = 0;
+          for (let j = Math.max(0, i - win + 1); j <= i; j++) { hive += vals[j].hive; total += vals[j].hive + vals[j].human + vals[j].other; }
+          return total ? { pct: hive / total, hive, total } : null;
+        });
+        ticks = [0, 0.25, 0.5, 0.75, 1];
+        let d = '';
+        pts.forEach((p, i) => {
+          if (!p) return;
+          const y = yOf(p.pct, 1).toFixed(1);
+          d += `${pts[i - 1] ? 'L' : 'M'}${(i * cw).toFixed(1)},${y} L${((i + 1) * cw).toFixed(1)},${y} `;
+        });
+        marks = `<line class="ref" x1="0" x2="${W}" y1="${yOf(0.5, 1)}" y2="${yOf(0.5, 1)}" vector-effect="non-scaling-stroke"></line>` + (d ? `<path class="share-line" d="${d.trim()}" vector-effect="non-scaling-stroke"></path>` : '');
+        titles = pts.map((p, i) => `${range(i)} (trailing ${winLabel}) · ` + (p ? `hive ${Math.round(p.pct * 100)}% · ${p.hive} of ${p.total}` : 'no activity in window'));
+        label = `Hive share over a trailing ${winLabel} window, one step per ${prtDurationLabel(bucketSec)} bucket`;
+        note = `Line: hive share over a trailing ${winLabel} window · gaps mean no activity in that window · hover for details`;
+      } else {
+        ticks = prtNiceTicks(Math.max(0, ...vals.map(v => v.hive + v.human + v.other)));
+        const top = ticks[ticks.length - 1];
+        const bw = cw * 0.7;
+        vals.forEach((v, i) => {
+          let acc = 0;
+          ['hive', 'human', 'other'].forEach(key => {
+            if (!v[key]) return;
+            marks += `<rect class="bar ${key}" x="${(i * cw + (cw - bw) / 2).toFixed(1)}" y="${yOf(acc + v[key], top).toFixed(2)}" width="${bw.toFixed(1)}" height="${((v[key] / top) * H).toFixed(2)}"></rect>`;
+            acc += v[key];
+          });
+        });
+        titles = vals.map((v, i) => `${range(i)} · ` + (v.hive + v.human + v.other ? `hive ${v.hive} · human ${v.human} · other ${v.other}` : 'none'));
+        label = `Stacked bars: hive, human and other automation counts per ${prtDurationLabel(bucketSec)} bucket`;
+        note = `Bars: count per ${prtDurationLabel(bucketSec)} bucket · hover a bar for its time and counts`;
+      }
+      const top = ticks[ticks.length - 1];
+      const fmtTick = v => view === 'share' ? `${Math.round(v * 100)}%` : String(v);
+      const grid = ticks.map(v => `<line class="grid" x1="0" x2="${W}" y1="${yOf(v, top).toFixed(2)}" y2="${yOf(v, top).toFixed(2)}" vector-effect="non-scaling-stroke"></line>`).join('');
+      const hits = titles.map((t, i) => `<rect class="hit" x="${(i * cw).toFixed(1)}" y="0" width="${cw.toFixed(1)}" height="${H}"><title>${escapeHtml(t)}</title></rect>`).join('');
+      const yLabels = ticks.map(v => `<span style="bottom:${((v / top) * 100).toFixed(1)}%">${fmtTick(v)}</span>`).join('');
+      // Six or seven x labels on round times: the smallest whole-bucket step
+      // from this list, placed on buckets that start on a multiple of it.
+      const stepSec = [300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 2592000]
+        .find(s => s % bucketSec === 0 && s * 7 >= spanSec) || bucketSec * Math.ceil(n / 7);
+      let xIdx = times.map((_, i) => i).filter(i => isFinite(times[i]) && (times[i] / 1000) % stepSec === 0);
+      if (!xIdx.length) xIdx = times.map((_, i) => i).filter(i => i % Math.round(stepSec / bucketSec) === 0);
+      const xLabels = [];
+      for (const i of xIdx) xLabels.push(`<span style="left:${((i / n) * 100).toFixed(1)}%">${escapeHtml(prtTrendTimeLabel(times[i], bucketSec, spanSec))}</span>`);
+      return `<div class="prt-trend-plot prt-trend-${view === 'share' ? 'share' : 'counts'}"><div class="prt-trend-y" aria-hidden="true">${yLabels}</div><svg class="prt-trend-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)}">${grid}${marks}${hits}</svg><div class="prt-trend-x" aria-hidden="true">${xLabels.join('')}</div></div><div class="prt-caption prt-trend-note">${escapeHtml(note)}</div>`;
+    }
     function prtRoleNoun(role) {
       role = role || prtRole;
       switch (role) {
@@ -28227,7 +28348,9 @@ function burnAreaChart() {
       const legend = [['hive', 'hive', ''], ['human', 'human', ''], ['other', 'other automation', 'non-hive bots (dependabot, renovate, GitHub Actions, …)']].map(([key, label, title]) => `<span${title ? ` title="${escapeHtml(title)}"` : ''}><i class="${key}"></i>${label}${prtSeriesAllZero(series, key) ? ' · 0' : ''}</span>`).join('');
       const stats = prtTrendStats(dto);
       const trendTitle = stats.total ? `${stats.caption}. ${stats.definition} Previous compares with ${stats.prevWindow}.` : `${stats.caption} ${stats.definition}`;
-      return `<div class="prt-trend" title="${escapeHtml(trendTitle)}"><div class="prt-trend-head"><strong>Hive vs human trend</strong><select class="prt-role-select" data-change-action="setPRThroughputRole" data-arg-types="v">${opts}</select></div>${prtTrendSvg(series) || '<div class="prt-caption">No trend series yet.</div>'}<div class="prt-legend">${legend}</div><div class="prt-caption">${escapeHtml(prtTrendCaption(dto))}</div></div>`;
+      const viewOpts = PRT_TREND_VIEWS.map(([v,l]) => `<option value="${v}"${prtTrendView===v?' selected':''}>${l}</option>`).join('');
+      const chart = prtTrendView === 'area' ? prtTrendSvg(series) : prtTrendPlot(series, dto, prtTrendView);
+      return `<div class="prt-trend" title="${escapeHtml(trendTitle)}"><div class="prt-trend-head"><strong>Hive vs human trend</strong><div class="prt-trend-controls"><select class="prt-role-select prt-view-select" data-change-action="setPRThroughputTrendView" data-arg-types="v" title="Chart view: counts per bucket, hive share over a trailing window, or the 100% share area" aria-label="Chart view">${viewOpts}</select><select class="prt-role-select" data-change-action="setPRThroughputRole" data-arg-types="v">${opts}</select></div></div>${chart || '<div class="prt-caption">No trend series yet.</div>'}<div class="prt-legend">${legend}</div><div class="prt-caption">${escapeHtml(prtTrendCaption(dto))}</div></div>`;
     }
     function prtWindowControls() {
       const buttons = PRT_WINDOWS.map(([h, label]) => `<button type="button" class="${prtHours === h ? 'active' : ''}" data-action="setPRThroughputHours" data-arg0="${h}" data-stop="1" title="${h === 0 ? 'All time' : 'Last ' + label}">${label}</button>`).join('');
@@ -28492,6 +28615,11 @@ function burnAreaChart() {
       prtRole = ['created','reviewed','merged','closed'].includes(String(role)) ? String(role) : 'merged';
       return fetchPRThroughput();
     }
+    function setPRThroughputTrendView(view) {
+      prtTrendView = PRT_TREND_VIEWS.some(([v]) => v === String(view)) ? String(view) : 'counts';
+      try { localStorage.setItem(PRT_TREND_VIEW_STORAGE_KEY, prtTrendView); } catch {}
+      if (prtLast) renderPRThroughput(prtLast);
+    }
     function exportPRThroughputCSV() {
       const dto = prtLast || {};
       const rows = [['t','opened','merged','closed']].concat((dto.buckets || []).map(b => [b.t || '', b.opened || 0, b.merged || 0, b.closed || 0]));
@@ -28502,6 +28630,7 @@ function burnAreaChart() {
     window.setPRThroughputHours = setPRThroughputHours;
     window.setPRThroughputRepo = setPRThroughputRepo;
     window.setPRThroughputRole = setPRThroughputRole;
+    window.setPRThroughputTrendView = setPRThroughputTrendView;
     window.exportPRThroughputCSV = exportPRThroughputCSV;
 
     // Evidence sub-panel (#12064, RFC #12062): read-only reporting from
