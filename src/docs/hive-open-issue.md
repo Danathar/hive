@@ -620,6 +620,24 @@ into a closed issue — so if every sibling is closed the finding files
 normally. Issues closed as `not_planned` or `duplicate` never count: they are
 the rejected-twin gate's evidence, not a sign of a stream.
 
+### Parked and other-lane issues never take a fold
+
+An open issue parked on a maintainer decision (`stage/045-needs-decision`,
+the hive's configured needs-decision label, or any other parking label) or
+carrying a different `agent/<lane>` label than the requester's is not a fold
+target ([#14360](https://github.com/hivecommons/hive/issues/14360)): an
+outreach issue asking an admin to edit repository topics cites the files it
+describes, but no PR closes it, so a code-change finding folded there is never
+worked. Such an issue is skipped for the exact file-set twin and the
+same-component fold, and does not count toward the component threshold; the
+finding files normally unless an eligible sibling matches. An exact or
+canonical title match is unaffected.
+
+Every consolidated result also carries `consolidated_reason`: `subject` (a
+canonical title match on a human-filed issue), `file_set` (an exact file-set
+twin) or `component:<path>` (a same-component fold on `<path>`), so the agent
+can tell a true twin from a shared-path fold.
+
 ### Unattended comments are rate-limited per issue
 
 Every automated comment is a notification to the issue's subscribers, and a

@@ -156,6 +156,10 @@ type IssueResponse struct {
 	// the finding was posted there as a comment instead, so the two land in
 	// one PR rather than two PRs that conflict. Number/URL name that issue.
 	Consolidated bool `json:"consolidated,omitempty"`
+	// ConsolidatedReason says what matched when Consolidated is set:
+	// "subject", "file_set", or "component:<path>" (#14360), so the agent can
+	// tell a true twin from a weak shared-path fold.
+	ConsolidatedReason string `json:"consolidated_reason,omitempty"`
 	// RejectedDuplicate reports that no issue was created because a maintainer
 	// recently closed an agent-filed issue covering the same file set as
 	// not-planned or duplicate (#6463). Number/URL point at that closed issue
@@ -747,6 +751,7 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 			resp.URL = res.URL
 			resp.AlreadyExisted = res.AlreadyExisted
 			resp.Consolidated = res.Consolidated
+			resp.ConsolidatedReason = res.FoldReason
 			// Best-effort GitHub sub-issue link (#9435): the child issue is
 			// already created at this point, so a link failure (parent
 			// missing, already at GitHub's sub-issue cap, transient API
@@ -1129,6 +1134,9 @@ type CreateIssueResult struct {
 	// App-bot-filed issue has the same file-reference set (#9376); the
 	// finding was appended to it as a comment. AlreadyExisted is also true.
 	Consolidated bool
+	// FoldReason says what matched when Consolidated is set: "subject",
+	// "file_set", or "component:<path>" (#14360).
+	FoldReason string
 	// SameFileAs is the open issue CreateIssueRequest.FoldMatch refused to
 	// fold into: it cites the same files but not the same finding, so a new
 	// issue was created instead (#13906). 0 otherwise.
@@ -1258,7 +1266,7 @@ func (c *Client) createIssue(ctx context.Context, req CreateIssueRequest) (Creat
 	var componentCount, componentClosed int
 	var openComponent map[string]int
 	var openComponentOldest map[string]*gh.Issue
-	scan, err := c.scanOpenIssues(ctx, owner, repoName, title, body, wantFiles)
+	scan, err := c.scanOpenIssues(ctx, owner, repoName, title, body, wantFiles, originLabel)
 	// A canonical-subject match is only as specific as the stem left after
 	// stripping: every "Review backlog (<perspective>): …" title canonicalises
 	// to the same stem, so FoldMatch gates it like a file-set or component
@@ -1283,7 +1291,7 @@ func (c *Client) createIssue(ctx context.Context, req CreateIssueRequest) (Creat
 				subjectMatchFindingComment(title, body)); err != nil {
 				return CreateIssueResult{}, err
 			}
-			return CreateIssueResult{Number: existing.GetNumber(), URL: existing.GetHTMLURL(), ID: existing.GetID(), AlreadyExisted: true, Consolidated: true}, nil
+			return CreateIssueResult{Number: existing.GetNumber(), URL: existing.GetHTMLURL(), ID: existing.GetID(), AlreadyExisted: true, Consolidated: true, FoldReason: "subject"}, nil
 		}
 		c.logger.Info("CreateIssue: open issue with the same subject exists, reusing",
 			slog.String("repo", repoName), slog.Int("number", existing.GetNumber()),
@@ -1335,7 +1343,7 @@ func (c *Client) createIssue(ctx context.Context, req CreateIssueRequest) (Creat
 		c.logger.Info("CreateIssue: consolidated finding into open issue over the same file set",
 			slog.String("repo", repoName), slog.Int("number", fileSetTwin.GetNumber()),
 			slog.String("existing_title", fileSetTwin.GetTitle()))
-		return CreateIssueResult{Number: fileSetTwin.GetNumber(), URL: fileSetTwin.GetHTMLURL(), AlreadyExisted: true, Consolidated: true}, nil
+		return CreateIssueResult{Number: fileSetTwin.GetNumber(), URL: fileSetTwin.GetHTMLURL(), AlreadyExisted: true, Consolidated: true, FoldReason: "file_set"}, nil
 	}
 
 	// Same-component fold (#11239): exact file-set equality misses a stream
@@ -1379,7 +1387,7 @@ func (c *Client) createIssue(ctx context.Context, req CreateIssueRequest) (Creat
 			slog.String("repo", repoName), slog.Int("number", componentTwin.GetNumber()),
 			slog.String("path", componentPath), slog.Int("open_siblings", componentCount),
 			slog.Int("recently_closed_siblings", componentClosed))
-		return CreateIssueResult{Number: componentTwin.GetNumber(), URL: componentTwin.GetHTMLURL(), AlreadyExisted: true, Consolidated: true}, nil
+		return CreateIssueResult{Number: componentTwin.GetNumber(), URL: componentTwin.GetHTMLURL(), AlreadyExisted: true, Consolidated: true, FoldReason: "component:" + componentPath}, nil
 	}
 
 	// Ensure labels exist. Retryable failures keep the whole request queued
@@ -1487,7 +1495,7 @@ const issueCreateUnknownTTL = time.Hour
 // so the watcher counts the attempt and gives up after
 // issueReconcileMaxAttempts).
 func (c *Client) reconcileIssueCreate(ctx context.Context, boundary effects.Boundary, claim effects.Claim, owner, repoName, title, body string, create func(context.Context) (effects.Result, error), journalErr error) (effects.Result, error) {
-	found, lookupErr := c.scanOpenIssues(WithRESTCaller(ctx, "hive:reconcile_issue_create"), owner, repoName, title, body, nil)
+	found, lookupErr := c.scanOpenIssues(WithRESTCaller(ctx, "hive:reconcile_issue_create"), owner, repoName, title, body, nil, "")
 	if lookupErr != nil {
 		expired, expErr := effects.ExpireUnresolved(ctx, boundary, claim, issueCreateUnknownTTL)
 		if expErr != nil {
@@ -1708,10 +1716,11 @@ func isUbiquitousFileRef(p string) bool {
 // canonical match is returned so repeats consolidate onto the original issue
 // rather than the newest copy. When wantFiles is non-empty the same pass also
 // records the oldest open issue (bot- or human-filed) whose
-// file-reference set equals wantFiles (#9376). Bounded: agent-filed issues
-// are recent by construction, and an unbounded scan of a busy repo would burn
-// API budget on every create.
-func (c *Client) scanOpenIssues(ctx context.Context, owner, repo, title, body string, wantFiles map[string]bool) (openIssueMatches, error) {
+// file-reference set equals wantFiles (#9376). Issues that cannot take a
+// fold (see foldTargetEligible) are skipped for the file-set, pair and
+// component matches. Bounded: agent-filed issues are recent by construction,
+// and an unbounded scan of a busy repo would burn API budget on every create.
+func (c *Client) scanOpenIssues(ctx context.Context, owner, repo, title, body string, wantFiles map[string]bool, originLabel string) (openIssueMatches, error) {
 	wantCanonical := canonicalIssueSubject(title)
 	botLogins := c.hiveBotLogins()
 	wantPrimary, wantTokens := "", map[string]bool(nil)
@@ -1748,7 +1757,7 @@ func (c *Client) scanOpenIssues(ctx context.Context, owner, repo, title, body st
 			if wantCanonical != "" && canonicalIssueSubject(candidate) == wantCanonical {
 				found.subject = is
 			}
-			if len(wantFiles) > 0 {
+			if len(wantFiles) > 0 && c.foldTargetEligible(is, originLabel) {
 				have := issueFileRefSet(candidate + "\n" + is.GetBody())
 				// Human-filed issues are fold targets for an exact file-set
 				// match (#11576), but never count toward the high-confidence
@@ -1783,6 +1792,37 @@ func (c *Client) scanOpenIssues(ctx context.Context, owner, repo, title, body st
 	}
 	found.componentCounts, found.componentOldest = componentCounts, componentOldest
 	return found, nil
+}
+
+// foldTargetEligible reports whether an open issue may receive a folded
+// finding (#14360). A finding folded into an issue parked on a maintainer
+// decision waits on that decision, and one folded into another agent lane's
+// issue lands where nobody works it: an outreach issue that asks an admin to
+// edit repo topics cites the files it describes, but no PR closes it. Either
+// would hide a code-change finding, so such issues neither take folds nor
+// count toward a component stream. originLabel is the request's provenance
+// label; only an agent/<lane> origin is compared against the target's lane.
+func (c *Client) foldTargetEligible(is *gh.Issue, originLabel string) bool {
+	park := c.needsDecisionLabel()
+	wantLane := ""
+	if strings.HasPrefix(strings.ToLower(originLabel), agentLaneLabelPrefix) {
+		wantLane = originLabel
+	}
+	for _, l := range is.Labels {
+		name := strings.TrimSpace(l.GetName())
+		if strings.EqualFold(name, park) {
+			return false
+		}
+		for _, parking := range issueParkingLabels {
+			if strings.EqualFold(name, parking) {
+				return false
+			}
+		}
+		if wantLane != "" && strings.HasPrefix(strings.ToLower(name), agentLaneLabelPrefix) && !strings.EqualFold(name, wantLane) {
+			return false
+		}
+	}
+	return true
 }
 
 // pickFoldComponent picks the shared path to fold into: among paths cited by
