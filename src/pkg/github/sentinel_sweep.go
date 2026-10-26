@@ -393,9 +393,10 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	number := pr.GetNumber()
 	head := pr.GetHead().GetSHA()
 	author := pr.GetUser().GetLogin()
+	codeAuthor, origin := c.sentinelCodeAuthor(pr)
 	trust := SentinelAuthorTrust{}
 	if opts.TrustedAuthor != nil {
-		trust = opts.TrustedAuthor(displayRepo, author)
+		trust = opts.TrustedAuthor(displayRepo, codeAuthor)
 	}
 	decision := DecideSentinelAction(label, trust, opts.TrustedAuthorsBlock)
 	hasAlertLabel := prHasLabel(pr, label)
@@ -420,6 +421,11 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	}
 	event := SentinelSweepEvent{Number: number, Author: author, Title: pr.GetTitle(), HeadSHA: head, Findings: findings, Blocked: decision.Block, TrustedReason: decision.TrustedReason}
 	digest := sentinelFlaggedDigest(findings, files)
+	markerBody := SentinelComment(decision, head, author, findings)
+	if origin > 0 {
+		markerBody += sentinelAdoptedNote(origin, codeAuthor)
+	}
+	markerBody = sentinelWithDigest(markerBody, digest)
 	marker := SentinelMarker + " " + head
 	comment, posted, err := c.findOwnMarkerComment(ctx, owner, repo, number, marker)
 	if err != nil {
@@ -433,6 +439,15 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 		// which the first pass re-evaluated the unchanged head and
 		// re-labelled the cleared PR (#11686, seen on #11614). The clearance is remembered
 		// where it is durable: the marker comment itself.
+		return SentinelSweepEvent{}, false, nil
+	}
+	if decision.Block && !hasAlertLabel && origin > 0 && c.sentinelOriginCleared(ctx, owner, repo, origin, head, label) {
+		// The App's copy of a head a maintainer already cleared on the
+		// adopted PR: that review covers this head too. It also replaces a
+		// trusted-author notice an older hive left for this head.
+		if err := c.recordSentinelClearance(ctx, owner, repo, number, fmt.Sprintf(sentinelOriginClearedNote, label, origin), markerBody); err != nil {
+			return SentinelSweepEvent{}, false, err
+		}
 		return SentinelSweepEvent{}, false, nil
 	}
 	if decision.Block && !hasAlertLabel && !posted {
@@ -459,15 +474,14 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 			note = sentinelCarriedNote
 		}
 		if cleared {
-			alert := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
-			if err := c.recordSentinelClearance(ctx, owner, repo, number, fmt.Sprintf(note, clearedBy, label), alert); err != nil {
+			if err := c.recordSentinelClearance(ctx, owner, repo, number, fmt.Sprintf(note, clearedBy, label), markerBody); err != nil {
 				return SentinelSweepEvent{}, false, err
 			}
 			return SentinelSweepEvent{}, false, nil
 		}
 	}
 	if !decision.Block {
-		body := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
+		body := markerBody
 		if hasAlertLabel {
 			if !posted {
 				return SentinelSweepEvent{}, false, nil
@@ -493,7 +507,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{label}); err != nil {
 		return SentinelSweepEvent{}, false, fmt.Errorf("adding %s label: %w", label, err)
 	}
-	body := sentinelWithDigest(SentinelComment(decision, head, author, findings), digest)
+	body := markerBody
 	if posted {
 		if _, _, err := c.client.Issues.EditComment(ctx, owner, repo, comment.GetID(), &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
 			return SentinelSweepEvent{}, false, fmt.Errorf("updating sentinel alert: %w", err)
