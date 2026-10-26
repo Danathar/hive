@@ -975,6 +975,12 @@ type ContributeWSHub struct {
 	unmintableMu    sync.Mutex
 	logger          *slog.Logger
 	seq             int
+	// admissionSkipLogged maps an item key to the last admission refusal
+	// selectTask logged for it, so an unchanged refusal is logged once rather
+	// than on every pass. Its own mutex for the same reason as unmintableMu.
+	// See contribute_admission_log.go.
+	admissionSkipLogged map[string]string
+	admissionSkipMu     sync.Mutex
 	// taskGen is the monotonically increasing source of assignment GENERATION tokens
 	// (kubestellar/hive#2568, the Gate). nextTaskGen() hands out a fresh value for
 	// every assignment and every release, so a generation is never reused across the

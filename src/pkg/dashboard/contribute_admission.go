@@ -275,19 +275,31 @@ func observeExternalDependencies(candidate contributorAdmissionCandidate) conver
 // first since cross-repo `owner/repo#N` closing references key on it. A hub
 // with no hook wired (tests, or a hive booted without GitHub credentials)
 // reports no claims and selection proceeds exactly as before.
+//
+// A merged `Refs #N` claim does not count. The PR landed part of the work and
+// deliberately left the issue open for the rest, so the issue goes back to
+// the queue, as it already does for agents (#7061). Before this it was held as
+// "already claimed by a PR" for the whole merged-claim scan window, and the
+// remainder sat unoffered.
 func (h *ContributeWSHub) issueClaimedByOpenPR(repoFull, repoName string, number int) (ghpkg.IssueClaim, bool) {
 	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.IssueClaimed == nil {
 		return ghpkg.IssueClaim{}, false
 	}
-	if claim, ok := h.server.deps.IssueClaimed(repoFull, number); ok {
+	if claim, ok := h.server.deps.IssueClaimed(repoFull, number); ok && !mergedReferenceClaim(claim) {
 		return claim, true
 	}
 	if repoName != "" && repoName != repoFull {
-		if claim, ok := h.server.deps.IssueClaimed(repoName, number); ok {
+		if claim, ok := h.server.deps.IssueClaimed(repoName, number); ok && !mergedReferenceClaim(claim) {
 			return claim, true
 		}
 	}
 	return ghpkg.IssueClaim{}, false
+}
+
+// mergedReferenceClaim reports whether a claim comes from a merged PR that
+// only referenced the issue (`Refs #N`, `Part of #N`).
+func mergedReferenceClaim(c ghpkg.IssueClaim) bool {
+	return c.MergedPR && c.Reference
 }
 
 // churnTriagedMarker is the label a maintainer applies to say "I have looked

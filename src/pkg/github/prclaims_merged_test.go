@@ -188,6 +188,46 @@ func TestClaimRankOpenBeatsMergedWithinTier(t *testing.T) {
 	}
 }
 
+// TestClaimRankMergedReferenceBelowEveryOpenClaim: a merged `Refs #N` never
+// said the issue was done, and the contribute queue releases it (#7061), so it
+// must not shadow an open PR of any grade. The case that mattered: a merged
+// hive-authored `Refs #N` used to outrank a person's open `Refs #N` PR.
+func TestClaimRankMergedReferenceBelowEveryOpenClaim(t *testing.T) {
+	open := map[string]IssueClaim{
+		"hive closing":     {},
+		"person closing":   {ExternalAuthor: true},
+		"hive reference":   {Reference: true},
+		"person reference": {Reference: true, ExternalAuthor: true},
+	}
+	merged := map[string]IssueClaim{
+		"hive reference":   {Reference: true, MergedPR: true},
+		"person reference": {Reference: true, MergedPR: true, ExternalAuthor: true},
+	}
+	for on, o := range open {
+		for mn, m := range merged {
+			if claimRank(o) <= claimRank(m) {
+				t.Errorf("open %s (%d) must outrank merged %s (%d)", on, claimRank(o), mn, claimRank(m))
+			}
+		}
+	}
+	if claimRank(merged["hive reference"]) <= claimRank(merged["person reference"]) {
+		t.Errorf("merged hive reference (%d) must still outrank merged person reference (%d)",
+			claimRank(merged["hive reference"]), claimRank(merged["person reference"]))
+	}
+
+	// Through the ledger, in both scan orders.
+	hiveMerged := IssueClaim{Repo: "o/r", Issue: 7, PRNumber: 10, PRRepo: "o/r", Reference: true, MergedPR: true, ObservedAt: time.Now()}
+	personOpen := IssueClaim{Repo: "o/r", Issue: 7, PRNumber: 11, PRRepo: "o/r", Reference: true, ExternalAuthor: true, ObservedAt: time.Now()}
+	for _, live := range [][]IssueClaim{{hiveMerged, personOpen}, {personOpen, hiveMerged}} {
+		l := NewClaimLedger(t.TempDir()+"/l.json", testLogger())
+		l.Reconcile(live, true)
+		got, ok := l.Lookup("o/r", 7)
+		if !ok || got.PRNumber != 11 {
+			t.Errorf("Lookup after %d,%d = %+v (ok=%v), want the open PR #11", live[0].PRNumber, live[1].PRNumber, got, ok)
+		}
+	}
+}
+
 // TestFilterClaimedIssuesMergedClaims pins the agent-side consumption of
 // merged claims (#6867/#7061): a merged strong claim suppresses and never takes
 // the red+stale release valve (the PR is merged — check state is meaningless),
