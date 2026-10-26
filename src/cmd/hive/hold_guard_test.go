@@ -90,6 +90,10 @@ type holdGuardServer struct {
 	// workflowRefused answers update-branch with GitHub's 403 for an App
 	// without the workflows permission.
 	workflowRefused bool
+	// refuseStatus, when set, answers update-branch with that status and
+	// refuseMessage.
+	refuseStatus  int
+	refuseMessage string
 }
 
 func (s *holdGuardServer) handler(t *testing.T) http.Handler {
@@ -151,6 +155,11 @@ func (s *holdGuardServer) handler(t *testing.T) http.Handler {
 			s.updateBranchCalls[number]++
 			if s.workflowRefused {
 				http.Error(w, `{"message":"refusing to allow a GitHub App to create or update workflow `+"`.github/workflows/docs-validate.yml`"+` without `+"`workflows`"+` permission"}`, http.StatusForbidden)
+				return
+			}
+			if s.refuseStatus != 0 {
+				body, _ := json.Marshal(map[string]string{"message": s.refuseMessage})
+				http.Error(w, string(body), s.refuseStatus)
 				return
 			}
 			if s.failUpdateBranch {

@@ -2111,6 +2111,7 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 					FromFork:            fromFork,
 					MaintainerCanModify: pr.GetMaintainerCanModify(),
 					BaseRef:             prBaseRef(pr),
+					BaseSHA:             pr.GetBase().GetSHA(),
 					RequestedReviewers:  reqLogins,
 					RequestedTeams:      reqTeams,
 					HoldSources:         prHoldSources,
