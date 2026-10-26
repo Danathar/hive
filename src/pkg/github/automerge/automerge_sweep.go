@@ -180,6 +180,12 @@ type Engine struct {
 	mergerAuthzMu sync.RWMutex
 	mergerAuthz   MergerAuthorizer
 
+	// maintainerPerm caches whether a PR author holds admin or maintain on
+	// the PR's repository (authorMaintainsRepo): adoption never takes over
+	// a maintainer's own PR.
+	maintainerPermMu sync.Mutex
+	maintainerPerm   map[string]maintainerPermEntry
+
 	requiredChecksMu      sync.RWMutex
 	requiredChecks        map[string]bool
 	requiredChecksForRepo func(repo string) (map[string]bool, bool)
