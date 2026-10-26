@@ -709,14 +709,8 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	}
 	// The engine re-derives the stage from the labels left behind, so a kept
 	// park label (a person's or a lifecycle bot's `needs-human`) re-parks the
-	// issue at the same stage (hivecommons/hive#12715). Only a stage the
-	// remaining labels no longer derive is reported as removed.
+	// issue at the same stage (hivecommons/hive#12715).
 	stayingStage := unparkStageThatStays(displayRepo, number, labels, removed, stageLabels)
-	for _, label := range stageLabels {
-		if !strings.EqualFold(label, stayingStage) {
-			removed = append(removed, label)
-		}
-	}
 	if !labelPresent(labels, HumanAckLabel) {
 		if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{HumanAckLabel}); err != nil {
 			return false, fmt.Errorf("adding %s to %s/%s#%d: %w", HumanAckLabel, owner, repo, number, err)
@@ -728,8 +722,18 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	if err := c.StageFacts().Unparked(ctx, c.IssueStageRef(owner+"/"+repo, number), actor); err != nil {
 		return false, err
 	}
+	// Only a stage label the issue no longer carries once the engine has
+	// run is reported as removed (projectbluefin/website#926).
+	var lifting []string
+	for _, label := range stageLabels {
+		if !strings.EqualFold(label, stayingStage) {
+			lifting = append(lifting, label)
+		}
+	}
+	gone, lingering := c.unparkStageLabelsLifted(ctx, owner, repo, number, lifting)
+	removed = append(removed, gone...)
 	decision := unparkCommandDecisionText(command)
-	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept, stayingStage)
+	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept, stayingStage, lingering)
 	if note := c.unparkIssueFilterNote(labels, removed); note != "" {
 		reply += "\n\n" + note
 	}
@@ -769,7 +773,7 @@ func unparkStageThatStays(displayRepo string, number int, labels, removed, stage
 	return ""
 }
 
-func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string, stayingStage string) string {
+func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string, stayingStage string, lingering []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\nApproved by @%s. Decision: %s\n\n`%s` is applied", unparkAcceptedMarker, actor, decision, HumanAckLabel)
 	if len(removed) > 0 {
@@ -782,8 +786,38 @@ func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept 
 	if stayingStage != "" {
 		fmt.Fprintf(&b, " `%s` stays: a label left on the issue still parks it for a person, so agents will not pick it up until that label is removed.", stayingStage)
 	}
+	if len(lingering) > 0 {
+		fmt.Fprintf(&b, " %s is still on the issue: Hive's stage writer did not take it off, so the issue still reads as parked until it is removed.", quoteLabelsProse(lingering))
+	}
 	b.WriteString(" Any `hold` label is left exactly as it was.")
 	return b.String()
+}
+
+// unparkStageLabelsLifted re-reads the issue once the stage engine has run
+// on an un-park and splits stageLabels, the stage park labels the issue
+// wore, into the ones that came off (gone) and the ones still on it
+// (still). A failed read reports neither, so no reply claims anything
+// about them.
+func (c *Client) unparkStageLabelsLifted(ctx context.Context, owner, repo string, number int, stageLabels []string) (gone, still []string) {
+	if len(stageLabels) == 0 {
+		return nil, nil
+	}
+	issue, _, err := c.client.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("un-park: could not re-read the issue's stage labels", "repo", owner+"/"+repo, "issue", number, "error", err)
+		}
+		return nil, nil
+	}
+	now := extractLabels(issue.Labels)
+	for _, label := range stageLabels {
+		if labelPresent(now, label) {
+			still = append(still, label)
+		} else {
+			gone = append(gone, label)
+		}
+	}
+	return gone, still
 }
 
 // removeIssueLabel removes one label; a label that has already gone is not an
@@ -894,12 +928,18 @@ func hasIssueParkingLabel(labels []string) bool {
 // re-reads the issue, takes the stage/045 park label off and re-derives the
 // stage. A kept `needs-human` would leave the issue hard-suppressed and at
 // stage/045 after the decision is recorded. A label that has already gone
-// is not an error. It returns the labels it removed, spelled as the issue
-// carried them, so the reply can name exactly what changed.
+// is not an error. It returns the labels that came off, spelled as the
+// issue carried them — its own removals, then the stage park labels a
+// re-read after the engine ran no longer finds — so the reply can name
+// exactly what changed.
 func (c *Client) clearIssueParkingLabels(ctx context.Context, owner, repo string, number int, labels []string, actor string, liftNeedsHuman bool) ([]string, error) {
-	var removed []string
+	var removed, stageLabels []string
 	for _, label := range c.parkingLabelsPresent(labels) {
-		if stagelabels.IsStageLabel(label) || (c.hasNeedsHumanLabel([]string{label}) && !liftNeedsHuman) {
+		if stagelabels.IsStageLabel(label) {
+			stageLabels = append(stageLabels, label)
+			continue
+		}
+		if c.hasNeedsHumanLabel([]string{label}) && !liftNeedsHuman {
 			continue
 		}
 		if _, err := c.client.Issues.RemoveLabelForIssue(ctx, owner, repo, number, url.PathEscape(label)); err != nil {
@@ -920,7 +960,8 @@ func (c *Client) clearIssueParkingLabels(ctx context.Context, owner, repo string
 	if err := c.StageFacts().Unparked(ctx, c.IssueStageRef(owner+"/"+repo, number), actor); err != nil {
 		return removed, err
 	}
-	return removed, nil
+	gone, _ := c.unparkStageLabelsLifted(ctx, owner, repo, number, stageLabels)
+	return append(removed, gone...), nil
 }
 
 func labelPresent(labels []string, want string) bool {
