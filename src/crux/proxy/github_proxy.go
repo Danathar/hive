@@ -557,6 +557,18 @@ func (p *GitHubProxy) SetRepoPausedFunc(fn func(repo string) bool) {
 	p.pausedMu.Unlock()
 }
 
+// repoScopePath is the request path handed to the per-repo write gates (pause,
+// agent scope, auto-merge, per-repo ACMM mode, repo filter). It starts from
+// the client's own escaping rather than the decoded req.URL.Path so a GitLab
+// "namespace%2Fproject" stays one segment and ExtractRepo resolves the exact
+// project — including nested groups — instead of guessing where the project
+// path ends from the sub-resource that follows it. CanonicalGatePath then
+// decodes every OTHER escape so an escaped structural segment (/r%65pos/,
+// repo%2Egit, pro%6Aects, merg%65) cannot hide the repo from the gates.
+func repoScopePath(req *http.Request) string {
+	return CanonicalGatePath(req.URL.EscapedPath())
+}
+
 // repoPauseRefusal is RepoPauseRefusal against this proxy's current predicate.
 func (p *GitHubProxy) repoPauseRefusal(method, path string) (string, bool) {
 	p.pausedMu.RLock()
@@ -1382,15 +1394,15 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 		// scope so their more specific reasons win when both apply.
 		writeSurfaceKind := ""
 		if agentName != internalCallerName {
-			if reason, paused := p.repoPauseRefusal(req.Method, req.URL.Path); paused {
+			if reason, paused := p.repoPauseRefusal(req.Method, repoScopePath(req)); paused {
 				blocked = true
 				blockReason = reason
 				blockCode = DenyReasonRepoPaused
-			} else if reason, refused := p.agentRepoScopeRefusal(agentName, req.Method, req.URL.Path); refused {
+			} else if reason, refused := p.agentRepoScopeRefusal(agentName, req.Method, repoScopePath(req)); refused {
 				blocked = true
 				blockReason = reason
 				blockCode = DenyReasonAgentRepoScope
-			} else if reason, refused := p.autoMergeRefusal(req.Method, req.URL.Path); refused {
+			} else if reason, refused := p.autoMergeRefusal(req.Method, repoScopePath(req)); refused {
 				blocked = true
 				blockReason = reason
 				blockCode = DenyReasonRepoAutoMergeOff
@@ -1469,7 +1481,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 			// autonomy. Its control-plane calls (App token mint, heartbeat)
 			// must not be gated as if they were agent writes. Repo-filter and
 			// canary-egress checks below still apply.
-		} else if !AllowedByModeCaps(autonomyModeForRepo(agentName, ExtractRepo(req.URL.Path), mode), caps, req.Method, req.URL.Path) {
+		} else if !AllowedByModeCaps(autonomyModeForRepo(agentName, ExtractRepo(repoScopePath(req)), mode), caps, req.Method, req.URL.Path) {
 			blocked = true
 			blockCode = DenyReasonMode
 			// An unidentified agent is silently treated as ADVISORY, which turns
@@ -1487,7 +1499,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 				blockReason = msg
 				blockCode = DenyReasonHardDeny
 			}
-		} else if len(p.allowedRepos) > 0 && !RepoFilterAllowed(p.allowedRepos, req.Method, req.URL.Path) {
+		} else if len(p.allowedRepos) > 0 && !RepoFilterAllowed(p.allowedRepos, req.Method, repoScopePath(req)) {
 			blocked = true
 			blockReason = "repo not in hive config"
 			blockCode = DenyReasonRepoNotInConfig
@@ -1549,7 +1561,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 			}
 			p.recordViolation(agentName, req.Method, detail)
 			if writeSurfaceKind != "" {
-				p.auditWriteRefused(agentName, writeSurfaceKind, req.Method, req.URL.Path)
+				p.auditWriteRefused(agentName, writeSurfaceKind, req.Method, repoScopePath(req))
 			}
 
 			if blockCode == "" {

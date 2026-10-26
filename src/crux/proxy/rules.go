@@ -335,15 +335,90 @@ func DeniedMessage(method, path string) (string, bool) {
 
 var repoPathPrefix = regexp.MustCompile(`^(?:/api/v1)?/repos/([^/]+/[^/]+)`)
 
-var gitPathPrefix = regexp.MustCompile(`^/([^/]+/[^/]+)\.git/`)
+// gitSmartHTTPEndpoints are the only things that may follow "<slug>.git/" for
+// gitPathRepo to treat the path as a git smart-HTTP request. Anchoring on the
+// remainder keeps a ".git/" that merely appears inside some other API path
+// (GitLab /repository/files/foo.git/raw) from yielding a bogus slug.
+var gitSmartHTTPEndpoints = map[string]bool{
+	"info/refs":        true,
+	"git-upload-pack":  true,
+	"git-receive-pack": true,
+}
 
-// gitLabProjectPathPrefix captures the project segment of a GitLab API path.
-// GitLab addresses a project either by its URL-encoded "namespace%2Fproject"
-// path (one segment) or by its numeric id; the optional second group only
-// matters for the unencoded "namespace/project" spelling, so ExtractRepo must
-// decide which form it is looking at before it consumes a second segment —
-// otherwise a sub-resource such as /issues is mistaken for the project name.
-var gitLabProjectPathPrefix = regexp.MustCompile(`^(?:/api/v4)?/projects/([^/]+)(?:/([^/]+))?`)
+// gitPathRepo returns the repo slug of a git smart-HTTP path ("/org/repo.git/
+// git-receive-pack"), or "" if the path is not one. The slug ends at the FIRST
+// ".git/" and must be two or more segments, so GitLab nested groups
+// ("/group/sub/repo.git/...") are gated on the full project path instead of
+// extracting no repo at all. The remainder after ".git/" must be one of the
+// smart-HTTP endpoints in gitSmartHTTPEndpoints.
+func gitPathRepo(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		return ""
+	}
+	i := strings.Index(path, ".git/")
+	if i < 0 {
+		return ""
+	}
+	if !gitSmartHTTPEndpoints[path[i+len(".git/"):]] {
+		return ""
+	}
+	slug := path[1:i]
+	if slug == "" || !strings.Contains(slug, "/") || strings.HasPrefix(slug, "/") ||
+		strings.HasSuffix(slug, "/") || strings.Contains(slug, "//") {
+		return ""
+	}
+	return slug
+}
+
+// gitLabProjectPathPrefix captures everything after /projects/ in a GitLab API
+// path. GitLab addresses a project either by its URL-encoded "namespace%2Fproject"
+// path (one segment) or by its numeric id. The proxy's gates hand ExtractRepo
+// the request's escaped path, so a well-formed client keeps the project in a
+// single %2F segment and is resolved exactly. A decoded (unencoded) spelling
+// may span any number of segments (nested groups); ExtractRepo then takes
+// segments up to the first project sub-resource in gitLabProjectResources.
+var gitLabProjectPathPrefix = regexp.MustCompile(`^(?:/api/v4)?/projects/(.+)$`)
+
+// gitLabProjectResources are the segments that follow a project path in the
+// GitLab REST API (and "-" for its /-/ routes); they end the project path when
+// ExtractRepo has to scan a decoded "group/sub/repo/..." spelling.
+//
+// This is a heuristic with two known failure modes, both bounded:
+//
+//   - A sub-resource missing from this map is absorbed into the repo slug
+//     ("org/repo/foo"), which matches no allowlist, scope or pause entry, so
+//     writes fail CLOSED with a misleading slug. Keep the map complete — every
+//     project route that accepts a write must be here.
+//   - A namespace or project literally named like a resource word
+//     ("acme/releases") is cut short. ExtractRepo never returns "" for such a
+//     path: it falls back to the first two segments so the write is still
+//     gated against SOME repo rather than skipping every gate.
+//
+// Neither applies to the %2F-encoded form every GitLab client emits.
+var gitLabProjectResources = map[string]bool{
+	"-": true, "access_requests": true, "access_tokens": true, "alert_management_alerts": true,
+	"approval_rules": true, "approval_settings": true, "approvals": true, "archive": true,
+	"audit_events": true, "avatar": true, "badges": true, "boards": true, "branches": true,
+	"ci": true, "cluster_agents": true, "clusters": true, "commits": true, "custom_attributes": true,
+	"debian_distributions": true, "deploy_keys": true, "deploy_tokens": true, "deployments": true,
+	"discussions": true, "environments": true, "error_tracking": true, "events": true,
+	"export": true, "feature_flags": true, "feature_flags_user_lists": true, "fork": true,
+	"forks": true, "freeze_periods": true, "groups": true, "hooks": true, "housekeeping": true,
+	"import": true, "integrations": true, "invitations": true, "issues": true,
+	"issues_statistics": true, "iterations": true, "job_token_scope": true, "jobs": true,
+	"labels": true, "languages": true, "members": true, "merge_requests": true,
+	"merge_trains": true, "milestones": true, "mirror": true, "notes": true,
+	"notification_settings": true, "packages": true, "pages": true, "pages_access": true,
+	"pipeline": true, "pipeline_schedules": true, "pipelines": true, "protected_branches": true,
+	"protected_environments": true, "protected_tags": true, "push_rule": true, "ref": true,
+	"registry": true, "releases": true, "remote_mirrors": true, "repository": true,
+	"repository_size": true, "resource_groups": true, "restore": true, "runners": true,
+	"search": true, "secure_files": true, "services": true, "share": true, "snapshot": true,
+	"snippets": true, "star": true, "starrers": true, "statistics": true, "statuses": true,
+	"storage": true, "tags": true, "templates": true, "transfer": true, "trigger": true,
+	"triggers": true, "unarchive": true, "unstar": true, "uploads": true, "users": true,
+	"variables": true, "vulnerabilities": true, "vulnerability_findings": true, "wikis": true,
+}
 
 var gitLabNumericProjectID = regexp.MustCompile(`^\d+$`)
 
@@ -362,24 +437,87 @@ var writeMethods = map[string]bool{
 	"DELETE": true,
 }
 
+// unescapeSlug percent-decodes each "/"-separated segment of a repo slug
+// taken from an escaped request path. The gates compare slugs against
+// operator config (pause list, agent scope, allowlist), so a client spelling
+// "o%72g/repo" must resolve to "org/repo" — the forge decodes it to exactly
+// that — rather than to a garbled slug that no deny-list entry matches. A
+// segment that fails to decode is kept verbatim.
+func unescapeSlug(slug string) string {
+	segs := strings.Split(slug, "/")
+	for i, seg := range segs {
+		if u, err := url.PathUnescape(seg); err == nil {
+			segs[i] = u
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+// CanonicalGatePath normalizes an escaped request path (req.URL.EscapedPath())
+// into the one spelling the per-repo gates and ExtractRepo understand. Every
+// segment is percent-decoded exactly as the forge will decode it, then only
+// the two characters that carry structure are re-escaped: "/" as %2F so a
+// GitLab "namespace%2Fproject" stays one segment, and "%" as %25 so a later
+// unescapeSlug decodes each segment once, never twice.
+//
+// Without this, a client could spell a literal prefix with an escape —
+// /r%65pos/org/repo, /org/repo%2Egit/git-receive-pack,
+// /api/v4/pro%6Aects/org%2Frepo — and Go's URL parser would hand the gates the
+// escaped bytes verbatim. ExtractRepo only decodes slug segments, so it would
+// return "" and pause, agent scope, repo filter and per-repo ACMM would all
+// fail OPEN while the forge decoded the relayed request to the real repo.
+// A segment that fails to decode is kept verbatim.
+func CanonicalGatePath(escaped string) string {
+	segs := strings.Split(escaped, "/")
+	for i, seg := range segs {
+		u, err := url.PathUnescape(seg)
+		if err != nil {
+			continue
+		}
+		u = strings.ReplaceAll(u, "%", "%25")
+		segs[i] = strings.ReplaceAll(u, "/", "%2F")
+	}
+	return strings.Join(segs, "/")
+}
+
 func ExtractRepo(path string) string {
 	if m := repoPathPrefix.FindStringSubmatch(path); len(m) > 1 {
-		return m[1]
+		return unescapeSlug(m[1])
 	}
-	if m := gitPathPrefix.FindStringSubmatch(path); len(m) > 1 {
-		return m[1]
+	if slug := gitPathRepo(path); slug != "" {
+		return unescapeSlug(slug)
 	}
-	if m := gitLabProjectPathPrefix.FindStringSubmatch(path); len(m) > 2 {
-		first := m[1]
-		if unescaped, err := url.PathUnescape(first); err == nil && strings.Contains(unescaped, "/") {
-			return unescaped
+	if m := gitLabProjectPathPrefix.FindStringSubmatch(path); len(m) > 1 {
+		segs := strings.Split(m[1], "/")
+		// Decode every segment before scanning so "%2F" in the project
+		// segment, and escaped letters in slug or resource words alike,
+		// are read the way the forge reads them.
+		for i, seg := range segs {
+			if u, err := url.PathUnescape(seg); err == nil {
+				segs[i] = u
+			}
+		}
+		first := segs[0]
+		if strings.Contains(first, "/") {
+			return first
 		}
 		if gitLabNumericProjectID.MatchString(first) {
 			// Numeric project id: the repo slug is not recoverable from the path.
 			return ""
 		}
-		if m[2] != "" {
-			return first + "/" + m[2]
+		n := 0
+		for n < len(segs) && segs[n] != "" && !gitLabProjectResources[segs[n]] {
+			n++
+		}
+		if n >= 2 {
+			return strings.Join(segs[:n], "/")
+		}
+		// The scan stopped on a resource word before a namespace/project pair
+		// was complete: the group or project is itself named like a resource.
+		// Fail closed on the plain two-segment reading rather than return ""
+		// (which every gate treats as "no repo in path" and lets through).
+		if len(segs) >= 2 && segs[0] != "" && segs[1] != "" {
+			return segs[0] + "/" + segs[1]
 		}
 	}
 	return ""
