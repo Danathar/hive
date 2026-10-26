@@ -175,6 +175,18 @@ for **Closed**, it covers PRs closed without merging plus issue closes. The
 previous percent compares against the immediately preceding window of the same
 length (for example, previous 24 hours for the 24h window).
 
+The expanded trend has a **View** dropdown, remembered per browser:
+
+- **Counts** (default): stacked bars of hive, human and other-automation
+  events per bucket, with a count axis and a time axis.
+- **Hive share %**: the hive share over a trailing window of about a sixth of
+  the selected window. The line breaks where that window had no activity.
+- **Share area**: the original 100% stacked area. Every bucket with activity
+  reaches full height, so it shows the mix but not when or how much.
+
+Hovering a bucket in **Counts** or **Hive share %** shows its time range and
+counts.
+
 ## Settings → Knowledge → Connectors
 
 The Knowledge card has a **🔌 Integrations** button that opens an in-app modal for Obsidian setup plus every registered `knowledge.connectors` type. The **Knowledge** tab of the governor config dialog also has a **Connectors** section listing every `knowledge.connectors` entry: name, type, layer, a status pill (`ok`, `syncing`, `error`, `disabled`, or `pending` before the first sync), last sync, pages/facts, and the last error (truncated, full text on hover). Owners also get **Sync now**, **Edit**, **Disable/Enable** and **Remove** per row plus **Add connector**; everyone else sees a read-only table. Add/Edit uses the styled hive dialog with type-specific scope fields and a **Validate** button; credentials are referenced by environment variable name or secret file path only. Saves go through the owner-only `PUT /api/config/knowledge/connectors`. See [Knowledge connectors](knowledge-connectors.md).
