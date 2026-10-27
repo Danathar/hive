@@ -23,12 +23,35 @@ func TestFormatDigestMarkdownIncludesAdviceSection(t *testing.T) {
 	}
 	md := FormatDigestMarkdown(BuildDigest(nil, "SURGE"), DigestOptions{ShowEmpty: true, Advice: advice})
 	for _, want := range []string{
-		"## Advice", "Throttle PR-producing lanes", "mode=SURGE", "next review in 3 day(s)",
+		"## Advice", "Throttle PR-producing lanes", "mode=SURGE",
+		"Hive keeps this list until 2026-09-23, so it does not jump around between reports.",
+		"If Hive's mode changes from `SURGE`, it picks a new list sooner.",
 		"governor actionable queue 3 PRs / 20 issues", "Overview chart 93 open PRs / 295 open issues",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("digest missing %q:\n%s", want, md)
 		}
+	}
+}
+
+// The digest says in plain words that the list is picked once a week and the
+// numbers under it are not, instead of "Frozen for governor mode …".
+func TestAdviceSectionSaysWhenTheListWasPicked(t *testing.T) {
+	start := time.Date(2026, 10, 26, 17, 27, 0, 0, time.UTC)
+	advice := &hiveadvisor.Result{
+		Epoch:           hiveadvisor.Epoch{Mode: "BUSY", Start: start, End: start.Add(hiveadvisor.EpochLength)},
+		Recommendations: []hiveadvisor.Recommendation{{ID: "rebalance-merge-side", Title: "Rebalance toward merge-side agents"}},
+	}
+	var b strings.Builder
+	writeAdviceSection(&b, advice, "")
+	want := "> Hive picked this list on 2026-10-26 and keeps it until 2026-11-02, so it does not jump around between reports. " +
+		"The numbers, items and links under each one are worked out fresh for every report. " +
+		"If Hive's mode changes from `BUSY`, it picks a new list sooner.\n"
+	if !strings.Contains(b.String(), want) {
+		t.Fatalf("advice header missing\nwant %q\nin:\n%s", want, b.String())
+	}
+	if strings.Contains(b.String(), "Frozen for") || strings.Contains(b.String(), "next review in") {
+		t.Fatalf("advice header still uses the old wording:\n%s", b.String())
 	}
 }
 
@@ -66,7 +89,7 @@ func TestAdviceSectionRendersQueueExplanation(t *testing.T) {
 		"  - Full list: [Blocked PRs (CSV)](https://hive.example.com/api/overview/prs.csv?band=blocked)\n",
 		"- ~~**Widen HIVE_REPOS**~~ — No longer applies",
 		"Bands named above (same rules as the Overview chart):\n- **Blocked** (PRs): blocked sweep verdict, merge conflicts, or failing CI",
-		"numbers, items and links are recomputed on every digest",
+		"numbers, items and links under each one are worked out fresh for every report",
 	} {
 		if !strings.Contains(withOrigin, want) {
 			t.Fatalf("digest missing %q:\n%s", want, withOrigin)

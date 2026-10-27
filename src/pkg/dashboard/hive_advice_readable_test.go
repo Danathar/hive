@@ -77,3 +77,57 @@ assert.equal(out.match(/hive-advice-why/g).length, 1, 'only the needs-human advi
 		t.Fatalf("hive advice card renderer failed: %v\n%s", err, out)
 	}
 }
+
+// The header says in plain words that the list is picked once a week and the
+// numbers under it are not, instead of "Frozen for BUSY; next review in 7
+// days. Numbers refresh every cycle.", and the header badge reads "picked
+// weekly" with the same explanation on hover.
+func TestHiveAdviceHeaderSaysWhenTheListWasPicked(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable: hive advice card rendering was not executed")
+	}
+	html := indexHTML(t)
+	if got := strings.Count(html, `">picked weekly</span>`); got != 2 {
+		t.Errorf("the Hive Advice header badge reads \"picked weekly\" in %d places, want 2 (section header and card config)", got)
+	}
+	if strings.Contains(html, `">weekly</span>`) {
+		t.Error("a Hive Advice badge still reads just \"weekly\"")
+	}
+	if !strings.Contains(html, `class="dash-card-badge" title="Hive picks this list once a week`) {
+		t.Error("the Hive Advice card badge does not explain \"picked weekly\" on hover")
+	}
+	var source strings.Builder
+	source.WriteString(`const assert = require('node:assert/strict');
+const nodes = { 'hive-advice-section': { style: {} }, 'hive-advice-card': { innerHTML: '' } };
+const document = { getElementById: (id) => nodes[id] || null };
+let _lastHiveAdvice = null;
+const summaries = {};
+function refreshSectionCardShell() {}
+function setSectionSummary(id, text) { summaries[id] = text; }
+function applySectionCollapse() {}
+function formatDashboardDate(v) { const d = new Date(v); return (d.getUTCMonth() + 1) + '/' + d.getUTCDate(); }
+`)
+	for _, name := range []string{"escapeHtml", "renderHiveAdvice"} {
+		source.WriteString(jsFunc(t, html, name))
+		source.WriteByte('\n')
+	}
+	source.WriteString(`const rec = { id: 'rebalance-merge-side', title: 'Rebalance toward merge-side agents', rationale: 'The hive is busy.' };
+renderHiveAdvice({ epoch: { mode: 'BUSY', start: '2026-10-26T17:27:39Z', end: '2026-11-02T17:27:39Z' }, nextReviewInDays: 7, recommendations: [rec, rec, rec] });
+let out = nodes['hive-advice-card'].innerHTML;
+assert.ok(out.includes("Hive picked this list on 10/26 and keeps it until 11/2, so it does not jump around. The numbers under each item update every few minutes. If Hive's mode changes from BUSY, it picks a new list sooner."), out);
+assert.ok(!/Frozen for|next review in|refresh every cycle/.test(out), 'old wording:\n' + out);
+assert.equal(summaries['advisory-section'], '3 advice items this week');
+
+renderHiveAdvice({ epoch: { mode: 'IDLE', end: '2026-11-02T17:27:39Z' }, recommendations: [rec] });
+out = nodes['hive-advice-card'].innerHTML;
+assert.ok(out.includes('Hive keeps this list until 11/2, so it does not jump around.'), out);
+assert.equal(summaries['advisory-section'], '1 advice item this week');
+
+renderHiveAdvice({ recommendations: [rec] });
+assert.ok(nodes['hive-advice-card'].innerHTML.includes('Hive keeps this list for a week, so it does not jump around.'));
+`)
+	if out, err := exec.Command(node, "-e", source.String()).CombinedOutput(); err != nil {
+		t.Fatalf("hive advice header renderer failed: %v\n%s", err, out)
+	}
+}

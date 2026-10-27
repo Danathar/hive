@@ -144,7 +144,7 @@ Reports, advice and suggestions Hive has written about your projects and about h
 
 **What it is good for.** Open it about once a week to read what Hive suggests. Collapse it when you do not need it.
 
-**Example.** The collapsed title reads `2 weekly advice items`. Open it and read Hive Advice first.
+**Example.** The collapsed title reads `2 advice items this week`. Open it and read Hive Advice first.
 
 **When it appears.** At autonomy level L2 and above. The autonomy level is how much Hive may do on its own, from L1 to L6. Some sections inside it hide themselves when they are empty.
 
@@ -172,9 +172,9 @@ The open findings Hive's workers have written down, such as bugs, ideas and advi
 
 ## Hive Advice
 
-A short weekly list of things Hive recommends you do to keep work moving on your projects.
+A few things Hive recommends you do to keep work moving on your projects, picked once a week.
 
-**What it tells you.** Hive checks its own counters and your open work, then lists a few concrete steps. The list is frozen for a week so it does not change under you. The numbers inside it still refresh.
+**What it tells you.** Hive checks its own counters and your open work, then lists a few concrete steps. Hive keeps the same list for a week so it does not jump around, and picks a new one sooner if its mode changes. The numbers inside it update every few minutes.
 
 **How the numbers are worked out.**
 
