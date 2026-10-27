@@ -11,7 +11,8 @@ import (
 // refresh's your-turn decision rather than the current step: a PR at review
 // whose repo requires an approving review is the operator's from the start,
 // an issue its PR covers waits elsewhere, and a row with no stored decision
-// says nothing. An issue's linked PR entry carries the PR's answer.
+// says nothing. A PR back with its author or a person's draft is neither the
+// operator's nor Hive's. An issue's linked PR entry carries the PR's answer.
 func TestStageTrackerSaysWhoFinishesEachRow(t *testing.T) {
 	const approval = "Waiting on a person's review: an approving review is required by branch protection (0 given)"
 	repo := FrontendRepo{Name: "x",
@@ -23,12 +24,16 @@ func TestStageTrackerSaysWhoFinishesEachRow(t *testing.T) {
 		OpenPrs: []any{
 			FrontendPR{PullRequest: github.PullRequest{Repo: "x", Number: 8, Title: "hive's"}},
 			FrontendPR{PullRequest: github.PullRequest{Repo: "x", Number: 9, Title: "needs approval"}},
+			FrontendPR{PullRequest: github.PullRequest{Repo: "x", Number: 10, Title: "returned", Author: "alice", Labels: []string{"stage/072-returned-to-contributor"}}},
+			FrontendPR{PullRequest: github.PullRequest{Repo: "x", Number: 11, Title: "person's draft", Author: "bob", Draft: true, Labels: []string{"author/human"}}},
 		},
 		Ownership: map[string]Ownership{
 			ownershipKey(ownershipKindIssue, 1): {YourTurn: true, Verb: OwnershipVerbDecide, ReasonCode: OwnershipReasonParkedNeedsDecision, Reason: "Parked until a maintainer decides"},
 			ownershipKey(ownershipKindIssue, 2): waitingElsewhere(),
 			ownershipKey(ownershipKindPR, 8):    notYourTurn(),
 			ownershipKey(ownershipKindPR, 9):    {YourTurn: true, Verb: OwnershipVerbReview, ReasonCode: OwnershipReasonReviewDecision, Reason: approval},
+			ownershipKey(ownershipKindPR, 10):   notYourTurn(),
+			ownershipKey(ownershipKindPR, 11):   notYourTurn(),
 		},
 	}
 	tr := (&Server{}).buildStageTracker(&StatusPayload{Repos: []FrontendRepo{repo}}, nil, time.Now())
@@ -40,6 +45,10 @@ func TestStageTrackerSaysWhoFinishesEachRow(t *testing.T) {
 		"issue#3": {"", "", ""},
 		"pr#8":    {finisherHive, "", ""},
 		"pr#9":    {finisherPerson, OwnershipVerbReview, approval},
+		// Not the operator's turn, but not Hive's either: the row's own step
+		// or a person's draft names the author.
+		"pr#10": {finisherElsewhere, "", "Returned to @alice — @alice must act"},
+		"pr#11": {finisherElsewhere, "", "Draft — its author must mark it ready for review"},
 	}
 	seen := 0
 	for _, it := range tr.Items {

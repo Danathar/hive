@@ -264,8 +264,10 @@ type StageTrackerItem struct {
 	// than the current step, so a gate a person owns further on (a required
 	// approval, a hand merge) shows from the start: "hive" when nothing in
 	// the decision waits on a person, "person" when it is the operator's
-	// turn, "elsewhere" when it waits on someone else (an author, a hold, a
-	// covering PR), and empty when the snapshot carries no decision.
+	// turn, "elsewhere" when it waits on someone else (a person's hold, a
+	// covering PR, a reporter, an open blocker, or its author: a PR returned
+	// to them or a person's draft), and empty when the snapshot carries no
+	// decision.
 	// FinisherVerb and FinisherReason are the decision's verb and reason.
 	Finisher       string `json:"finisher,omitempty"`
 	FinisherVerb   string `json:"finisher_verb,omitempty"`
@@ -389,6 +391,24 @@ func stageTrackerFinisher(decisions map[string]Ownership, kind string, number in
 		return finisherElsewhere, "", o.Reason
 	}
 	return finisherHive, "", ""
+}
+
+// stageTrackerSetFinisher fills it.Finisher from the stored decision. The
+// decision answers "is it the operator's turn", so a row it leaves to no
+// one in particular is Hive's unless the row's own step names its author: a
+// PR back with its author (071/072), an issue whose author must confirm the
+// gap (017), or a person's draft waits on them, not on Hive.
+func stageTrackerSetFinisher(it *StageTrackerItem, decisions map[string]Ownership, draft bool) {
+	it.Finisher, it.FinisherVerb, it.FinisherReason = stageTrackerFinisher(decisions, it.Kind, it.Number)
+	if it.Finisher != finisherHive {
+		return
+	}
+	switch {
+	case it.Stage == trackerNumberNeedsAuthor, it.Stage == trackerNumberReturned, it.Stage == stagelabels.PossiblyExisting.Number():
+		it.Finisher, it.FinisherReason = finisherElsewhere, it.Caption
+	case draft && it.AuthorKind == authorKindHuman:
+		it.Finisher, it.FinisherReason = finisherElsewhere, "Draft — its author must mark it ready for review"
+	}
 }
 
 // Stage numbers the tracker lays out by. Pinned to stagelabels.Table in
@@ -1180,7 +1200,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			stage, rec, ok = stagelabels.None, stagelabels.Record{}, false
 		}
 		finish(&it, issue.Labels, stage, rec, ok, false)
-		it.Finisher, it.FinisherVerb, it.FinisherReason = stageTrackerFinisher(decisions, ownershipKindIssue, issue.Number)
+		stageTrackerSetFinisher(&it, decisions, false)
 		if it.Stage == trackerNumberClaimed {
 			it.ClaimantKind = s.stageTrackerClaimantKind(repoName, issue.Number)
 		}
@@ -1212,7 +1232,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			it.Lane = laneHive
 		}
 		finish(&it, pr.Labels, labelStage(pr.Labels), rec, ok, pr.Draft)
-		it.Finisher, it.FinisherVerb, it.FinisherReason = stageTrackerFinisher(decisions, ownershipKindPR, pr.Number)
+		stageTrackerSetFinisher(&it, decisions, pr.Draft)
 		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(repoName, pr.Number, pr.HeadSHA, pr.Labels)
 		it.LinkedIssues = stageTrackerPRLinkedIssues(pr, status.GitHubBaseURL)
 		add(it)
