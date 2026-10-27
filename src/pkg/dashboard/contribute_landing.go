@@ -4689,11 +4689,23 @@ function adminRepoWildcardMatch(text,pattern){
   if(pattern.charAt(pattern.length-1)!=='*'&&last&&text.slice(-last.length)!==last)return false;
   return true;
 }
+function adminRepoIsRegexEntry(entry){
+  entry=String(entry||'').trim();
+  return entry.length>1&&entry.charAt(0)==='/'&&entry.charAt(entry.length-1)==='/';
+}
+// Mirrors config.RepoMatchesAny: a plain entry must equal the full or bare
+// name (case-insensitive); * globs and /regex/ entries match either form.
 function adminRepoDisabledEntryMatches(repoFull,entry){
   var full=String(repoFull||''),short=adminRepoShortName(full);
   entry=String(entry||'').trim();
   if(!entry)return false;
-  return adminRepoWildcardMatch(full,entry)||adminRepoWildcardMatch(short,entry);
+  if(adminRepoIsRegexEntry(entry)){
+    var re;try{re=new RegExp(entry.slice(1,-1),'i');}catch(e){return false;}
+    return re.test(full)||re.test(short);
+  }
+  if(entry.indexOf('*')>=0)return adminRepoWildcardMatch(full,entry)||adminRepoWildcardMatch(short,entry);
+  entry=entry.toLowerCase();
+  return full.toLowerCase()===entry||short.toLowerCase()===entry;
 }
 function adminRepoMatchingDisabledEntries(repoFull,disabled){
   return (disabled||[]).filter(function(entry){return adminRepoDisabledEntryMatches(repoFull,entry);});
@@ -4944,8 +4956,8 @@ onEl('ops-admin','click',function(e){
     var dr=(adminHub.disabled_repos||[]).slice();
     var matches=adminRepoMatchingDisabledEntries(repo,dr);
     if(matches.length){
-      var wild=matches.filter(function(r){return String(r||'').indexOf('*')>=0;});
-      if(wild.length){toast('This repo is disabled by wildcard disabled_repos entry: '+wild.join(', '),false);renderAdminControls();return;}
+      var wild=matches.filter(function(r){return String(r||'').indexOf('*')>=0||adminRepoIsRegexEntry(r);});
+      if(wild.length){toast('This repo is disabled by wildcard or regex disabled_repos entry: '+wild.join(', '),false);renderAdminControls();return;}
       dr=dr.filter(function(r){return !adminRepoDisabledEntryMatches(repo,r);});
     }else{
       dr.push(repo);

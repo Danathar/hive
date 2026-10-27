@@ -111,3 +111,45 @@ assert.match(toasts[0], /regex/);
 		t.Fatalf("contribute repo toggle failed: %v\n%s", err, out)
 	}
 }
+
+// TestAdminRepoDisabledEntryMatchesExactPlainEntries pins the Contribute
+// landing admin page to the same rule as config.RepoMatchesAny, so its
+// "Repos for Contribute" toggles cannot disagree with the hub or strip a
+// prefix-sharing entry when another repo is enabled.
+func TestAdminRepoDisabledEntryMatchesExactPlainEntries(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable: admin repo matcher was not executed")
+	}
+	body := renderContributePage(t)
+	var source strings.Builder
+	source.WriteString("const assert = require('node:assert/strict');\n")
+	for _, name := range []string{
+		"adminRepoShortName",
+		"adminRepoWildcardMatch",
+		"adminRepoIsRegexEntry",
+		"adminRepoDisabledEntryMatches",
+		"adminRepoMatchingDisabledEntries",
+	} {
+		source.WriteString(jsFunc(t, body, name))
+		source.WriteByte('\n')
+	}
+	source.WriteString(`const m = adminRepoDisabledEntryMatches;
+assert.equal(m('projectbluefin/dakota', 'projectbluefin/dakota'), true);
+assert.equal(m('projectbluefin/dakota-iso', 'projectbluefin/dakota'), false);
+assert.equal(m('projectbluefin/dakota', 'dakota'), true);
+assert.equal(m('projectbluefin/dakota-iso', 'dakota'), false);
+assert.equal(m('projectbluefin/dakota', 'ProjectBluefin/Dakota'), true);
+assert.equal(m('projectbluefin/dakota-iso', 'projectbluefin/dakota*'), true);
+assert.equal(m('projectbluefin/dakota', '/^projectbluefin\\/dakota$/'), true);
+assert.equal(m('projectbluefin/dakota-iso', '/^projectbluefin\\/dakota$/'), false);
+assert.equal(m('projectbluefin/dakota', '/dakota(/'), false);
+assert.equal(m('projectbluefin/dakota', ''), false);
+assert.deepEqual(
+  adminRepoMatchingDisabledEntries('projectbluefin/dakota-iso', ['projectbluefin/dakota', 'projectbluefin/dakota-iso']),
+  ['projectbluefin/dakota-iso']);
+`)
+	if out, err := exec.Command(node, "-e", source.String()).CombinedOutput(); err != nil {
+		t.Fatalf("admin repo matcher failed: %v\n%s", err, out)
+	}
+}
