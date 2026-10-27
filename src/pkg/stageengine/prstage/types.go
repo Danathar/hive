@@ -61,6 +61,12 @@ type Detail struct {
 	// no per-repo override is configured.
 	DCOGate     bool
 	DCOGateHead string
+	// SquashSignoffGate records, for the same head as DCOGateHead, whether
+	// the `Sign-off survives the squash` check
+	// (.github/workflows/dco-squash-attribution.yml) is required or reported
+	// there. Only repositories that carry that workflow run it, so the
+	// sign-off attribution notes name it only where it is.
+	SquashSignoffGate bool
 }
 
 // RedCheck returns the first red non-required check on head, or "".

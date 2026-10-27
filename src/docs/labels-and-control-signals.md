@@ -620,7 +620,11 @@ The split also covers a head whose commits GitHub links to the hive App while
 the PR author is someone else — a hive follow-up commit on the branch, or a
 contributor who committed from inside a hive pod with the App's noreply
 address (hivecommons/pluk#315 and the other OWNERS PRs of 2026-10-20). The
-required "Sign-off survives the squash" check is red there, and no hive push
+hive will not squash-merge such a head. On a repository that runs
+`.github/workflows/dco-squash-attribution.yml`, the "Sign-off survives the
+squash" check is red there too. The hive's notes name that check only when
+the head's required or reported checks include it, because most managed
+repositories do not carry the workflow. No hive push
 lands on a non-App-authored branch (`review.fix_human_prs` does not authorize
 one and the hive must not forge the author's `Signed-off-by`). Who put
 those commits there decides the route. When the hive did — the

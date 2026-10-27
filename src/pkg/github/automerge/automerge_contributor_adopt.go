@@ -452,9 +452,9 @@ func adoptionBlockerText(obs stageObservation, rec stagelabels.Record) string {
 	switch {
 	case adoptedHeadSignoffUnfixable(obs, rec):
 		author := nonEmpty(obs.Author, "the contributor")
-		msg := fmt.Sprintf("%d commit(s) on `%s` carry the App's `Signed-off-by` while a squash merge would land them as @%s, so the `Sign-off survives the squash` gate stays red. "+
+		msg := fmt.Sprintf("%d commit(s) on `%s` carry the App's `Signed-off-by` while a squash merge would land them as @%s, so the hive will not squash-merge this head%s. "+
 			"The hive cannot rewrite that authorship without the contributor, and a superseding PR would carry the same head, so it opened none. ",
-			obs.Detail.DCOSquashUnsafeHive, shortSHA(obs.HeadSHA), author)
+			obs.Detail.DCOSquashUnsafeHive, shortSHA(obs.HeadSHA), author, squashSignoffGateNote(obs))
 		msg += mergeCommitRefusalText(obs)
 		return msg
 	case verdictBlocks(obs.Detail):
@@ -1176,7 +1176,7 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 	}
 	noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
 	store.MarkAdoptionEscalated(key, obs.HeadSHA, reason)
-	c.warn("stage labels: adopted PR sits with nothing the hive can push; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "head_since", rec.AdoptedHeadSince(), "noted", noted)
+	c.info("stage labels: adopted PR sits with nothing the hive can push; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "head_since", rec.AdoptedHeadSince(), "noted", noted)
 	if noted {
 		// The blocker flapped on a head already noted: re-escalate silently.
 		return adoptionEscape{Escalated: true, Reason: reason}, comments, firstErr

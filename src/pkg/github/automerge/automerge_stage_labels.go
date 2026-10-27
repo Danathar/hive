@@ -293,6 +293,7 @@ func (t *StageTracker) drain() [][]stageObservation {
 			}
 			if detail.DCOGateHead != "" && (o.HeadSHA == "" || detail.DCOGateHead == o.HeadSHA) {
 				o.Detail.DCOGate, o.Detail.DCOGateHead = detail.DCOGate, detail.DCOGateHead
+				o.Detail.SquashSignoffGate = detail.SquashSignoffGate
 			}
 			list = append(list, o)
 		}
@@ -550,21 +551,26 @@ func stageActivity(obs stageObservation, stage stagelabels.Stage) stagelabels.Ac
 // (hivecommons/hive#12542): in the required-check set or reported on the
 // head by the DCO App / Prow's plugin. It is the detected "this repo
 // enforces DCO" signal; a head without one is not routed to 072 for a
-// missing sign-off unless config says the repo requires it.
+// missing sign-off unless config says the repo requires it. It also records
+// whether the `Sign-off survives the squash` check is among them, which only
+// the sign-off attribution notes read.
 func (c *Engine) noteStageDCOGate(owner, repo string, number int, head string, required map[string]bool, observed map[string]bool) {
 	if !c.stagePolicy().Enabled || number <= 0 {
 		return
 	}
-	gate := false
+	gate, squashGate := false, false
 	for _, set := range []map[string]bool{required, observed} {
 		for name := range set {
 			if hgithub.IsDCOContext(name) {
 				gate = true
 			}
+			if isSquashSignoffCheck(name) {
+				squashGate = true
+			}
 		}
 	}
 	c.stageTrackerOrShared().note(stageKey(owner, repo, number), func(d *stageDetail) {
-		d.DCOGate, d.DCOGateHead = gate, head
+		d.DCOGate, d.DCOGateHead, d.SquashSignoffGate = gate, head, squashGate
 	})
 }
 

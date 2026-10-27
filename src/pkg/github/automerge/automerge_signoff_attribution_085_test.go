@@ -31,6 +31,8 @@ type signoffCase struct {
 	squashOnly bool
 	// approvedHead, when set, is the head a trusted maintainer approved.
 	approvedHead string
+	// squashGate: the head's checks include `Sign-off survives the squash`.
+	squashGate bool
 }
 
 func runSignoffCase(t *testing.T, tc signoffCase) (*stageAPI, stagelabels.Record, *Engine, func()) {
@@ -66,6 +68,9 @@ func runSignoffCase(t *testing.T, tc signoffCase) (*stageAPI, stagelabels.Record
 	pr.User = &gh.User{Login: gh.Ptr("j1mc")}
 	e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, tc.reason, false, nil)
 	e.noteStageRole("acme", "widget", n, stagelabels.RoleContributor)
+	if tc.squashGate {
+		e.noteStageDCOGate("acme", "widget", n, pr.GetHead().GetSHA(), nil, map[string]bool{squashSignoffCheck: true})
+	}
 	if _, err := e.ApplyStageLabels(context.Background()); err != nil {
 		t.Fatal(err)
 	}
