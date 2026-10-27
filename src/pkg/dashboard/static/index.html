@@ -1870,6 +1870,13 @@
     .hive-advice-band-list dt { margin: var(--sp-0); }
     .hive-advice-band-list dd { margin: var(--sp-0); color: var(--muted); line-height: 1.35; }
     .hive-advice-band-list .repo-issue-pill, .hive-advice-band-list .repo-pr-pill { display: inline-flex; align-items: center; max-width: none; font-size: var(--fs-xs); font-weight: 700; }
+    .hive-advice-sub { margin-top: var(--sp-3); color: var(--muted); font-size: var(--fs-2xs); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .hive-advice-why, .hive-advice-items { margin: var(--sp-1) var(--sp-0) var(--sp-0); padding-left: var(--sp-5); font-size: var(--fs-sm); line-height: 1.4; }
+    .hive-advice-why li + li, .hive-advice-items li + li { margin-top: var(--sp-1); }
+    .hive-advice-items { color: var(--muted); }
+    .hive-advice-help { margin-top: var(--sp-2); font-size: var(--fs-sm); }
+    .hive-advice-signals { margin-top: var(--sp-2); color: var(--muted); font-size: var(--fs-xs); }
+    .hive-advice-signals > summary { cursor: pointer; }
     @media (max-width: 620px) { .hive-advice-counts { grid-template-columns: 1fr; } .hive-advice-band-list { grid-template-columns: 1fr; } }
     .reco-ready { margin-top: 10px; padding: var(--sp-4) var(--sp-5); border-radius: var(--r); font-size: 0.8rem;
       background: var(--green-bg); border: 1px solid var(--green-border); color: var(--text); }
@@ -27289,20 +27296,25 @@ function burnAreaChart() {
           <div class="crit-detail">${escapeHtml(r.rationale || '')}</div></div>
         </li>`;
         }
+        // The raw signals are the evidence behind the numbers, not advice:
+        // folded away so the card reads as why / how to help / where to start.
         const sigs = Array.isArray(r.signals) ? r.signals : [];
-        const sigHtml = sigs.length ? `<div class="crit-cmp">signals: ${sigs.map((s) => `${escapeHtml(s.name || '')}=${escapeHtml(s.value || '')}`).join(', ')}</div>` : '';
+        const sigHtml = sigs.length ? `<details class="hive-advice-signals"><summary>Numbers behind this</summary>${sigs.map((s) => `${escapeHtml(s.name || '')}=${escapeHtml(s.value || '')}`).join(', ')}</details>` : '';
+        const why = Array.isArray(r.why) ? r.why : [];
+        const whyHtml = why.length ? `<div class="hive-advice-sub">Why they wait</div><ul class="hive-advice-why">${why.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>` : '';
+        const helpHtml = r.help ? `<div class="hive-advice-help"><strong>How to help:</strong> ${escapeHtml(r.help)}.</div>` : '';
         const its = Array.isArray(r.items) ? r.items : [];
-        const itemHtml = its.length ? `<div class="crit-cmp">First: ${its.map((it) => {
+        const itemHtml = its.length ? `<div class="hive-advice-sub">First</div><ul class="hive-advice-items">${its.map((it) => {
           const ref = `${escapeHtml(it.repo || '')}#${escapeHtml(String(it.number || ''))}`;
           const link = it.url ? `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${ref}</a>` : ref;
-          return it.note ? `${link} (${escapeHtml(it.note)})` : link;
-        }).join(', ')}</div>` : '';
+          return `<li>${it.note ? `${link} — ${escapeHtml(it.note)}` : link}</li>`;
+        }).join('')}</ul>` : '';
         const links = Array.isArray(r.links) ? r.links : [];
         const linkHtml = links.length ? `<div class="crit-cmp">Full list: ${links.map((l) => `<a href="${escapeHtml(l.url || '')}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label || l.url || '')}</a>`).join(', ')}</div>` : '';
         return `<li class="reco-crit met" id="hive-advice-rec-${i}">
           <span class="mark">${i + 1}</span>
           <div class="crit-body"><div class="crit-name">${escapeHtml(r.title || r.id || 'Recommendation')}</div>
-          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div>${itemHtml}${linkHtml}${sigHtml}</div>
+          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div>${whyHtml}${helpHtml}${itemHtml}${linkHtml}${sigHtml}</div>
         </li>`;
       }).join('');
       const bands = Array.isArray(dto.bands) ? dto.bands : [];
