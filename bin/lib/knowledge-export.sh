@@ -510,6 +510,12 @@ GOOSECFG
       ln -sf "$agent_md" "${dest_dir}/AGENTS.md"
       ln -sf "$agent_md" "${dest_dir}/CLAUDE.md"
       ;;
+    omnigent)
+      # Omnigent orchestrates Claude, Codex, Cursor, Pi, and custom harnesses.
+      # Link both AGENTS.md and CLAUDE.md for harness compatibility.
+      ln -sf "$agent_md" "${dest_dir}/AGENTS.md"
+      ln -sf "$agent_md" "${dest_dir}/CLAUDE.md"
+      ;;
     *)
       ln -sf "$agent_md" "${dest_dir}/CLAUDE.md"
       ;;

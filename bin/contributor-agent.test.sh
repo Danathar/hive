@@ -652,6 +652,25 @@ for link in "${HOME_DIR}/AGENTS.md" "${HOME_DIR}/CLAUDE.md"; do
   fi
 done
 
+# Omnigent orchestrates several harnesses, so it gets both link names too.
+rm -f "${HOME_DIR}/AGENTS.md" "${HOME_DIR}/CLAUDE.md"
+OMNIGENT_AGENT_MD="${HOME_DIR}/agent.md"
+env -i \
+  PATH="${PATH}" \
+  HOME="$HOME_DIR" \
+  HIVE_REGISTRATION_TOKEN="test-token" \
+  HIVE_CONTRIBUTOR_AGENT_TEST_LINK_KNOWLEDGE=1 \
+  HIVE_CONTRIBUTOR_AGENT_TEST_KNOWLEDGE_DEST="$OMNIGENT_AGENT_MD" \
+  AGENT_BACKEND=omnigent \
+  bash "${ROOT_DIR}/bin/contributor-agent.sh"
+
+for link in "${HOME_DIR}/AGENTS.md" "${HOME_DIR}/CLAUDE.md"; do
+  if [[ "$(readlink "$link")" != "$OMNIGENT_AGENT_MD" ]]; then
+    echo "expected Omnigent knowledge link $link to target the Hive export" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "${WORK_DIR}/omp-bin"
 cat >"${WORK_DIR}/omp-bin/omp" <<'OMP'
 #!/bin/sh
