@@ -115,6 +115,41 @@ func TestHumanGateWhyWordsUnknownCodesFromTheirReason(t *testing.T) {
 	}
 }
 
+// Each wording github.BranchProtectionBlockReason gives a review decision
+// lands in its own group: "approve PRs" is the wrong advice for a PR whose
+// reviewer asked for changes, named or not.
+func TestHumanGateWhySplitsEveryReviewDecisionWording(t *testing.T) {
+	reasons := []string{
+		"changes requested by @alice",
+		"changes requested by @alice, @bob",
+		"a reviewer requested changes",
+		"code-owner review required by branch protection",
+		"blocked by a branch rule Hive does not read (ruleset requires code-owner review)",
+		"an approving review is required by branch protection (0 given)",
+	}
+	var owns []Ownership
+	var repos []string
+	for _, reason := range reasons {
+		owns = append(owns, Ownership{YourTurn: true, Verb: "REVIEW", ReasonCode: "review_decision_required", Reason: "Waiting on a person's review: " + reason})
+		repos = append(repos, "octo/demo")
+	}
+	why, help := humanGateWhy(owns, repos)
+	want := []string{
+		"3 with changes a reviewer requested (all in octo/demo).",
+		"2 waiting for a code owner's review (all in octo/demo).",
+		"1 waiting for an approving review that branch protection requires (all in octo/demo).",
+	}
+	if !reflect.DeepEqual(why, want) {
+		t.Fatalf("why =\n%s", strings.Join(why, "\n"))
+	}
+	if want := "follow up on the requested changes in octo/demo; code owners: review PRs in octo/demo; approve PRs in octo/demo"; help != want {
+		t.Fatalf("help = %q\nwant %q", help, want)
+	}
+	if got := shortOwnershipNote(owns[0]); got != "REVIEW — changes requested by @alice" {
+		t.Fatalf("note = %q", got)
+	}
+}
+
 func TestWhereTextNamesTheLargestRepos(t *testing.T) {
 	got := whereText(map[string]int{"a": 5, "b": 3, "c": 2, "d": 1, "e": 1}, 12)
 	if got != "5 in a, 3 in b, 2 in c, 2 elsewhere" {

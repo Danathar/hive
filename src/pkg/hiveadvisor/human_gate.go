@@ -70,6 +70,8 @@ var gateReasons = map[string]gateReason{
 // review_decision_required splits by the rule GitHub is waiting on
 // (github.PullRequest.HumanReviewBlocksMerge): a reviewer's requested
 // changes and a code owner's review ask different people for different things.
+// The reason says "changes requested by @a" when it knows who asked, and "a
+// reviewer requested changes" when it does not; both are the changes group.
 var (
 	gateChangesRequested = gateReason{"with changes a reviewer requested", "follow up on the requested changes in %s"}
 	gateCodeOwnerReview  = gateReason{"waiting for a code owner's review", "code owners: review PRs in %s"}
@@ -87,7 +89,7 @@ func gateReasonFor(o Ownership) (string, gateReason) {
 	if o.ReasonCode == "review_decision_required" {
 		reason := strings.ToLower(o.Reason)
 		switch {
-		case strings.Contains(reason, "requested changes"):
+		case strings.Contains(reason, "changes requested"), strings.Contains(reason, "requested changes"):
 			return o.ReasonCode + "/changes", gateChangesRequested
 		case strings.Contains(reason, "code-owner"), strings.Contains(reason, "code owner"):
 			return o.ReasonCode + "/code-owner", gateCodeOwnerReview
