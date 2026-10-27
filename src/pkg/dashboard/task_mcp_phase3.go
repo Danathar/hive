@@ -129,7 +129,8 @@ func (p dashboardTaskMCPProvider) scopedKnowledgeFacts(ctx context.Context, repo
 	seen := map[string]bool{}
 	for _, fact := range facts {
 		key := string(fact.Layer) + "/" + fact.Slug
-		if !factForRepo(fact, repo) || !factMatchesQuery(fact, query) {
+		// Task MCP serves agents: approved knowledge only (#14546).
+		if fact.EffectiveState() != knowledge.StateApproved || !factForRepo(fact, repo) || !factMatchesQuery(fact, query) {
 			continue
 		}
 		if seen[key] {
