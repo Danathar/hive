@@ -277,3 +277,74 @@ func TestMaintainHeldPRMergeabilityLeavesAReturnedPRAlone(t *testing.T) {
 		t.Fatalf("calls = %d, comments = %d; want the returned PR left alone", fake.updateCalls(7), fake.commentCount())
 	}
 }
+
+// An accepted update that lands between ticks is settled without moving the
+// baseline, so the hive's merge commit is not in the snapshot's commit set.
+// It still never reads as drift at lift time when the hive saw it while the
+// PR was held: the snapshot step records that head before the update
+// settles, and a human lift on an observed head is accepted (#13603). Only
+// a lift that lands before the hive sees the new head re-holds, which fails
+// toward a fresh review.
+func TestEnforceHoldGuardSettledUpdateIsNotDriftAtLift(t *testing.T) {
+	lifted := []map[string]any{{
+		"event":      "labeled",
+		"label":      map[string]string{"name": "hold"},
+		"actor":      map[string]string{"login": "kubestellar-hive[bot]", "type": "Bot"},
+		"created_at": "2026-10-22T05:00:00Z",
+	}, {
+		"event":     "committed",
+		"sha":       "m1",
+		"committer": map[string]string{"name": "GitHub", "date": "2026-10-22T10:00:00Z"},
+	}, {
+		"event":      "unlabeled",
+		"label":      map[string]string{"name": "hold"},
+		"actor":      map[string]string{"login": "clubanderson", "type": "User"},
+		"created_at": "2026-10-22T18:19:00Z",
+	}}
+	held := func(head, state string) *github.ActionableResult {
+		a := heldActionable(github.HoldItem{Repo: "widgets", Number: 7, Type: "pr", HeadSHA: head})
+		a.PRs.Held = []github.PullRequest{{Repo: "widgets", Number: 7, HeadSHA: head, BaseSHA: "b1", MergeableState: state}}
+		return a
+	}
+	for _, tc := range []struct {
+		name         string
+		seenWhenHeld bool
+	}{
+		{"merge seen while held", true},
+		{"lift before the merge was seen", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestHoldGuardStore(t)
+			fake := &holdGuardServer{commits: map[int][]map[string]any{7: {ghCommit("c1", "renovate", "chore(deps): bump")}}}
+			fake.timeline = map[int][]map[string]any{7: lifted}
+			client := newHoldGuardClient(t, fake)
+			client.SetAppBotLogin("kubestellar-hive[bot]")
+			cfg := escalationTestConfig()
+
+			_ = enforceHoldGuard(context.Background(), cfg, client, client, held("c1", "behind"), discardLogger())
+			if rec, _ := store.Recorded("acme/widgets", 7); rec.UpdateRequestedHeadSHA != "c1" {
+				t.Fatalf("record = %+v, want an accepted update awaited at c1", rec)
+			}
+			fake.setCommits(7, ghCommit("c1", "renovate", "chore(deps): bump"), ghCommit("m1", "kubestellar-hive[bot]", "Merge branch 'main' into deps"))
+			if tc.seenWhenHeld {
+				_ = enforceHoldGuard(context.Background(), cfg, client, client, held("m1", "clean"), discardLogger())
+				if rec, _ := store.Recorded("acme/widgets", 7); rec.UpdateRequestedHeadSHA != "" || rec.HeadSHA != "c1" || rec.ObservedHeldHeadSHA != "m1" {
+					t.Fatalf("record = %+v, want the update settled, baseline c1, observed head m1", rec)
+				}
+			}
+
+			got := enforceHoldGuard(context.Background(), cfg, client, client,
+				actionableWith(github.PullRequest{Repo: "widgets", Number: 7, Author: "renovate", HeadSHA: "m1"}), discardLogger())
+			_, tracked := store.Recorded("acme/widgets", 7)
+			if tc.seenWhenHeld {
+				if len(got) != 0 || fake.commentCount() != 0 || len(fake.labels) != 0 || tracked {
+					t.Fatalf("excluded=%v comments=%v labels=%v tracked=%v; a lift on the merge the hive saw while held must reopen the lanes quietly", got, fake.comments, fake.labels, tracked)
+				}
+				return
+			}
+			if len(got) == 0 || fake.commentCount() != 1 {
+				t.Fatalf("excluded=%v comments=%v; a head the hive never saw while held must re-hold for review", got, fake.comments)
+			}
+		})
+	}
+}
