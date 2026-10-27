@@ -47,6 +47,9 @@ type Host interface {
 	// model_roles map its OMP extension reads. Both resolve per launch.
 	SetAdvisorEnabledResolver(fn func(agentName string) bool)
 	SetAdvisorRolesResolver(fn func() map[string]config.ModelRole)
+	// SetRepeatFailureEnabledResolver feeds the neutral BASH_ENV route for
+	// repeat-failure capture (#14574): whether the monitor is on at launch.
+	SetRepeatFailureEnabledResolver(fn func() bool)
 	SetKickLogSourceResolver(fn func() string)
 	SetInferenceCallbacks(setRoute func(agentName, backend, model string), clearRoute func(agentName string))
 	SetSandboxConfig(cfg config.AgentSandboxConfig)

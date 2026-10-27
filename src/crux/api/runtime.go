@@ -842,4 +842,7 @@ var HostSetters = map[string]HostSetter{
 	// policy rides the hive callback.
 	"SetAdvisorEnabledResolver": {HostSetterInProcessOnly, "advisor lane is in-process only; sidecar follow-up"},
 	"SetAdvisorRolesResolver":   {HostSetterInProcessOnly, "advisor lane is in-process only; sidecar follow-up"},
+	// Repeat-failure BASH_ENV route (v6, #14574): the enabled switch is read
+	// in-process until it rides the hive callback policy.
+	"SetRepeatFailureEnabledResolver": {HostSetterInProcessOnly, "repeat-failure capture switch is in-process only; sidecar follow-up"},
 }

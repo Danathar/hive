@@ -306,6 +306,9 @@ func (h *sidecarHost) SetAdvisorEnabledResolver(func(string) bool) {
 func (h *sidecarHost) SetAdvisorRolesResolver(func() map[string]cruxconfig.ModelRole) {
 	h.inProcessOnly("SetAdvisorRolesResolver")
 }
+func (h *sidecarHost) SetRepeatFailureEnabledResolver(func() bool) {
+	h.inProcessOnly("SetRepeatFailureEnabledResolver")
+}
 func (h *sidecarHost) SetRepoAutoMergeEnabledResolver(fn func(string) bool) {
 	h.setPolicy("SetRepoAutoMergeEnabledResolver", func() { h.autoMerge = fn })
 }

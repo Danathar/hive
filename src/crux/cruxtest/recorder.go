@@ -974,6 +974,10 @@ func (r *Recorder) SetAdvisorEnabledResolver(fn func(string) bool) {
 func (r *Recorder) SetAdvisorRolesResolver(fn func() map[string]config.ModelRole) {
 	r.record("SetAdvisorRolesResolver", fn != nil)
 }
+
+func (r *Recorder) SetRepeatFailureEnabledResolver(fn func() bool) {
+	r.record("SetRepeatFailureEnabledResolver", fn != nil)
+}
 func (r *Recorder) SetRepoAutoMergeEnabledResolver(fn func(repo string) bool) {
 	r.record("SetRepoAutoMergeEnabledResolver", fn != nil)
 }
