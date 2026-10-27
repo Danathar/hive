@@ -23,6 +23,13 @@ _inline.js
 /dash.js
 /pr-body.md
 
+# Agent/session scratch: PR and issue bodies drafted for --body-file, and
+# section drafts. Never source; #11588 and #14197 committed them by accident.
+/pr-body.*
+/issue-body.*
+/issue[0-9]*.txt
+/section.md
+
 # Test-run scratch: crux/agent tests create stub CLI binaries under a
 # randomly-suffixed dir. Generated per run; never part of the tree.
 .hive-agent-stubs-*/
