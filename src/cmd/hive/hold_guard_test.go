@@ -65,6 +65,13 @@ type holdGuardServer struct {
 	updateBranchCalls map[int]int
 	failUpdateBranch  bool
 
+	// updateBranchExpected records the expected_head_sha each update-branch
+	// request carried; liveHead, when set for a PR, makes the endpoint refuse
+	// a request whose expected_head_sha differs, as GitHub does when the head
+	// moved after enumeration (#14537).
+	updateBranchExpected map[int][]string
+	liveHead             map[int]string
+
 	// baseContains lists the SHAs the fake base branch contains; the compare
 	// endpoint reports them "behind" the base and anything else "diverged"
 	// (#14534: proving the merged parent of a hygiene merge is a base commit).
@@ -138,6 +145,20 @@ func (s *holdGuardServer) handler(t *testing.T) http.Handler {
 				s.updateBranchCalls = map[int]int{}
 			}
 			s.updateBranchCalls[number]++
+			var opts struct {
+				ExpectedHeadSHA string `json:"expected_head_sha"`
+			}
+			if body, _ := io.ReadAll(r.Body); len(body) > 0 {
+				_ = json.Unmarshal(body, &opts)
+			}
+			if s.updateBranchExpected == nil {
+				s.updateBranchExpected = map[int][]string{}
+			}
+			s.updateBranchExpected[number] = append(s.updateBranchExpected[number], opts.ExpectedHeadSHA)
+			if live, ok := s.liveHead[number]; ok && opts.ExpectedHeadSHA != "" && opts.ExpectedHeadSHA != live {
+				http.Error(w, `{"message":"expected head sha didn't match current head ref."}`, http.StatusUnprocessableEntity)
+				return
+			}
 			if s.failUpdateBranch {
 				http.Error(w, `{"message":"Merge conflict"}`, http.StatusUnprocessableEntity)
 				return

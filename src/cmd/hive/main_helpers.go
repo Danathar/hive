@@ -242,12 +242,13 @@ func enforceHoldGuard(
 // conflicts) and sit that way for the entire review wait.
 //
 // For each PR the guard is already tracking, a "behind" or "dirty" state gets
-// one merge-from-base attempt via UpdateBranch, using the hive's own
-// identity. On success the result is hygiene, not reviewable content, so the
-// guard's baseline is advanced to the new head (holdguard.AdvanceHygiene) —
-// this is what keeps the next lift check from reading the hive's own upkeep
-// push as drift. The advance requires proof that the new head IS that merge
-// (holdguard.IsHygieneMerge: first parent is the requested head, second is a
+// one merge-from-base attempt via UpdateBranchExpectedHead, pinned to the
+// enumerated head and using the hive's own identity. On success the result
+// is hygiene, not reviewable content, so the guard's baseline is advanced to
+// the new head (holdguard.AdvanceHygiene) — this is what keeps the next lift
+// check from reading the hive's own upkeep push as drift. The advance
+// requires proof that the new head IS that merge (holdguard.IsHygieneMerge:
+// first parent is the requested head, second is a
 // commit on the base branch — the enumerated BaseSHA, or one the live base
 // contains when the base moved before the update ran); a head that moved any
 // other way stays unadopted and reads as drift. On
@@ -283,7 +284,20 @@ func maintainHeldPRMergeability(
 		if state != "behind" && state != "dirty" {
 			continue
 		}
-		if err := ghClient.UpdateBranch(ctx, pr.Repo, pr.Number); err != nil {
+		// Pin the update to the enumerated head: GitHub then refuses it if a
+		// contributor push landed after enumeration, so the hive never stacks
+		// its merge on commits the guard has not evaluated. The post-hoc
+		// IsHygieneMerge check below still covers a push landing after the 202
+		// (hivecommons/hive#14537).
+		if err := ghClient.UpdateBranchExpectedHead(ctx, pr.Repo, pr.Number, pr.HeadSHA, pr.BaseSHA); err != nil {
+			if github.IsUpdateBranchStaleHead(err) {
+				// The head moved since enumeration: not a conflict, and not
+				// ours to merge onto. The next tick re-reads the head and the
+				// lift check sees the move as drift.
+				logger.Info("hold guard: held PR head moved since enumeration; skipped keeping it mergeable",
+					"repo", repo, "pr", pr.Number, "expected_head", pr.HeadSHA, "error", err)
+				continue
+			}
 			if state != "dirty" {
 				// "behind" is expected to be a trivial fast-forward; a
 				// failure here is an anomaly (race, API hiccup), not the

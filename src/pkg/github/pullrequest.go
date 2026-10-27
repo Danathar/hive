@@ -535,6 +535,28 @@ func (c *Client) UpdateBranchExpectedHead(ctx context.Context, repo string, numb
 	return c.updateBranch(ctx, repo, number, expectedHeadSHA, observedBaseSHA)
 }
 
+// IsUpdateBranchStaleHead reports whether err is GitHub refusing an
+// UpdateBranchExpectedHead call because the PR head is no longer the expected
+// SHA: a 422 naming the expected head. Callers treat it as "the head moved
+// since enumeration, re-evaluate on the next snapshot", not as a merge
+// conflict.
+func IsUpdateBranchStaleHead(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	var apiErr *gh.ErrorResponse
+	is422 := errors.As(err, &apiErr) && apiErr.Response != nil && apiErr.Response.StatusCode == http.StatusUnprocessableEntity
+	if !is422 && !strings.Contains(msg, "422") && !strings.Contains(msg, "validation failed") {
+		return false
+	}
+	return strings.Contains(msg, "expected_head_sha") ||
+		strings.Contains(msg, "expected head") ||
+		strings.Contains(msg, "head sha") ||
+		strings.Contains(msg, "head_sha") ||
+		strings.Contains(msg, "does not match")
+}
+
 func (c *Client) updateBranch(ctx context.Context, repo string, number int, expectedHeadSHA string, observedBaseSHA string) error {
 	if c == nil || c.client == nil {
 		return ErrNoGitHubClient
