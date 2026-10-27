@@ -7018,7 +7018,7 @@
     </div>
 
     <div id="hive-advice-section" class="advisory-subsection" style="margin-top: var(--sp-6); margin-bottom: var(--sp-8); display: none;">
-      <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="hive-advice-section"><span class="section-chevron">▼</span> 🧭 Hive Advice <span style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-pill);margin-left:var(--sp-3);background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">weekly</span></h2>
+      <h2 class="section-label section-header-toggle mb-4" data-action="toggleSection" data-arg0="hive-advice-section"><span class="section-chevron">▼</span> 🧭 Hive Advice <span style="font-size:var(--fs-2xs);font-weight:600;vertical-align:middle;padding:var(--sp-1) var(--sp-3);border-radius:var(--r-pill);margin-left:var(--sp-3);background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">picked weekly</span></h2>
       <div class="section-body">
         <div id="hive-advice-card" class="advisory-subsection-card"></div>
       </div>
@@ -8476,7 +8476,7 @@
       'governor': { title: '🚦 Governor', summary: 'idle', settingsHtml: sectionSettingsGear('Governor', 'openConfigDialog', 'Open Governor configuration — manage agents, thresholds, budget, notifications, health checks, and sensing patterns', ' data-arg0="governor"') },
       'advisory-section': { title: '📣 Advisory', summary: '0 advisories' },
       'advisory-digest-section': { title: '📋 Advisory Digest', summary: '0 findings' },
-      'hive-advice-section': { title: '🧭 Hive Advice', summary: '0 recommendations', badgeHtml: '<span class="dash-card-badge">weekly</span>' },
+      'hive-advice-section': { title: '🧭 Hive Advice', summary: '0 recommendations', badgeHtml: '<span class="dash-card-badge" title="Hive picks this list once a week so it does not jump around. The numbers in it update every few minutes.">picked weekly</span>' },
       'fleet-report-section': { title: '📡 Fleet Report Preview', summary: '0 reports', badgeHtml: '<span class="dash-card-badge">dry-run</span>' },
       'acmm-reco-section': { title: '⬆️ Ready to level up?', summary: 'L— · stay', badgeHtml: '<span class="dash-card-badge">advisory</span>' },
       'lifecycle-section': { title: '🔀 Lifecycle Timeline', summary: '0 in flight · 0 merged' },
@@ -8515,7 +8515,7 @@
       'governor-pr-models-section': { heading: 'PRs by model', help: "Which AI models wrote the pull requests Hive opened, and how often each model's work was merged without extra fixes." },
       'advisory-section': { heading: 'Advisory', help: 'Reports, advice and suggestions Hive has written about your projects and about how it is running.' },
       'advisory-digest-section': { heading: 'Advisory Digest', help: "The open findings Hive's workers have written down, such as bugs, ideas and advice, grouped by who wrote them." },
-      'hive-advice-section': { heading: 'Hive Advice', help: 'A short weekly list of things Hive recommends you do to keep work moving on your projects.' },
+      'hive-advice-section': { heading: 'Hive Advice', help: 'A few things Hive recommends you do to keep work moving on your projects, picked once a week.' },
       'fleet-report-section': { heading: 'Fleet Report Preview', help: 'Problems Hive has noticed in itself that it would report to the Hive maintainers, and problems that have since gone away.' },
       'acmm-reco-section': { heading: 'Ready to level up?', help: 'Whether Hive thinks you could safely let it do more on its own, and what still has to be true first.' },
       'lifecycle-section': { heading: 'Lifecycle Timeline', help: 'A timeline of recent pull requests, from when they were opened to when they were merged or got stuck.' },
@@ -27276,14 +27276,18 @@ function burnAreaChart() {
       dto = dto || {};
       _lastHiveAdvice = dto;
       const recs = Array.isArray(dto.recommendations) ? dto.recommendations : [];
-      setSectionSummary('advisory-section', `${recs.length} weekly advice${recs.length === 1 ? '' : ' items'}`, 'Weekly Hive Advice');
+      setSectionSummary('advisory-section', `${recs.length} advice item${recs.length === 1 ? '' : 's'} this week`, 'Hive Advice');
       setSectionSummary('hive-advice-section', `${recs.length} recommendation${recs.length === 1 ? '' : 's'}`);
       if (recs.length === 0) { section.style.display = 'none'; return; }
       const epoch = dto.epoch || {};
-      const days = Number.isFinite(Number(dto.nextReviewInDays)) ? Number(dto.nextReviewInDays) : 0;
+      // Which items show is picked once a week (the epoch) and kept so the
+      // list does not jump around; what is under them is recomputed on every
+      // status refresh. A change of governor mode picks a new list early.
       const mode = escapeHtml(epoch.mode || 'IDLE');
-      const until = epoch.end ? formatDashboardDate(epoch.end) : '';
-      const review = `Frozen for ${mode}; next review in ${days} day${days === 1 ? '' : 's'}${until ? ' (' + escapeHtml(until) + ')' : ''}. Numbers refresh every cycle.`;
+      const picked = epoch.start ? escapeHtml(formatDashboardDate(epoch.start)) : '';
+      const until = epoch.end ? escapeHtml(formatDashboardDate(epoch.end)) : '';
+      const kept = picked && until ? `Hive picked this list on ${picked} and keeps it until ${until}` : until ? `Hive keeps this list until ${until}` : 'Hive keeps this list for a week';
+      const review = `${kept}, so it does not jump around. The numbers under each item update every few minutes. If Hive's mode changes from ${mode}, it picks a new list sooner.`;
       const counts = dto.counts || {};
       const countChip = (label, tip, prs, issues, issueLabel) => `<div class="hive-advice-count-chip" title="${escapeHtml(tip)}"><dt>${escapeHtml(label)}</dt><dd><span class="count-value">${escapeHtml(String(prs ?? 0))}</span><span class="count-label">${escapeHtml(label === 'Governor queue' ? 'PRs' : 'open PRs')}</span><span class="count-value">${escapeHtml(String(issues ?? 0))}</span><span class="count-label">${escapeHtml(issueLabel)}</span></dd></div>`;
       const countsHtml = `<dl class="hive-advice-counts" aria-label="Advice count scopes">${countChip('Governor queue', 'Governor actionable queue: mode & cadence', counts.governorPRs, counts.governorIssues, 'issues')}${countChip('Overview chart', 'Overview chart: every open or held item; queue-health advice counts these', counts.overviewPRs, counts.overviewIssues, 'issues')}</dl>`;

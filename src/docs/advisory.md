@@ -490,6 +490,12 @@ struck through and marked *cleared*, with its stale numbers dropped; a rule
 that starts firing mid-epoch waits for the next epoch. An epoch that froze
 only the "Keep observing" placeholder is not kept once real advice appears.
 
+The dashboard card and the digest say this in plain words rather than in
+these terms: "Hive picked this list on 2026-10-26 and keeps it until
+2026-11-02, so it does not jump around", then that the numbers under each item
+are recomputed, then that a change of mode picks a new list sooner. The card's
+header badge reads *picked weekly*.
+
 ### Tuning the thresholds
 
 The trigger points are starting values to calibrate against real hives, not

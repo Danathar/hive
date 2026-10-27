@@ -1447,8 +1447,14 @@ func writeAdviceSection(b *strings.Builder, advice *hiveadvisor.Result, dashboar
 		return
 	}
 	b.WriteString("## Advice\n\n")
-	b.WriteString(fmt.Sprintf("> Frozen for governor mode `%s` until %s (next review in %d day(s)). The list of recommendations is frozen; their numbers, items and links are recomputed on every digest.\n",
-		advice.Epoch.Mode, advice.Epoch.End.Format("2006-01-02"), advice.NextReviewInDays))
+	// Which recommendations show is picked once a week (the epoch); what is
+	// under them is recomputed for every digest. A mode change picks early.
+	kept := "Hive keeps this list until " + advice.Epoch.End.Format("2006-01-02")
+	if !advice.Epoch.Start.IsZero() {
+		kept = "Hive picked this list on " + advice.Epoch.Start.Format("2006-01-02") + " and keeps it until " + advice.Epoch.End.Format("2006-01-02")
+	}
+	b.WriteString(fmt.Sprintf("> %s, so it does not jump around between reports. The numbers, items and links under each one are worked out fresh for every report. If Hive's mode changes from `%s`, it picks a new list sooner.\n",
+		kept, advice.Epoch.Mode))
 	c := advice.Counts
 	b.WriteString(fmt.Sprintf(">\n> Counts quoted: governor actionable queue %d PRs / %d issues (what mode and cadence key on; excludes held, draft, in-review and human-gated items) — Overview chart %d open PRs / %d open issues (every open or held item across repo cards; the queue-health advice counts these).\n\n",
 		c.GovernorPRs, c.GovernorIssues, c.OverviewPRs, c.OverviewIssues))
