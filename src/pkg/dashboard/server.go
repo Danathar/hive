@@ -938,6 +938,14 @@ type FrontendAgent struct {
 	// the turn is still running. KickOutcomeReason is the deciding pane line.
 	KickOutcome       string `json:"kickOutcome,omitempty"`
 	KickOutcomeReason string `json:"kickOutcomeReason,omitempty"`
+	// RepeatFailureCheck is the repeat-failure check state (#14550): "on",
+	// "not_covered" or "no_data", with RepeatFailureCheckMessage as the row
+	// text. RepeatFailureNote is "Repeating failure: `<command>` failed N
+	// times in M min (exit S)" while a command repeats. All empty while the
+	// check is off, so the row shows nothing. Monitor only: never pauses.
+	RepeatFailureCheck        string `json:"repeatFailureCheck,omitempty"`
+	RepeatFailureCheckMessage string `json:"repeatFailureCheckMessage,omitempty"`
+	RepeatFailureNote         string `json:"repeatFailureNote,omitempty"`
 	// Run is the live per-run figure (#14576): this kick's estimated cost,
 	// tokens, elapsed time, last visible test result and files changed.
 	// Present only while Busy is "working".
