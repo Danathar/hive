@@ -297,10 +297,17 @@ func chatPRApproved(pr github.PullRequest) bool {
 	return pr.Protection.ReviewDecision == github.ReviewDecisionApproved || pr.Protection.ApprovalsGiven > 0
 }
 
-// chatPRWaitingOnReview is the `waiting on review` predicate: not a draft and
-// no approving review yet.
+// chatPRChangesRequested is true when GitHub's review decision asks the author
+// for changes.
+func chatPRChangesRequested(pr github.PullRequest) bool {
+	return pr.Protection != nil && pr.Protection.ReviewDecision == github.ReviewDecisionChangesRequested
+}
+
+// chatPRWaitingOnReview is the `waiting on review` predicate: not a draft, no
+// approving review yet, and no outstanding change request — a PR with changes
+// requested is waiting on its author, not on a reviewer.
 func chatPRWaitingOnReview(pr github.PullRequest) bool {
-	return !pr.Draft && !chatPRApproved(pr)
+	return !pr.Draft && !chatPRApproved(pr) && !chatPRChangesRequested(pr)
 }
 
 func (f chatPRFilter) matches(row chatPRRow, now time.Time) bool {
@@ -379,7 +386,7 @@ func chatPRLine(row chatPRRow, now time.Time) string {
 	meta = append(meta, chatPRCI(pr))
 	if chatPRApproved(pr) {
 		meta = append(meta, "approved")
-	} else if pr.Protection != nil && pr.Protection.ReviewDecision == github.ReviewDecisionChangesRequested {
+	} else if chatPRChangesRequested(pr) {
 		meta = append(meta, "changes requested")
 	}
 	if chatPRNeedsDecision(pr.Labels) {

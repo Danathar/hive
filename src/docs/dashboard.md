@@ -202,7 +202,7 @@ by repo, one row each — `owner/repo#N — title (@author · stage labels · ag
 — under the aggregate count, capped at 25 rows with an "… and N more" footer.
 The remainder of the command narrows the list and every filter is a
 conjunct: `waiting on review` / `needs review` (not a draft, no approving
-review), `needs decision` (`stage/085-needs-decision` or
+review, no outstanding change request), `needs decision` (`stage/085-needs-decision` or
 `stage/045-needs-decision`), `hold` (held set or a hold label), `failing ci`,
 `mine` (the signed-in viewer) / `by <login>` / `@login`, `repo <owner/repo>` or
 a bare `owner/repo` token (the short repo name also works), and `stale`

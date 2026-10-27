@@ -110,10 +110,10 @@ func TestRenderChatPRList(t *testing.T) {
 			absent: []string{"github.com/hivecommons/hive/pull/101", "Ignored", "… and"},
 		},
 		{
-			name:   "waiting on review drops approved and drafts",
+			name:   "waiting on review drops approved, drafts and changes requested",
 			query:  "prs: waiting on review",
-			want:   []string{"4 of 6 open pull request(s) match waiting on review:", "#101", "#104", "#105", "docs#7"},
-			absent: []string{"#102", "#103"},
+			want:   []string{"3 of 6 open pull request(s) match waiting on review:", "#101", "#105", "docs#7"},
+			absent: []string{"#102", "#103", "#104"},
 		},
 		{
 			name:   "needs decision",
@@ -190,6 +190,28 @@ func TestRenderChatPRList(t *testing.T) {
 				if strings.Contains(got, a) {
 					t.Errorf("unexpected %q in:\n%s", a, got)
 				}
+			}
+		})
+	}
+}
+
+func TestChatPRWaitingOnReview(t *testing.T) {
+	cases := []struct {
+		name string
+		pr   github.PullRequest
+		want bool
+	}{
+		{name: "no review yet", pr: github.PullRequest{}, want: true},
+		{name: "review required", pr: github.PullRequest{Protection: &github.ProtectionFacts{ReviewDecision: github.ReviewDecisionReviewRequired}}, want: true},
+		{name: "draft", pr: github.PullRequest{Draft: true}, want: false},
+		{name: "approved", pr: github.PullRequest{Protection: &github.ProtectionFacts{ReviewDecision: github.ReviewDecisionApproved}}, want: false},
+		{name: "changes requested waits on the author", pr: github.PullRequest{Protection: &github.ProtectionFacts{ReviewDecision: github.ReviewDecisionChangesRequested}}, want: false},
+		{name: "changes requested with an approval", pr: github.PullRequest{Protection: &github.ProtectionFacts{ReviewDecision: github.ReviewDecisionChangesRequested, ApprovalsGiven: 1}}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := chatPRWaitingOnReview(tc.pr); got != tc.want {
+				t.Fatalf("chatPRWaitingOnReview = %v, want %v", got, tc.want)
 			}
 		})
 	}
