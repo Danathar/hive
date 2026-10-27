@@ -144,7 +144,9 @@ untrusted text until one is set, or until the owner sets
 `classifier.enabled: false` or `classifier.fail_mode: open`. The boot log
 says so in one line, and the dashboard shows a persistent
 `ioscan-classifier-blocked` alert naming those fixes, since every kick that
-carries untrusted text is withheld while this lasts (#14499). A hive whose
+carries untrusted text is withheld while this lasts (#14499). Runtime classifier
+errors in fail-closed mode also raise this alert; a subsequent successful score
+clears it. A hive whose
 agents all run on a subscription CLI such as Copilot has no such endpoint;
 with `classifier.backend` left empty, boot then runs the classifier through
 the tool-less CLI most of the hive's agents run on (the most common of

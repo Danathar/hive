@@ -16,6 +16,7 @@ import (
 type ioscanClassifierSink interface {
 	SetClassifier(ioscan.Classifier, ioscan.Thresholds)
 	SetClassifierBudgetPerEval(int)
+	SetClassifierUnavailableFunc(func(error))
 }
 
 // ioscanClassifierAlerter is the part of the dashboard boot raises the
@@ -42,9 +43,16 @@ const ioscanClassifierBlockedAlertID = "ioscan-classifier-blocked"
 // be built: withheld text at fail-closed, no classifier at fail-open. When
 // the classifier is fail-closed and cannot run, a persistent dashboard alert
 // says that kicks are being blocked and how to fix it; the alert is cleared
-// on a boot where the classifier runs or is not required.
+// on a successful score or a boot where the classifier runs or is not required.
 func installIoscanClassifier(sched ioscanClassifierSink, alerts ioscanClassifierAlerter, cfg *config.Config, logger *slog.Logger, now func() time.Time) {
 	acmmLevel := cfg.ACMMLevelOrZero()
+	sched.SetClassifierUnavailableFunc(func(err error) {
+		if err == nil {
+			clearIoscanClassifierAlert(alerts)
+			return
+		}
+		raiseIoscanClassifierAlert(alerts, acmmLevel, err)
+	})
 	if !cfg.Ioscan.ClassifierEnabledAtLevel(acmmLevel) {
 		clearIoscanClassifierAlert(alerts)
 		return
@@ -148,8 +156,8 @@ func ioscanClassifierFallbackBackend(cfg *config.Config) string {
 // ioscanClassifierBlockedAlertMessage is the dashboard text for a required
 // classifier that cannot run.
 func ioscanClassifierBlockedAlertMessage(acmmLevel int, cause error) string {
-	return fmt.Sprintf("ioscan semantic classifier is required at ACMM L%d but is not running (%v). "+
-		"Every kick carrying untrusted text (issues, comments, PR bodies, reviews) is being withheld until this is fixed. "+
+	return fmt.Sprintf("ioscan semantic classifier is required at ACMM L%d but failed or is unavailable (%v). "+
+		"Kicks carrying untrusted text (issues, comments, PR bodies, reviews) can be withheld until this is fixed. "+
 		"Fix: configure a model endpoint (governor.trajectory or governor.litellm), set ioscan.classifier.backend to one of %s "+
 		"(Settings → Security → Input Defense), or accept scanning without the classifier with ioscan.classifier.fail_mode: open. "+
 		"Changes take effect after a restart.", acmmLevel, cause, strings.Join(ioscan.ToollessBackends(), ", "))

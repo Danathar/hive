@@ -14,9 +14,10 @@ import (
 )
 
 type fakeClassifierSink struct {
-	classifier ioscan.Classifier
-	sets       int
-	budget     int
+	classifier  ioscan.Classifier
+	sets        int
+	budget      int
+	unavailable func(error)
 }
 
 func (f *fakeClassifierSink) SetClassifier(c ioscan.Classifier, _ ioscan.Thresholds) {
@@ -25,6 +26,8 @@ func (f *fakeClassifierSink) SetClassifier(c ioscan.Classifier, _ ioscan.Thresho
 }
 
 func (f *fakeClassifierSink) SetClassifierBudgetPerEval(n int) { f.budget = n }
+
+func (f *fakeClassifierSink) SetClassifierUnavailableFunc(fn func(error)) { f.unavailable = fn }
 
 type fakeClassifierAlerts struct {
 	alerts map[string]string
@@ -279,4 +282,23 @@ func TestInstallIoscanClassifier_RequiredButUnavailableRaisesAlert(t *testing.T)
 
 	// No dashboard: nothing panics.
 	installIoscanClassifier(&fakeClassifierSink{}, nil, ioscanBootConfigWithAgents(t, 6, "codex"), logger, ioscanBootNow)
+}
+
+func TestInstallIoscanClassifier_RuntimeUnavailableAlert(t *testing.T) {
+	sink := &fakeClassifierSink{}
+	alerts := &fakeClassifierAlerts{}
+	logger, _ := ioscanBootLogger()
+	installIoscanClassifier(sink, alerts, ioscanBootConfig(6, "copilot", ""), logger, ioscanBootNow)
+	if _, ok := alerts.blocked(); ok {
+		t.Fatal("unexpected alert before runtime failure")
+	}
+	sink.unavailable(fmt.Errorf("authentication failed"))
+	msg, ok := alerts.blocked()
+	if !ok || !strings.Contains(msg, "authentication failed") {
+		t.Fatalf("runtime alert = %q, present = %v", msg, ok)
+	}
+	sink.unavailable(nil)
+	if _, ok := alerts.blocked(); ok {
+		t.Fatal("runtime alert remains after successful score")
+	}
 }
