@@ -64,6 +64,12 @@ type holdGuardServer struct {
 	// (#10437: keeping a held PR mergeable).
 	updateBranchCalls map[int]int
 	failUpdateBranch  bool
+
+	// baseContains lists the SHAs the fake base branch contains; the compare
+	// endpoint reports them "behind" the base and anything else "diverged"
+	// (#14534: proving the merged parent of a hygiene merge is a base commit).
+	baseContains map[string]bool
+	compareCalls int
 }
 
 func (s *holdGuardServer) handler(t *testing.T) http.Handler {
@@ -72,6 +78,15 @@ func (s *holdGuardServer) handler(t *testing.T) http.Handler {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/"):
+			s.compareCalls++
+			spec := r.URL.Path[strings.Index(r.URL.Path, "/compare/")+len("/compare/"):]
+			_, head, _ := strings.Cut(spec, "...")
+			status := "diverged"
+			if s.baseContains[head] {
+				status = "behind"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": status})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/commits"):
 			if s.failCommits {
 				http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
