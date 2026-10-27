@@ -1112,11 +1112,16 @@ Notes:
   same Hub → Hive → Repository tree as `hivectl hives web`, with the same staged
   edits, diff and Saved / Relay reload / Acknowledged receipt. `space` selects,
   `x` excludes or clears an exclusion, `f` follows, `e` enables, `R` reviews and
-  restricts a legacy profile, `/` searches (keeping ancestry), `A` reviews and
-  applies, `D` discards and `ctrl+r` refreshes without losing staged edits. Hub
-  and Hive actions show affected counts before staging. Nothing is written until
-  Apply; a review whose profiles changed elsewhere must be discarded and reviewed
-  again, and leaving or quitting with unapplied edits asks first.
+  restricts a legacy profile, `/` searches (keeping ancestry), `A` opens the bounded
+  change review, `D` discards and `ctrl+r` refreshes without losing staged edits. Hub
+  and Hive actions show affected counts before staging. In review, `↑`/`↓` or
+  `j`/`k` scroll wrapped rows; `PageUp`/`PageDown` page and `Home`/`End` jump.
+  Full target identities wrap without truncation. `Enter` explicitly applies;
+  `Esc` returns with edits kept. The review pins the title, scope and key hints,
+  scrolls only the diff, adapts to resize and pauses Apply
+  below 40 columns or 12 rows until its confirmation context fits again.
+  Nothing is written until Apply; a review whose profiles changed elsewhere must
+  be discarded and reviewed again, and leaving or quitting with unapplied edits asks first.
 - **Disable instead of removing a hive to pause it.** `hivectl hives disable <name>`
   (or `just contribute-hives disable <name>`) preserves its URL, registration token,
   contributor ID and rank. `enable <name>` restores eligibility without registration

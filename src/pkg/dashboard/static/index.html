@@ -1291,6 +1291,14 @@
     .agent-now .an-lead { font-weight: 600; color: var(--text); }
     .agent-now.outdated { color: var(--yellow); }
     .oc-agent-detail .agent-now { text-align: left; }
+    /* Live per-run line (#14576): $cost · tokens · elapsed · tests · files. */
+    .oc-run-line { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-1) var(--sp-3); font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-1); font-variant-numeric: tabular-nums; }
+    .oc-run-line .rl-cost { font-weight: 600; color: var(--text); }
+    .oc-run-line .rl-tests.pass { color: var(--green); }
+    .oc-run-line .rl-tests.fail { color: var(--red); }
+    .oc-run-line .rl-sep { opacity: 0.5; }
+    .oc-agent-detail .oc-run-line { justify-content: flex-start; }
+    .oc-agent-detail-header .oc-run-line { margin-top: var(--sp-0); margin-left: auto; }
     /* Agent activity section (#10935): one row per agent. */
     .agent-activity-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
     .agent-activity-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
@@ -1453,6 +1461,8 @@
     .ham-badges { position: absolute; right: calc(4em + var(--sp-3)); top: 0; display: inline-flex; gap: var(--sp-2); }
     .ham-badge { display: inline-block; font-size: var(--fs-xs); line-height: 1.4; padding: 0 var(--sp-3); border-radius: var(--r-pill); border: var(--line-width) solid var(--line-subtle); color: var(--text-faint); white-space: nowrap; }
     .ham-badge-mod.ham-mod-stalled, .ham-badge-mod.ham-mod-regressed { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+    /* A regression the hive is already working through: muted, never red. */
+    .ham-badge-mod.ham-mod-regressed.ham-mod-handled { color: var(--text-muted); border-color: var(--line-subtle); border-style: dashed; }
     .ham-badge-mod.ham-mod-needs-triage { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
     .ham-badge.ham-finisher-person { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
     .ham-badge-mod.ham-mod-possible-dupe { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, transparent); }
@@ -7331,7 +7341,7 @@
         <input id="activity-monitor-q" class="ham-input" type="search" placeholder="Search # or title…" autocomplete="off" spellcheck="false" aria-label="Search by number or title" data-input-action="hamFilter" data-arg0="q" data-arg-types="s,w">
         <label class="ham-repo-filter"><span>Since</span><select id="activity-monitor-age" class="ham-select" data-change-action="hamFilter" data-arg0="age" data-arg-types="s,v" title="Time on the current step (or open, when no step is known)"><option value="any">Any age</option><option value="1h">Over 1 hour</option><option value="1d">Over 1 day</option><option value="1w">Over 1 week</option><option value="stale">Past the stage dwell</option></select></label>
         <label class="ham-repo-filter"><span>Author</span><select id="activity-monitor-author" class="ham-select" data-change-action="hamFilter" data-arg0="author" data-arg-types="s,v"><option value="any">Any author</option><option value="human">Human</option><option value="clanker">Clanker</option><option value="hive">Hive</option></select></label>
-        <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, regressed, held, needs-human, needs-decision, needs-rebase, blocked, or on 045 / 071 / 072 / 085 / 090">Needs attention</button>
+        <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, held, needs-human, needs-decision, needs-rebase, blocked, on 045 / 071 / 072 / 085 / 090, or regressed while parked on a person">Needs attention</button>
         <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option><option value="finisher" title="Rows Hive can finish on its own first, then rows waiting on someone else, then rows that need a person. Reverse the direction for rows that need a person first.">Hive end to end first</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Reverse sort direction">↓</button></label>
         <label class="ham-repo-filter"><span>Group</span><select id="activity-monitor-group" class="ham-select" data-change-action="hamGroup" data-arg-types="v" title="Group rows under one collapsible header per repository"><option value="none">None</option><option value="repo">Repo</option></select></label>
         <label class="ham-repo-filter"><span>Per page</span><select id="activity-monitor-size" class="ham-select" data-change-action="hamFilter" data-arg0="size" data-arg-types="s,v"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
@@ -11089,6 +11099,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           <div class="gov-metric"><span class="gm-label">actionable</span><span class="gm-val">${govActionable}</span></div>
           <div class="gov-metric"><span class="gm-label">PRs</span><span class="gm-val">${govPrs}</span></div>
           <div class="gov-metric"><span class="gm-label">MTTR</span><span class="gm-val">${formatFixTime(itmMedian)}</span></div>
+          ${fleetRunStripHtml()}
           <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + (h.review_class ? ' [' + h.review_class + ']' : '') + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
           ${standbyPauseFactsHtml(gov)}
           ${(() => {
@@ -11156,6 +11167,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         <div class="oc-agent-detail-header">
           <span class="status-dot ${dotState}" data-status="${statusAttr(dotState)}"${dotTitle ? ` title="${esc(dotTitle)}"` : ''}></span>
           <span class="agent-name-big">${esc(a.displayName || a.name)}</span>${a.sandboxed ? ' ' + statusBadgeHTML('ready', 'sandboxed', 'Sandboxed runner active', 'done') : ''}${needsLoginDown ? '<span title="CLI needs login" style="margin-left:var(--sp-3)">\uD83D\uDD11</span>' : ''}
+          ${agentRunLineHtml(a)}
           <span style="font-size:0.78rem;color:var(--muted);margin-left:auto">${stateLabel}${pauseInfoIcon(a)}</span>
         </div>
         <div class="oc-detail-actions">
@@ -13895,6 +13907,39 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return agentNowLineHtml(a, agentNowStateOf(a), agentNowContext(Date.now()));
     }
 
+    // Live per-run line (#14576): "$0.42 · 38.1K tok · 4m 12s · tests ✓ · 3 files".
+    // Rendered only while /api/status carries agents[].run (busy agents), from
+    // the per-agent cumulative figures the token collector already keeps; the
+    // server reports the delta since the kick's BusySince, so a reload does not
+    // reset it. Missing signals render as "–" rather than a guess.
+    const RUN_LINE_HELP = 'Live figures for the kick in progress: estimated cost and tokens since the kick started (token × list price, same basis as the Cost section), elapsed time, the last test-runner result visible in the transcript, and the last "N files changed" git summary. "–" means not observed yet.';
+    function fmtRunElapsed(sec) {
+      sec = Math.max(0, Math.floor(Number(sec) || 0));
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+      if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+      return `${s}s`;
+    }
+    function agentRunLineHtml(a) {
+      const r = a && a.run;
+      if (!r) return '';
+      const sep = '<span class="rl-sep">·</span>';
+      const cost = r.priced ? fmtUSD(r.costUSD || 0) : '$–';
+      const toks = r.priced ? `${fmtTokens(r.tokens || 0)} tok` : '– tok';
+      const tests = r.tests === 'pass' ? '<span class="rl-tests pass">tests ✓</span>'
+        : r.tests === 'fail' ? '<span class="rl-tests fail">tests ✗</span>'
+        : '<span class="rl-tests">tests –</span>';
+      const files = (typeof r.filesChanged === 'number' && r.filesChanged >= 0)
+        ? `${r.filesChanged} file${r.filesChanged === 1 ? '' : 's'}` : '– files';
+      return `<div class="oc-run-line" data-agent-run="${esc(a.name)}" title="${esc(RUN_LINE_HELP)}"><span class="rl-cost">${cost}</span>${sep}<span class="rl-tokens">${toks}</span>${sep}<span class="rl-elapsed">${fmtRunElapsed(r.elapsedS)}</span>${sep}${tests}${sep}<span class="rl-files">${files}</span></div>`;
+    }
+    function fleetRunStripHtml() {
+      const f = window._lastStatus?.fleetRun;
+      if (!f) return '';
+      const hour = f.hourPriced ? fmtUSD(f.hourUSD || 0) : '$–';
+      return `<div class="gov-metric" title="Agents mid-kick right now · estimated spend accrued by the whole fleet in the current clock hour (token × list price)"><span class="gm-label">running</span><span class="gm-val" id="oc-fleet-run">${f.running || 0} · ${hour} this hour</span></div>`;
+    }
+
     // Repaints every "Now:" line in place so "ago" keeps counting up (and
     // turns into "information may be out of date") without new data.
     function refreshAgentNowLines() {
@@ -14021,6 +14066,17 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_MERGE_COLUMN = 80;
     const STAGE_TRACKER_NEEDS_DECISION = 85;
     const STAGE_TRACKER_ISSUE_NEEDS_DECISION = 45;
+    // 090 under a manual-merge lane rule (payload manual_merge: CI workflow /
+    // action edits, removed tests, a human-merge path): the hive never merges
+    // it itself, so the lit chevron says what is actually owed — the
+    // maintainer's merge click — and names who already approved the head
+    // (payload human_approver) instead of the generic stage word.
+    const STAGE_TRACKER_READY_FOR_HUMAN_MERGE = 90;
+    const STAGE_TRACKER_MANUAL_MERGE_WORD = 'Awaiting human merge';
+    function stageTrackerManualMergeWord(item) {
+      const approver = String((item && item.human_approver) || '').trim();
+      return STAGE_TRACKER_MANUAL_MERGE_WORD + (approver ? ' · approved by @' + approver : '');
+    }
     // Issue-slot placeholders for a closing reference whose title the server
     // could not resolve (the issue is closed and unreadable, or of unknown state).
     const STAGE_TRACKER_CLOSED_ISSUE_TITLE = '(closed issue)';
@@ -14159,7 +14215,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
       const holdLabels = stageTrackerHoldLabels(item);
       if (mods.indexOf('stalled') >= 0) return 'Stalled';
-      if (mods.indexOf('regressed') >= 0) return 'Sent back';
+      if (mods.indexOf('regressed') >= 0 && !stageTrackerRegressionHandled(item)) return 'Sent back';
       if (n === 0 && mods.indexOf('hold') >= 0) return 'Open · on hold' + (holdLabels.length ? ' (' + holdLabels.join(', ') + ')' : '');
       if (n === 0 && mods.indexOf('blocked') >= 0) return 'Open · blocked';
       // An issue parked on a person (045, or a pre-045 085 with no covering
@@ -14262,7 +14318,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const terminal = anchor >= STAGE_TRACKER_TERMINAL;
       const sentinelLane = stageTrackerSentinelInLane(item);
       const detour = (!terminal && STAGE_TRACKER_PATH.indexOf(cur) < 0 && cur !== STAGE_TRACKER_TRIAGE_NEEDED && cur !== STAGE_TRACKER_POSSIBLY_EXISTS && cur !== 40 && cur !== 60 && cur !== STAGE_TRACKER_PRE_MERGE_SOAK && cur !== 100)
-        ? { text: sentinelLane ? STAGE_TRACKER_SENTINEL_WORD : (STAGE_TRACKER_ACTIVE_WORD[cur] || curStage.short || curStage.label || String(cur)), sentinel: sentinelLane } : null;
+        ? { text: sentinelLane ? STAGE_TRACKER_SENTINEL_WORD : (cur === STAGE_TRACKER_READY_FOR_HUMAN_MERGE && item.manual_merge ? stageTrackerManualMergeWord(item) : (STAGE_TRACKER_ACTIVE_WORD[cur] || curStage.short || curStage.label || String(cur))), sentinel: sentinelLane } : null;
       const segs = STAGE_TRACKER_PATH.map(n => {
         const st = n === 0 ? { label: 'Open', short: 'Open', description: 'Open, not yet in a stage' } : (byNum[n] || {});
         let state = 'todo';
@@ -14440,9 +14496,27 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return st && (st.short || st.label) ? code + ' ' + (st.short || st.label) : code;
     }
 
+    // Modifiers that park an item on a person. A regression on a row that
+    // carries none of these and sits on a hive-driven stage is the hive's
+    // to work through, so the dashboard must not dress it as a human call.
+    const STAGE_TRACKER_HUMAN_MODS = ['hold', 'needs-human', 'needs-decision', 'needs-rebase', 'blocked', 'stalled'];
+    const STAGE_TRACKER_HANDLED_TEXT = 'stage ↓';
+    const STAGE_TRACKER_HANDLED_NOTE = 'the hive is handling it — no action needed; clears on the next forward step';
+
+    // True when the item is regressed but nothing about it waits on a
+    // person: no human-gate modifier and not on a human-gated stage. Such a
+    // row gets a muted "stage ↓" pill and stays out of "Needs attention".
+    function stageTrackerRegressionHandled(item) {
+      const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
+      if (mods.indexOf('regressed') < 0) return false;
+      if (mods.some(m => STAGE_TRACKER_HUMAN_MODS.indexOf(m) >= 0)) return false;
+      return STAGE_TRACKER_ATTENTION_STAGES.indexOf(Number(item.stage) || 0) < 0;
+    }
+
     // The regressed pill's explanation: which stage the item fell from and
     // to, when, and the reason recorded with the fall — so "regressed" never
     // needs a trip to the store to read. '' when the item is not regressed.
+    // A hive-handled regression adds the note that nobody needs to act.
     function stageTrackerRegressionText(item, nowMs) {
       const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
       const from = Number(item.regressed_from) || 0;
@@ -14454,6 +14528,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (!isNaN(atMs)) text += ' at ' + agentNowClockTime(atMs, nowMs || Date.now());
       if (item.regressed_reason) text += ' because ' + String(item.regressed_reason);
       if (cur && cur !== to) text += ' · now ' + stageTrackerStageWord(cur);
+      if (stageTrackerRegressionHandled(item)) text += ' · ' + STAGE_TRACKER_HANDLED_NOTE;
       return text;
     }
 
@@ -14502,14 +14577,19 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const mods = (Array.isArray(item.modifiers) ? item.modifiers.slice() : [])
         .sort((x, y) => STAGE_TRACKER_MOD_PRIORITY.indexOf(x) - STAGE_TRACKER_MOD_PRIORITY.indexOf(y));
       if (!mods.length) return sentinel;
-      let text = STAGE_TRACKER_MOD_TEXT[mods[0]] || mods[0].replace(/-/g, ' ');
+      // A regression the hive is working through yields the lead pill to any
+      // other modifier and, alone, draws muted as "stage ↓" rather than red.
+      const handled = stageTrackerRegressionHandled(item);
+      if (handled && mods.length > 1) mods.push(mods.shift());
+      let text = handled && mods[0] === 'regressed' ? STAGE_TRACKER_HANDLED_TEXT : (STAGE_TRACKER_MOD_TEXT[mods[0]] || mods[0].replace(/-/g, ' '));
       // A blocked row with a hive:recheck-after deadline ("blocked until <RFC3339>") names when the sweep re-checks it.
       const recheck = mods[0] === 'blocked' ? /^blocked until (\S+)/i.exec(String(item.bucket_reason || '')) : null;
       const recheckMs = recheck ? Date.parse(recheck[1]) : NaN;
       if (!isNaN(recheckMs)) text += ' · re-check at ' + agentNowClockTime(recheckMs, Date.now());
       // The regressed pill (lead or folded into "+1") explains itself on hover.
       const regressed = stageTrackerRegressionText(item, Date.now());
-      return sentinel + `<span class="ham-badge ham-badge-mod ham-mod-${esc(mods[0])}"${regressed ? ` title="${esc(regressed)}"` : ''}>${esc(text)}${mods.length > 1 ? ' +' + (mods.length - 1) : ''}</span>`;
+      const cls = 'ham-mod-' + mods[0] + (handled && mods[0] === 'regressed' ? ' ham-mod-handled' : '');
+      return sentinel + `<span class="ham-badge ham-badge-mod ${esc(cls)}"${regressed ? ` title="${esc(regressed)}"` : ''}>${esc(text)}${mods.length > 1 ? ' +' + (mods.length - 1) : ''}</span>`;
     }
 
     // Ghost strip for a title line: the lead cell (Open..Claimed) carries
@@ -15221,6 +15301,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerNeedsAttention(item) {
       const mods = Array.isArray(item.modifiers) ? item.modifiers : [];
       const n = Number(item.stage) || 0;
+      if (stageTrackerRegressionHandled(item)) return false;
       return mods.length > 0 || STAGE_TRACKER_ATTENTION_STAGES.indexOf(n) >= 0;
     }
 
@@ -18208,6 +18289,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
             return '';
           })()}${kickOutcomeBadgeHtml(a)}${agentSpendChip(a.name)}</div>
           ${agentNowHtml(a)}
+          ${agentRunLineHtml(a)}
           ${agentBlockerLineHtml(a)}
           ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name, a.loginURL, a.backendAuthStatus, a.backendAuthLastError, a.statusEvidence, a.inferenceLastError)}
           ${(() => {

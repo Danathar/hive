@@ -92,6 +92,7 @@ func TestStageTrackerRows(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_PR_COLUMN"),
 		jsConstLine(t, html, "STAGE_TRACKER_MERGE_COLUMN"),
 		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_DECISION"),
+		stageTrackerManualMergeJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_ISSUE_NEEDS_DECISION"),
 		jsConstLine(t, html, "STAGE_TRACKER_CLOSED_ISSUE_TITLE"),
 		jsConstLine(t, html, "STAGE_TRACKER_UNTITLED_ISSUE"),
@@ -151,6 +152,10 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerStripItems"),
 		jsFunc(t, html, "stageTrackerCurrentStageHtml"),
 		jsFunc(t, html, "stageTrackerStageWord"),
+		jsConstLine(t, html, "STAGE_TRACKER_HUMAN_MODS"),
+		jsConstLine(t, html, "STAGE_TRACKER_HANDLED_TEXT"),
+		jsConstLine(t, html, "STAGE_TRACKER_HANDLED_NOTE"),
+		jsFunc(t, html, "stageTrackerRegressionHandled"),
 		jsFunc(t, html, "stageTrackerRegressionText"),
 		jsFunc(t, html, "stageTrackerTooltip"),
 		jsFunc(t, html, "stageTrackerChipsHtml"),
@@ -441,6 +446,13 @@ for (const parked of [45, 85]) {
 }
 // 045 needs attention like the other parking stages.
 assert.ok(stageTrackerNeedsAttention({ kind: 'issue', stage: 45 }) && stageTrackerNeedsAttention({ kind: 'pr', stage: 85 }) && !stageTrackerNeedsAttention({ kind: 'issue', stage: 10 }));
+// A regression the hive is working through is not a call on a person: out of "Needs attention", no "Sent back" headline.
+assert.ok(!stageTrackerNeedsAttention({ kind: 'issue', stage: 10, modifiers: ['regressed'], regressed_from: 40 }), 'regressed at Actionable is hive-handled');
+assert.ok(!stageTrackerNeedsAttention({ kind: 'issue', stage: 30, modifiers: ['regressed', 'draft'], regressed_from: 40 }), 'draft is not a human gate');
+assert.ok(stageTrackerNeedsAttention({ kind: 'issue', stage: 85, modifiers: ['regressed'], regressed_from: 100 }), 'regressed while parked on a person');
+assert.ok(stageTrackerNeedsAttention({ kind: 'pr', stage: 70, modifiers: ['regressed', 'needs-rebase'], regressed_from: 100 }), 'regressed with a human-call modifier');
+assert.notStrictEqual(stageTrackerHeadline({ kind: 'issue', stage: 10, modifiers: ['regressed'], regressed_from: 40 }), 'Sent back');
+assert.strictEqual(stageTrackerHeadline({ kind: 'pr', stage: 70, modifiers: ['regressed', 'needs-rebase'], regressed_from: 100 }), 'Sent back');
 // ...but an issue whose single covering PR sits on 085 still rides the PR's
 // merge gate, with the "(its PR)" suffix.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 356, kind: 'issue', stage: 40, linked_prs: [{ number: 109, author_kind: 'hive', stage: 85 }] }, stages, ctx);
@@ -720,6 +732,7 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		stageTrackerSentinelJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_PATH"),
 		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_DECISION"),
+		stageTrackerManualMergeJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_ISSUE_NEEDS_DECISION"),
 		jsConstLine(t, html, "STAGE_TRACKER_CLOSED_ISSUE_TITLE"),
 		jsConstLine(t, html, "STAGE_TRACKER_UNTITLED_ISSUE"),
@@ -734,6 +747,10 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsFunc(t, html, "stageTrackerAnchor"),
 		jsFunc(t, html, "stageTrackerLinkedSorted"),
 		jsFunc(t, html, "stageTrackerSortKey"),
+		jsConstLine(t, html, "STAGE_TRACKER_HUMAN_MODS"),
+		jsConstLine(t, html, "STAGE_TRACKER_HANDLED_TEXT"),
+		jsConstLine(t, html, "STAGE_TRACKER_HANDLED_NOTE"),
+		jsFunc(t, html, "stageTrackerRegressionHandled"),
 		jsFunc(t, html, "stageTrackerNeedsAttention"),
 		jsFunc(t, html, "stageTrackerWaitSince"),
 		jsFunc(t, html, "stageTrackerLabelFamily"),
