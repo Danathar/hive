@@ -721,7 +721,8 @@ func (c *Client) failPRRequest(path string, req PRRequest, err error, nowFn func
 	// points away from its cause. Log it at ERROR on its own line — this is
 	// work an agent already completed and cannot publish, and it is invisible
 	// in the fleet view because the agent's session ended healthy.
-	if reason, ok := missingHeadReason(err); ok {
+	reason, missingHead := missingHeadReason(err)
+	if missingHead {
 		c.logger.Error("pr-request watcher: head branch is not on the remote — the agent's push did not authenticate",
 			slog.String("repo", req.Repo), slog.String("head", req.Head),
 			slog.String("agent", req.Agent), slog.String("diagnosis", reason))
@@ -732,6 +733,11 @@ func (c *Client) failPRRequest(path string, req PRRequest, err error, nowFn func
 		c.logger.Error("pr-request watcher: request exceeded retry horizon, quarantined",
 			slog.String("path", path), slog.String("repo", req.Repo),
 			slog.String("head", req.Head), slog.String("error", err.Error()))
+		return
+	}
+	// The specific error above already reports this failure to the fleet.
+	// Avoid a second, unclassified report for the same retry.
+	if missingHead {
 		return
 	}
 	c.logger.Warn("pr-request watcher: request failed, will retry with backoff",
