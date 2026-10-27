@@ -1452,6 +1452,7 @@
     .ham-badge { display: inline-block; font-size: var(--fs-xs); line-height: 1.4; padding: 0 var(--sp-3); border-radius: var(--r-pill); border: var(--line-width) solid var(--line-subtle); color: var(--text-faint); white-space: nowrap; }
     .ham-badge-mod.ham-mod-stalled, .ham-badge-mod.ham-mod-regressed { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
     .ham-badge-mod.ham-mod-needs-triage { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+    .ham-badge.ham-finisher-person { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
     .ham-badge-mod.ham-mod-possible-dupe { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, transparent); }
     /* Sentinel-flagged PR, #13535 follow-up: the chip beside needs rebase /
        regressed, and the human-decision chevron itself when its word
@@ -7302,7 +7303,7 @@
         <label class="ham-repo-filter"><span>Since</span><select id="activity-monitor-age" class="ham-select" data-change-action="hamFilter" data-arg0="age" data-arg-types="s,v" title="Time on the current step (or open, when no step is known)"><option value="any">Any age</option><option value="1h">Over 1 hour</option><option value="1d">Over 1 day</option><option value="1w">Over 1 week</option><option value="stale">Past the stage dwell</option></select></label>
         <label class="ham-repo-filter"><span>Author</span><select id="activity-monitor-author" class="ham-select" data-change-action="hamFilter" data-arg0="author" data-arg-types="s,v"><option value="any">Any author</option><option value="human">Human</option><option value="clanker">Clanker</option><option value="hive">Hive</option></select></label>
         <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, regressed, held, needs-human, needs-decision, needs-rebase, blocked, or on 045 / 071 / 072 / 085 / 090">Needs attention</button>
-        <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Reverse sort direction">↓</button></label>
+        <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option><option value="finisher" title="Rows Hive can finish on its own first, then rows waiting on someone else, then rows that need a person. Reverse the direction for rows that need a person first.">Hive end to end first</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Reverse sort direction">↓</button></label>
         <label class="ham-repo-filter"><span>Group</span><select id="activity-monitor-group" class="ham-select" data-change-action="hamGroup" data-arg-types="v" title="Group rows under one collapsible header per repository"><option value="none">None</option><option value="repo">Repo</option></select></label>
         <label class="ham-repo-filter"><span>Per page</span><select id="activity-monitor-size" class="ham-select" data-change-action="hamFilter" data-arg0="size" data-arg-types="s,v"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
         <button type="button" class="ham-chip ham-reset" id="activity-monitor-reset" data-action="hamFilter" data-arg0="reset" hidden>Clear filters</button>
@@ -14086,7 +14087,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // Label families a chip row is built from, in display order; other
     // labels follow when at least two items carry them.
     const STAGE_TRACKER_LABEL_FAMILIES = ['stage/', 'needs-', 'author/', 'role/', 'hold', 'on-hold', 'do-not-merge', 'hive-pause/'];
-    const STAGE_TRACKER_SORTS = ['furthest', 'waiting', 'newest', 'number'];
+    const STAGE_TRACKER_SORTS = ['furthest', 'waiting', 'newest', 'number', 'finisher'];
     // Repo chip + group-by-repo. The chip before an item's number names its
     // repo (short name; owner/repo in the tooltip; click = the Repo filter)
     // and is shown always / only when the payload spans several repos
@@ -14419,7 +14420,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
 
     function stageTrackerChipsHtml(item) {
-      const sentinel = stageTrackerSentinelChipHtml(item);
+      // A row Hive cannot finish on its own: the server's your-turn decision
+      // (item.finisher, from the status refresh rather than the current step)
+      // says a person must act, now or at a gate further on such as a
+      // required approval or a hand merge. The verb and reason are on hover.
+      const why = [item.finisher_verb, item.finisher_reason].filter(Boolean).join(' — ');
+      const person = item.finisher === 'person'
+        ? `<span class="ham-badge ham-finisher-person" title="${esc('Hive cannot finish this on its own' + (why ? ': ' + why : ''))}">🧑 needs a person</span>` : '';
+      const sentinel = person + stageTrackerSentinelChipHtml(item);
       const mods = (Array.isArray(item.modifiers) ? item.modifiers.slice() : [])
         .sort((x, y) => STAGE_TRACKER_MOD_PRIORITY.indexOf(x) - STAGE_TRACKER_MOD_PRIORITY.indexOf(y));
       if (!mods.length) return sentinel;
@@ -14454,7 +14462,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     function stageTrackerSubRowHtml(lp, issue, stages, nowMs, ctx) {
       const pr = { repo: issue.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', author: lp.author || '', author_kind: lp.author_kind || '',
         stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], caption: lp.caption || '', reason: lp.reason || '',
-        sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' };
+        sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '',
+        finisher: lp.finisher || '', finisher_verb: lp.finisher_verb || '', finisher_reason: lp.finisher_reason || '' };
       let ref = stageTrackerPRRef(pr.number, pr.url, pr.author_kind, pr.author, pr.title, (pr.title ? pr.title + ' · ' : '') + stageTrackerTooltip(pr, nowMs));
       ref += stageTrackerBaseRefBadge(lp);
       const chip = ctx && ctx.repoChips ? stageTrackerRepoChipHtml(pr.repo, ctx) : '';
@@ -14630,8 +14639,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           // One covering PR: a single entry whose strip the PR's stage drives.
           const lp = linked[0];
           prRefs = [stageTrackerPRRef(lp.number, lp.url, lp.author_kind || '', lp.author, lp.title) + stageTrackerBaseRefBadge(lp)];
+          // Who finishes the row is the PR's answer once the PR has one.
+          const fin = lp.finisher ? lp : item;
           shown = Object.assign({}, item, { via_pr: true, stage: lp.stage || 40, stage_since: lp.stage_since || item.stage_since, modifiers: lp.modifiers || item.modifiers, caption: lp.caption || item.caption, reason: lp.reason || item.reason,
-            sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' });
+            sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '',
+            finisher: fin.finisher || '', finisher_verb: fin.finisher_verb || '', finisher_reason: fin.finisher_reason || '' });
         } else if (linked.length) {
           // Several covering PRs: the issue strip ends at Claimed, all passed
           // and nothing lit; one sub-row per PR carries the live chevron.
@@ -15224,9 +15236,24 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       return rows.filter(it => !(it.kind === 'pr' && it.nested_under && issues.has(it.repo + '#' + it.nested_under)));
     }
 
+    // Who finishes a row, for the 'finisher' sort: 0 Hive end to end, 1 not
+    // known, 2 waiting on someone else, 3 needs a person. An issue riding one
+    // covering PR takes the PR's answer (as its chip does); an issue with
+    // several takes the one furthest from Hive.
+    const STAGE_TRACKER_FINISHER_RANK = { hive: 0, elsewhere: 2, person: 3 };
+    function stageTrackerFinisherRank(item, stages) {
+      const rank = f => (Object.prototype.hasOwnProperty.call(STAGE_TRACKER_FINISHER_RANK, f || '') ? STAGE_TRACKER_FINISHER_RANK[f] : 1);
+      const linked = item && item.kind === 'issue' ? stageTrackerLinkedSorted(item, stages) : [];
+      if (linked.length === 1 && linked[0].finisher) return rank(linked[0].finisher);
+      if (linked.length > 1) return Math.max(...linked.map(lp => rank(lp.finisher)));
+      return rank(item && item.finisher);
+    }
+
     // Order rows. 'furthest' is the strip order (furthest along first, then
     // longest on step); 'waiting' is longest wait first; 'newest' is most
-    // recently opened first; 'number' is repo then number. dir 'asc' reverses.
+    // recently opened first; 'number' is repo then number; 'finisher' is
+    // Hive end to end first, then waiting on someone else, then needs a
+    // person, each in strip order. dir 'asc' reverses.
     function stageTrackerSort(rows, stages, f) {
       f = stageTrackerNormalizeFilter(f);
       const byRepoNumber = (x, y) => ((x.repo || '').localeCompare(y.repo || '')) || ((x.number || 0) - (y.number || 0));
@@ -15235,6 +15262,11 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         case 'waiting': cmp = (x, y) => ((stageTrackerWaitSince(x) || Infinity) - (stageTrackerWaitSince(y) || Infinity)) || byRepoNumber(x, y); break;
         case 'newest': cmp = (x, y) => ((Date.parse(y.created_at || '') || 0) - (Date.parse(x.created_at || '') || 0)) || byRepoNumber(y, x); break;
         case 'number': cmp = (x, y) => byRepoNumber(y, x); break;
+        case 'finisher': {
+          const keyOf = it => stageTrackerSortKey(it, stages);
+          cmp = (x, y) => { const a = keyOf(x), b = keyOf(y); return (stageTrackerFinisherRank(x, stages) - stageTrackerFinisherRank(y, stages)) || (b.anchor - a.anchor) || (a.since - b.since) || byRepoNumber(x, y); };
+          break;
+        }
         default: {
           const keyOf = it => stageTrackerSortKey(it, stages);
           cmp = (x, y) => { const a = keyOf(x), b = keyOf(y); return (b.anchor - a.anchor) || (a.since - b.since) || byRepoNumber(x, y); };

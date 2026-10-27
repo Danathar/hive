@@ -259,6 +259,19 @@ type StageTrackerItem struct {
 	Reason  string `json:"reason,omitempty"`
 	Caption string `json:"caption"`
 	Actor   string `json:"actor,omitempty"`
+	// Finisher says whether the hive can take the item to the end on its
+	// own, from the status refresh's your-turn decision (#11507) rather
+	// than the current step, so a gate a person owns further on (a required
+	// approval, a hand merge) shows from the start: "hive" when nothing in
+	// the decision waits on a person, "person" when it is the operator's
+	// turn, "elsewhere" when it waits on someone else (a person's hold, a
+	// covering PR, a reporter, an open blocker, or its author: a PR returned
+	// to them or a person's draft), and empty when the snapshot carries no
+	// decision.
+	// FinisherVerb and FinisherReason are the decision's verb and reason.
+	Finisher       string `json:"finisher,omitempty"`
+	FinisherVerb   string `json:"finisher_verb,omitempty"`
+	FinisherReason string `json:"finisher_reason,omitempty"`
 	// Modifiers are the health and control markers in effect: stalled,
 	// regressed, hold, needs-human, needs-decision (stage/045 on an issue or
 	// stage/085 on a PR carried as a park signal), needs-rebase, blocked,
@@ -352,6 +365,50 @@ type StageTrackerLinkedPR struct {
 	SentinelAlert  bool   `json:"sentinel_alert,omitempty"`
 	SentinelReason string `json:"sentinel_reason,omitempty"`
 	Head           string `json:"head,omitempty"`
+	// Finisher, FinisherVerb and FinisherReason mirror the nested PR's own
+	// row fields, so an issue riding its PR says who finishes the PR.
+	Finisher       string `json:"finisher,omitempty"`
+	FinisherVerb   string `json:"finisher_verb,omitempty"`
+	FinisherReason string `json:"finisher_reason,omitempty"`
+}
+
+// Who finishes an item (StageTrackerItem.Finisher).
+const (
+	finisherHive      = "hive"
+	finisherPerson    = "person"
+	finisherElsewhere = "elsewhere"
+)
+
+// stageTrackerFinisher reads the stored your-turn decision for one row.
+func stageTrackerFinisher(decisions map[string]Ownership, kind string, number int) (finisher, verb, reason string) {
+	o := ownershipFor(decisions, kind, number)
+	switch {
+	case o == nil:
+		return "", "", ""
+	case o.YourTurn:
+		return finisherPerson, o.Verb, o.Reason
+	case o.WaitingElsewhere:
+		return finisherElsewhere, "", o.Reason
+	}
+	return finisherHive, "", ""
+}
+
+// stageTrackerSetFinisher fills it.Finisher from the stored decision. The
+// decision answers "is it the operator's turn", so a row it leaves to no
+// one in particular is Hive's unless the row's own step names its author: a
+// PR back with its author (071/072), an issue whose author must confirm the
+// gap (017), or a person's draft waits on them, not on Hive.
+func stageTrackerSetFinisher(it *StageTrackerItem, decisions map[string]Ownership, draft bool) {
+	it.Finisher, it.FinisherVerb, it.FinisherReason = stageTrackerFinisher(decisions, it.Kind, it.Number)
+	if it.Finisher != finisherHive {
+		return
+	}
+	switch {
+	case it.Stage == trackerNumberNeedsAuthor, it.Stage == trackerNumberReturned, it.Stage == stagelabels.PossiblyExisting.Number():
+		it.Finisher, it.FinisherReason = finisherElsewhere, it.Caption
+	case draft && it.AuthorKind == authorKindHuman:
+		it.Finisher, it.FinisherReason = finisherElsewhere, "Draft — its author must mark it ready for review"
+	}
 }
 
 // Stage numbers the tracker lays out by. Pinned to stagelabels.Table in
@@ -1095,7 +1152,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		seen[key] = true
 		resp.Items = append(resp.Items, it)
 	}
-	addIssue := func(repoName string, issue github.Issue, bucket, bucketReason string, progress *github.IssueChildren) {
+	addIssue := func(repoName string, decisions map[string]Ownership, issue github.Issue, bucket, bucketReason string, progress *github.IssueChildren) {
 		// A closed issue has no stage; a stage label it closed wearing is
 		// the closed-issue sweep's to remove, not a row to render
 		// (hivecommons/homebrew-hive#127).
@@ -1143,6 +1200,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			stage, rec, ok = stagelabels.None, stagelabels.Record{}, false
 		}
 		finish(&it, issue.Labels, stage, rec, ok, false)
+		stageTrackerSetFinisher(&it, decisions, false)
 		if it.Stage == trackerNumberClaimed {
 			it.ClaimantKind = s.stageTrackerClaimantKind(repoName, issue.Number)
 		}
@@ -1153,7 +1211,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		}
 		add(it)
 	}
-	addPR := func(repoName string, pr github.PullRequest, verdict *github.MergeVerdict, bucket, bucketReason string) {
+	addPR := func(repoName string, decisions map[string]Ownership, pr github.PullRequest, verdict *github.MergeVerdict, bucket, bucketReason string) {
 		pr.Repo = nonEmpty(pr.Repo, repoName)
 		rec, ok := lookup(repoName, pr.Number)
 		it := StageTrackerItem{Repo: repoName, Number: pr.Number, Kind: "pr", Title: pr.Title, Author: pr.Author, Head: pr.HeadSHA,
@@ -1174,6 +1232,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 			it.Lane = laneHive
 		}
 		finish(&it, pr.Labels, labelStage(pr.Labels), rec, ok, pr.Draft)
+		stageTrackerSetFinisher(&it, decisions, pr.Draft)
 		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(repoName, pr.Number, pr.HeadSHA, pr.Labels)
 		it.LinkedIssues = stageTrackerPRLinkedIssues(pr, status.GitHubBaseURL)
 		add(it)
@@ -1187,18 +1246,18 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		for _, it := range repoOpenItems(repo) {
 			switch {
 			case it.Kind == "issue" && !it.Sidelined:
-				addIssue(repoName, it.Issue, "", "", nil)
+				addIssue(repoName, repo.Ownership, it.Issue, "", "", nil)
 			case it.Kind == "pr" && !it.Sidelined:
-				addPR(repoName, it.PR.pr, it.PR.verdict, "", "")
+				addPR(repoName, repo.Ownership, it.PR.pr, it.PR.verdict, "", "")
 			case it.Kind == "issue":
 				// The enumeration's sidelined issues: parked in a work-detail
 				// bucket, the open items the first tracker never showed.
 				w := it.WorkIssue
-				addIssue(repoName, github.Issue{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Assignees: w.Assignees,
+				addIssue(repoName, repo.Ownership, github.Issue{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Assignees: w.Assignees,
 					CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, ClaimKind: w.ClaimKind, ClaimedBy: w.ClaimedBy, LinkedPRs: w.LinkedPRs, ClaimContext: w.ClaimContext, IsTracker: w.IsTracker, Children: w.Children}, w.Bucket, w.Reason, w.TrackerProgress)
 			default:
 				w := it.WorkPR
-				addPR(repoName, github.PullRequest{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Draft: w.Draft,
+				addPR(repoName, repo.Ownership, github.PullRequest{Repo: w.Repo, Number: w.Number, Title: w.Title, Author: w.Author, Labels: w.Labels, Draft: w.Draft,
 					AppAuthored: w.AppAuthored, HiveAttributed: w.HiveAttributed, CreatedAt: w.CreatedAt, UpdatedAt: w.UpdatedAt, URL: w.URL, BaseRef: w.BaseRef, LinkedIssues: w.LinkedIssues, ReferencedIssues: w.ReferencedIssues}, nil, w.Bucket, w.Reason)
 			}
 		}
@@ -1541,6 +1600,7 @@ func stageTrackerResolveLinkedPRs(items []StageTrackerItem) {
 				lp.StageSince, lp.Caption = pr.StageSince, pr.Caption
 				lp.SentinelAlert, lp.SentinelReason, lp.Head = pr.SentinelAlert, pr.SentinelReason, pr.Head
 				lp.BaseRef = pr.BaseRef
+				lp.Finisher, lp.FinisherVerb, lp.FinisherReason = pr.Finisher, pr.FinisherVerb, pr.FinisherReason
 				if len(pr.Modifiers) > 0 {
 					lp.Modifiers = append([]string(nil), pr.Modifiers...)
 				}

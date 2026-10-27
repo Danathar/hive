@@ -126,6 +126,8 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerNormalizeFilter"),
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
+		jsConstLine(t, html, "STAGE_TRACKER_FINISHER_RANK"),
+		jsFunc(t, html, "stageTrackerFinisherRank"),
 		jsFunc(t, html, "stageTrackerSort"),
 		jsFunc(t, html, "stageTrackerPage"),
 		jsFunc(t, html, "stageTrackerLabelFacets"),
@@ -595,6 +597,20 @@ assert.ok(/<span class="ham-since( ham-stalled)?">[^<]*<\/span>/.test(row) && !/
 // Merged: the lit cap is the only chevron with hover text.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 106, kind: 'pr', stage: 110 }, stages, ctx);
 assert.ok(/<li class="ham-seg active cap merged" title="Merged — [^"]*" aria-current="step">/.test(row) && titled(strip(row)).length === 1, row);
+// Who finishes it: a row the your-turn decision hands to a person carries the
+// "needs a person" chip with the verb and reason on hover, even while the lit
+// step is Hive's; an issue riding one covering PR takes the PR's answer.
+const approval = "Waiting on a person's review: an approving review is required by branch protection (0 given)";
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 120, kind: 'pr', stage: 50, finisher: 'person', finisher_verb: 'REVIEW', finisher_reason: approval }, stages, ctx);
+assert.ok(row.includes('<span class="ham-badge ham-finisher-person" title="Hive cannot finish this on its own: REVIEW — Waiting on a person&#39;s review: an approving review is required by branch protection (0 given)">🧑 needs a person</span>'), row);
+for (const finisher of ['hive', 'elsewhere', '']) {
+  row = stageTrackerRowHtml({ repo: 'acme/console', number: 121, kind: 'pr', stage: 50, finisher }, stages, ctx);
+  assert.ok(!row.includes('ham-finisher-person'), finisher + ': ' + row);
+}
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 122, kind: 'issue', stage: 40, finisher: 'elsewhere', linked_prs: [{ number: 123, stage: 50, finisher: 'person', finisher_verb: 'REVIEW', finisher_reason: approval }] }, stages, ctx);
+assert.ok(row.includes('ham-finisher-person'), 'an issue riding one PR takes the PR answer: ' + row);
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 124, kind: 'issue', stage: 40, finisher: 'person', linked_prs: [{ number: 125, stage: 50, finisher: 'hive' }] }, stages, ctx);
+assert.ok(!row.includes('ham-finisher-person'), 'the PR answer wins once the PR has one: ' + row);
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -652,6 +668,8 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
 		jsFunc(t, html, "stageTrackerVisible"),
+		jsConstLine(t, html, "STAGE_TRACKER_FINISHER_RANK"),
+		jsFunc(t, html, "stageTrackerFinisherRank"),
 		jsFunc(t, html, "stageTrackerSort"),
 		jsFunc(t, html, "stageTrackerPage"),
 		jsFunc(t, html, "stageTrackerLabelFacets"),
@@ -727,6 +745,21 @@ assert.deepStrictEqual(nums(stageTrackerSort(items, stages, F({ sort: 'newest' }
 assert.deepStrictEqual(nums(stageTrackerSort(items, stages, F({ sort: 'number' }))), [5, 4, 3, 2, 1], 'number sort descends by repo then number');
 assert.deepStrictEqual(nums(stageTrackerSort(items, stages, F({ sort: 'number', dir: 'asc' }))), [1, 2, 3, 4, 5]);
 assert.deepStrictEqual(nums(items), [1, 2, 3, 4, 5], 'sorting does not mutate the payload');
+
+// Hive end to end first: Hive, then not known, then waiting on someone else,
+// then needs a person, each furthest along first; an issue riding one PR sorts
+// by the PR's answer; reversed, the rows that need a person come first.
+const fin = [
+  { kind: 'pr', repo: 'a/b', number: 11, stage: 50, finisher: 'person' },
+  { kind: 'pr', repo: 'a/b', number: 12, stage: 50, finisher: 'hive' },
+  { kind: 'issue', repo: 'a/b', number: 13, stage: 10, finisher: 'elsewhere' },
+  { kind: 'issue', repo: 'a/b', number: 14, stage: 10 },
+  { kind: 'issue', repo: 'a/b', number: 15, stage: 40, finisher: 'elsewhere', linked_prs: [{ number: 16, stage: 80, finisher: 'hive' }] },
+  { kind: 'issue', repo: 'a/b', number: 17, stage: 40, linked_prs: [{ number: 18, stage: 80, finisher: 'hive' }, { number: 19, stage: 50, finisher: 'person' }] },
+];
+assert.strictEqual(stageTrackerNormalizeFilter({ sort: 'finisher' }).sort, 'finisher');
+assert.deepStrictEqual(nums(stageTrackerSort(fin, stages, F({ sort: 'finisher' }))), [15, 12, 14, 13, 17, 11], 'an issue with several PRs takes the one furthest from Hive');
+assert.deepStrictEqual(nums(stageTrackerSort(fin, stages, F({ sort: 'finisher', dir: 'asc' }))), [11, 17, 13, 14, 12, 15]);
 
 // Paging: sizes, clamping past the end, the counts text.
 const many = Array.from({ length: 120 }, (_, i) => ({ kind: 'issue', repo: 'a/b', number: i + 1 }));
