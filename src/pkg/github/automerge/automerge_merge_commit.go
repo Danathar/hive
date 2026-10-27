@@ -142,6 +142,27 @@ func (c *Engine) noteMergeCommit(ctx context.Context, store *stagelabels.Store, 
 	return 1, nil
 }
 
+// squashSignoffCheck is the check-run name of
+// .github/workflows/dco-squash-attribution.yml.
+const squashSignoffCheck = "Sign-off survives the squash"
+
+func isSquashSignoffCheck(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), squashSignoffCheck)
+}
+
+// squashSignoffGateNote is the sign-off attribution notes' mention of that
+// check, or "" when the head's required and reported checks do not include
+// it (noteStageDCOGate): the workflow lives in the repositories that carry
+// it, not in every repository the hive manages, and the hive's own commit
+// check is what holds the head everywhere else.
+func squashSignoffGateNote(obs stageObservation) string {
+	d := obs.Detail
+	if !d.SquashSignoffGate || (d.DCOGateHead != "" && obs.HeadSHA != "" && d.DCOGateHead != obs.HeadSHA) {
+		return ""
+	}
+	return " (the `" + squashSignoffCheck + "` check stays red)"
+}
+
 // SignoffAttributionDecisionMarkerPrefix opens the one stage/085 note per
 // head for a hive-caused sign-off attribution the lane could not resolve
 // with a merge commit by itself.
@@ -158,8 +179,8 @@ func SignoffAttributionDecisionComment(obs stageObservation) string {
 	author := nonEmpty(obs.Author, "the contributor")
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s head=%s -->\n", SignoffAttributionDecisionMarkerPrefix, obs.HeadSHA)
-	fmt.Fprintf(&b, "Held at `%s` for a maintainer. %d of %d commits on `%s` are the hive's own, signed off as the hive App, so a squash merge would land them as @%s with the App's sign-off and the `Sign-off survives the squash` gate stays red. ",
-		stagelabels.NeedsDecision.Label(), n, total, shortSHA(obs.HeadSHA), author)
+	fmt.Fprintf(&b, "Held at `%s` for a maintainer. %d of %d commits on `%s` are the hive's own, signed off as the hive App, so a squash merge would land them as @%s with the App's sign-off, and the hive will not squash-merge this head%s. ",
+		stagelabels.NeedsDecision.Label(), n, total, shortSHA(obs.HeadSHA), author, squashSignoffGateNote(obs))
 	fmt.Fprintf(&b, "@%s did not make those commits and has nothing to fix here.\n\n", author)
 	b.WriteString(mergeCommitRefusalText(obs))
 	return b.String()

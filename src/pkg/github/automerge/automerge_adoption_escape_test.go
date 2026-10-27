@@ -154,6 +154,8 @@ func TestAdoptedInPlaceSquashUnsafeHiveCommitStallsWithoutSupersede(t *testing.T
 	h.adopt.setCommitAuthor("f72fa44", testHiveAppBotLogin)
 
 	h.clock.advance(time.Minute)
+	// This repo runs the gate (dco-squash-attribution.yml), so the note names it.
+	h.e.noteStageDCOGate("acme", "widget", 7, "f72fa44", map[string]bool{squashSignoffCheck: true}, nil)
 	h.observe(adoptPR(7, "f72fa44", adoptedLabels...), contributorLaneReasonNoVerdict)
 	if h.adopt.refAttempts != 0 || len(h.adopt.refs) != 0 || len(h.adopt.pulls) != 0 {
 		t.Fatalf("signoff supersede opened: attempts=%d refs=%v pulls=%v", h.adopt.refAttempts, h.adopt.refs, h.adopt.pulls)
