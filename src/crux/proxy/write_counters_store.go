@@ -181,6 +181,8 @@ func (d DurableWriteCounts) empty() bool {
 	return len(d.Totals) == 0 && len(d.Weeks) == 0
 }
 
+var errInvalidWriteCounts = errors.New("invalid write counters JSON")
+
 // LoadDurableWriteCounts reads the file at path. A missing file is an empty
 // result, not an error.
 func LoadDurableWriteCounts(path string) (DurableWriteCounts, error) {
@@ -193,7 +195,7 @@ func LoadDurableWriteCounts(path string) (DurableWriteCounts, error) {
 		return d, err
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
-		return newDurableWriteCounts(), fmt.Errorf("parse %s: %w", path, err)
+		return newDurableWriteCounts(), fmt.Errorf("parse %s: %w: %w", path, errInvalidWriteCounts, err)
 	}
 	return d, nil
 }
@@ -220,7 +222,10 @@ func (c *writeCounters) flush(path string, now time.Time) error {
 func mergeIntoFile(path string, pending DurableWriteCounts, now time.Time) error {
 	cur, err := LoadDurableWriteCounts(path)
 	if err != nil {
-		// A corrupt file must not stall persistence forever; start over.
+		// Only corrupt JSON can safely be replaced; preserve unreadable files.
+		if !errors.Is(err, errInvalidWriteCounts) {
+			return err
+		}
 		cur = newDurableWriteCounts()
 	}
 	cur.merge(pending)

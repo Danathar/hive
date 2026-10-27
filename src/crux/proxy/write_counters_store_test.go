@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -88,6 +89,59 @@ func TestWriteCountersFlushFailureKeepsPending(t *testing.T) {
 	}
 }
 
+func TestWriteCountersReadFailureKeepsFileAndPending(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "counters.json")
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	var c writeCounters
+	c.now = func() time.Time { return now }
+	c.record("ADVISORY", "")
+	if err := c.flush(path, now); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink loop produces a deterministic read error even when CI runs as root.
+	if err := os.Symlink(filepath.Base(path), path); err != nil {
+		t.Fatal(err)
+	}
+	c.record("ADVISORY", DenyReasonMode)
+	if err := c.flush(path, now); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("flush error = %v, want ELOOP", err)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("unreadable path was replaced: %v, %v", info, err)
+	}
+	saved, err := os.ReadFile(path + ".saved")
+	if err != nil || string(saved) != string(original) {
+		t.Fatalf("durable data changed: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".saved", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.flush(path, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadDurableWriteCounts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wc := got.Totals["ADVISORY"]; wc.Attempted != 2 || wc.Blocked != 1 {
+		t.Errorf("retry totals = %+v", wc)
+	}
+	if !got.RecordedSince.Equal(time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("recorded_since changed: %s", got.RecordedSince)
+	}
+}
+
 func TestLoadDurableWriteCountsMissingAndCorrupt(t *testing.T) {
 	dir := t.TempDir()
 	if d, err := LoadDurableWriteCounts(filepath.Join(dir, "none.json")); err != nil || !d.empty() {
@@ -95,8 +149,8 @@ func TestLoadDurableWriteCountsMissingAndCorrupt(t *testing.T) {
 	}
 	bad := filepath.Join(dir, "bad.json")
 	_ = os.WriteFile(bad, []byte("{"), 0o644)
-	if _, err := LoadDurableWriteCounts(bad); err == nil {
-		t.Error("expected parse error")
+	if _, err := LoadDurableWriteCounts(bad); !errors.Is(err, errInvalidWriteCounts) {
+		t.Errorf("expected parse error, got %v", err)
 	}
 	var c writeCounters
 	c.record("ADVISORY", "")
