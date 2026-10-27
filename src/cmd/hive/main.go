@@ -2430,6 +2430,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	b.agentMgr.SetRepeatFailureEnabledResolver(func() bool {
 		return b.cfg.RepeatFailure.IsEnabled()
 	})
+	b.agentMgr.SetRepeatFailureConfigResolver(func() *config.RepeatFailureConfig {
+		return b.cfg.RepeatFailure
+	})
 	b.agentMgr.SetAdvisorRolesResolver(func() map[string]config.ModelRole {
 		return b.cfg.ModelRoles
 	})

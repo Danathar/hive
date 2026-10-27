@@ -620,6 +620,15 @@ More about the line:
 - **Updates.** The line updates with each worker update, every 10 seconds by default, so a change shows within about 15 seconds.
 - **Privacy.** Titles come only from the issue and pull request lists the dashboard already shows you. If it shows you no repositories' issues, the line shows no item numbers either.
 
+**The repeat-failure line.** When the repeat-failure check is on (`repeat_failure.enabled`, off by default), each card and detail panel has one more line under the blockers line. When the check is off the line is not shown at all. The check only watches: it never pauses or interrupts a worker.
+
+| The line says | What it means |
+| --- | --- |
+| `repeat-failure check on` | Hive records this worker's shell commands and will note one that keeps failing the same way. |
+| `repeat-failure check not available for this backend` | Hive cannot record this backend's shell commands yet, so repeated failures are not noticed. The [repeated-failure table](backend-support-tiers.md#repeated-failure-check) says why and names the follow-up issue. |
+| `repeat-failure check not receiving data` | The worker's current round of work ran shell commands, but no command record has arrived for `repeat_failure.no_data_after_s` (15 minutes by default). The backend may have changed how it runs commands. Reading and editing files alone do not count, and a command that is still running (a long build) does not start the wait. |
+| ``Repeating failure: `gh pr view 123` failed 5 times in 10 min (exit 1)`` | The same command failed the same way at least `repeat_failure.threshold` times (5) within `repeat_failure.window_s` (10 minutes). It says `(failed)` instead of an exit number when the backend gives none, and `and 2 others` when more commands are repeating; the most recent one is shown. The note clears when that command succeeds or when its last failure is older than the window. Hive logs the note once, when it appears. Commands are shown with secrets removed. |
+
 **The run line.** While a worker is working, a second line under **Now:** reads like `$0.42 · 38.1K tok · 4m 12s · tests ✓ · 3 files`. The same line is pinned in the worker's detail panel header. It is built only from figures Hive already keeps:
 
 - **`$` and `tok`** are the estimated cost and tokens of *this* round of work: the worker's cumulative token count × public list price (the same basis as the Cost section), minus what it was when Hive started the round (the last kick). Hive remembers the starting point, so a page reload does not reset the figure. `$–` means the token collector has no figure for this worker yet.
@@ -639,6 +648,7 @@ More about the line:
 - Each card's ⚙️ button opens its settings: schedule, model, tools and permissions. See [Agent configuration](agent-configuration.md).
 - `governor.claims.enabled` turns reservations on. When it is off, which is the default, the line shows nothing about reservations.
 - `dashboard.agent_poll_interval_s` sets how often worker updates are sent. The default is 10 seconds.
+- `repeat_failure.enabled` turns the repeat-failure line on; `threshold`, `window_s`, `no_data_after_s` and `exclude` tune it. See [Agent-runtime blocks](operator-reference.md#agent-runtime-blocks-configagentruntimeconfig).
 
 ## Hive activity monitor
 
