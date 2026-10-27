@@ -286,6 +286,8 @@ type prBreakdown struct {
 	blocked, blockedCI, blockedConflict, verdict int
 	yourTurn, toClose                            int
 	yourTurnVerbs                                map[string]int
+	yourTurnOwn                                  []Ownership
+	yourTurnRepos                                []string
 	staleBlocked                                 int
 	oldestBlockedDays                            int
 	checks, verdicts, lanes, authors, repos      []bucket
@@ -296,6 +298,8 @@ type issueBreakdown struct {
 	open                     int
 	yourTurn, toClose        int
 	yourTurnVerbs            map[string]int
+	yourTurnOwn              []Ownership
+	yourTurnRepos            []string
 	done, agentFiled         int
 	yourTurnItems, doneItems []Item
 }
@@ -322,7 +326,8 @@ func summarizePRs(prs []PRItem) prBreakdown {
 				b.yourTurn++
 			}
 			b.yourTurnVerbs[own.Verb]++
-			b.yourTurnItems = append(b.yourTurnItems, Item{Repo: pr.Repo, Number: pr.Number, URL: pr.URL, Note: ownershipNote(own)})
+			b.yourTurnOwn, b.yourTurnRepos = append(b.yourTurnOwn, own), append(b.yourTurnRepos, pr.Repo)
+			b.yourTurnItems = append(b.yourTurnItems, Item{Repo: pr.Repo, Number: pr.Number, URL: pr.URL, Note: shortOwnershipNote(own)})
 		}
 		switch pr.Band {
 		case PRBandBlocked:
@@ -379,7 +384,8 @@ func summarizeIssues(issues []IssueItem) issueBreakdown {
 				b.yourTurn++
 			}
 			b.yourTurnVerbs[own.Verb]++
-			b.yourTurnItems = append(b.yourTurnItems, Item{Repo: issue.Repo, Number: issue.Number, URL: issue.URL, Note: ownershipNote(own)})
+			b.yourTurnOwn, b.yourTurnRepos = append(b.yourTurnOwn, own), append(b.yourTurnRepos, issue.Repo)
+			b.yourTurnItems = append(b.yourTurnItems, Item{Repo: issue.Repo, Number: issue.Number, URL: issue.URL, Note: shortOwnershipNote(own)})
 		}
 		switch issue.Band {
 		case IssueBandDone:
@@ -491,10 +497,11 @@ func queueCandidates(q Queue, th Thresholds) []Recommendation {
 	if meetsPct(prs.yourTurn+prs.toClose, prs.open, th.NeedsHumanPRPct) {
 		n := prs.yourTurn + prs.toClose
 		r := rec("clear-human-gate-prs", 84, "Clear the human gate on PRs",
-			fmt.Sprintf("%d of %d open PRs (%d%%) are your turn (%s) — release, review, inspect or close them.",
-				n, prs.open, pct(n, prs.open), verbSummary(prs.yourTurnVerbs)),
-			sig("overview_open_prs", prs.open), sig("needs_human", n), sig("your_turn", prs.yourTurn), sig("to_close", prs.toClose))
+			fmt.Sprintf("%d of %d open PRs (%d%%) are waiting on a person; the hive cannot move them on its own.",
+				n, prs.open, pct(n, prs.open)),
+			sig("overview_open_prs", prs.open), sig("needs_human", n), sig("your_turn", prs.yourTurn), sig("to_close", prs.toClose), sig("verbs", verbSummary(prs.yourTurnVerbs)))
 		r.Links = []Link{exportLink("Your-turn PRs (CSV)", prExportPath, "slice", "your-turn,to-close")}
+		r.Why, r.Help = humanGateWhy(prs.yourTurnOwn, prs.yourTurnRepos)
 		r.Items = capItems(prs.yourTurnItems)
 		out = append(out, r)
 	}
@@ -502,10 +509,11 @@ func queueCandidates(q Queue, th Thresholds) []Recommendation {
 	if meetsPct(issues.yourTurn+issues.toClose, issues.open, th.NeedsHumanIssuePct) {
 		n := issues.yourTurn + issues.toClose
 		r := rec("unblock-human-issues", 82, "Unblock the human queue",
-			fmt.Sprintf("%d of %d open issues (%d%%) are your turn (%s) — decide the oldest first.",
-				n, issues.open, pct(n, issues.open), verbSummary(issues.yourTurnVerbs)),
-			sig("overview_open_issues", issues.open), sig("needs_human", n), sig("your_turn", issues.yourTurn), sig("to_close", issues.toClose))
+			fmt.Sprintf("%d of %d open issues (%d%%) are waiting on a person; the oldest are listed first.",
+				n, issues.open, pct(n, issues.open)),
+			sig("overview_open_issues", issues.open), sig("needs_human", n), sig("your_turn", issues.yourTurn), sig("to_close", issues.toClose), sig("verbs", verbSummary(issues.yourTurnVerbs)))
 		r.Links = []Link{exportLink("Your-turn issues (CSV)", issueExportPath, "slice", "your-turn,to-close")}
+		r.Why, r.Help = humanGateWhy(issues.yourTurnOwn, issues.yourTurnRepos)
 		r.Items = capItems(issues.yourTurnItems)
 		out = append(out, r)
 	}

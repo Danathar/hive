@@ -61,7 +61,8 @@ func TestAdviceSectionRendersQueueExplanation(t *testing.T) {
 	withOrigin := FormatDigestMarkdown(BuildDigest(nil, "IDLE"), DigestOptions{ShowEmpty: true, Advice: advice, DashboardURL: "https://hive.example.com/"})
 	for _, want := range []string{
 		"- **Reduce the blocked PR queue** — 70 of 93 open PRs (75%) are Blocked.",
-		"  - First: [octo/demo#12](https://github.com/octo/demo/pull/12) (fails go-security-analysis), octo/demo#13 (merge conflict)\n",
+		"  - First:\n    - [octo/demo#12](https://github.com/octo/demo/pull/12) — fails go-security-analysis\n    - octo/demo#13 — merge conflict\n",
+		"  - Numbers behind this: blocked=70\n",
 		"  - Full list: [Blocked PRs (CSV)](https://hive.example.com/api/overview/prs.csv?band=blocked)\n",
 		"- ~~**Widen HIVE_REPOS**~~ — No longer applies",
 		"Bands named above (same rules as the Overview chart):\n- **Blocked** (PRs): blocked sweep verdict, merge conflicts, or failing CI",
@@ -78,5 +79,38 @@ func TestAdviceSectionRendersQueueExplanation(t *testing.T) {
 	withoutOrigin := FormatDigestMarkdown(BuildDigest(nil, "IDLE"), DigestOptions{ShowEmpty: true, Advice: advice})
 	if !strings.Contains(withoutOrigin, "  - Full list: Blocked PRs (CSV): `/api/overview/prs.csv?band=blocked`\n") {
 		t.Fatalf("relative export path should render as code without a dashboard origin:\n%s", withoutOrigin)
+	}
+}
+
+// The needs-human advice reads as a short list: the headline, why the items
+// wait (one line per reason), how to help, then one item per line, with the
+// raw signals last instead of trailing the headline.
+func TestAdviceSectionRendersWhyAndHowToHelp(t *testing.T) {
+	advice := &hiveadvisor.Result{
+		Epoch: hiveadvisor.Epoch{Mode: "BUSY", End: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)},
+		Recommendations: []hiveadvisor.Recommendation{{
+			ID:        "clear-human-gate-prs",
+			Title:     "Clear the human gate on PRs",
+			Rationale: "59 of 94 open PRs (62%) are waiting on a person; the hive cannot move them on its own.",
+			Why: []string{
+				"24 parked until a maintainer decides (20 in utah-packages, 3 in utah, 1 in testsuite).",
+				"21 waiting for an approving review that branch protection requires (16 in common, 5 in actions).",
+			},
+			Help:    "answer the parked decisions in utah-packages and utah; approve PRs in common and actions",
+			Items:   []hiveadvisor.Item{{Repo: "actions", Number: 675, Note: "REVIEW — Hive's review is parked for a person"}},
+			Signals: []hiveadvisor.Signal{{Name: "needs_human", Value: "59"}},
+		}},
+	}
+	md := FormatDigestMarkdown(BuildDigest(nil, "BUSY"), DigestOptions{ShowEmpty: true, Advice: advice})
+	want := "- **Clear the human gate on PRs** — 59 of 94 open PRs (62%) are waiting on a person; the hive cannot move them on its own.\n" +
+		"  - Why they wait:\n" +
+		"    - 24 parked until a maintainer decides (20 in utah-packages, 3 in utah, 1 in testsuite).\n" +
+		"    - 21 waiting for an approving review that branch protection requires (16 in common, 5 in actions).\n" +
+		"  - **How to help:** answer the parked decisions in utah-packages and utah; approve PRs in common and actions.\n" +
+		"  - First:\n" +
+		"    - actions#675 — REVIEW — Hive's review is parked for a person\n" +
+		"  - Numbers behind this: needs_human=59\n"
+	if !strings.Contains(md, want) {
+		t.Fatalf("digest advice block:\n%s\nwant:\n%s", md, want)
 	}
 }

@@ -1458,28 +1458,30 @@ func writeAdviceSection(b *strings.Builder, advice *hiveadvisor.Result, dashboar
 			b.WriteString(fmt.Sprintf("- ~~**%s**~~ — %s\n", rec.Title, rec.Rationale))
 			continue
 		}
-		b.WriteString(fmt.Sprintf("- **%s** — %s", rec.Title, rec.Rationale))
-		if len(rec.Signals) > 0 {
-			parts := make([]string, 0, len(rec.Signals))
-			for _, s := range rec.Signals {
-				parts = append(parts, fmt.Sprintf("%s=%s", s.Name, s.Value))
+		// One idea per line: the headline, why the items wait, how to help,
+		// where to start, the full list, and last the raw signals.
+		b.WriteString(fmt.Sprintf("- **%s** — %s\n", rec.Title, rec.Rationale))
+		if len(rec.Why) > 0 {
+			b.WriteString("  - Why they wait:\n")
+			for _, w := range rec.Why {
+				b.WriteString("    - " + w + "\n")
 			}
-			b.WriteString(" (signals: " + strings.Join(parts, ", ") + ")")
 		}
-		b.WriteString("\n")
+		if rec.Help != "" {
+			b.WriteString("  - **How to help:** " + rec.Help + ".\n")
+		}
 		if len(rec.Items) > 0 {
-			parts := make([]string, 0, len(rec.Items))
+			b.WriteString("  - First:\n")
 			for _, it := range rec.Items {
 				ref := fmt.Sprintf("%s#%d", it.Repo, it.Number)
 				if it.URL != "" {
 					ref = fmt.Sprintf("[%s](%s)", ref, it.URL)
 				}
 				if it.Note != "" {
-					ref += " (" + it.Note + ")"
+					ref += " — " + it.Note
 				}
-				parts = append(parts, ref)
+				b.WriteString("    - " + ref + "\n")
 			}
-			b.WriteString("  - First: " + strings.Join(parts, ", ") + "\n")
 		}
 		if len(rec.Links) > 0 {
 			parts := make([]string, 0, len(rec.Links))
@@ -1491,6 +1493,13 @@ func writeAdviceSection(b *strings.Builder, advice *hiveadvisor.Result, dashboar
 				}
 			}
 			b.WriteString("  - Full list: " + strings.Join(parts, ", ") + "\n")
+		}
+		if len(rec.Signals) > 0 {
+			parts := make([]string, 0, len(rec.Signals))
+			for _, s := range rec.Signals {
+				parts = append(parts, fmt.Sprintf("%s=%s", s.Name, s.Value))
+			}
+			b.WriteString("  - Numbers behind this: " + strings.Join(parts, ", ") + "\n")
 		}
 	}
 	if len(advice.Bands) > 0 {

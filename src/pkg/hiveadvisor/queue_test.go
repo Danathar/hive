@@ -241,8 +241,18 @@ func TestIssueScenarioLeadsWithBlockedPRs(t *testing.T) {
 		t.Fatalf("throttle-lane = %+v", lane)
 	}
 	human := find(t, got.Recommendations, "unblock-human-issues")
-	if !strings.Contains(human.Rationale, "117 of 295 open issues (39%) are your turn (59 DECIDE, 58 STEER)") {
+	if !strings.Contains(human.Rationale, "117 of 295 open issues (39%) are waiting on a person") {
 		t.Fatalf("unblock-human-issues = %q", human.Rationale)
+	}
+	wantWhy := []string{
+		"59 parked until a maintainer decides (all in octo/demo).",
+		"58 parked until a maintainer gives direction (all in octo/demo).",
+	}
+	if !reflect.DeepEqual(human.Why, wantWhy) || human.Help != "answer the parked decisions in octo/demo; give direction on the parked items in octo/demo" {
+		t.Fatalf("unblock-human-issues why=%q help=%q", human.Why, human.Help)
+	}
+	if !hasSignal(human.Signals, "verbs", "59 DECIDE, 58 STEER") {
+		t.Fatalf("the per-verb split moved to the signals: %+v", human.Signals)
 	}
 	done := find(t, got.Recommendations, "confirm-and-close")
 	if !strings.Contains(done.Rationale, "92 issues are agent-marked done; confirming them shrinks the backlog by 31%") || done.Links[0].URL != "/api/overview/issues.csv?band=done" {
@@ -307,8 +317,8 @@ func TestYourTurnPRsAreCountedFromTheDecisionOldestFirst(t *testing.T) {
 	}
 	recs := queueCandidates(Queue{PRs: prs}, Thresholds{})
 	r := find(t, recs, "clear-human-gate-prs")
-	if !strings.Contains(r.Rationale, "3 of 5 open PRs (60%) are your turn (2 REVIEW, 1 CLOSE)") {
-		t.Fatalf("rationale = %q", r.Rationale)
+	if !strings.Contains(r.Rationale, "3 of 5 open PRs (60%) are waiting on a person") || !hasSignal(r.Signals, "verbs", "2 REVIEW, 1 CLOSE") {
+		t.Fatalf("rationale = %q signals = %+v", r.Rationale, r.Signals)
 	}
 	gotOrder := []int{r.Items[0].Number, r.Items[1].Number, r.Items[2].Number}
 	if !reflect.DeepEqual(gotOrder, []int{2, 3, 1}) || len(r.Items) != 3 {

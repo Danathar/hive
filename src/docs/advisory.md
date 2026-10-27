@@ -427,15 +427,32 @@ Two families of rules feed the block:
 | `reduce-blocked-prs` | Blocked PRs ≥ `blocked_pr_pct` of open PRs | the dominant cause and the first action: *"41 of 70 fail check `go-security-analysis` — fix the check before touching cadence"*, *"N have merge conflicts — rebase or close the oldest"*, or the top blocked-verdict reason |
 | `fix-failing-check` | one check fails on ≥ `check_share_pct` of CI-blocked PRs (at least 2) | the check name and how many PRs it holds |
 | `throttle-lane` | one agent lane produced ≥ `lane_share_pct` of Blocked PRs (at least 2) | the lane to slow down |
-| `clear-human-gate-prs` | PRs that are your turn (the inbox's N plus M) ≥ `needs_human_pr_pct` of open PRs | the per-verb split of those PRs |
-| `unblock-human-issues` | Issues that are your turn (the inbox's N plus M, parked issues included) ≥ `needs_human_issue_pct` of open issues | the per-verb split of those issues |
+| `clear-human-gate-prs` | PRs that are your turn (the inbox's N plus M) ≥ `needs_human_pr_pct` of open PRs | how many wait on a person, **why** they wait (grouped by reason, with where they sit) and **how to help** |
+| `unblock-human-issues` | Issues that are your turn (the inbox's N plus M, parked issues included) ≥ `needs_human_issue_pct` of open issues | the same why / how to help breakdown for issues |
 | `review-stale-prs` | Blocked PRs past `dashboard.issue_bands.stale_days` ≥ `stale_blocked_prs` | stale = no activity past the threshold, not proven dead |
 | `confirm-and-close` | any issue in Confirm & close | how much of the backlog confirming them removes |
+
+The two needs-human rules also carry:
+
+- **Why they wait:** the your-turn items grouped by the reason the dashboard
+  recorded for each (its ownership reason code), in plain words, largest
+  group first, each with where it sits, for example *"24 parked until a
+  maintainer decides (20 in utah-packages, 3 in utah, 1 in testsuite)"*. A
+  reviewer's requested changes and a code owner's review are their own
+  groups, apart from approvals branch protection requires. The five largest
+  groups are named; the rest fold into one "N more for other reasons" line.
+- **How to help:** the action for the three largest groups, naming the
+  repositories only when two of them hold most of that group, for example
+  *"answer the parked decisions in utah-packages and utah; approve PRs in
+  common and actions"*.
 
 Every queue-health recommendation carries:
 
 - **First:** the first five issues/PRs it is about (oldest activity first),
   each with why it is listed (the failing check, "merge conflict", "held").
+  A needs-human item's note is its verb and reason, cut to the reason's first
+  clause when it runs past 100 characters (a parked hive review lists every
+  reviewer's summary); the inbox and the CSV keep the whole reason.
 - **Full list:** the matching Overview export, e.g.
   `/api/overview/prs.csv?band=blocked` (plus a `repo=` link when one repo
   holds half the blocked PRs). The digest prefixes the link with
@@ -444,6 +461,9 @@ Every queue-health recommendation carries:
 - **Band rules:** the one-line rule for each band the advice names, the same
   text the Overview tooltips print — so *Blocked* is read as "blocked sweep
   verdict, merge conflicts, or failing CI", not the `blocked` label.
+- **Numbers behind this:** the raw signals the rule read (including the
+  per-verb split), last in the digest and folded away on the dashboard
+  card.
 
 ### Which count is quoted
 
