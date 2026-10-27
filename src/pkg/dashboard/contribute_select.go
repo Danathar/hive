@@ -873,6 +873,10 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 				issueClaim: issueClaim,
 				claimed:    claimed,
 			})
+			// An unchanged refusal was already logged on an earlier pass.
+			if !decision.admitted && !h.admissionSkipChanged(itemKey, decision) {
+				return
+			}
 			if !decision.admitted {
 				switch decision.reason {
 				case contributorAdmissionReasonOpenPRClaim:
@@ -928,6 +932,7 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 				}
 				return
 			}
+			h.admissionSkipCleared(itemKey)
 			// Yank self-exclusion: an issue this SAME clanker was just yanked off is
 			// briefly skipped for it (yankSelfExcludeSeconds), so the immediate post-yank
 			// reassignment moves the clanker to genuinely different work instead of re-

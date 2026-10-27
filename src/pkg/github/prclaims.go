@@ -382,6 +382,12 @@ func settledRetained(c IssueClaim, now time.Time) bool {
 // evidence still wins: a merged `Fixes #N` (the work is done) outranks an open
 // `Refs #N` (someone is doing related work), so a settled issue is not
 // re-offered just because a follow-up references it.
+//
+// A merged `Refs #N` is the exception: it never claimed the issue was done,
+// so it ranks below EVERY open claim. Readers release a merged reference
+// claim back to the queue (#7061), and if it outranked a person's open
+// `Refs #N` PR, that release would hand the issue to someone else while the
+// person is still working it.
 func claimRank(c IssueClaim) int {
 	var tier int
 	switch {
@@ -393,6 +399,9 @@ func claimRank(c IssueClaim) int {
 		tier = 1
 	default:
 		tier = 0
+	}
+	if c.Reference && c.MergedPR {
+		return tier - 2
 	}
 	rank := tier * 2
 	if !c.MergedPR {
