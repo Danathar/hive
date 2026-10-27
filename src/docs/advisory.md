@@ -452,7 +452,9 @@ Every queue-health recommendation carries:
   each with why it is listed (the failing check, "merge conflict", "held").
   A needs-human item's note is its verb and reason, cut to the reason's first
   clause when it runs past 100 characters (a parked hive review lists every
-  reviewer's summary); the inbox and the CSV keep the whole reason.
+  reviewer's summary); a review-decision note drops "Waiting on a person's
+  review:", which the REVIEW verb already says. The inbox and the CSV keep the
+  whole reason.
 - **Full list:** the matching Overview export, e.g.
   `/api/overview/prs.csv?band=blocked` (plus a `repo=` link when one repo
   holds half the blocked PRs). The digest prefixes the link with

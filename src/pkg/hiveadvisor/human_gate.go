@@ -243,10 +243,19 @@ func joinAnd(names []string) string {
 // the inbox and the CSV.
 const maxNoteRunes = 100
 
+// noteDetailOnly are the reason codes whose reason opens with a clause the
+// verb already says ("Waiting on a person's review: " beside REVIEW), so the
+// item note keeps only what follows it: "REVIEW — a reviewer requested
+// changes".
+var noteDetailOnly = map[string]bool{"review_decision_required": true}
+
 // shortOwnershipNote is the item note: the verb and a reason short enough to
 // read in a list.
 func shortOwnershipNote(o Ownership) string {
 	reason := strings.TrimSpace(o.Reason)
+	if head := firstClause(reason); noteDetailOnly[o.ReasonCode] && head != reason {
+		reason = strings.TrimSpace(strings.TrimPrefix(reason, head+": "))
+	}
 	if utf8.RuneCountInString(reason) > maxNoteRunes {
 		if head := firstClause(reason); head != "" && utf8.RuneCountInString(head) <= maxNoteRunes {
 			reason = head

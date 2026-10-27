@@ -76,6 +76,12 @@ func TestHumanGateAdviceSaysWhyAndHowToHelp(t *testing.T) {
 		if it.Number == 675 && it.Note != "REVIEW — Hive's review is parked for a person" {
 			t.Fatalf("parked review note = %q", it.Note)
 		}
+		if it.Number == 544 && it.Note != "REVIEW — a reviewer requested changes" {
+			t.Fatalf("the review-decision note drops the clause REVIEW already says: %q", it.Note)
+		}
+		if it.Number == 665 && it.Note != "REVIEW — an approving review is required by branch protection (0 given)" {
+			t.Fatalf("approval note = %q", it.Note)
+		}
 	}
 	if got := NeedsHumanItems(Queue{PRs: prs}); got[len(got)-1].Note != "REVIEW — "+projectbluefinParkedReview {
 		t.Fatalf("the inbox list keeps the full reason: %q", got[len(got)-1].Note)
