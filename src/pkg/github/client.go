@@ -2030,6 +2030,10 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 					RequestedReviewers:  reqLogins,
 					RequestedTeams:      reqTeams,
 					ReferencedIssues:    PRReferencedIssues(pr.GetTitle(), pr.GetBody(), repo, pr.GetNumber()),
+					// The review swarm reviews held PRs too; without the digest
+					// their kicks carry no "Review body digest:" line and their
+					// verdicts split across aggregates (hivecommons/hive#14594).
+					BodyDigest: review.PullRequestBodyDigest(pr.GetTitle(), pr.GetBody()),
 				})
 			} else {
 				sidelined = append(sidelined, c.repoWorkPR(repo, pr, labels, hasAttr, workBucketPRDraft, "Held draft"))

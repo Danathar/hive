@@ -389,9 +389,12 @@ func (c *Client) writeOneVerdict(ctx context.Context, req ReviewRequest, report 
 	// a 64-character hash back proved unreliable (prose summaries, a
 	// "sha256:" prefix, a hash of something else), and every miscopy left the
 	// report orphaned in its own aggregate, so its pending entry never cleared
-	// and the swarm deadlocked (hivecommons/hive#14361). An advisory verdict
+	// and the swarm deadlocked (hivecommons/hive#14361). A dispatch record
+	// with no digest stamps an empty one, so every head's verdict for that
+	// PR and head SHA shares one aggregate instead of each landing under
+	// whatever the model wrote (hivecommons/hive#14594). An advisory verdict
 	// has no dispatch record and keeps the digest it reported.
-	if dispatchBodyDigest := strings.TrimSpace(auth.BodyDigest); auth.Dispatched && dispatchBodyDigest != "" {
+	if dispatchBodyDigest := strings.TrimSpace(auth.BodyDigest); auth.Dispatched {
 		if strings.TrimSpace(report.BodyDigest) != dispatchBodyDigest {
 			c.logger.Debug("review-request watcher: verdict body digest replaced by the dispatch digest",
 				slog.String("reviewed", fmt.Sprintf("%s#%d", req.Repo, req.Number)),
