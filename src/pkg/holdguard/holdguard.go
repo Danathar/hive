@@ -45,6 +45,16 @@
 // resolve a real conflict this way, a one-time comment (ConflictCommentBody)
 // tells the human before they open the review, instead of letting them
 // discover a stale, unmergeable PR mid-review.
+//
+// Each merge-from-base is one attempt per (head, base) pair. GitHub answers
+// update-branch with 202 and merges later, so an accepted attempt whose new
+// head is not visible yet is recorded as requested (MarkUpdateRequested) and
+// waited on rather than re-sent; one still unmoved after UpdateConfirmWindow
+// stops like a refusal. A refusal the same token would get again (workflows
+// permission, a fork the App cannot write to, a conflict) or an accepted
+// update that never landed stops attempts for that head and base
+// (MarkUpdateStopped) until either moves, and a one-time note
+// (UpdateStoppedCommentBody) tells a person to update the branch.
 package holdguard
 
 import (
@@ -118,9 +128,28 @@ type Entry struct {
 	ConflictNoted bool `json:"conflict_noted,omitempty"`
 	// WorkflowRefusedHeadSHA is the PR head GitHub refused to update from its
 	// base because the base changed .github/workflows/ and the App lacks the
-	// workflows permission. The same head gets the same refusal, so the
-	// guard does not ask again until the head moves.
+	// workflows permission. Written by builds before UpdateStopped* existed;
+	// still read (UpdateStoppedFor) so such a record does not retry, never
+	// written now.
 	WorkflowRefusedHeadSHA string `json:"workflow_refused_head_sha,omitempty"`
+	// UpdateRequestedHeadSHA and UpdateRequestedBaseSHA are the head and base
+	// of a merge-from-base GitHub accepted (202) whose new head the guard has
+	// not seen yet; UpdateRequestedAt is when. Cleared once the head moves.
+	UpdateRequestedHeadSHA string    `json:"update_requested_head_sha,omitempty"`
+	UpdateRequestedBaseSHA string    `json:"update_requested_base_sha,omitempty"`
+	UpdateRequestedAt      time.Time `json:"update_requested_at,omitempty"`
+	// UpdateStoppedHeadSHA and UpdateStoppedBaseSHA are the head and base the
+	// guard stopped updating, and UpdateStoppedReason is why (one of the
+	// UpdateStop* reasons). No attempt is made again until the head or the
+	// base moves.
+	UpdateStoppedHeadSHA string `json:"update_stopped_head_sha,omitempty"`
+	UpdateStoppedBaseSHA string `json:"update_stopped_base_sha,omitempty"`
+	UpdateStoppedReason  string `json:"update_stopped_reason,omitempty"`
+	// UpdateStopNotedHeadSHA and UpdateStopNotedReason name the head and
+	// reason the person-facing note was last posted for, so a stop retried
+	// on a new base with the same answer does not post again.
+	UpdateStopNotedHeadSHA string `json:"update_stop_noted_head_sha,omitempty"`
+	UpdateStopNotedReason  string `json:"update_stop_noted_reason,omitempty"`
 	// ObservedHeldHeadSHA is the latest head the hive itself observed on the
 	// PR while the hold gate was still on (#13603). A current head equal to
 	// it provably predates the gate lift, so a trusted human's lift reviewed
@@ -307,6 +336,7 @@ func (s *Store) AdvanceHygiene(repo string, number int, headSHA string, commits 
 	e.ObservedHeldHeadSHA = headSHA
 	e.CommitSHAs, e.Authors = commitSets(commits)
 	e.ConflictNoted = false
+	e.clearUpdateRequested()
 	e.UpdatedAt = s.now()
 	s.saveLocked()
 }
@@ -324,17 +354,119 @@ func (s *Store) MarkConflictNoted(repo string, number int) {
 	}
 }
 
-// MarkWorkflowRefused records that GitHub refused to update the PR at headSHA
-// from its base for lack of the workflows permission. No-op for an untracked
-// PR or an empty head.
-func (s *Store) MarkWorkflowRefused(repo string, number int, headSHA string) {
+// Reasons the guard stops keeping a held PR mergeable for a head and base.
+// The first two match the automerge sweep's reasons for the same refusals.
+const (
+	UpdateStopWorkflowPermission = "workflow-permission"
+	UpdateStopForkNotEditable    = "fork-not-editable"
+	UpdateStopConflict           = "conflict"
+	UpdateStopUpToDate           = "up-to-date"
+	UpdateStopNotLanded          = "update-not-landed"
+)
+
+// UpdateConfirmWindow is how long an accepted (202) merge-from-base may take
+// to move the head before the guard stops waiting. GitHub normally finishes
+// in seconds; past this the update is treated as one that will not land.
+const UpdateConfirmWindow = 30 * time.Minute
+
+// UpdateStoppedFor reports whether the guard stopped updating this head on
+// this base, and why. A record from a build that only knew the workflows
+// refusal (WorkflowRefusedHeadSHA) stops on its head alone.
+func (e Entry) UpdateStoppedFor(headSHA, baseSHA string) (string, bool) {
+	if headSHA == "" {
+		return "", false
+	}
+	if e.UpdateStoppedHeadSHA == headSHA && e.UpdateStoppedBaseSHA == baseSHA && e.UpdateStoppedReason != "" {
+		return e.UpdateStoppedReason, true
+	}
+	if e.WorkflowRefusedHeadSHA == headSHA {
+		return UpdateStopWorkflowPermission, true
+	}
+	return "", false
+}
+
+// UpdateStopNoted reports whether the person-facing note for reason already
+// posted for headSHA.
+func (e Entry) UpdateStopNoted(headSHA, reason string) bool {
+	return headSHA != "" && e.UpdateStopNotedHeadSHA == headSHA && e.UpdateStopNotedReason == reason
+}
+
+func (e *Entry) clearUpdateRequested() {
+	e.UpdateRequestedHeadSHA, e.UpdateRequestedBaseSHA = "", ""
+	e.UpdateRequestedAt = time.Time{}
+}
+
+// MarkUpdateRequested records that GitHub accepted a merge-from-base for
+// headSHA on baseSHA whose new head is not visible yet. No-op for an
+// untracked PR or an empty head.
+func (s *Store) MarkUpdateRequested(repo string, number int, headSHA, baseSHA string) {
 	if headSHA == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.entries[Key(repo, number)]; e != nil {
-		e.WorkflowRefusedHeadSHA = headSHA
+		e.UpdateRequestedHeadSHA, e.UpdateRequestedBaseSHA = headSHA, baseSHA
+		e.UpdateRequestedAt = s.now()
+		e.UpdatedAt = s.now()
+		s.saveLocked()
+	}
+}
+
+// UpdatePending reports whether an accepted merge-from-base for headSHA on
+// baseSHA is still awaited, and whether UpdateConfirmWindow has passed
+// without the head moving.
+func (s *Store) UpdatePending(repo string, number int, headSHA, baseSHA string) (pending, expired bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[Key(repo, number)]
+	if e == nil || headSHA == "" || e.UpdateRequestedHeadSHA != headSHA || e.UpdateRequestedBaseSHA != baseSHA {
+		return false, false
+	}
+	return true, s.now().Sub(e.UpdateRequestedAt) >= UpdateConfirmWindow
+}
+
+// SettleUpdateRequest forgets an awaited merge-from-base once the PR's head
+// is no longer the head it was requested for, and reports whether there was
+// one. The baseline is left alone: a head that moved between ticks is not
+// proven to be the hive's own merge, so the lift check judges it.
+func (s *Store) SettleUpdateRequest(repo string, number int, headSHA string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[Key(repo, number)]
+	if e == nil || e.UpdateRequestedHeadSHA == "" || headSHA == "" || e.UpdateRequestedHeadSHA == headSHA {
+		return false
+	}
+	e.clearUpdateRequested()
+	e.UpdatedAt = s.now()
+	s.saveLocked()
+	return true
+}
+
+// MarkUpdateStopped records that the guard stops updating headSHA on baseSHA
+// for reason, until the head or the base moves. No-op for an untracked PR
+// or an empty head.
+func (s *Store) MarkUpdateStopped(repo string, number int, headSHA, baseSHA, reason string) {
+	if headSHA == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[Key(repo, number)]; e != nil {
+		e.UpdateStoppedHeadSHA, e.UpdateStoppedBaseSHA, e.UpdateStoppedReason = headSHA, baseSHA, reason
+		e.clearUpdateRequested()
+		e.UpdatedAt = s.now()
+		s.saveLocked()
+	}
+}
+
+// MarkUpdateStopNoted records that the person-facing note for reason posted
+// for headSHA.
+func (s *Store) MarkUpdateStopNoted(repo string, number int, headSHA, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[Key(repo, number)]; e != nil {
+		e.UpdateStopNotedHeadSHA, e.UpdateStopNotedReason = headSHA, reason
 		e.UpdatedAt = s.now()
 		s.saveLocked()
 	}
@@ -585,5 +717,30 @@ func ConflictCommentBody() string {
 	b.WriteString("## ⚠️ Hold-gate mergeability: this PR has a real conflict with its base\n\n")
 	b.WriteString("This PR is hold-gated and has fallen behind its base branch. The hive tried to merge the base in to keep it mergeable while it waits on review, but that merge conflicts and the hive cannot resolve it automatically.\n\n")
 	b.WriteString("It will stay held and will NOT merge on its own even once reviewed — removing `" + ReHoldLabel + "` alone will not be enough. Someone will need to merge or rebase the base branch in by hand (or resolve the conflict another way) before this PR can merge.\n")
+	return b.String()
+}
+
+// UpdateStoppedCommentBody is the one-time note posted when the guard stops
+// keeping a held PR up to date with its base for reason (an UpdateStop*
+// reason other than conflict, which has ConflictCommentBody).
+func UpdateStoppedCommentBody(reason string) string {
+	why := "GitHub did not complete the update."
+	action := "use **Update branch** on this PR, or merge the base branch in by hand."
+	switch reason {
+	case UpdateStopWorkflowPermission:
+		why = "GitHub refused the update because the base branch changed files under `.github/workflows/` and the Hive app does not have the workflows permission."
+	case UpdateStopForkNotEditable:
+		why = "The branch is in a fork the Hive app cannot push to (\"Allow edits by maintainers\" is off, or GitHub refused the push)."
+		action = "ask the author to merge the base branch in, or use **Update branch** on this PR if GitHub offers it."
+	case UpdateStopNotLanded:
+		why = fmt.Sprintf("GitHub accepted the update, but the branch had not moved %d minutes later.", int(UpdateConfirmWindow/time.Minute))
+	}
+	var b strings.Builder
+	b.WriteString("## ⚠️ Hold-gate mergeability: Hive could not update this branch\n\n")
+	b.WriteString("This PR is hold-gated and has fallen behind its base branch. Hive keeps held PRs up to date while they wait on review, but it could not update this one. ")
+	b.WriteString(why)
+	b.WriteString("\n\nHive will not try again until this branch or its base branch changes. To bring it up to date now, ")
+	b.WriteString(action)
+	b.WriteString("\n")
 	return b.String()
 }

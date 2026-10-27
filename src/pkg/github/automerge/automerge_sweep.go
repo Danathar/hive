@@ -2458,51 +2458,20 @@ const (
 	autoMergeReasonWorkflowPermission = prstage.AutoMergeReasonWorkflowPermission
 )
 
-type updateBranchFailure int
+type updateBranchFailure = hgithub.BranchUpdateFailure
 
 const (
-	updateBranchOther updateBranchFailure = iota
-	updateBranchConflict
-	updateBranchUpToDate
-	updateBranchForkNotEditable
-	updateBranchWorkflowPermission
+	updateBranchOther              = hgithub.BranchUpdateOther
+	updateBranchConflict           = hgithub.BranchUpdateConflict
+	updateBranchUpToDate           = hgithub.BranchUpdateUpToDate
+	updateBranchForkNotEditable    = hgithub.BranchUpdateForkNotEditable
+	updateBranchWorkflowPermission = hgithub.BranchUpdateWorkflowPermission
 )
 
-// classifyUpdateBranchError separates the update-branch failures GitHub
-// reports with overlapping statuses: 422 covers conflicts and an already
-// current branch, while a 422 naming maintainer edits (or a 403 on a fork PR)
-// means the app cannot write to the fork head. A 403 refusing to update a
-// workflow file means the base changed .github/workflows/ and the App lacks the
-// workflows permission, on a fork or not: no retry with the same token can
-// succeed, so a person must update the branch. Any other 403 on a same-repo
-// branch is a plain permission or rate-limit failure. An unrecognised 422
-// stays a conflict.
+// classifyUpdateBranchError is hgithub.ClassifyBranchUpdateError, shared
+// with the hold guard's keep-mergeable update.
 func classifyUpdateBranchError(err error, fork bool) updateBranchFailure {
-	var ghErr *gh.ErrorResponse
-	if !errors.As(err, &ghErr) || ghErr.Response == nil {
-		return updateBranchOther
-	}
-	if hgithub.IsWorkflowPermissionRefusal(err) {
-		return updateBranchWorkflowPermission
-	}
-	msg := strings.ToLower(ghErr.Message)
-	switch ghErr.Response.StatusCode {
-	case http.StatusForbidden:
-		if fork {
-			return updateBranchForkNotEditable
-		}
-	case http.StatusUnprocessableEntity:
-		switch {
-		case strings.Contains(msg, "maintainer") || strings.Contains(msg, "permission") || strings.Contains(msg, "not authorized"):
-			return updateBranchForkNotEditable
-		case strings.Contains(msg, "merge conflict"):
-			return updateBranchConflict
-		case strings.Contains(msg, "up to date") || strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no new commits"):
-			return updateBranchUpToDate
-		}
-		return updateBranchConflict
-	}
-	return updateBranchOther
+	return hgithub.ClassifyBranchUpdateError(err, fork)
 }
 
 func (c *Engine) executeUpdateBranchEffect(ctx context.Context, owner, repo string, number int, headSHA, reason string) error {

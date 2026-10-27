@@ -81,13 +81,21 @@ func TestMaintainHeldPRMergeabilityNotesUnresolvableConflictOnce(t *testing.T) {
 		t.Fatalf("conflict notice must be deduplicated, saw %v", fake.comments)
 	}
 
-	// The conflict resolves (a human merges by hand); the next behind push
+	// The same conflict on the same head and base is not asked again.
+	fake.mu.Lock()
+	calls := fake.updateBranchCalls[7]
+	fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("update-branch calls for an unchanged conflicting head and base = %d, want 1", calls)
+	}
+
+	// The base moves and the conflict goes away; the next behind push
 	// succeeds, and the stale conflict notice must clear.
 	fake.mu.Lock()
 	fake.failUpdateBranch = false
 	fake.commits[7] = append(fake.commits[7], ghCommit("c2", "hive-bot", "Merge branch 'main' into feature"))
 	fake.mu.Unlock()
-	heldResolved := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c1", MergeableState: "behind"})
+	heldResolved := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c1", BaseSHA: "b2", MergeableState: "behind"})
 	_ = enforceHoldGuard(context.Background(), cfg, client, client, heldResolved, discardLogger())
 	rec, ok = store.Recorded("acme/widgets", 7)
 	if !ok || rec.ConflictNoted {
@@ -137,8 +145,9 @@ func TestMaintainHeldPRMergeabilityIgnoresCleanPR(t *testing.T) {
 
 // A held PR GitHub refuses to update because the base changed workflow files
 // and the App lacks the workflows permission (projectbluefin/testsuite#991,
-// retried every pass for six hours) gets one attempt per head: the refusal is
-// recorded, no conflict notice is posted, and only a new head retries.
+// retried every pass for six hours) gets one attempt per head and base: the
+// refusal is recorded with its reason, one note tells a person to update the
+// branch (not the conflict notice), and only a new head or base retries.
 func TestMaintainHeldPRMergeabilityStopsOnWorkflowPermissionRefusal(t *testing.T) {
 	for _, state := range []string{"behind", "dirty"} {
 		t.Run(state, func(t *testing.T) {
@@ -163,22 +172,41 @@ func TestMaintainHeldPRMergeabilityStopsOnWorkflowPermissionRefusal(t *testing.T
 			if calls != 1 {
 				t.Fatalf("update-branch calls for a refused head = %d, want 1", calls)
 			}
-			if comments != 0 {
-				t.Fatalf("a workflows-permission refusal is not a conflict; saw %d comments", comments)
+			if comments != 1 {
+				t.Fatalf("want one update notice for a workflows-permission refusal; saw %d comments", comments)
+			}
+			fake.mu.Lock()
+			note := fake.comments[0]
+			fake.mu.Unlock()
+			if !strings.Contains(note, "workflows permission") || !strings.Contains(note, "Update branch") || strings.Contains(note, "real conflict") {
+				t.Fatalf("notice = %q, want the workflows-permission reason and the Update branch step, not the conflict notice", note)
 			}
 			rec, ok := store.Recorded("acme/widgets", 7)
-			if !ok || rec.WorkflowRefusedHeadSHA != "c1" || rec.ConflictNoted {
-				t.Fatalf("snapshot = %+v ok=%v, want WorkflowRefusedHeadSHA=c1 and no conflict noted", rec, ok)
+			if !ok || rec.UpdateStoppedHeadSHA != "c1" || rec.UpdateStoppedReason != holdguard.UpdateStopWorkflowPermission || rec.ConflictNoted {
+				t.Fatalf("snapshot = %+v ok=%v, want an update stop at c1 for the workflows permission and no conflict noted", rec, ok)
+			}
+
+			// The base moves; the guard asks again, and the same refusal
+			// does not post a second note for the same head.
+			movedBase := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c1", BaseSHA: "b2", MergeableState: state})
+			_ = enforceHoldGuard(context.Background(), cfg, client, client, movedBase, discardLogger())
+			_ = enforceHoldGuard(context.Background(), cfg, client, client, movedBase, discardLogger())
+			fake.mu.Lock()
+			calls = fake.updateBranchCalls[7]
+			comments = len(fake.comments)
+			fake.mu.Unlock()
+			if calls != 2 || comments != 1 {
+				t.Fatalf("after the base moved: update-branch calls = %d, comments = %d; want 2 and 1", calls, comments)
 			}
 
 			// The head moves (a person pushed); the guard tries again.
-			movedHead := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c2", MergeableState: state})
+			movedHead := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c2", BaseSHA: "b2", MergeableState: state})
 			_ = enforceHoldGuard(context.Background(), cfg, client, client, movedHead, discardLogger())
 			fake.mu.Lock()
 			calls = fake.updateBranchCalls[7]
 			fake.mu.Unlock()
-			if calls != 2 {
-				t.Fatalf("update-branch calls after the head moved = %d, want 2", calls)
+			if calls != 3 {
+				t.Fatalf("update-branch calls after the head moved = %d, want 3", calls)
 			}
 		})
 	}
