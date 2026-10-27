@@ -396,6 +396,15 @@ symlinks it under whatever filename the chosen CLI actually looks for
 fetched and refreshed on schedule, but the model never sees it — the failure
 mode fixed for Goose in [#2393](https://github.com/hivecommons/hive/issues/2393).
 
+`just contribute-hive local` fetches the same export into
+`${HIVE_AGENT_MD:-$HOME/agent.md}` before starting the CLI and refreshes it
+every 10 minutes (shared code in `bin/lib/knowledge-export.sh`). It is then
+symlinked under the backend's context filenames (`CLAUDE.md`, `AGENTS.md`,
+`.goosehints`, ...) in `HIVE_AGENT_CWD`, the directory the CLI is launched
+from, rather than in your home directory as the container does. If the hub
+cannot serve it, the file stays absent and the relay reports a `~`-relative
+`knowledge_error`.
+
 | Backend | Filenames linked in `$HOME` |
 | --- | --- |
 | `claude`, `litellm` | `CLAUDE.md` |
