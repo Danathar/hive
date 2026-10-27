@@ -294,6 +294,50 @@ func TestPlanIdempotentExclusiveAndStaleRemoval(t *testing.T) {
 	}
 }
 
+func TestPlanCaseInsensitiveMatching(t *testing.T) {
+	// Test that Plan recognizes mis-cased stage labels.
+	want := Desired{Stage: ReviewPending, Role: RoleContributor}
+	add, remove := Plan([]string{"bug", "STAGE/050-REVIEW-PENDING", "role/contributor"}, want)
+	if len(add)+len(remove) != 0 {
+		t.Fatalf("mis-cased stage label should be recognized: add=%v remove=%v", add, remove)
+	}
+
+	// Test that Plan removes a mis-cased label and adds the canonical form.
+	add, remove = Plan([]string{"bug", "STAGE/070-FIXING"}, Desired{Stage: ReviewPending})
+	if !reflect.DeepEqual(remove, []string{"STAGE/070-FIXING"}) {
+		t.Fatalf("mis-cased stage/070-fixing should be removed: remove=%v", remove)
+	}
+	if !reflect.DeepEqual(add, []string{"stage/050-review-pending"}) {
+		t.Fatalf("canonical stage should be added: add=%v", add)
+	}
+
+	// A mixed-case configured author/<kind> name already on the item must be
+	// matched (no churn), and when missing must be added with its configured
+	// spelling.
+	names := authorkind.Names{Human: "author/Human"}
+	add, remove = Plan([]string{"bug", "author/Human", "stage/050-review-pending"},
+		Desired{Stage: ReviewPending, Kind: authorkind.Human, KindLabels: names})
+	if len(add)+len(remove) != 0 {
+		t.Fatalf("configured mixed-case author label should be idempotent: add=%v remove=%v", add, remove)
+	}
+	add, remove = Plan([]string{"bug", "stage/050-review-pending"},
+		Desired{Stage: ReviewPending, Kind: authorkind.Human, KindLabels: names})
+	if !reflect.DeepEqual(add, []string{"author/Human"}) || len(remove) != 0 {
+		t.Fatalf("configured author label should be added verbatim: add=%v remove=%v", add, remove)
+	}
+
+	// Test that Owned recognizes mis-cased labels.
+	if !Owned("STAGE/010-ACTIONABLE") || !Owned("ROLE/TRUSTED") || !Owned("AUTHOR/HUMAN") {
+		t.Fatal("Owned should recognize mis-cased labels")
+	}
+
+	// Test that Current recognizes mis-cased labels.
+	cur := Current([]string{"STAGE/030-PR-IN-PROGRESS"})
+	if cur != PRInProgress {
+		t.Fatalf("Current should recognize mis-cased labels: got %v want %v", cur, PRInProgress)
+	}
+}
+
 func TestStoreObserveRegressRecoverAndStalled(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
@@ -1436,5 +1480,50 @@ func TestLabelNormalisationConsistency(t *testing.T) {
 				t.Errorf("IssueCoveredByPR(%v) = %v, want %v", tt.labels, gotCovered, tt.wantCovered)
 			}
 		})
+	}
+}
+
+// hivecommons/hive#14471: the supersession mark and the poll gate it closes.
+func TestStoreMarkSupersededAndPollDue(t *testing.T) {
+	now := time.Date(2026, 10, 26, 22, 0, 0, 0, time.UTC)
+	s := NewStore("", func() time.Time { return now })
+	key := Key("acme/widget", 7)
+	s.Observe(key, ReturnedToContributor, "check-failing:unit")
+	r, _ := s.Get(key)
+	if r.SupersederPollDue(now, 10*time.Minute) {
+		t.Fatal("poll due with no superseder on record")
+	}
+	s.MarkAdopted(key, "a", 90, now)
+	r, _ = s.Get(key)
+	if !r.SupersederPollDue(now.Add(10*time.Minute), 10*time.Minute) || r.SupersederPollDue(now.Add(time.Minute), 10*time.Minute) {
+		t.Fatalf("poll gate: %+v", r)
+	}
+	s.MarkSuperseded(key, 90, true, now)
+	r, _ = s.Get(key)
+	if !r.Superseded() || r.SupersededBy != 90 || !r.SupersededOpen || !r.SupersededAt.Equal(now) {
+		t.Fatalf("superseded open: %+v", r)
+	}
+	if r.SupersederPollDue(now.Add(time.Hour), 10*time.Minute) {
+		t.Fatal("poll due after supersession")
+	}
+	// The close succeeding later flips open off without moving the clock.
+	s.MarkSuperseded(key, 90, false, now.Add(time.Minute))
+	r, _ = s.Get(key)
+	if r.SupersededOpen || !r.SupersededAt.Equal(now) {
+		t.Fatalf("superseded closed: %+v", r)
+	}
+	s.MarkSupersederMergedNoted(key, "b")
+	r, _ = s.Get(key)
+	if r.SupersederMergedNotedHead != "b" {
+		t.Fatalf("noted head: %+v", r)
+	}
+	s.ClearAdoption(key)
+	r, _ = s.Get(key)
+	if r.Superseded() || r.SupersederMergedNotedHead != "" || r.SupersededOpen {
+		t.Fatalf("ClearAdoption kept supersession: %+v", r)
+	}
+	s.MarkSuperseded(key, 0, false, now)
+	if r, _ = s.Get(key); r.Superseded() {
+		t.Fatal("MarkSuperseded accepted PR 0")
 	}
 }

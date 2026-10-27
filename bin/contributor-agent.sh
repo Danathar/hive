@@ -459,6 +459,12 @@ GOOSECFG
       ln -sf "$agent_md" "${HOME}/AGENTS.md"
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
+    omnigent)
+      # Omnigent orchestrates Claude, Codex, Cursor, Pi, and custom harnesses.
+      # Link both AGENTS.md and CLAUDE.md for harness compatibility.
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
     *)
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
@@ -726,6 +732,21 @@ detect_cli() {
         echo "NOT_AUTHED"
       fi
       ;;
+    omnigent)
+      # `omnigent --version` is a Click version action: it exits 0 with
+      # no credential at all, so the binary alone proves nothing. Probe the
+      # credential Omnigent documents: ambient provider keys (ANTHROPIC_API_KEY,
+      # OPENAI_API_KEY, GEMINI_API_KEY), Databricks auth (~/.databrickscfg,
+      # DATABRICKS_TOKEN), or persisted session tokens (~/.omnigent/auth_tokens.json
+      # or ~/.omnigent/config.yaml).
+      if ! omnigent --version &>/dev/null; then
+        echo "NOT_AUTHED"
+      elif [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" || -n "${GEMINI_API_KEY:-}" || -n "${DATABRICKS_TOKEN:-}" || -n "${OMNIGENT_API_KEY:-}" || -s "${HOME}/.omnigent/auth_tokens.json" || -s "${HOME}/.omnigent/config.yaml" || -s "${HOME}/.databrickscfg" ]]; then
+        echo "OK"
+      else
+        echo "NOT_AUTHED"
+      fi
+      ;;
     *)
       echo "UNKNOWN"
       ;;
@@ -740,7 +761,7 @@ fi
 # seed_claude_config pre-answers the first-run gates Claude Code raises in
 # ${HOME}/.claude.json, so none of them can park the tmux pane on a menu that
 # nothing inside a container is there to answer. Mirrors the hub's
-# inferenceUserConfigSeed (src/pkg/agent/manager.go) and the same seed
+# inferenceUserConfigSeed (src/crux/agent/manager.go) and the same seed
 # bin/test_backend_smoke.sh writes for its throwaway HOME.
 #
 # hasCompletedOnboarding matters for EVERY claude contributor, not just the
@@ -752,7 +773,7 @@ fi
 # oauthAccount but NOT hasCompletedOnboarding. The CLI then re-runs onboarding
 # and draws "Select login method" on top of working credentials. That two-file
 # split is documented for hub-side agents in
-# src/pkg/agent/claude_session_state.go (#4596); the contributor relay walks
+# src/crux/agent/claude_session_state.go (#4596); the contributor relay walks
 # into the same wall from the other direction.
 #
 # This seeding used to run only for litellm, or for claude when an
@@ -884,17 +905,12 @@ case "$STATUS" in
     ;;
 esac
 
-# bob is launched with --auth-method api-key (see backend_perm_flag in
-# config/backends.conf), which makes BOBSHELL_API_KEY mandatory: without it bob
-# comes up sitting at "Enter Bob-Shell API Key" and simply waits. Nobody is
-# attached to an unattended relay, so that is an indefinite silent hang rather
-# than a failure anyone can see. Fail loudly at startup instead.
-# Only the presence of the key is tested — never its value, and it is never
-# echoed.
-if [[ "$AGENT_BACKEND" == "bob" ]] && [[ -z "${BOBSHELL_API_KEY:-}" ]]; then
-  echo "ERROR: backend 'bob' requires BOBSHELL_API_KEY to be set."
+# Fail before an unattended Bob waits indefinitely for a key. Export both
+# names for Bob 1.x/2.x compatibility without printing either value.
+if [[ "$AGENT_BACKEND" == "bob" ]] && ! backend_bob_prepare_env; then
+  echo "ERROR: backend 'bob' requires BOB_API_KEY (or legacy BOBSHELL_API_KEY) to be set."
   echo "  Get a key at https://bob.ibm.com (Scope: Inference), then:"
-  echo "    export BOBSHELL_API_KEY=..."
+  echo "    export BOB_API_KEY=..."
   echo "  The key stays on your machine and is never sent to the hive."
   exit 1
 fi
@@ -1189,6 +1205,15 @@ CONTAINER_NAME="${HIVE_CONTAINER_NAME:-hive-contributor}"
 # by something older than the recipe that passes this, printing exactly what it
 # printed before.
 CONTAINER_RUNTIME="${HIVE_CONTAINER_RUNTIME:-docker}"
+# Apptainer/Singularity attach to a named instance and do not accept -it.
+case "$CONTAINER_RUNTIME" in
+  apptainer|singularity)
+    ATTACH_COMMAND="$CONTAINER_RUNTIME exec instance://$CONTAINER_NAME tmux attach -t $TMUX_SESSION"
+    ;;
+  *)
+    ATTACH_COMMAND="$CONTAINER_RUNTIME exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
+    ;;
+esac
 echo "Contributor agent is running."
 echo "  Mode:    $CONTRIBUTOR_MODE"
 echo "  CLI:     $CMD"
@@ -1206,7 +1231,7 @@ fi
 if [[ "$KRUN_CONSOLE" == "true" ]]; then
   echo "  Console: $CONTAINER_RUNTIME attach $CONTAINER_NAME (detach: Ctrl-P Ctrl-Q)"
 elif [[ "$CONTRIBUTOR_MODE" == "interactive" ]]; then
-  echo "  Tmux:    $CONTAINER_RUNTIME exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
+  echo "  Tmux:    $ATTACH_COMMAND"
 else
   # Headless: no pane to attach to. The relay drives a one-shot CLI per task and
   # writes its lifecycle state (waiting/working/done/failed) here for a probe.

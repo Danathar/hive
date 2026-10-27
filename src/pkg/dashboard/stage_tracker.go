@@ -633,9 +633,9 @@ const stageTrackerSentinelMoreFormat = " (+%d more)"
 // stageTrackerSentinel reports whether the sentinel flagged repo#number at
 // head: the PR wears the configured alert label (the sweep's blocking
 // signal, read from the live labels so a webhook label patch flips it at
-// once) or the review evidence bundle for head records sentinel findings
-// (how a trusted author's notice-only finding is seen, since those carry a
-// comment rather than the label). The findings count and the first
+// once) or the verified review evidence bundle for head records sentinel
+// findings (how a trusted author's notice-only finding is seen, since those
+// carry a comment rather than the label). The findings count and the first
 // finding's summary come from the bundle; both are empty when only the
 // label says so. Blocking-alert findings without the label mean a
 // maintainer removed it after reviewing this head (the sweep re-applies it
@@ -643,7 +643,7 @@ const stageTrackerSentinelMoreFormat = " (+%d more)"
 // flag a row that has no label. One file read per PR with a known head,
 // ENOENT when the sentinel never wrote one; the tracker payload is memoised
 // so this runs once per snapshot, not per request.
-func (s *Server) stageTrackerSentinel(repo string, number int, head string, labels []string) (alert bool, findings int, reason string) {
+func (s *Server) stageTrackerSentinel(verifier *github.ReviewEvidenceVerifier, repo string, number int, head string, labels []string) (alert bool, findings int, reason string) {
 	label := s.sentinelLabel()
 	for _, l := range labels {
 		if strings.EqualFold(strings.TrimSpace(l), label) {
@@ -651,10 +651,10 @@ func (s *Server) stageTrackerSentinel(repo string, number int, head string, labe
 			break
 		}
 	}
-	if head == "" {
+	if head == "" || verifier == nil {
 		return alert, 0, ""
 	}
-	b, err := github.LoadReviewEvidence(github.ReviewEvidencePath("", repo, number, head))
+	b, err := github.LoadVerifiedReviewEvidence(github.ReviewEvidencePath("", repo, number, head), *verifier)
 	if err != nil || b == nil || len(b.Sentinel) == 0 {
 		return alert, 0, ""
 	}
@@ -680,6 +680,7 @@ func (s *Server) stageTrackerSentinel(repo string, number int, head string, labe
 	}
 	return true, findings, reason
 }
+
 func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Record, hasRec bool, overrides map[string]time.Duration, now time.Time, draft bool) []string {
 	set := map[string]bool{}
 	for _, l := range labels {
@@ -1079,6 +1080,11 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		cfg = s.deps.Config
 	}
 	resp.NeedsHumanLabels = needsHumanPresetLabels(cfg, status.HiveID)
+	verifier, verifierErr := s.reviewEvidenceVerifier()
+	var evidenceVerifier *github.ReviewEvidenceVerifier
+	if verifierErr == nil {
+		evidenceVerifier = &verifier
+	}
 	lookup := func(repo string, number int) (stagelabels.Record, bool) {
 		if store == nil {
 			return stagelabels.Record{}, false
@@ -1214,6 +1220,12 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 	addPR := func(repoName string, decisions map[string]Ownership, pr github.PullRequest, verdict *github.MergeVerdict, bucket, bucketReason string) {
 		pr.Repo = nonEmpty(pr.Repo, repoName)
 		rec, ok := lookup(repoName, pr.Number)
+		if ok && rec.Superseded() {
+			// hivecommons/hive#14471: the hive's adoption of this PR merged
+			// and the original was told. Closed or not (the App may lack
+			// permission on a fork PR), it is finished work, not a row.
+			return
+		}
 		it := StageTrackerItem{Repo: repoName, Number: pr.Number, Kind: "pr", Title: pr.Title, Author: pr.Author, Head: pr.HeadSHA,
 			Labels: append([]string(nil), pr.Labels...), CreatedAt: timePtr(pr.CreatedAt), UpdatedAt: timePtr(pr.UpdatedAt),
 			Bucket: bucket, BucketReason: bucketReason,
@@ -1233,7 +1245,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		}
 		finish(&it, pr.Labels, labelStage(pr.Labels), rec, ok, pr.Draft)
 		stageTrackerSetFinisher(&it, decisions, pr.Draft)
-		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(repoName, pr.Number, pr.HeadSHA, pr.Labels)
+		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(evidenceVerifier, repoName, pr.Number, pr.HeadSHA, pr.Labels)
 		it.LinkedIssues = stageTrackerPRLinkedIssues(pr, status.GitHubBaseURL)
 		add(it)
 	}
