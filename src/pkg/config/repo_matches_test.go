@@ -25,6 +25,7 @@ func TestRepoMatchesAny(t *testing.T) {
 		{"case-insensitive bare name", "projectbluefin/dakota", "dakota", []string{"DAKOTA"}, true},
 		{"surrounding whitespace is ignored", "projectbluefin/dakota", "dakota", []string{"  projectbluefin/dakota "}, true},
 		{"empty entry never matches", "projectbluefin/dakota", "dakota", []string{"", "  "}, false},
+		{"lone slash is not an empty regex", "projectbluefin/dakota", "dakota", []string{"/"}, false},
 		{"later entry matches", "projectbluefin/dakota", "dakota", []string{"other/repo", "dakota"}, true},
 		{"no patterns", "projectbluefin/dakota", "dakota", nil, false},
 	}
