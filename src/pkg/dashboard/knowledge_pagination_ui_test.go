@@ -62,7 +62,7 @@ const facts = Array.from({length: 121}, (_, i) => ({slug: 'fact-' + i}));
  await kbSearch();
  assert.equal(_kbPageOffset, 0);
  assert.ok(_kbServerPaged);
- assert.match(urls[0], /limit=50&offset=0&type=gotcha/);
+ assert.match(urls[0], /limit=50&offset=0&include_states=all&type=gotcha/);
  await kbChangePage(1);
  assert.match(urls[1], /offset=50/);
  assert.equal(_kbFacts.length, 50); // replace, never append pages to the DOM

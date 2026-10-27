@@ -39,12 +39,12 @@ func TestKnowledgeListPages(t *testing.T) {
 	if err := s.deps.Knowledge.ConnectVault(vault, "pages"); err != nil {
 		t.Fatal(err)
 	}
-	_, first := tocGet(t, s, "/api/knowledge")
+	_, first := tocGet(t, s, "/api/knowledge?include_states=all")
 	facts := first["facts"].([]interface{})
 	if len(facts) != 50 || first["total"] != float64(65) || first["has_more"] != true {
 		t.Fatalf("first page: %v", first)
 	}
-	_, last := tocGet(t, s, "/api/knowledge?offset=50")
+	_, last := tocGet(t, s, "/api/knowledge?include_states=all&offset=50")
 	rest := last["facts"].([]interface{})
 	if len(rest) != 15 || last["has_more"] != false {
 		t.Fatalf("last page: %v", last)
