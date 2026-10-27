@@ -387,8 +387,8 @@ the decision follows each one, with the code on `v6` that now carries it.
 - `src/pkg/linearagent/oauth.go:56` — `app:mentionable`.
 - `src/crux/agent/capabilities.go:32` — `Converse`, documented for mentions.
 - `src/crux/proxy/rules.go:160,189` — where `Converse` is enforced.
-- `src/pkg/config/config.go:1716` — `linear.session_agent` resolution rule.
-- `src/pkg/config/config.go:5538` — the removed declarative channel types (#5591).
+- `src/pkg/config/work_sources.go:119-123` — `linear.session_agent` resolution rule.
+- `src/pkg/config/validate.go:702` — the removed declarative channel types (#5591).
 - `src/pkg/config/review_bots.go:33` — `classification.review_bots`, the loop
   list and the per-thread cap.
 - `src/pkg/github/review_request_watcher.go`, `review_threads.go` — the

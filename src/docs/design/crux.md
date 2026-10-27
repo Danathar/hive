@@ -115,7 +115,7 @@ two-repo changes per day, which is why Stage 1 happens in this repo.
    `HasSession`); `pkg/tui` attaches through it and the ratchet's tmux
    baseline is zero everywhere else. Operations are added as call sites
    move behind the funnel, not ahead of them.
-3. `crux.Runtime` (shipped): `src/pkg/crux/runtime.go` is the exported
+3. `crux.Runtime` (shipped): `src/crux/runtime.go` is the exported
    runtime surface, grouped as `Lifecycle`, `Observer`, `Kicker`,
    `Definitions`, `Fleet` and `Credentials`; every method is annotated with
    the consumer that needs it and `*agent.Manager` satisfies it directly, so
@@ -344,7 +344,7 @@ which bit a CI script during #13950:
   `.../internal/...`. Test helpers the ring needs live in
   `crux/internal/testutil`; `internal/testutil` keeps the canonical copy.
 - Root-module tests that read ring files by path (`internal/settingsparity`
-  walked `src/pkg/crux/config`; the docs citation and link checkers) name
+  walked `src/crux/config`; the docs citation and link checkers) name
   `src/crux/...` now. `pkg/<ring>` paths in prose were left alone where
   they describe history.
 - Relative paths inside ring tests kept their depth (`pkg/agent` and
@@ -971,7 +971,7 @@ answers are already cheap and the per-call timeout
 ## CLI
 
 The Stage 2 plan called for a `crux` binary; it shipped in Stage 1 instead
-(`src/cmd/crux`, logic in `src/pkg/crux/cli`, operator page
+(`src/cmd/crux`, logic in `src/crux/cli`, operator page
 [crux-cli.md](../crux-cli.md)) because it is the cheapest proof that
 `crux.Runtime` is a sufficient surface: every subcommand is written against
 the interface, and the only `*agent.Manager` reference is the constructor in

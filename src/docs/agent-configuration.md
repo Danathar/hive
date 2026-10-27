@@ -892,7 +892,7 @@ agents:
       ref: main              # optional; branch/tag/SHA — omit for the default branch
 ```
 
-`definition_source` is `DefinitionSourceConfig` (`src/pkg/crux/config/agent_runtime.go:62`), a field on `AgentConfig` (`src/pkg/crux/config/agent_config.go:356`). `owner`, `repo`, and `path` are required for the source to be considered set (`IsSet()`, `src/pkg/crux/config/agent_runtime.go:88`); `ref` is optional and falls back to the repo's default branch. `url` is a fifth, informational-only field the dashboard import UI uses to round-trip the pasted `github.com` blob URL — it plays no part in fetching.
+`definition_source` is `DefinitionSourceConfig` (`src/crux/config/agent_runtime.go:62`), a field on `AgentConfig` (`src/crux/config/agent_config.go:356`). `owner`, `repo`, and `path` are required for the source to be considered set (`IsSet()`, `src/crux/config/agent_runtime.go:88`); `ref` is optional and falls back to the repo's default branch. `url` is a fifth, informational-only field the dashboard import UI uses to round-trip the pasted `github.com` blob URL — it plays no part in fetching.
 
 ### What it does
 

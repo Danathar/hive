@@ -231,7 +231,7 @@ filesystem.
 
 It is double-gated off: `AgentConfig.SandboxEnabled` requires both the global
 `agent_sandbox.enabled` bool and a per-agent `sandbox.enabled` pointer to be
-true (`src/pkg/crux/config/agent_runtime.go:524-529`); both default to their zero value
+true (`src/crux/config/agent_runtime.go:524-529`); both default to their zero value
 (`false`/`nil`), so an agent is on the sandbox path only if an operator finds
 and sets both knobs. `sandbox-isolation.md` confirms this is deliberate:
 "Sandbox execution is opt-in and the tmux path remains unchanged for all
@@ -366,7 +366,7 @@ The sandbox is already built, already does real workspace confinement via a
 bind mount and `--userns=keep-id`
 (`src/crux/sandbox/sandbox.go:123-146`), and is exactly the shape the Codex
 comparison in the original issue argues for. The double gate
-(`src/pkg/crux/config/agent_runtime.go:524-529`) is a configuration default, not a
+(`src/crux/config/agent_runtime.go:524-529`) is a configuration default, not a
 missing capability — closing it is materially cheaper than any option in
 category B that requires new code (bwrap/seccomp/VM), and it directly answers
 the mode where the incident actually happened (`local`, no container, no

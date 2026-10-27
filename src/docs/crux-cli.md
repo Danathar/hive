@@ -4,7 +4,7 @@
 ([design record](design/crux.md), RFC
 [#13536](https://github.com/hivecommons/hive/issues/13536)). It runs an agent
 from a definition and observes and controls it through `crux.Runtime`
-(`src/pkg/crux/runtime.go`), with none of the governor, GitHub integration or
+(`src/crux/runtime.go`), with none of the governor, GitHub integration or
 dashboard around it. It is the Stage 1 proof that the runtime surface is
 enough to drive an agent; the Stage 2 binary ships the same commands from the
 nested module.
