@@ -31923,10 +31923,12 @@ function burnAreaChart() {
         } else {
           url = '/api/knowledge/' + encodeURIComponent(layer);
         }
+        // Owners browse every lifecycle state; the server clamps other roles to approved.
+        url += (url.includes('?') ? '&' : '?') + 'include_states=all';
         if (typeFilter) url += (url.includes('?') ? '&' : '?') + 'type=' + encodeURIComponent(typeFilter);
       } else {
         url = '/api/knowledge';
-        const params = ['limit=' + _kbPageSize, 'offset=' + offset];
+        const params = ['limit=' + _kbPageSize, 'offset=' + offset, 'include_states=all'];
         if (typeFilter) params.push('type=' + encodeURIComponent(typeFilter));
         if (params.length) url += '?' + params.join('&');
       }
@@ -31956,7 +31958,7 @@ function burnAreaChart() {
         layer = match ? match.layer : 'project';
       }
       try {
-        const r = await fetch('/api/knowledge/' + encodeURIComponent(layer) + '/' + encodeURIComponent(slug));
+        const r = await fetch('/api/knowledge/' + encodeURIComponent(layer) + '/' + encodeURIComponent(slug) + '?include_states=all');
         if (!r.ok) return;
         _kbSelectedFact = await r.json();
         renderKnowledgeDetail();

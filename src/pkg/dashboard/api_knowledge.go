@@ -165,9 +165,14 @@ func (s *Server) handleKnowledgeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	includeStates, err := knowledgeIncludeStates(r)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	limit, offset := knowledgeListPagination(r)
 	typeFilter := r.URL.Query().Get("type")
-	facts := s.deps.Knowledge.SearchAllWithVaults(s.deps.Ctx, "", typeFilter, 0)
+	facts := knowledge.FilterByLifecycle(s.deps.Knowledge.SearchAllWithVaults(s.deps.Ctx, "", typeFilter, 0), includeStates)
 	// Search merges multiple stores; impose a stable order before slicing pages.
 	sort.SliceStable(facts, func(i, j int) bool {
 		if facts[i].Layer != facts[j].Layer {
@@ -238,7 +243,9 @@ func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	facts := s.deps.Knowledge.SearchAllWithVaults(s.deps.Ctx, "", "", 0)
+	// The export seeds contributor agents' startup context, so it carries
+	// approved knowledge only, whoever asks (#14546).
+	facts := knowledge.FilterByLifecycle(s.deps.Knowledge.SearchAllWithVaults(s.deps.Ctx, "", "", 0), nil)
 
 	grouped := make(map[string][]knowledge.Fact)
 	for _, f := range facts {
@@ -405,9 +412,10 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Search defaults to approved (current) knowledge; include_states opts
-	// into draft/deprecated/superseded facts, e.g. "deprecated,superseded" or "all".
-	includeStates, err := knowledge.ParseLifecycleStates(r.URL.Query().Get("include_states"))
+	// Search defaults to approved (current) knowledge; owners may opt into
+	// draft/deprecated/superseded facts with include_states, e.g.
+	// "deprecated,superseded" or "all".
+	includeStates, err := knowledgeIncludeStates(r)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -524,6 +532,11 @@ func (s *Server) handleKnowledgeLayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	includeStates, err := knowledgeIncludeStates(r)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	layer := r.PathValue("layer")
 	typeFilter := r.URL.Query().Get("type")
 
@@ -535,7 +548,7 @@ func (s *Server) handleKnowledgeLayer(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, map[string]interface{}{"layer": layer, "count": 0, "facts": []interface{}{}})
 			return
 		}
-		facts := store.ListPages(typeFilter)
+		facts := knowledge.FilterByLifecycle(store.ListPages(typeFilter), includeStates)
 		for i := range facts {
 			facts[i].Layer = knowledge.LayerType(layer)
 		}
@@ -548,10 +561,7 @@ func (s *Server) handleKnowledgeLayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	knowledgeLayer := knowledge.LayerType(layer)
-	facts := s.deps.Knowledge.LayerFacts(s.deps.Ctx, knowledgeLayer, typeFilter)
-	if facts == nil {
-		facts = []knowledge.Fact{}
-	}
+	facts := knowledge.FilterByLifecycle(s.deps.Knowledge.LayerFacts(s.deps.Ctx, knowledgeLayer, typeFilter), includeStates)
 	jsonResponse(w, map[string]interface{}{
 		"layer": layer,
 		"count": len(facts),
@@ -565,13 +575,24 @@ func (s *Server) handleKnowledgeFact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	includeStates, err := knowledgeIncludeStates(r)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	slug := r.PathValue("slug")
 	fact, err := s.deps.Knowledge.ReadFact(s.deps.Ctx, slug)
 	if err != nil || fact == nil {
 		jsonError(w, "fact not found", http.StatusNotFound)
 		return
 	}
-	jsonResponse(w, fact)
+	// A fact hidden from lists must not be readable by guessing its slug.
+	visible := knowledge.FilterByLifecycle([]knowledge.Fact{*fact}, includeStates)
+	if len(visible) == 0 {
+		jsonError(w, "fact not found", http.StatusNotFound)
+		return
+	}
+	jsonResponse(w, visible[0])
 }
 
 func (s *Server) handleKnowledgeCreate(w http.ResponseWriter, r *http.Request) {
@@ -996,12 +1017,13 @@ func (s *Server) handleVaultFacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := r.PathValue("name")
-	facts := s.deps.Knowledge.VaultFacts(name)
-	if facts == nil {
-		facts = []knowledge.Fact{}
+	includeStates, err := knowledgeIncludeStates(r)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	jsonResponse(w, facts)
+	name := r.PathValue("name")
+	jsonResponse(w, knowledge.FilterByLifecycle(s.deps.Knowledge.VaultFacts(name), includeStates))
 }
 
 func (s *Server) handleGitSourcesList(w http.ResponseWriter, r *http.Request) {
