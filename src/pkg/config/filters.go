@@ -1,9 +1,37 @@
 package config
 
+import "strings"
+
 // MatchesAny returns true if text matches any pattern in the list.
 func MatchesAny(text string, patterns []string) bool {
 	for _, p := range patterns {
 		if WildcardMatch(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// RepoMatchesAny reports whether a repository, given as its full owner/name
+// and its bare name, matches any hub.disabled_repos style pattern. Unlike
+// MatchesAny, a plain entry (no "*", not wrapped in /…/) must equal one of
+// the two forms exactly, case-insensitively, so disabling "owner/dakota"
+// does not also disable "owner/dakota-iso". Globs and /regex/ entries keep
+// the WildcardMatch semantics against both forms. Empty entries never match.
+func RepoMatchesAny(full, name string, patterns []string) bool {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		isRegex := len(p) > 1 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/")
+		if isRegex || strings.Contains(p, "*") {
+			if WildcardMatch(full, p) || WildcardMatch(name, p) {
+				return true
+			}
+			continue
+		}
+		if strings.EqualFold(full, p) || strings.EqualFold(name, p) {
 			return true
 		}
 	}

@@ -768,7 +768,7 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 		if len(repo.ActionableIssues) == 0 {
 			continue
 		}
-		if config.MatchesAny(repo.Full, disabledRepos) || config.MatchesAny(repo.Name, disabledRepos) {
+		if config.RepoMatchesAny(repo.Full, repo.Name, disabledRepos) {
 			continue
 		}
 		if !repoScope.allows(repoScopeID(repoScopeDefaultForge, scopeHost, repo.Full)) {

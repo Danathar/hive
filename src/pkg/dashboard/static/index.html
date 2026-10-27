@@ -47321,12 +47321,26 @@ function burnAreaChart() {
       return true;
     }
 
+    function contribRepoIsRegexEntry(entry) {
+      entry = String(entry || '').trim();
+      return entry.length > 1 && entry.charAt(0) === '/' && entry.charAt(entry.length - 1) === '/';
+    }
+
+    // Mirrors config.RepoMatchesAny: a plain entry must equal the full or bare
+    // name (case-insensitive); * globs and /regex/ entries match either form.
     function contribRepoDisabledEntryMatches(repoFull, entry) {
       const full = String(repoFull || '');
       const short = contribRepoShortName(full);
       entry = String(entry || '').trim();
       if (!entry) return false;
-      return contribRepoWildcardMatch(full, entry) || contribRepoWildcardMatch(short, entry);
+      if (contribRepoIsRegexEntry(entry)) {
+        var re;
+        try { re = new RegExp(entry.slice(1, -1), 'i'); } catch (e) { return false; }
+        return re.test(full) || re.test(short);
+      }
+      if (entry.indexOf('*') >= 0) return contribRepoWildcardMatch(full, entry) || contribRepoWildcardMatch(short, entry);
+      entry = entry.toLowerCase();
+      return full.toLowerCase() === entry || short.toLowerCase() === entry;
     }
 
     function contribRepoMatchingDisabledEntries(repoFull, disabled) {
@@ -47978,9 +47992,9 @@ function burnAreaChart() {
         if (contribRepoMatchingDisabledEntries(repoFull, disabled).length === 0) disabled.push(repoFull);
       } else {
         var blockers = contribRepoMatchingDisabledEntries(repoFull, disabled);
-        var wildcardBlockers = blockers.filter(function(r) { return String(r || '').indexOf('*') >= 0; });
+        var wildcardBlockers = blockers.filter(function(r) { return String(r || '').indexOf('*') >= 0 || contribRepoIsRegexEntry(r); });
         if (wildcardBlockers.length) {
-          showToast('This repo is disabled by wildcard disabled_repos entry: ' + wildcardBlockers.join(', '), 'error');
+          showToast('This repo is disabled by wildcard or regex disabled_repos entry: ' + wildcardBlockers.join(', '), 'error');
           renderConfigTab('Hub');
           return;
         }

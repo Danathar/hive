@@ -677,7 +677,7 @@ type contributeRepository struct {
 
 // contributeEligibleRepositories lists the repositories contributors may be
 // offered work from: the hub's monitored repositories minus hub.disabled_repos,
-// matched with the same MatchesAny rule selectTask applies. The monitored set
+// matched with the same RepoMatchesAny rule selectTask applies. The monitored set
 // is the status snapshot selection reads; before the first snapshot it is the
 // configured project repos, qualified with the org exactly as buildRepos does.
 func (s *Server) contributeEligibleRepositories() []contributeRepository {
@@ -718,7 +718,7 @@ func (s *Server) contributeEligibleRepositories() []contributeRepository {
 		if full == "" || !strings.Contains(full, "/") {
 			continue
 		}
-		if config.MatchesAny(r.full, disabled) || config.MatchesAny(r.name, disabled) {
+		if config.RepoMatchesAny(r.full, r.name, disabled) {
 			continue
 		}
 		id := repoScopeID(repoScopeDefaultForge, host, full)
