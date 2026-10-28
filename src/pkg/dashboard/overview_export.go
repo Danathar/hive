@@ -114,18 +114,18 @@ func (s *Server) handleOverviewExport(w http.ResponseWriter, r *http.Request, ki
 		w.Header().Set("Content-Type", overviewJSONType)
 		resp := overviewJSONResponse{Kind: kind, GeneratedAt: now, SnapshotAt: snapshotAt, SnapshotSeq: snapshotSeq, SnapshotInstance: snapshotInstance, HiveID: hiveID, StaleDays: normalizeIssueBandsConfig(cfg).StaleDays, Bands: bands, Rows: rows}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			slogWarnOverviewEncode(err)
+			logOverviewEncodeFailure(err)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", overviewCSVType)
 	w.Header().Set("Content-Disposition", `inline; filename="`+overviewFilename(hiveID, kind, filters, bands, now)+`"`)
 	if _, err := w.Write([]byte(overviewCSV(rows, overviewCSVColumns(kind)))); err != nil {
-		slogWarnOverviewEncode(err)
+		logOverviewEncodeFailure(err)
 	}
 }
 
-func slogWarnOverviewEncode(err error) {
+func logOverviewEncodeFailure(err error) {
 	if err != nil {
 		logEncodeFailure("overview export encode failed", err)
 	}

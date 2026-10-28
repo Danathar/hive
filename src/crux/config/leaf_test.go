@@ -92,6 +92,13 @@ func TestAgentConfigJevAndOwners(t *testing.T) {
 	if a.ModelIsOperatorOwned() {
 		t.Fatal("pack owner is not operator")
 	}
+	if a.BackendIsPackOwned() {
+		t.Fatal("operator-owned backend is not pack-owned")
+	}
+	a.BackendOwner = FieldOwnerPack
+	if !a.BackendIsPackOwned() || (AgentConfig{}).BackendIsPackOwned() {
+		t.Fatal("only a pack-stamped backend is pack-owned")
+	}
 }
 
 func TestAgentConfigRepos(t *testing.T) {

@@ -83,6 +83,9 @@ type Config struct {
 	// operator-facing block; Tracing is retained as a legacy alias.
 	OTel    OTelConfig `yaml:"otel,omitempty" json:"otel,omitempty"`
 	Tracing OTelConfig `yaml:"tracing,omitempty"`
+	// Debug holds process-level diagnostics knobs (pprof listener). See
+	// docs/operator-reference.md "Runtime diagnostics".
+	Debug DebugConfig `yaml:"debug,omitempty" json:"debug,omitempty"`
 	// Triggers is an additive list of CEL-based declarative agent triggers.
 	// Default empty → existing label/governor triggering is unchanged.
 	Triggers []TriggerRule `yaml:"triggers,omitempty" json:"triggers,omitempty"`

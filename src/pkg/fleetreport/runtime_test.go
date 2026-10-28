@@ -364,6 +364,7 @@ func TestEveryRuntimeClassTriggerAndNonTriggerThresholds(t *testing.T) {
 		{class: ClassIOScanClassifierUnavail, message: "ioscan classifier failed closed; text withheld"},
 		{class: ClassIOScanClassifierUnavail, message: "ioscan classifier failed open; text passes on unclassified"},
 		{class: ClassIOScanClassifierUnavail, message: "ioscan fail-closed blocked kick"},
+		{class: ClassIOScanClassifierUnavail, message: "ioscan fail-closed blocked held-PR coordination kick"},
 		{class: ClassGitHubFetchTransient, message: "channel commit date: fetch failed — the row will render without a timestamp"},
 		{class: ClassLabelProvisioningFailed, message: "issue stage labels: provisioning failed"},
 		{class: ClassAgentCLIRestartLoop, message: "agent CLI crashed or stuck on consent screen, restarting before kick"},
@@ -798,6 +799,15 @@ func TestIsBenignMessagePolicySeedDivergence(t *testing.T) {
 	}
 }
 
+func TestIsBenignMessageForwardMergeGuard(t *testing.T) {
+	if !IsBenignMessage("forward-merge guard: refusing to squash, forcing merge commit") {
+		t.Error("forward-merge squash refusal not benign")
+	}
+	if IsBenignMessage("forward-merge guard: head-history check failed") {
+		t.Error("head-history check failure wrongly benign")
+	}
+}
+
 func TestIsBenignMessageCopilotModelFallback(t *testing.T) {
 	const msg = "copilot CLI substituted the configured model"
 	if !IsBenignMessage(msg) {
@@ -948,6 +958,7 @@ func TestRecurringRuntimeMessagesAreClassified(t *testing.T) {
 		"ioscan classifier failed closed; text withheld":                                               ClassIOScanClassifierUnavail,
 		"ioscan classifier failed open; text passes on unclassified":                                   ClassIOScanClassifierUnavail,
 		"ioscan fail-closed blocked kick":                                                              ClassIOScanClassifierUnavail,
+		"ioscan fail-closed blocked held-PR coordination kick":                                         ClassIOScanClassifierUnavail,
 		"proxy client TLS handshake failed":                                                            ClassProxyTLSHandshakeFailed,
 		"transparent proxy TLS handshake failed":                                                       ClassProxyTLSHandshakeFailed,
 		"failed to restore per-agent dir mode":                                                         ClassAgentDirSetupFailed,

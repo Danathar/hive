@@ -152,6 +152,10 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	// the manager's process table and were re-registered. A repair, not a
 	// creation — it never feeds `created` or isFirstApplyOrExpansion (#5632).
 	var readded []string
+	// Read once, before this apply creates or moves anything, so every pack
+	// agent judges the hive's gateway on the same pre-apply roster rather
+	// than on agents this apply already moved.
+	hiveBackends := s.hiveAgentBackends()
 	for _, pa := range pack.Agents {
 		// A deliberately deleted agent is NOT re-created, at any level. The
 		// pack listing it is exactly why deletion did not stick: ApplyPack
@@ -161,6 +165,7 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 			tombstoned = append(tombstoned, pa.Name)
 			continue
 		}
+		hiveGateway := s.hiveGatewayBackend(hiveBackends, pa.Name)
 		if existing, exists := s.deps.Config.Agents[pa.Name]; exists {
 			changed := false
 			// stamped records an ownership-only change that must be persisted
@@ -221,6 +226,22 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 			// stick. A pack-owned model is cleared there instead, so the
 			// gateway default applies.
 			packBackend, backendReplaced := s.packAgentBackend(pa)
+			// A pack agent whose backend the pack still owns follows the
+			// hive's gateway (#14678): from the CLI the pack gave it, and
+			// again from a gateway an earlier apply moved it onto when the
+			// operator later moves the hive to another. Only a backend the
+			// pack itself wrote moves — never an operator's pick, nor a
+			// legacy unowned one.
+			gw := gatewayPlacement(packBackend, backendReplaced, hiveGateway)
+			if gw != "" && existing.BackendIsPackOwned() && !strings.EqualFold(existing.Backend, gw) {
+				s.logger.Info("moving pack-owned agent onto the hive's inference gateway",
+					"agent", pa.Name, "backend", existing.Backend, "gateway", gw)
+				existing.Backend = gw
+				if !existing.ModelIsOperatorOwned() {
+					existing.Model = ""
+				}
+				changed = true
+			}
 			onForeignGateway := s.agentOnForeignGatewayBackend(existing.Backend, packBackend)
 			packModel := pa.Model
 			// A hand-set backend other than the pack's (an operator-owned
@@ -414,6 +435,12 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 		packBackend, backendReplaced := s.packAgentBackend(pa)
 		packModel := pa.Model
 		if backendReplaced {
+			packModel = ""
+		}
+		// The pack model is an id from the pack CLI's catalogue; on the
+		// gateway it is cleared so the gateway's default_model applies (#9945).
+		if gw := gatewayPlacement(packBackend, backendReplaced, hiveGateway); gw != "" {
+			packBackend = gw
 			packModel = ""
 		}
 		agentCfg := config.AgentConfig{
@@ -1155,10 +1182,6 @@ func (s *Server) ensureCPUTier(level int) {
 	}
 }
 
-// packAgentBackend is the backend a pack agent is placed on: the pack's own
-// choice, unless the spoke's backends allow/deny list (#11310) disallows it,
-// in which case the list's fallback ("" = hive default) is used instead and
-// replaced reports true.
 // agentOnForeignGatewayBackend reports whether an agent runs on an
 // inference-routed backend (litellm/vllm/llm-d or a configured gateway name)
 // other than the pack's backend, so a pack model — an id from the pack
@@ -1170,9 +1193,104 @@ func (s *Server) agentOnForeignGatewayBackend(agentBackend, packBackend string) 
 	return config.IsInferenceBackend(agentBackend) || s.deps.Config.Governor.ResolveGateway(agentBackend) != nil
 }
 
+// packAgentBackend is the backend a pack agent is placed on: the pack's own
+// choice, unless the spoke's backends allow/deny list (#11310) disallows it,
+// in which case the list's fallback ("" = hive default) is used instead and
+// replaced reports true.
 func (s *Server) packAgentBackend(pa config.PackAgent) (backend string, replaced bool) {
 	if s.deps.Config.BackendAllowed(pa.Backend) {
 		return pa.Backend, false
 	}
 	return s.deps.Config.Backends.Fallback(), true
+}
+
+// agentBackendVote is one enabled agent's backend as seen by
+// hiveGatewayBackend: the backend and whether an operator picked it.
+type agentBackendVote struct {
+	backend       string
+	operatorOwned bool
+}
+
+// hiveAgentBackends snapshots the backend of every enabled agent, keyed by
+// name, for hiveGatewayBackend.
+func (s *Server) hiveAgentBackends() map[string]agentBackendVote {
+	backends := map[string]agentBackendVote{}
+	for name, agent := range s.deps.Config.Agents {
+		if !agent.Enabled || s.deps.Config.IsAgentRemoved(name) {
+			continue
+		}
+		backends[name] = agentBackendVote{
+			backend:       strings.TrimSpace(agent.Backend),
+			operatorOwned: agent.BackendIsOperatorOwned(),
+		}
+	}
+	return backends
+}
+
+// hiveGatewayBackend is the inference gateway the operator moved the hive
+// onto, or "" when there is no such gateway. The candidates are the enabled
+// agents in backends other than except, the pack agent being placed, so its
+// own placement is not counted against the move. The gateway is chosen by
+// unanimity of the operator-owned backends among those candidates: every one
+// must name the same inference backend or configured gateway, and there must
+// be at least one. Any operator pick of a subscription CLI, of the hive
+// default or of a different gateway yields "". The chosen gateway must then
+// clear a majority bar: more than half of the candidates, whoever placed
+// them, already run on it; otherwise the result is "".
+//
+// A pack agent a level adds later is placed on this backend instead of its
+// pack CLI (#14678): an operator who moved scanner/quality/guide onto a LiteLLM
+// gateway found the L2 `reviewer`, added afterwards, on copilot — the only
+// agent in the hive still calling an inference provider they had moved off.
+// Only operator-owned backends choose the gateway, so the pack's own CLI
+// placements (the L2 `supervisor`/`brainstorm`, or a reviewer the pack
+// created before this fix) cannot veto the move they are the subject of, and
+// the majority bar keeps one agent moved onto a gateway from migrating the
+// pack's CLI agents with it. Every agent already on the chosen gateway counts
+// toward that majority, whoever placed it there: the pack agents an earlier
+// level moved onto it must not dilute the bar for the agent the next level
+// adds, or the L3 `ci-maintainer` would land on copilot one level up.
+func (s *Server) hiveGatewayBackend(backends map[string]agentBackendVote, except string) string {
+	shared := ""
+	for name, vote := range backends {
+		if strings.EqualFold(name, except) || !vote.operatorOwned {
+			continue
+		}
+		if !s.agentOnForeignGatewayBackend(vote.backend, "") {
+			return ""
+		}
+		if shared != "" && !strings.EqualFold(shared, vote.backend) {
+			return ""
+		}
+		shared = vote.backend
+	}
+	if shared == "" || !s.deps.Config.BackendAllowed(shared) {
+		return ""
+	}
+	onGateway, others := 0, 0
+	for name, vote := range backends {
+		if strings.EqualFold(name, except) {
+			continue
+		}
+		others++
+		if strings.EqualFold(vote.backend, shared) {
+			onGateway++
+		}
+	}
+	if onGateway*2 <= others {
+		return ""
+	}
+	return shared
+}
+
+// gatewayPlacement is the backend a pack-owned agent is moved to so it follows
+// the hive's gateway (hiveGatewayBackend), or "" to keep packBackend. Only a
+// pack whose own placement is a CLI is redirected: a pack that itself names a
+// gateway, or a placement the spoke's backends list already replaced, is left
+// alone.
+func gatewayPlacement(packBackend string, backendReplaced bool, hiveGateway string) string {
+	if hiveGateway == "" || backendReplaced || !config.IsCLIBackend(packBackend) {
+		return ""
+	}
+	return hiveGateway
 }

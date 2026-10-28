@@ -664,6 +664,7 @@
   },
   "otel": {},
   "Tracing": {},
+  "debug": {},
   "Mint": {
     "Enabled": false,
     "KeyPath": "",

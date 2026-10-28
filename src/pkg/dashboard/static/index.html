@@ -560,13 +560,17 @@
       .oc-topbar-right .widget-dl { margin-left: var(--sp-0); margin-right: var(--sp-0); }
     }
 
-    /* Right chip cluster keeps its full width so it cannot shrink and spill over the left ACMM badge (#13135); the left/center tracks absorb the squeeze. */
-    @media (min-width: 901px) and (max-width: 1400px) {
+    /* Right chip cluster keeps its full width so it cannot shrink and spill over the left ACMM badge or project title (#13135); the left/center tracks absorb the squeeze. Starts at 769px because the ≤768px block clips the cluster instead. */
+    @media (min-width: 769px) and (max-width: 1400px) {
       .oc-topbar-right { min-width: max-content; }
     }
 
+    /* Icon-only chips here so the full-width right cluster still leaves room for the drawer toggle and title (#13135). */
     @media (min-width: 769px) and (max-width: 900px) {
       #acmm-badge { display: none; }
+      .oc-health-badge .nav-chip__label,
+      #oc-settings-btn .nav-chip__label,
+      #welcome-topbar-btn .nav-chip__label { display: none; }
     }
 
     /* Light main content area */
@@ -7363,7 +7367,7 @@
         <input id="activity-monitor-q" class="ham-input" type="search" placeholder="Search # or title…" autocomplete="off" spellcheck="false" aria-label="Search by number or title" data-input-action="hamFilter" data-arg0="q" data-arg-types="s,w">
         <label class="ham-repo-filter"><span>Since</span><select id="activity-monitor-age" class="ham-select" data-change-action="hamFilter" data-arg0="age" data-arg-types="s,v" title="Time on the current step (or open, when no step is known)"><option value="any">Any age</option><option value="1h">Over 1 hour</option><option value="1d">Over 1 day</option><option value="1w">Over 1 week</option><option value="stale">Past the stage dwell</option></select></label>
         <label class="ham-repo-filter"><span>Author</span><select id="activity-monitor-author" class="ham-select" data-change-action="hamFilter" data-arg0="author" data-arg-types="s,v"><option value="any">Any author</option><option value="human">Human</option><option value="clanker">Clanker</option><option value="hive">Hive</option></select></label>
-        <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, held, needs-human, needs-decision, needs-rebase, blocked, on 045 / 071 / 072 / 085 / 090, or regressed while parked on a person">Needs attention</button>
+        <button type="button" class="ham-chip" id="activity-monitor-attention" data-action="hamFilter" data-arg0="attention" data-arg1="toggle" aria-pressed="false" title="Stalled, held, unauthorized, needs-human, needs-decision, needs-rebase, blocked, on 045 / 071 / 072 / 085 / 090, or regressed while parked on a person. Merge-gate pills (sentinel, needs-human, needs-decision) count only once the PR reaches the merge gate">Needs attention</button>
         <label class="ham-repo-filter"><span>Sort</span><select id="activity-monitor-sort" class="ham-select" data-change-action="hamFilter" data-arg0="sort" data-arg-types="s,v"><option value="furthest">Furthest along</option><option value="waiting">Longest waiting</option><option value="newest">Newest</option><option value="number">Number</option><option value="finisher" title="Rows Hive can finish on its own first, then rows waiting on someone else, then rows that need a person. Reverse the direction for rows that need a person first.">Hive end to end first</option></select> <button type="button" class="ham-chip ham-dir" id="activity-monitor-dir" data-action="hamFilter" data-arg0="dir" data-arg1="toggle" aria-label="Reverse sort direction" title="Attention-first within each column; arrow flips age order">↓</button></label>
         <label class="ham-repo-filter"><span>Group</span><select id="activity-monitor-group" class="ham-select" data-change-action="hamGroup" data-arg-types="v" title="Group rows under one collapsible header per repository"><option value="none">None</option><option value="repo">Repo</option></select></label>
         <label class="ham-repo-filter"><span>Per page</span><select id="activity-monitor-size" class="ham-select" data-change-action="hamFilter" data-arg0="size" data-arg-types="s,v"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
@@ -14233,6 +14237,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     const STAGE_TRACKER_SENTINEL_CHIP = 'sentinel';
     const STAGE_TRACKER_SENTINEL_TIP = 'Sentinel flagged security-relevant changes';
     const STAGE_TRACKER_SENTINEL_TIP_FALLBACK = 'possible security override, privilege escalation or codebase damage — a maintainer must review before merge';
+    // Merge-gate pills the server held back (payload deferred_modifiers:
+    // sentinel, needs-human, needs-decision, a merge-time unauthorized
+    // step) because the PR has not reached the gate yet: nothing a person
+    // does now moves the row, so no pill is drawn and the row stays out of
+    // "Needs attention"; the row tooltip alone names what waits at the gate.
+    const STAGE_TRACKER_DEFERRED_NOTE = 'Pending at merge gate: ';
+    function stageTrackerDeferredMods(item) {
+      return Array.isArray(item && item.deferred_modifiers) ? item.deferred_modifiers : [];
+    }
     const STAGE_TRACKER_SHORT_SHA = 7;
     var _stageTracker = null;
     var _stageTrackerSig = '';
@@ -14639,7 +14652,9 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (mods.length) lines.push('Flags: ' + mods.map(m => STAGE_TRACKER_MOD_TEXT[m] || m).join(', '));
       const stale = stageTrackerStaleLabelsText(item);
       if (stale) lines.push(stale);
-      if (item.sentinel_alert) lines.push(stageTrackerSentinelTip(item));
+      const deferred = stageTrackerDeferredMods(item);
+      if (deferred.length) lines.push(STAGE_TRACKER_DEFERRED_NOTE + deferred.map(m => STAGE_TRACKER_MOD_TEXT[m] || m).join(', '));
+      if (item.sentinel_alert && deferred.indexOf(STAGE_TRACKER_SENTINEL_CHIP) < 0) lines.push(stageTrackerSentinelTip(item));
       const regressed = stageTrackerRegressionText(item, nowMs);
       if (regressed) lines.push(regressed.charAt(0).toUpperCase() + regressed.slice(1));
       if (mods.indexOf('unauthorized') >= 0 && item.unauthorized) lines.push('Unauthorized: ' + item.unauthorized);
@@ -14651,7 +14666,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // The sentinel chip: drawn in the chip area (beside needs rebase /
     // regressed) on every lane but the one whose word already says it.
     function stageTrackerSentinelChipHtml(item) {
-      if (!item || !item.sentinel_alert || stageTrackerSentinelInLane(item)) return '';
+      if (!item || !item.sentinel_alert || stageTrackerSentinelInLane(item) || stageTrackerDeferredMods(item).indexOf(STAGE_TRACKER_SENTINEL_CHIP) >= 0) return '';
       return `<span class="ham-badge ham-badge-sentinel" title="${esc(stageTrackerSentinelTip(item))}" aria-label="${esc('Sentinel alert — ' + stageTrackerSentinelTip(item))}">${esc(STAGE_TRACKER_SENTINEL_CHIP)}</span>`;
     }
 
@@ -14672,6 +14687,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const handled = stageTrackerRegressionHandled(item);
       if (handled && mods.length > 1) mods.push(mods.shift());
       let text = handled && mods[0] === 'regressed' ? STAGE_TRACKER_HANDLED_TEXT : (STAGE_TRACKER_MOD_TEXT[mods[0]] || mods[0].replace(/-/g, ' '));
+      // A row the scheduler withholds for open GitHub "blocked by" dependencies names them (hivecommons/hive#14765).
+      if (mods[0] === 'blocked' && Array.isArray(item.blocked_on) && item.blocked_on.length) text = stageTrackerBlockedTip(item);
       // A blocked row with a hive:recheck-after deadline ("blocked until <RFC3339>") names when the sweep re-checks it.
       const recheck = mods[0] === 'blocked' ? /^blocked until (\S+)/i.exec(String(item.bucket_reason || '')) : null;
       const recheckMs = recheck ? Date.parse(recheck[1]) : NaN;
@@ -14679,7 +14696,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       // The regressed pill (lead or folded into "+1") explains itself on hover.
       const regressed = stageTrackerRegressionText(item, Date.now());
       // An unauthorized pill names the missing App permission and the human step.
-      const tip = (mods.indexOf('unauthorized') >= 0 && String(item.unauthorized || '').trim()) || regressed;
+      const tip = (mods.indexOf('unauthorized') >= 0 && String(item.unauthorized || '').trim()) || regressed
+        || (mods.indexOf('blocked') >= 0 && Array.isArray(item.blocked_on) && item.blocked_on.length ? 'Withheld from the scanner until ' + item.blocked_on.join(', ') + (item.blocked_on.length > 1 ? ' close' : ' closes') : '');
       const cls = 'ham-mod-' + mods[0] + (handled && mods[0] === 'regressed' ? ' ham-mod-handled' : '');
       return sentinel + `<span class="ham-badge ham-badge-mod ${esc(cls)}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(text)}${mods.length > 1 ? ' +' + (mods.length - 1) : ''}</span>`;
     }
@@ -14739,7 +14757,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // PR's full tooltip rides its link; the sub-row container has none.
     function stageTrackerSubRowHtml(lp, issue, stages, nowMs, ctx) {
       const pr = { repo: issue.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', author: lp.author || '', author_kind: lp.author_kind || '',
-        stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], caption: lp.caption || '', reason: lp.reason || '',
+        stage: lp.stage || 0, stage_since: lp.stage_since || '', modifiers: lp.modifiers || [], deferred_modifiers: lp.deferred_modifiers || [], caption: lp.caption || '', reason: lp.reason || '',
         human_approver: lp.human_approver || '', manual_merge: !!lp.manual_merge, human_merge_reason: lp.human_merge_reason || '', human_merge_reason_text: lp.human_merge_reason_text || '', sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '',
         finisher: lp.finisher || '', finisher_verb: lp.finisher_verb || '', finisher_reason: lp.finisher_reason || '' };
       let ref = stageTrackerPRRef(pr.number, pr.url, pr.author_kind, pr.author, pr.title, (pr.title ? pr.title + ' · ' : '') + stageTrackerTooltip(pr, nowMs) + ' · ' + stageTrackerLinkedTip(issue, pr.number, ctx));
@@ -14922,7 +14940,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
           prRefs = [STAGE_TRACKER_LINKED_GLYPH + stageTrackerPRRef(lp.number, lp.url, lp.author_kind || '', lp.author, lp.title, (lp.title ? lp.title + '\n' : '') + 'Author: ' + who + ' · ' + stageTrackerLinkedTip(item, lp.number, ctx)) + stageTrackerBaseRefBadge(lp)];
           // Who finishes the row is the PR's answer once the PR has one.
           const fin = lp.finisher ? lp : item;
-          shown = Object.assign({}, item, { via_pr: true, stage: lp.stage || 40, stage_since: lp.stage_since || item.stage_since, modifiers: lp.modifiers || item.modifiers, caption: lp.caption || item.caption, reason: lp.reason || item.reason,
+          shown = Object.assign({}, item, { via_pr: true, stage: lp.stage || 40, stage_since: lp.stage_since || item.stage_since, modifiers: lp.modifiers || item.modifiers, deferred_modifiers: lp.deferred_modifiers || item.deferred_modifiers || [], caption: lp.caption || item.caption, reason: lp.reason || item.reason,
             human_approver: lp.human_approver || '', manual_merge: !!lp.manual_merge, human_merge_reason: lp.human_merge_reason || '', human_merge_reason_text: lp.human_merge_reason_text || '', sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '',
             finisher: fin.finisher || '', finisher_verb: fin.finisher_verb || '', finisher_reason: fin.finisher_reason || '' });
         } else if (linked.length) {
@@ -16231,7 +16249,7 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const parked = it => (Array.isArray(it.modifiers) ? it.modifiers : []).indexOf('needs-decision') >= 0 || STAGE_TRACKER_DECISION_STAGES.indexOf(Number(it.stage) || 0) >= 0;
       if (item.kind === 'pr') return parked(item) ? item : null;
       for (const lp of (Array.isArray(item.linked_prs) ? item.linked_prs : [])) {
-        const pr = { repo: item.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', stage: lp.stage || 0, modifiers: lp.modifiers || [], author: lp.author || '',
+        const pr = { repo: item.repo, number: lp.number, kind: 'pr', title: lp.title || '', url: lp.url || '', stage: lp.stage || 0, modifiers: lp.modifiers || [], deferred_modifiers: lp.deferred_modifiers || [], author: lp.author || '',
           human_approver: lp.human_approver || '', manual_merge: !!lp.manual_merge, human_merge_reason: lp.human_merge_reason || '', human_merge_reason_text: lp.human_merge_reason_text || '', sentinel_alert: !!lp.sentinel_alert, sentinel_reason: lp.sentinel_reason || '', head: lp.head || '' };
         if (parked(pr)) return pr;
       }
@@ -25806,18 +25824,21 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     // using Codex with a ChatGPT account"), so codex must NOT fall through to
     // the copilot list. The server discovers the live catalog via
     // `codex app-server` model/list (per-CLI-version, baked into the binary);
-    // this is only the pre-discovery fallback. Snapshot of codex 0.159.0
-    // (live model/list capture, 2026-09-30, #9804): visible ids in picker
-    // order (astra is the default; GPT-6 Sol and Luna arrived in 0.156.1,
-    // #8417), then hidden ids — hidden entries are still valid --model
-    // values. gpt-5.2 and gpt-5.4-mini were retired in 0.155.0; gpt-5.4 was
-    // retired between 0.156.1 and 0.159.0.
+    // this is only the pre-discovery fallback. Snapshot of codex 0.165.0
+    // (live model/list capture, 2026-10-27; the 0.159.0 capture was #9804):
+    // visible ids in picker order (GPT-6.1 Sol is the default; GPT-6.1 Terra
+    // arrived in 0.165.0; GPT-6 Sol and Luna arrived in 0.156.1, #8417), then
+    // hidden ids — hidden entries are still valid --model values. gpt-5.2 and
+    // gpt-5.4-mini were retired in 0.155.0; gpt-5.4 was retired between
+    // 0.156.1 and 0.159.0.
     // Keep in sync with codexStaticModels in cli_models.go.
     const CODEX_CLI_MODELS = [
+      { value: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
       { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
       { value: 'gpt-6-sol', label: 'GPT-6 Sol' },
       { value: 'gpt-6-luna', label: 'GPT-6 Luna' },
       { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+      { value: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
       { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
       { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
       { value: 'gpt-5.5', label: 'GPT-5.5' },
