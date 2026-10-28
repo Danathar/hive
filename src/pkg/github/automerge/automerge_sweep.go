@@ -972,7 +972,10 @@ func (c *Engine) SweepQueuedAutoMerges(ctx context.Context, opts AutoMergeSweepO
 			}
 			result.Seen++
 			if reason := c.prefilterQueuedIssue(issue, label); reason != "" {
-				if reason == "held" || reason == "exempt-label" {
+				c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, issue.GetNumber(), nil, hgithub.PRAuditPathQueue, reason)
+				// prefilterQueuedIssue reports holds as labelBlockReason's
+				// "label:hold", never the bare "held" used by the PR path.
+				if reason == "held" || reason == "label:hold" || reason == "exempt-label" {
 					c.debug("automerge sweep skipped PR", "repo", repo, "pr", issue.GetNumber(), "reason", reason)
 				} else {
 					c.info("automerge sweep skipped PR", "repo", repo, "pr", issue.GetNumber(), "reason", reason)
@@ -1146,6 +1149,9 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 					continue
 				} else if reason != "" {
 					if reason == "hold" {
+						// Same reason string as labelBlockReason so the lane
+						// rejection log reads alike on every hold path.
+						c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, number, pr, hgithub.PRAuditPathSweep, "label:hold")
 						reason = "held"
 					}
 					result.Skipped++
@@ -1168,6 +1174,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				continue
 			}
 			if reason := c.prefilterSelfAuthoredPR(pr); reason != "" {
+				c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, number, pr, hgithub.PRAuditPathSweep, reason)
 				c.info("automerge skip", "repo", repo, "pr", number, "reason", reason)
 				result.Skipped++
 				repoSkipped++
@@ -1984,6 +1991,28 @@ func (c *Engine) serializedLane(repo string) (bool, hgithub.SerializedLaneGate) 
 	}
 	strategy, gate := provider.SerializedLane()
 	return hgithub.SerializedStrategy(strategy, repo), gate
+}
+
+// rejectPrefilteredBeforeLane keeps cheap sweep rejections cheap for direct
+// repos, while letting a serialized front leave immediately. Queued issue list
+// entries lack the base branch, so only that path needs an extra PR fetch:
+// on a hive-serialized repo every prefiltered queued PR (label-removed,
+// exempt-label, sentinel or label block) costs one PullRequests.Get per sweep,
+// because the sweep cannot tell from the issue entry whether it is the front.
+func (c *Engine) rejectPrefilteredBeforeLane(ctx context.Context, displayRepo, owner, repo string, number int, pr *gh.PullRequest, path, reason string) {
+	serialized, gate := c.serializedLane(displayRepo)
+	if !serialized {
+		return
+	}
+	if pr == nil {
+		var err error
+		pr, _, err = c.gh.PullRequests.Get(hgithub.WithRESTCaller(ctx, "hive:automerge_sweep"), owner, repo, number)
+		if err != nil {
+			c.warn("automerge sweep: could not fetch a prefiltered PR for the serialized lane", "repo", owner+"/"+repo, "pr", number, "reason", reason, "error", err)
+			return
+		}
+	}
+	c.rejectBeforeLane(ctx, serialized, gate, owner, repo, number, pr, path, reason)
 }
 
 // rejectBeforeLane returns a sweep path's own rejection of pr. In a

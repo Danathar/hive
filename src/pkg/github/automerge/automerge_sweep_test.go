@@ -36,6 +36,7 @@ type sweepPR struct {
 	checkStatus     string
 	checkConclusion string
 	headRepo        string
+	baseRef         string
 }
 
 func issueLabels(primary string, extra []string) []map[string]string {
@@ -1822,6 +1823,7 @@ func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]i
 					"draft":  pr.draft,
 					"user":   map[string]string{"login": pr.author},
 					"head":   map[string]string{"sha": "sha" + strconv.Itoa(pr.number)},
+					"base":   map[string]string{"ref": "main"},
 					"labels": issueLabels("", pr.extraLabels),
 				})
 			}
@@ -2968,6 +2970,13 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 			if headRepo == "" {
 				headRepo = "acme/widget"
 			}
+			// The base ref is omitted unless a test opts in, so existing
+			// callers keep the empty-base-branch path and need no
+			// protection or base-status stubs.
+			base := map[string]any{"repo": map[string]string{"full_name": "acme/widget"}}
+			if pr.baseRef != "" {
+				base["ref"] = pr.baseRef
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"number":          pr.number,
 				"state":           "open",
@@ -2976,7 +2985,7 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				"mergeable":       pr.mergeableState == "clean",
 				"user":            map[string]string{"login": pr.author},
 				"head":            map[string]any{"sha": headSHA, "repo": map[string]string{"full_name": headRepo}},
-				"base":            map[string]any{"repo": map[string]string{"full_name": "acme/widget"}},
+				"base":            base,
 				"labels":          prLabels,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/status") && hasShaNumber(r.URL.Path):
