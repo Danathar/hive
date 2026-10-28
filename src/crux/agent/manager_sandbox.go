@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hivecommons/hive/crux"
 	"github.com/hivecommons/hive/crux/config"
 	"github.com/hivecommons/hive/crux/effects"
 	"github.com/hivecommons/hive/crux/kubejob"
@@ -150,6 +151,9 @@ func (m *Manager) startSandboxKickLocked(agent *AgentProcess, message string) er
 		Timeout:       time.Duration(agent.Config.SandboxTimeoutS(m.sandboxConfig)) * time.Second,
 		PublishVerify: agent.Config.SandboxPublishVerify(m.sandboxConfig),
 		VerifyTimeout: time.Duration(agent.Config.SandboxPublishVerifyTimeoutS(m.sandboxConfig)) * time.Second,
+		// Every sandbox kick gets a review spool (hivecommons/hive#14986);
+		// whether the agent may post through it is the relay's decision.
+		ReviewSpoolDir: crux.SandboxReviewSpoolsDir(m.workDir),
 	}
 	// A kick template's own verify block wins over config so the policy
 	// that asks for a proven result also says how hive checks it.
