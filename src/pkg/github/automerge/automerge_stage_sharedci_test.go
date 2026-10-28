@@ -56,6 +56,18 @@ func TestStageActivitySharedCIAndBudgetWaitOnHive(t *testing.T) {
 	}
 }
 
+// A contributor PR skipped for no-linked-issue is waiting on a person, so
+// the stage-dwell "waits on the hive" warning must not fire for it.
+func TestStageActivityNoLinkedIssueDoesNotWaitOnHive(t *testing.T) {
+	obs := stageObservation{HeadSHA: "sha", Reason: contributorLaneReasonNoLinkedIssue}
+	if a := stageActivity(obs, stagelabels.ReviewPending); a.WaitingOnHive {
+		t.Fatal("no-linked-issue waits on the hive")
+	}
+	if a := stageActivity(stageObservation{HeadSHA: "sha"}, stagelabels.ReviewPending); !a.WaitingOnHive {
+		t.Fatal("verdict-less review-pending head no longer waits on the hive")
+	}
+}
+
 // A base-red clanker PR stays at 050 across repeated sweeps — no 072, no
 // nudge comment or relay interrupt, no stall — and is handed back to its
 // author with a nudge only once the incident closes and the head is still
