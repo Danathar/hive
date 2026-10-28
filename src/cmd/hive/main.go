@@ -9306,9 +9306,18 @@ func redPRFixKick(o escalation.Observation, rerouted bool) string {
 		fmt.Fprintf(&b, "Its owning agent (%s) is not reachable right now, so this repair is routed to you.\n\n", redPRFixOwner(o.Agent))
 	}
 	b.WriteString("Repair it BEFORE claiming new issues or opening any new PR:\n")
+	// `no-dco` is written on every managed repo but gates only where DCO is
+	// enforced (hivecommons/hive#12544): a re-sign is the first repair only
+	// when a DCO check is among the failures. Elsewhere — a Renovate-style
+	// bot branch in a repo with no DCO gate — demanding a force-pushed
+	// re-sign would rewrite a branch nothing asked to change.
 	if slices.Contains(o.Labels, stagelabels.NoDCOLabel) {
-		fmt.Fprintf(&b, "  FIRST (required): the PR is %s — it inherited unsigned commits. Re-sign them: gh pr checkout %d --repo %s → git rebase --signoff <base> (original authors preserved) → git push --force-with-lease\n", stagelabels.NoDCOLabel, o.Number, o.Repo)
-		b.WriteString("  THEN fix any failing CI the same way.\n")
+		if slices.ContainsFunc(o.FailingChecks, github.IsDCOContext) {
+			fmt.Fprintf(&b, "  FIRST (required): the PR is %s — it inherited unsigned commits. Re-sign them: gh pr checkout %d --repo %s → git rebase --signoff <base> (original authors preserved) → git push --force-with-lease\n", stagelabels.NoDCOLabel, o.Number, o.Repo)
+			b.WriteString("  THEN fix any failing CI the same way.\n")
+		} else {
+			fmt.Fprintf(&b, "  Note: the PR carries %s, but no DCO check is failing here; re-sign its commits only if this repository asks for it. Fix the failing CI first.\n", stagelabels.NoDCOLabel)
+		}
 	}
 	fmt.Fprintf(&b, "  gh pr checkout %d --repo %s → fix → git commit -s → git push\n", o.Number, o.Repo)
 	b.WriteString("Push to the SAME branch. Do NOT open a replacement PR.\n")
