@@ -48,6 +48,20 @@ type DeltaDiff struct {
 	// delta instruction, since that needs no file list.
 	Known bool
 	Files []DeltaFile
+	// BaseSync is true when every commit between the two heads is a merge of
+	// the base branch into the PR that GitHub made for the hive App
+	// (update-branch for review.contributor_prs.base_sync,
+	// auto_merge.require_current_base and the hold guard's mergeability upkeep;
+	// the merges API for merge-forward), proven by pkg/github ReviewDeltaDiff
+	// from the compare's commits (projectbluefin/fsdk-containers#482). When it is true
+	// PRFiles and BaseFiles are complete lists; when it is false both are nil.
+	BaseSync bool
+	// PRFiles are the PR's own changed paths at the current head (the base
+	// branch's merge base with the head, three-dot, like the PR's Files tab).
+	PRFiles []string
+	// BaseFiles are the paths the base branch changed between the reviewed
+	// head's merge base and the base commit the sync merged in.
+	BaseFiles []string
 }
 
 // ChangedLines is the delta size the trivial threshold is judged against.
@@ -63,6 +77,51 @@ func (d DeltaDiff) ChangedLines() int {
 // reviewed head's (a rebase or an amended message).
 func (d DeltaDiff) Identical() bool {
 	return d.Known && len(d.Files) == 0
+}
+
+// BaseSyncOnly reports a known base-sync delta that brought in nothing but
+// the base's own changes, none of them in a file the PR changes:
+//
+//   - the delta's files are exactly the files the base changed (BaseFiles), so
+//     no base change was dropped and nothing beyond the base was added; and
+//   - no delta file is one of the PR's own files (PRFiles), so each delta file
+//     now holds the base's content, and no PR file moved.
+//
+// Together these mean every file at the new head is either byte-for-byte the
+// reviewed head's or the base's, which is what a clean merge of a base that
+// touched none of the PR's files produces. GitHub's update-branch and merges
+// API refuse a conflicting merge, so a hive base-sync never carries a conflict
+// resolution, and a merge whose result differs from that (a hand-resolved or
+// fabricated tree) fails one of the two checks unless all it did was take
+// the base's version of a file both sides changed: the same result as a PR
+// whose change already landed on the base, which is base code, reviewed and
+// merged there.
+func (d DeltaDiff) BaseSyncOnly() bool {
+	if !d.Known || !d.BaseSync || len(d.Files) == 0 {
+		return false
+	}
+	delta := map[string]bool{}
+	for _, f := range d.Files {
+		delta[strings.TrimSpace(f.Path)] = true
+	}
+	base := map[string]bool{}
+	for _, p := range d.BaseFiles {
+		base[strings.TrimSpace(p)] = true
+	}
+	if len(base) != len(delta) {
+		return false
+	}
+	for p := range delta {
+		if !base[p] {
+			return false
+		}
+	}
+	for _, p := range d.PRFiles {
+		if delta[strings.TrimSpace(p)] {
+			return false
+		}
+	}
+	return true
 }
 
 // DeltaContext is what a delta re-review kick carries about the previous
@@ -85,6 +144,9 @@ type DeltaContext struct {
 	// ChangedLines is the known delta size, 0 when unknown.
 	ChangedLines int
 	DiffKnown    bool
+	// BaseSync is set when the planner carries an approve across a hive
+	// base-sync (DeltaDiff.BaseSyncOnly) rather than a trivial delta.
+	BaseSync bool
 }
 
 // DeltaReviewInfo is recorded on an aggregate produced by a delta re-review,
@@ -95,7 +157,11 @@ type DeltaReviewInfo struct {
 	// Trivial is true when no model call was made: the previous verdict was
 	// re-stamped onto the new head because the delta was empty or under
 	// review.delta_trivial_lines in files the previous verdict passed.
-	Trivial      bool   `json:"trivial,omitempty"`
+	Trivial bool `json:"trivial,omitempty"`
+	// BaseSync is true when the re-stamp crossed a hive merge of the base
+	// into the PR whose changes miss every PR file (projectbluefin/fsdk-containers#482),
+	// at any delta size.
+	BaseSync     bool   `json:"base_sync,omitempty"`
 	ChangedLines int    `json:"changed_lines,omitempty"`
 	Note         string `json:"note,omitempty"`
 }
@@ -172,6 +238,17 @@ func (o DispatchOptions) effectiveDeltaMaxAge() time.Duration {
 //   - otherwise delta. With a known compare that is empty, or under
 //     delta_trivial_lines and touching no file the prior verdict flagged, the
 //     prior verdict is re-stamped instead of asked again.
+//   - a prior approve across a hive base-sync that brought in only base
+//     changes outside the PR's files (DeltaDiff.BaseSyncOnly) is re-stamped
+//     at any delta size (projectbluefin/fsdk-containers#482). The hive's own update-branch
+//     used to drop an approved PR back to review-gate:no-review-bundle, and
+//     then pay a model to "delta review" base code that was reviewed and
+//     merged upstream. CI still re-runs on the merge head (the point of
+//     auto_merge.require_current_base, hivecommons/hive#13634), so only the
+//     review verdict is carried. Only approve: a changes_requested or
+//     requires_human verdict keeps its delta review, so a base-sync never
+//     settles what a reviewer or a person still has open. A negative
+//     delta_trivial_lines, which opts out of re-stamps, opts out of this too.
 func planDelta(pr PullRequest, artifact Artifact, opts DispatchOptions, now time.Time) (deltaMode, *DeltaContext, Aggregate) {
 	if !opts.DeltaRereview {
 		return deltaModeFull, nil, Aggregate{}
@@ -205,6 +282,10 @@ func planDelta(pr PullRequest, artifact Artifact, opts DispatchOptions, now time
 		ctx.Files = append(ctx.Files, f.Path)
 	}
 	sort.Strings(ctx.Files)
+	if prior.Verdict == VerdictApprove && opts.DeltaTrivialLines >= 0 && diff.BaseSyncOnly() {
+		ctx.BaseSync = true
+		return deltaModeTrivial, ctx, prior
+	}
 	if deltaTrivial(*diff, prior, opts.effectiveDeltaTrivialLines()) {
 		return deltaModeTrivial, ctx, prior
 	}
@@ -248,10 +329,13 @@ func restampAggregate(prior Aggregate, pr PullRequest, ctx DeltaContext, now tim
 	agg.BodyDigest = pr.BodyDigest
 	agg.RecordedAt = now
 	note := fmt.Sprintf("re-stamped from %s: delta touches %d file(s), %d line(s), none previously flagged", shortSHA(ctx.PreviousHead), len(ctx.Files), ctx.ChangedLines)
-	if ctx.DiffKnown && len(ctx.Files) == 0 {
+	switch {
+	case ctx.BaseSync:
+		note = fmt.Sprintf("re-stamped from %s: hive base-sync; the base's changes (%d file(s), %d line(s)) are disjoint from the PR's files", shortSHA(ctx.PreviousHead), len(ctx.Files), ctx.ChangedLines)
+	case ctx.DiffKnown && len(ctx.Files) == 0:
 		note = fmt.Sprintf("re-stamped from %s: identical tree", shortSHA(ctx.PreviousHead))
 	}
-	agg.Delta = &DeltaReviewInfo{PreviousHead: ctx.PreviousHead, Trivial: true, ChangedLines: ctx.ChangedLines, Note: note}
+	agg.Delta = &DeltaReviewInfo{PreviousHead: ctx.PreviousHead, Trivial: true, BaseSync: ctx.BaseSync, ChangedLines: ctx.ChangedLines, Note: note}
 	agg.Reasons = append(append([]string(nil), prior.Reasons...), "delta re-review: "+note)
 	return agg
 }

@@ -10,12 +10,14 @@ import (
 )
 
 type fakeDeltaDiffer struct {
-	calls []string
-	diff  review.DeltaDiff
+	calls    []string
+	baseRefs []string
+	diff     review.DeltaDiff
 }
 
-func (f *fakeDeltaDiffer) ReviewDeltaDiff(_ context.Context, repo, previousHead, head string) review.DeltaDiff {
+func (f *fakeDeltaDiffer) ReviewDeltaDiff(_ context.Context, repo, baseRef, previousHead, head string) review.DeltaDiff {
 	f.calls = append(f.calls, repo+"#"+previousHead+".."+head)
+	f.baseRefs = append(f.baseRefs, baseRef)
 	out := f.diff
 	out.PreviousHead = previousHead
 	return out
@@ -99,5 +101,45 @@ func TestPlanReviewDispatch_DeltaNotFetchedWithoutPriorOrWhenOff(t *testing.T) {
 	plan = planReviewDispatch(reviewSwarmConfig(), actionableWithPR("hive-bot"), nil, nil, restoreTestLogger())
 	if len(plan.ReviewKicks) != 1 || plan.ReviewKicks[0].DeltaPreviousHead == "" || len(plan.DeltaRestamps) != 0 {
 		t.Fatalf("nil differ: kicks=%+v restamps=%d", plan.ReviewKicks, len(plan.DeltaRestamps))
+	}
+}
+
+// The hive's own update-branch of an approved PR (projectbluefin/fsdk-containers#482):
+// the planner hands the PR's base branch to the compare, and a base-sync whose
+// files miss the PR's carries the approve onto the merge head at any size.
+func TestPlanReviewDispatch_HiveBaseSyncCarriesApprove(t *testing.T) {
+	redirectReviewPaths(t)
+	writePriorVerdict(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", review.VerdictApprove)
+	actionable := actionableWithPR("hive-bot")
+	actionable.PRs.Items[0].BaseRef = "main"
+	differ := &fakeDeltaDiffer{diff: review.DeltaDiff{
+		Known: true, BaseSync: true,
+		Files:     []review.DeltaFile{{Path: "pkg/base/b.go", Additions: 400}},
+		BaseFiles: []string{"pkg/base/b.go"},
+		PRFiles:   []string{"pkg/x/x.go"},
+	}}
+	plan := planReviewDispatchWith(context.Background(), reviewSwarmConfig(), actionable, nil, nil, differ, restoreTestLogger())
+	if len(differ.baseRefs) != 1 || differ.baseRefs[0] != "main" {
+		t.Fatalf("base refs passed to the compare = %v, want [main]", differ.baseRefs)
+	}
+	if len(plan.ReviewKicks) != 0 || len(plan.DeltaRestamps) != 1 {
+		t.Fatalf("kicks=%d restamps=%d, want 0/1", len(plan.ReviewKicks), len(plan.DeltaRestamps))
+	}
+	art, err := review.LoadArtifact("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := art.AggregateForBody("hivecommons/hive", 4321, reviewTestSHA, "")
+	if !ok || got.Verdict != review.VerdictApprove || got.Delta == nil || !got.Delta.BaseSync {
+		t.Fatalf("base-sync restamp not recorded: %+v ok=%v", got, ok)
+	}
+
+	// The base changed one of the PR's files: a delta review, not a carry.
+	redirectReviewPaths(t)
+	writePriorVerdict(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", review.VerdictApprove)
+	differ.diff.PRFiles = append(differ.diff.PRFiles, "pkg/base/b.go")
+	plan = planReviewDispatchWith(context.Background(), reviewSwarmConfig(), actionable, nil, nil, differ, restoreTestLogger())
+	if len(plan.ReviewKicks) != 1 || len(plan.DeltaRestamps) != 0 || plan.ReviewKicks[0].DeltaPreviousHead == "" {
+		t.Fatalf("intersecting base-sync: kicks=%+v restamps=%d, want one delta kick", plan.ReviewKicks, len(plan.DeltaRestamps))
 	}
 }

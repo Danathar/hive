@@ -325,7 +325,11 @@ The same section's **Per-repository merge policy** block edits
 hive's `project.repos`. Saving writes each key in full as `owner/repo` (the form
 the sweep matches); an empty selection clears it, and a repo outside
 `project.repos` or a malformed glob is refused with a 400. The sweep reads all
-three live, so a change applies on the next pass without a restart.
+three live, so a change applies on the next pass without a restart. An
+update-branch of an approved PR keeps its swarm approve when the base's changes
+miss every PR file: the review planner re-stamps the verdict onto the merge
+head instead of holding it at `review-gate:no-review-bundle`, and CI still
+re-runs on that head (see [Delta re-review](review-swarm.md#delta-re-review-reviewdelta_rereview-reviewdelta_trivial_lines-reviewdelta_max_age)).
 
 ### Event-driven sweeps on the ForgeState cache
 
