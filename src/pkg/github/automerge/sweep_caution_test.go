@@ -2,10 +2,13 @@ package automerge
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	hgithub "github.com/hivecommons/hive/pkg/github"
 )
 
 func TestCautionSweepInterval(t *testing.T) {
@@ -62,5 +65,39 @@ func TestSweepTickGateBacksOffAndShedsUnderCaution(t *testing.T) {
 	}
 	if shedCalls != 1 {
 		t.Fatalf("shed consulted outside caution: calls = %d", shedCalls)
+	}
+}
+
+// A candidate's evaluation and merge run at normal pacing class, lifted out
+// of the lane's low class; a class the caller chose is left alone.
+func TestMergeDecisionPriority(t *testing.T) {
+	low := lowPriority(context.Background())
+	if got := hgithub.PacingClassOf(mergeDecisionPriority(low)); got != hgithub.PacingNormal {
+		t.Fatalf("low lane ctx → %s, want normal", got)
+	}
+	high := hgithub.WithPacingClass(context.Background(), hgithub.PacingHigh)
+	if got := hgithub.PacingClassOf(mergeDecisionPriority(high)); got != hgithub.PacingHigh {
+		t.Fatalf("high ctx → %s, want high kept", got)
+	}
+}
+
+// During a caution window whose queue is deeper than the low class may wait
+// (projectbluefin hive 2026-10-28: "class low, queue 5.454s ahead, limit
+// 5s"), an approved green App PR the pass reaches is still read and merged:
+// its status / check-run reads are not shed as housekeeping.
+func TestSweepMergesGreenPRWhileCautionQueueExceedsLowBudget(t *testing.T) {
+	var merged []int
+	src := newFakePRSource("acme/widget", greenCachedPR(11))
+	c, _ := newCachedSweepEngine(t, src, greenAPIPRs(11), &merged)
+	// 5.5s ahead: over the 5s low budget, inside the 30s normal one. Later
+	// slots are 1ms apart so the pass costs one wait, not a slot per call.
+	t.Cleanup(hgithub.EngageRateLimitCautionForTest(5500*time.Millisecond, time.Millisecond))
+
+	result, err := c.SweepSelfAuthoredAutoMerges(context.Background(), AutoMergeSweepOptions{})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(merged) != 1 || merged[0] != 11 {
+		t.Fatalf("merged=%v skipped=%d, want PR 11 merged during the caution window", merged, result.Skipped)
 	}
 }
