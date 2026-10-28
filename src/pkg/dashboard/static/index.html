@@ -557,13 +557,17 @@
       .oc-topbar-right .widget-dl { margin-left: var(--sp-0); margin-right: var(--sp-0); }
     }
 
-    /* Right chip cluster keeps its full width so it cannot shrink and spill over the left ACMM badge (#13135); the left/center tracks absorb the squeeze. */
-    @media (min-width: 901px) and (max-width: 1400px) {
+    /* Right chip cluster keeps its full width so it cannot shrink and spill over the left ACMM badge or project title (#13135); the left/center tracks absorb the squeeze. Starts at 769px because the ≤768px block clips the cluster instead. */
+    @media (min-width: 769px) and (max-width: 1400px) {
       .oc-topbar-right { min-width: max-content; }
     }
 
+    /* Icon-only chips here so the full-width right cluster still leaves room for the drawer toggle and title (#13135). */
     @media (min-width: 769px) and (max-width: 900px) {
       #acmm-badge { display: none; }
+      .oc-health-badge .nav-chip__label,
+      #oc-settings-btn .nav-chip__label,
+      #welcome-topbar-btn .nav-chip__label { display: none; }
     }
 
     /* Light main content area */
