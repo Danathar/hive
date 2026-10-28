@@ -36927,6 +36927,7 @@ function burnAreaChart() {
         case 'nousCampaignAction': nousCampaignAction(el.dataset.arg0, el.dataset.arg1); break;
         case 'toggleConfigSwitch': toggleConfigSwitch(el, el.dataset.section, el.dataset.key); break;
         case 'toggleContributorPRBaseSync': toggleContributorPRBaseSync(el); break;
+        case 'toggleReviewRequireLabels': toggleReviewRequireLabels(el); break;
         case 'toggleSentinelEnabled': toggleSentinelEnabled(el); break;
         case 'toggleSentinelBehavior': toggleSentinelBehavior(el); break;
         case 'toggleSentinelTrustedAuthorsBlock': toggleSentinelTrustedAuthorsBlock(el); break;
@@ -50758,6 +50759,14 @@ function burnAreaChart() {
             <div class="config-toggle-switch ${rv.priority_labels ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="priority_labels"></div>
             <span class="config-toggle-label">Label PRs with their review-queue priority ${yamlHint('review.priority_labels')} ${settingHelpMark('review-swarm', 'configuration', 'Label PRs with their review-queue priority', `OFF by default. Mirrors each open PR's place in the review queue (GET /api/review/queue) onto exactly one of review-priority/high, review-priority/normal or review-priority/low - high for fixes, normal for refactors, docs and unclassified PRs, low for test-only PRs - so the order shows up in plain GitHub searches. Applied by the hive from the computed rank, never by the PR's author, on contributor PRs too. The labels are never created: create them in each repo first; a repo without them is skipped.`)}</span>
           </div>
+          <div class="config-toggle" style="margin-top:10px">
+            <div class="config-toggle-switch ${(rv.require_labels && rv.require_labels.length) ? 'on' : ''}" data-action="toggleReviewRequireLabels"></div>
+            <span class="config-toggle-label">Only review labelled PRs ${yamlHint('review.require_labels[]')} ${settingHelpMark('review-swarm', 'configuration', 'Only review labelled PRs', `OFF by default: every open PR is reviewable. ON: the hive reviews a PR only when it carries at least one of the labels below (case-insensitive exact match), the PR-side counterpart of the issue approval gate (project.issue_filter.require_labels). Enforced server-side: unlabelled PRs never appear in a reviewer kick or the review dispatch, and the hive-review relay refuses to post on one, so a prompt cannot bypass it. The labels are never created: use a label the repo already maintains. Exempt and hold labels still exclude a PR that also carries an approval label.`)}</span>
+          </div>
+          <div class="config-field" id="rv-require-labels-field" style="margin-top:6px;${(rv.require_labels && rv.require_labels.length) ? '' : 'display:none'}">
+            <label>Review approval labels (comma-separated) ${yamlHint('review.require_labels[]')}</label>
+            <input type="text" id="rv-require-labels" value="${esc((rv.require_labels || []).join(', '))}" placeholder="e.g. hive-review" spellcheck="false" data-change-action="markDirtyReviewRequireLabels" data-arg-types="w">
+          </div>
           <div class="config-field" style="margin-top:10px">
             <label>Fixer agent ${yamlHint('review.fixer_agent')} ${settingHelpMark('review-swarm', 'configuration', 'Fixer agent', `The agent kicked to address reviewer findings before re-review. Use the agent ID (the key in the roster, not its display name). Blank falls back to the PR's authoring agent, then scanner.`)}</label>
             <input type="text" value="${esc(rv.fixer_agent || '')}" placeholder="scanner (default)" data-change-action="markDirty" data-arg0="review" data-arg1="fixer_agent" data-arg-types="s,s,w">
@@ -52716,6 +52725,32 @@ function burnAreaChart() {
       const isOn = el.classList.toggle('on');
       markDirty(section, key, isOn);
       if (section === 'review' && (key === 'fan_out' || key === 'combined_perspectives')) refreshReviewerAgentSummary();
+    }
+
+    // Review label gate (Settings → Features → Review Gate → "Only review
+    // labelled PRs"): the toggle shows/hides the label input; the saved value
+    // is review.require_labels, where an empty list means off.
+    function parseReviewRequireLabels(text) {
+      const seen = new Set();
+      return String(text || '').split(',').map(l => l.trim()).filter(l => {
+        if (!l) return false;
+        const k = l.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+    }
+    function toggleReviewRequireLabels(el) {
+      if (!el || el.classList.contains('disabled') || el.dataset.disabled === 'true') return;
+      const isOn = el.classList.toggle('on');
+      const field = document.getElementById('rv-require-labels-field');
+      if (field) field.style.display = isOn ? '' : 'none';
+      const input = document.getElementById('rv-require-labels');
+      markDirty('review', 'require_labels', isOn ? parseReviewRequireLabels(input && input.value) : []);
+      if (isOn && input) input.focus();
+    }
+    function markDirtyReviewRequireLabels(text) {
+      markDirty('review', 'require_labels', parseReviewRequireLabels(text));
     }
 
     // Reviewer agents pick-list (Settings → Features → Review Gate →
