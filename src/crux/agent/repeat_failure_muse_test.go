@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -363,5 +364,187 @@ func TestRepeatFailureMuseRoute(t *testing.T) {
 	}
 	if want := "Repeating failure: `ls /nonexistent` failed 5 times in 10 min (exit 2)"; st.Note != want {
 		t.Fatalf("note = %q, want %q", st.Note, want)
+	}
+}
+
+// TestRepeatFailureMuseWalkIsBounded: an agent-writable sessions tree with
+// more directories or logs than the caps is walked only up to them, newest
+// names and days first, and the walk reports that it left some out.
+func TestRepeatFailureMuseWalkIsBounded(t *testing.T) {
+	root := rfMuseRoot(t)
+	day := filepath.Join(root, "2026", "10", "28")
+	const extra = 50
+	for i := 0; i < museDirEntriesMax+extra; i++ {
+		if err := os.MkdirAll(filepath.Join(day, "s"+strconv.Itoa(1000000+i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, truncated := museRealSubdirs(day)
+	if len(got) != museDirEntriesMax || !truncated {
+		t.Fatalf("subdirs read from one directory = %d (truncated %v), want %d truncated", len(got), truncated, museDirEntriesMax)
+	}
+	// The newest names survive the cap, whatever order the directory lists
+	// them in: the oldest `extra` are the ones left out.
+	newest := "s" + strconv.Itoa(1000000+museDirEntriesMax+extra-1)
+	oldestKept := "s" + strconv.Itoa(1000000+extra)
+	if got[0] != newest || got[len(got)-1] != oldestKept {
+		t.Fatalf("kept %q..%q, want %q..%q", got[0], got[len(got)-1], newest, oldestKept)
+	}
+	if logs, truncated := museSessionLogs(root); len(logs) != museDirEntriesMax || !truncated {
+		t.Fatalf("logs from the over-full day = %d (truncated %v), want %d truncated", len(logs), truncated, museDirEntriesMax)
+	}
+	if _, truncated := museRealSubdirs(filepath.Join(root, "2026", "10")); truncated {
+		t.Fatal("an under-cap directory reported truncation")
+	}
+
+	// More logs than museSessionLogsMax across days: the oldest are left out.
+	total := rfMuseRoot(t)
+	perDay := museDirEntriesMax
+	days := museSessionLogsMax/perDay + 2
+	for d := 1; d <= days; d++ {
+		for i := 0; i < perDay; i++ {
+			dir := filepath.Join(total, "2026", "10", "0"+strconv.Itoa(d), "s"+strconv.Itoa(i))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	logs, truncated := museSessionLogs(total)
+	if len(logs) != museSessionLogsMax || !truncated {
+		t.Fatalf("logs collected = %d (truncated %v), want %d truncated", len(logs), truncated, museSessionLogsMax)
+	}
+	if !strings.Contains(logs[0], filepath.Join("10", "0"+strconv.Itoa(days))) {
+		t.Fatalf("first log %q is not from the newest day", logs[0])
+	}
+
+	// Directory listings are budgeted too, so empty year/month/day subtrees
+	// cannot make a scan list directories without bound.
+	w := &museWalk{listings: museDirListingsMax}
+	if got := w.subdirs(filepath.Join(total, "2026")); got != nil || !w.truncated {
+		t.Fatalf("subdirs past the listing budget = %v (truncated %v), want none, truncated", got, w.truncated)
+	}
+	small := rfMuseRoot(t)
+	if _, truncated := museSessionLogs(small); truncated {
+		t.Fatal("a missing root reported truncation")
+	}
+}
+
+// TestRepeatFailureMuseDisplacedSessionIsNotReplayed: a session log pushed
+// out of a capped walk by newer siblings keeps its read offset, so when it is
+// walked again nothing already recorded is emitted a second time.
+func TestRepeatFailureMuseDisplacedSessionIsNotReplayed(t *testing.T) {
+	root := rfMuseRoot(t)
+	r := newMuseRecordReader()
+	var s rfMuseScan
+	s.run(r, root)
+	rfMuseAppend(t, root, "a-session", rfMuseCall(t, "call_1")...)
+	s.run(r, root)
+	if len(s.records) != 1 {
+		t.Fatalf("records = %+v, want exactly one", s.records)
+	}
+	const rel = "2026/10/28/a-session/" + museSessionLog
+	if r.sessions[filepath.FromSlash(rel)] == nil {
+		t.Fatalf("sessions = %v, want %q followed", r.sessions, rel)
+	}
+
+	// Flood the day with newer-named sessions so a-session falls out of the
+	// per-directory cap.
+	day := filepath.Join(root, "2026", "10", "28")
+	var flood []string
+	for i := 0; i < museDirEntriesMax; i++ {
+		dir := filepath.Join(day, "z"+strconv.Itoa(1000000+i))
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		flood = append(flood, dir)
+	}
+	s.run(r, root)
+	if r.sessions[filepath.FromSlash(rel)] == nil {
+		t.Fatal("displaced session was dropped while its log still exists")
+	}
+	for _, dir := range flood {
+		if err := os.Remove(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rfMuseAppend(t, root, "a-session", rfMuseCall(t, "call_2")...)
+	s.run(r, root)
+	if len(s.records) != 2 || s.records[1].RawCommand != "ls /nonexistent" {
+		t.Fatalf("records after the session returned = %+v, want exactly the second call added", s.records)
+	}
+
+	// Gone for real: a scan that saw the whole tree forgets it.
+	if err := os.RemoveAll(filepath.Join(day, "a-session")); err != nil {
+		t.Fatal(err)
+	}
+	s.run(r, root)
+	if len(r.sessions) != 0 {
+		t.Fatalf("sessions after deletion = %v, want none", r.sessions)
+	}
+}
+
+// TestRepeatFailureMuseDisplacedSessionsAreCapped: sessions a truncated walk
+// leaves out are kept while their logs exist, but at most
+// museDisplacedSessionsMax of them, newest names first, so an agent minting
+// newer-named sessions every scan cannot grow the sessions map without bound.
+func TestRepeatFailureMuseDisplacedSessionsAreCapped(t *testing.T) {
+	root := rfMuseRoot(t)
+	r := newMuseRecordReader()
+	var s rfMuseScan
+	const perDay = museDirEntriesMax
+	rfMuseDay := func(d int) string { return fmt.Sprintf("%02d", d) }
+	daysPerBatch := museSessionLogsMax / perDay
+	// addDays creates perDay empty session logs for each day in [from, to].
+	addDays := func(from, to int) {
+		for d := from; d <= to; d++ {
+			for i := 0; i < perDay; i++ {
+				dir := filepath.Join(root, "2026", "10", rfMuseDay(d), "s"+strconv.Itoa(i))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, museSessionLog), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	rel := func(d int) string {
+		return filepath.Join("2026", "10", rfMuseDay(d), "s0", museSessionLog)
+	}
+
+	addDays(1, daysPerBatch)
+	s.run(r, root)
+	if len(r.sessions) != museSessionLogsMax {
+		t.Fatalf("sessions after the first scan = %d, want %d", len(r.sessions), museSessionLogsMax)
+	}
+
+	// Newer days push the first batch out of the walk: it is displaced, not
+	// gone, and all of it fits under the cap.
+	addDays(daysPerBatch+1, 2*daysPerBatch)
+	s.run(r, root)
+	if len(r.sessions) != 2*museSessionLogsMax {
+		t.Fatalf("sessions after the second scan = %d, want %d", len(r.sessions), 2*museSessionLogsMax)
+	}
+	if r.sessions[rel(1)] == nil {
+		t.Fatalf("displaced session %q was dropped while its log still exists", rel(1))
+	}
+
+	// A third batch displaces the second: now twice the cap is displaced, so
+	// the oldest-named half is forgotten and the map stays bounded.
+	addDays(2*daysPerBatch+1, 3*daysPerBatch)
+	s.run(r, root)
+	if len(r.sessions) != museSessionLogsMax+museDisplacedSessionsMax {
+		t.Fatalf("sessions after the third scan = %d, want %d", len(r.sessions), museSessionLogsMax+museDisplacedSessionsMax)
+	}
+	if r.sessions[rel(daysPerBatch+1)] == nil {
+		t.Fatalf("newest displaced session %q was evicted before older ones", rel(daysPerBatch+1))
+	}
+	for d := 1; d <= daysPerBatch; d++ {
+		if r.sessions[rel(d)] != nil {
+			t.Fatalf("oldest displaced session %q survived past the cap", rel(d))
+		}
+	}
+	if r.sessions[rel(3*daysPerBatch)] == nil {
+		t.Fatalf("walked session %q is not followed", rel(3*daysPerBatch))
 	}
 }

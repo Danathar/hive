@@ -3,11 +3,10 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -55,6 +54,20 @@ const (
 	// museTerminalTimedOut is the terminal_status of a command killed at its
 	// deadline.
 	museTerminalTimedOut = "timed_out"
+	// museDirEntriesMax bounds the subdirectories kept from one directory of
+	// the agent-writable sessions tree: the museDirEntriesMax newest names.
+	museDirEntriesMax = 1024
+	// museSessionLogsMax bounds the session logs one scan follows; the oldest
+	// days are the ones left out.
+	museSessionLogsMax = 4096
+	// museDirListingsMax bounds the directories one scan lists, so a tree of
+	// empty year/month/day directories costs at most this many listings.
+	museDirListingsMax = 2 * museSessionLogsMax
+	// museDisplacedSessionsMax bounds the followed sessions a truncated walk
+	// left out that the reader keeps (newest names first) while their logs
+	// exist, so the sessions map and the stats a scan spends on them stay
+	// bounded however many newer-named sessions displace them.
+	museDisplacedSessionsMax = museSessionLogsMax
 )
 
 // museRecordReader follows one agent's Muse Code session logs. Sessions are
@@ -84,45 +97,107 @@ func museSessionsRoot(name string, uid int, home string) string {
 	return filepath.Join(data, "muse", "sessions")
 }
 
-// museRealSubdirs lists the subdirectories of dir that are not links.
-func museRealSubdirs(dir string) []string {
+// museRealSubdirs lists the subdirectories of dir that are not links, newest
+// name first, keeping at most the museDirEntriesMax newest. truncated reports
+// that some were left out. Names are taken from the directory listing alone
+// (no per-entry stat); a batch is trimmed once 2*museDirEntriesMax names are
+// held, so that is the most held at a time.
+func museRealSubdirs(dir string) (out []string, truncated bool) {
+	// Also checked by museWalk.subdirs, which charges the listing budget
+	// only for directories that exist; this keeps direct callers safe.
+	if !copilotRecordRealDir(dir) {
+		return nil, false
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	keepNewest := func() {
+		sort.Sort(sort.Reverse(sort.StringSlice(out)))
+		if len(out) > museDirEntriesMax {
+			out = out[:museDirEntriesMax]
+			truncated = true
+		}
+	}
+	for {
+		entries, err := f.ReadDir(museDirEntriesMax)
+		for _, entry := range entries {
+			// A symlinked directory is not a directory to ReadDir.
+			if entry.IsDir() {
+				out = append(out, entry.Name())
+			}
+		}
+		if len(out) >= 2*museDirEntriesMax {
+			keepNewest()
+		}
+		if err != nil || len(entries) == 0 {
+			break
+		}
+	}
+	keepNewest()
+	return out, truncated
+}
+
+// museWalk is one scan's walk of the sessions tree: how many directories it
+// has listed and whether any cap left part of the tree out.
+type museWalk struct {
+	listings  int
+	truncated bool
+}
+
+// subdirs is museRealSubdirs charged to the walk's listing budget. A missing
+// or linked dir is checked here first so it costs no listing.
+func (w *museWalk) subdirs(dir string) []string {
 	if !copilotRecordRealDir(dir) {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if w.listings >= museDirListingsMax {
+		w.truncated = true
 		return nil
 	}
-	var out []string
-	for _, entry := range entries {
-		// A symlinked directory is not a directory to ReadDir.
-		if entry.IsDir() {
-			out = append(out, entry.Name())
-		}
+	w.listings++
+	out, truncated := museRealSubdirs(dir)
+	if truncated {
+		w.truncated = true
 	}
 	return out
 }
 
 // museSessionLogs returns the session and subagent logs under root, relative
-// to root.
-func museSessionLogs(root string) []string {
-	var logs []string
-	for _, y := range museRealSubdirs(root) {
-		for _, mo := range museRealSubdirs(filepath.Join(root, y)) {
-			for _, d := range museRealSubdirs(filepath.Join(root, y, mo)) {
+// to root, at most museSessionLogsMax of them, newest days first. truncated
+// reports that a cap (per directory, logs, or listings) left logs out, so a
+// log missing from the result is not necessarily gone.
+func museSessionLogs(root string) (logs []string, truncated bool) {
+	w := &museWalk{}
+	add := func(rel string) bool {
+		if len(logs) >= museSessionLogsMax {
+			w.truncated = true
+			return false
+		}
+		logs = append(logs, rel)
+		return true
+	}
+	for _, y := range w.subdirs(root) {
+		for _, mo := range w.subdirs(filepath.Join(root, y)) {
+			for _, d := range w.subdirs(filepath.Join(root, y, mo)) {
 				day := filepath.Join(y, mo, d)
-				for _, id := range museRealSubdirs(filepath.Join(root, day)) {
+				for _, id := range w.subdirs(filepath.Join(root, day)) {
 					sess := filepath.Join(day, id)
-					logs = append(logs, filepath.Join(sess, museSessionLog))
+					if !add(filepath.Join(sess, museSessionLog)) {
+						return logs, w.truncated
+					}
 					sub := filepath.Join(sess, "subagent")
-					for _, child := range museRealSubdirs(filepath.Join(root, sub)) {
-						logs = append(logs, filepath.Join(sub, child, museSessionLog))
+					for _, child := range w.subdirs(filepath.Join(root, sub)) {
+						if !add(filepath.Join(sub, child, museSessionLog)) {
+							return logs, w.truncated
+						}
 					}
 				}
 			}
 		}
 	}
-	return logs
+	return logs, w.truncated
 }
 
 // scan reads what was appended to every session log under root since the
@@ -135,7 +210,8 @@ func (r *museRecordReader) scan(root string, uid int, emit func(RepeatFailureRec
 		return
 	}
 	present := map[string]bool{}
-	for _, rel := range museSessionLogs(root) {
+	logs, truncated := museSessionLogs(root)
+	for _, rel := range logs {
 		path := filepath.Join(root, rel)
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || !copilotRecordOwnedBy(info, uid) {
@@ -158,41 +234,35 @@ func (r *museRecordReader) scan(root string, uid int, emit func(RepeatFailureRec
 			r.readSession(path, sess, info.Size(), emit, observe)
 		}
 	}
+	// Followed sessions the walk did not reach. A scan that saw the whole
+	// tree forgets them: they are gone. A truncated walk may have left a log
+	// out by a cap, not deletion, so its offset is kept while the log exists
+	// and its return replays nothing; newest names first, at most
+	// museDisplacedSessionsMax of them, so neither the map nor the stats
+	// spent here grow with the sessions an agent keeps minting.
+	var displaced []string
 	for rel := range r.sessions {
 		if !present[rel] {
-			delete(r.sessions, rel)
+			displaced = append(displaced, rel)
 		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(displaced)))
+	kept := 0
+	for _, rel := range displaced {
+		if truncated && kept < museDisplacedSessionsMax {
+			if info, err := os.Lstat(filepath.Join(root, rel)); err == nil && info.Mode().IsRegular() {
+				kept++
+				continue
+			}
+		}
+		delete(r.sessions, rel)
 	}
 }
 
 func (r *museRecordReader) readSession(path string, sess *copilotRecordSession, size int64, emit func(RepeatFailureRecord), observe func(bool, time.Time)) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
-		return
-	}
-	n := min(size-sess.offset, copilotRecordReadMax)
-	buf := make([]byte, n)
-	read, err := f.ReadAt(buf, sess.offset)
-	if err != nil && err != io.EOF {
-		return
-	}
-	buf = buf[:read]
-	end := bytes.LastIndexByte(buf, '\n')
-	if end < 0 {
-		if int64(read) == copilotRecordReadMax {
-			// One line larger than a whole read: skip it.
-			sess.offset += int64(read)
-		}
-		return
-	}
-	sess.offset += int64(end + 1)
-	for _, line := range bytes.Split(buf[:end], []byte{'\n'}) {
+	readAppendedLines(path, sess, size, func(line []byte) {
 		museHandleLine(sess, line, emit, observe)
-	}
+	})
 }
 
 // museSessionEnvelope is the part of a session-log line the reader uses.
