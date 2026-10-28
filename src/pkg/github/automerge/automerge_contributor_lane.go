@@ -1075,12 +1075,19 @@ func contributorLaneLinkedIssues(body, fullRepo string) []int {
 // CI workflow/action definitions and test deletion. It returns "" when the
 // diff may be merged unattended.
 func contributorLaneDiffReason(files []intent.ChangedFile) string {
-	adds, dels := 0, 0
 	for _, f := range files {
 		if intent.PathMatchesAny(f.Filename, contributorLaneWorkflowPaths) {
 			return contributorLaneReasonWorkflowPath
 		}
 	}
+	return contributorLaneTestsRemovedReason(files)
+}
+
+// contributorLaneTestsRemovedReason is contributorLaneDiffReason's test
+// deletion fence on its own: contributorLaneReasonTestsRemoved when the diff
+// deletes a test file or removes test lines past the floor and ratio, else "".
+func contributorLaneTestsRemovedReason(files []intent.ChangedFile) string {
+	adds, dels := 0, 0
 	for _, f := range files {
 		if !contributorLaneIsTestPath(f.Filename) {
 			continue
@@ -1247,6 +1254,16 @@ func (c *Engine) evaluateContributorLanePR(ctx context.Context, displayRepo, own
 		return eval, contributorLaneReasonFilesEvidence, err
 	}
 	if reason := contributorLaneDiffReason(files); reason != "" {
+		// contributorLaneDiffReason names only the first fence, and the
+		// owner-approval release lifts the workflow fence alone: a head that
+		// also removes tests merged on that approval with its test removal
+		// never checked. Name the rule no approval overrides, before any
+		// release is read or its audit comment posted.
+		if reason == contributorLaneReasonWorkflowPath {
+			if tests := contributorLaneTestsRemovedReason(files); tests != "" {
+				return eval, tests, nil
+			}
+		}
 		approver, released := c.workflowFenceReleased(ctx, displayRepo, owner, repo, pr, number, headSHA, reason, policy)
 		if !released {
 			return eval, reason, nil

@@ -169,6 +169,18 @@ func TestContributorLaneWorkflowFenceOwnerApproval(t *testing.T) {
 			wantReason: contributorLaneReasonWorkflowPath,
 		},
 		{
+			// The release covers the workflow fence only: a head that also
+			// deletes a test stops at the tests-removed rule, with no
+			// release read and no audit marker.
+			name: "approval does not release a head that also removes a test",
+			mutate: func(fx *contributorLaneFixture) {
+				fx.files = append(workflowPathFiles(), map[string]any{"filename": "pkg/widget/widget_test.go", "status": "removed", "additions": 0, "deletions": 40})
+				fx.reviews = []map[string]any{ownerApprovedReview("clubanderson", "sha7")}
+			},
+			trusted:    []string{"clubanderson"},
+			wantReason: contributorLaneReasonTestsRemoved,
+		},
+		{
 			name:       "no approval behaves as before",
 			trusted:    []string{"clubanderson"},
 			wantReason: contributorLaneReasonWorkflowPath,

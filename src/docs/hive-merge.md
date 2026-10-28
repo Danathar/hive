@@ -560,7 +560,9 @@ A PR merges through this tier only when all of the following hold:
   the lane logs `workflow-path fence released by owner approval login=…
   head=…`, leaves one `<!-- hive:workflow-approval head=… by=… -->` audit
   comment per head, and the PR goes through every other gate below like any
-  other. Merging such a PR needs the App's **Workflows: Read and write**;
+  other. The release covers the workflow fence only: a head that also deletes
+  tests stops at `contributor-lane:tests-removed` (the next bullet) before any
+  approval is read. Merging such a PR needs the App's **Workflows: Read and write**;
   when GitHub refuses the merge for want of it the lane marks the PR
   `hive:unauthorized` (step `merge-workflow-path`), stops retrying that
   head, and the approved head parks at `090-ready-for-human-merge` for a
