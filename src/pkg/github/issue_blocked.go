@@ -31,6 +31,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -44,7 +46,9 @@ import (
 // BlockedLabel is the workflow label that parks an issue on an unmerged PR
 // (or any outside blocker). It is reserved for agents (issue_request_label.go)
 // — the hive applies it from the review backlog and the blocked-on comment
-// relay — and the contributor lane already refuses it as a workflow skip.
+// relay, and a contributor relay applies it on a `blocked` verdict with no
+// marker (hivecommons/hive#7924) — and the contributor lane already refuses
+// it as a workflow skip.
 const BlockedLabel = "blocked"
 
 // ClaimBlockReasonBlockedPrefix prefixes the IssueClaimBlockReason for a
@@ -135,6 +139,23 @@ func blockedRecheck(body string) (time.Time, bool) {
 // body (hivecommons/hive#13311).
 func blockedRecheckDone(body string) bool {
 	return strings.Contains(body, RecheckDoneMarker)
+}
+
+// blockedReviewBacklogFiling reports whether body is a review-backlog item's
+// (reviewBacklogFooter ends every one): the only hive path whose marker-less
+// `blocked` liftBlockedMarkerless may lift (hivecommons/hive#13364).
+func blockedReviewBacklogFiling(body string) bool {
+	return strings.Contains(body, reviewBacklogFooter)
+}
+
+// setBlockedRowFacts records on a blocked work row what the sweep reads from
+// the issue body and GitHub's open "blocked by" count from the same payload
+// (#9839), so ReconcileBlockedIssues needs no re-read of either.
+func setBlockedRowFacts(row *RepoWorkIssue, body string, openBlockedBy int) {
+	row.RecheckAfter, row.OpsTracking = blockedRecheck(body)
+	row.RecheckDone = blockedRecheckDone(body)
+	row.ReviewBacklog = blockedReviewBacklogFiling(body)
+	row.OpenBlockedBy = openBlockedBy
 }
 
 // blockedStageReason is the IssueStageFor reason for an issue wearing the
@@ -276,6 +297,10 @@ type blockedIssueTarget struct {
 	recheckAfter time.Time
 	opsTracking  bool
 	recheckDone  bool
+	// reviewBacklog: the body is a review-backlog item's; openBlockedBy:
+	// GitHub's open "blocked by" count. Both gate liftBlockedMarkerless.
+	reviewBacklog bool
+	openBlockedBy int
 }
 
 // ReconcileBlockedIssues walks the cycle's blocked issues (filtered rows
@@ -289,10 +314,12 @@ type blockedIssueTarget struct {
 // deadline has passed loses `blocked` with a one-line note (once per
 // deadline) so the next enumeration re-triages it; an ops-tracking row on the
 // hive's own project gets soak evidence instead (runRecheckSoak) and keeps
-// `blocked`, other ops-tracking rows are left alone. A row with no marker,
-// no deadline and no ops-tracking whose `blocked` the hive itself applied is
-// lifted as a defect (liftBlockedMarkerless, hivecommons/hive#13364). Lookup
-// failures are counted and skipped.
+// `blocked`, other ops-tracking rows are left alone. A review-backlog item
+// with no marker, no deadline, no ops-tracking and no open native blocker
+// whose `blocked` the hive itself applied is lifted as a defect
+// (liftBlockedMarkerless, hivecommons/hive#13364); every other marker-less
+// block is a relay's verdict or a person's and stays. Lookup failures are
+// counted and skipped.
 func ReconcileBlockedIssues(ctx context.Context, client *Client, result *ActionableResult, logger *slog.Logger) BlockedIssueResult {
 	var res BlockedIssueResult
 	if client == nil || client.client == nil || result == nil {
@@ -309,7 +336,7 @@ func ReconcileBlockedIssues(ctx context.Context, client *Client, result *Actiona
 			if row.Number <= 0 || row.Bucket != workBucketFiltered || !IsBlockedIssueReason(row.Reason) || !hasBlockedLabel(row.Labels) {
 				continue
 			}
-			targets = append(targets, blockedIssueTarget{repo: row.Repo, number: row.Number, labels: row.Labels, reason: row.Reason, recheckAfter: row.RecheckAfter, opsTracking: row.OpsTracking, recheckDone: row.RecheckDone})
+			targets = append(targets, blockedIssueTarget{repo: row.Repo, number: row.Number, labels: row.Labels, reason: row.Reason, recheckAfter: row.RecheckAfter, opsTracking: row.OpsTracking, recheckDone: row.RecheckDone, reviewBacklog: row.ReviewBacklog, openBlockedBy: row.OpenBlockedBy})
 		}
 	}
 	return client.reconcileBlockedTargets(ctx, targets, logger)
@@ -335,7 +362,7 @@ func (c *Client) SweepBlockedIssues(ctx context.Context, opts BlockedSweepOption
 	var targets []blockedIssueTarget
 	for _, repo := range repos {
 		owner, repoName := c.splitRepo(repo)
-		issues, err := c.listOpenBlockedIssues(ctx, owner, repoName)
+		issues, blockedBy, err := c.listOpenBlockedIssues(ctx, owner, repoName)
 		if err != nil {
 			return BlockedIssueResult{}, err
 		}
@@ -350,13 +377,15 @@ func (c *Client) SweepBlockedIssues(ctx context.Context, opts BlockedSweepOption
 			body := issue.GetBody()
 			at, ops := blockedRecheck(body)
 			targets = append(targets, blockedIssueTarget{
-				repo:         repo,
-				number:       issue.GetNumber(),
-				labels:       labels,
-				reason:       blockedFilterReason(body),
-				recheckAfter: at,
-				opsTracking:  ops,
-				recheckDone:  blockedRecheckDone(body),
+				repo:          repo,
+				number:        issue.GetNumber(),
+				labels:        labels,
+				reason:        blockedFilterReason(body),
+				recheckAfter:  at,
+				opsTracking:   ops,
+				recheckDone:   blockedRecheckDone(body),
+				reviewBacklog: blockedReviewBacklogFiling(body),
+				openBlockedBy: blockedBy[issue.GetNumber()],
 			})
 		}
 	}
@@ -401,8 +430,8 @@ func (c *Client) reconcileBlockedTargets(ctx context.Context, targets []blockedI
 			}
 		}
 		if !ok {
-			// No tracked PR, no deadline, no ops-tracking: a block the hive
-			// applied itself with no marker is always a bug (a blocked
+			// No tracked PR, no deadline, no ops-tracking: a review-backlog
+			// item the hive blocked with no marker is a bug (a blocked
 			// filing folded into an open twin, hivecommons/hive#13364), so
 			// lift it. A maintainer's or a relay's marker-less label
 			// (hivecommons/hive#13267) is left alone: nothing to lift, but
@@ -509,15 +538,27 @@ func stripBlockedHelpWanted(ctx context.Context, client *Client, t blockedIssueT
 	res.Stripped++
 }
 
-// liftBlockedMarkerless lifts `blocked` from an issue with no blocked-on
-// marker, no recheck-after deadline and no ops-tracking marker when the
-// label's most recent application was by this hive (hivecommons/hive#13364):
-// nothing the hive writes applies `blocked` without a marker, so such a block
-// is a defect and would otherwise never lift. Reports whether the label came
-// off. A human-applied label, an unreadable timeline, or a client with no
-// hive identity configured leaves the issue alone, the last with one WARN so
-// the stuck block is at least visible.
+// liftBlockedMarkerless lifts `blocked` from a review-backlog item with no
+// blocked-on marker, no recheck-after deadline and no ops-tracking marker
+// when the label's most recent application was by this hive
+// (hivecommons/hive#13364): the review backlog always writes the marker with
+// the label, so such a block is a defect and would otherwise never lift.
+// Reports whether the label came off.
+//
+// The actor alone cannot attribute the block: a contributor relay's
+// `blocked` verdict is applied with a hub-minted task token, so its labeled
+// event names the same App bot, and it carries no marker by design — lifting
+// it is a human's (`/hive approve`, hivecommons/hive#7924 and #12376). Lifting
+// those put the issue back in the ready band, the next agent hit the same
+// blocker and the relay re-applied the label, daily. So any other issue, or
+// one GitHub still reports an open "blocked by" dependency on (#9839), is left
+// alone before the timeline is read. A human-applied label, an unreadable
+// timeline, or a client with no hive identity configured leaves the issue
+// alone too, the last with one WARN so the stuck block is at least visible.
 func liftBlockedMarkerless(ctx context.Context, client *Client, t blockedIssueTarget, res *BlockedIssueResult, logger *slog.Logger) bool {
+	if !t.reviewBacklog || t.openBlockedBy > 0 {
+		return false
+	}
 	actor, found, err := client.blockedLabelActor(ctx, t.repo, t.number)
 	if err != nil {
 		res.Errors++
@@ -732,30 +773,45 @@ func (c *Client) followSupersededChain(ctx context.Context, repo string, number,
 	return number, true
 }
 
-// listOpenBlockedIssues lists open issues with the `blocked` label in owner/repo.
-func (c *Client) listOpenBlockedIssues(ctx context.Context, owner, repo string) ([]*gh.Issue, error) {
-	opts := &gh.IssueListByRepoOptions{
-		State:       "open",
-		Labels:      []string{BlockedLabel},
-		ListOptions: gh.ListOptions{PerPage: 100},
-	}
+// listOpenBlockedIssues lists open issues with the `blocked` label in
+// owner/repo and, keyed by number, the open "blocked by" count each payload's
+// issue_dependencies_summary reports (go-github drops it; see
+// listOpenIssuesWithBlockedCounts).
+func (c *Client) listOpenBlockedIssues(ctx context.Context, owner, repo string) ([]*gh.Issue, map[int]int, error) {
 	var all []*gh.Issue
+	blockedBy := map[int]int{}
+	page := 1
 	for {
-		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repo, opts)
+		q := url.Values{}
+		q.Set("state", "open")
+		q.Set("labels", BlockedLabel)
+		q.Set("per_page", "100")
+		q.Set("page", strconv.Itoa(page))
+		req, err := c.client.NewRequest(http.MethodGet, fmt.Sprintf("repos/%s/%s/issues?%s", owner, repo, q.Encode()), nil)
 		if err != nil {
-			return all, err
+			return all, blockedBy, err
+		}
+		var issues []*issueWithDependencies
+		resp, err := c.client.Do(ctx, req, &issues)
+		if err != nil {
+			return all, blockedBy, err
 		}
 		for _, is := range issues {
-			if is != nil && !is.IsPullRequest() {
-				all = append(all, is)
+			if is == nil || is.IsPullRequest() {
+				continue
+			}
+			issue := is.Issue
+			all = append(all, &issue)
+			if is.DependenciesSummary != nil && is.DependenciesSummary.BlockedBy > 0 {
+				blockedBy[issue.GetNumber()] = is.DependenciesSummary.BlockedBy
 			}
 		}
-		if resp.NextPage == 0 {
+		if resp == nil || resp.NextPage == 0 {
 			break
 		}
-		opts.ListOptions.Page = resp.NextPage
+		page = resp.NextPage
 	}
-	return all, nil
+	return all, blockedBy, nil
 }
 
 // mentionPattern matches a GitHub @login that is not part of a path, an

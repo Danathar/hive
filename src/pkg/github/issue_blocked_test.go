@@ -260,6 +260,10 @@ func TestReconcileBlockedIssues(t *testing.T) {
 			_, _ = io.WriteString(w, `[{"id":1,"body":"`+reviewBacklogLinkMarker+` also raised on PR #9"}]`)
 		case r.Method == "GET" && r.URL.Path == "/repos/o/r/issues/70/timeline":
 			_, _ = io.WriteString(w, `[{"event":"labeled","created_at":"2026-10-20T10:00:00Z","label":{"name":"help wanted"},"actor":{"login":"maintainer","type":"User"}},{"event":"labeled","created_at":"2026-10-20T10:05:00Z","label":{"name":"blocked"},"actor":{"login":"`+testBot+`","type":"Bot"}}]`)
+		case r.Method == "GET" && (r.URL.Path == "/repos/o/r/issues/80/comments" || r.URL.Path == "/repos/o/r/issues/90/comments"):
+			_, _ = io.WriteString(w, `[{"id":1,"body":"Blocked: the upstream API this needs is not released yet."}]`)
+		case r.Method == "GET" && (r.URL.Path == "/repos/o/r/issues/80/timeline" || r.URL.Path == "/repos/o/r/issues/90/timeline"):
+			_, _ = io.WriteString(w, `[{"event":"labeled","created_at":"2026-10-20T10:05:00Z","label":{"name":"blocked"},"actor":{"login":"`+testBot+`","type":"Bot"}}]`)
 		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/repos/o/r/issues/"):
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments"):
@@ -289,14 +293,22 @@ func TestReconcileBlockedIssues(t *testing.T) {
 			// A relay's blocked verdict, no tracked PR (hivecommons/hive#13267):
 			// nothing to lift, but `help wanted` still comes off.
 			{Repo: "o/r", Number: 60, Labels: []string{"blocked", "help wanted"}, Bucket: workBucketFiltered, Reason: "blocked"},
-			// A hive-applied `blocked` with no marker anywhere (a blocked
-			// filing folded into an open twin, hivecommons/hive#13364) is a
-			// defect: lifted.
-			{Repo: "o/r", Number: 70, Labels: []string{"blocked"}, Bucket: workBucketFiltered, Reason: "blocked"},
+			// A hive-applied `blocked` with no marker anywhere on a
+			// review-backlog item (a blocked filing folded into an open twin,
+			// hivecommons/hive#13364) is a defect: lifted.
+			{Repo: "o/r", Number: 70, Labels: []string{"blocked"}, Bucket: workBucketFiltered, Reason: "blocked", ReviewBacklog: true},
+			// A contributor relay's blocked verdict: the task token makes the
+			// labeled actor the hive's own bot, but it is not a review-backlog
+			// item, so it stays for a human (hivecommons/hive#7924) and only
+			// loses `help wanted`.
+			{Repo: "o/r", Number: 80, Labels: []string{"blocked", "help wanted"}, Bucket: workBucketFiltered, Reason: "blocked"},
+			// A review-backlog item GitHub still reports an open "blocked
+			// by" dependency on (#9839) stays blocked.
+			{Repo: "o/r", Number: 90, Labels: []string{"blocked"}, Bucket: workBucketFiltered, Reason: "blocked", ReviewBacklog: true, OpenBlockedBy: 1},
 		}},
 	}}
 	res := ReconcileBlockedIssues(context.Background(), c, result, nil)
-	if res.Items != 6 || res.Unblocked != 3 || res.Stripped != 2 || res.Errors != 1 {
+	if res.Items != 8 || res.Unblocked != 3 || res.Stripped != 3 || res.Errors != 1 {
 		t.Fatalf("result = %+v", res)
 	}
 	mu.Lock()
@@ -309,12 +321,14 @@ func TestReconcileBlockedIssues(t *testing.T) {
 		"GET /repos/o/r/issues/30/comments",
 		"DELETE /repos/o/r/issues/30/labels/blocked",
 		"GET /repos/o/r/issues/60/comments",
-		"GET /repos/o/r/issues/60/timeline",
 		"DELETE /repos/o/r/issues/60/labels/help wanted",
 		"GET /repos/o/r/issues/70/comments",
 		"GET /repos/o/r/issues/70/timeline",
 		"DELETE /repos/o/r/issues/70/labels/blocked",
 		"POST /repos/o/r/issues/70/comments",
+		"GET /repos/o/r/issues/80/comments",
+		"DELETE /repos/o/r/issues/80/labels/help wanted",
+		"GET /repos/o/r/issues/90/comments",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing call %q in:\n%s", want, joined)
@@ -326,6 +340,15 @@ func TestReconcileBlockedIssues(t *testing.T) {
 		"/repos/o/r/issues/50",
 		"DELETE /repos/o/r/issues/60/labels/blocked",
 		"GET /repos/o/r/issues/30/timeline",
+		// Neither a non-backlog issue nor an open native blocker spends a
+		// timeline read: the lift is ruled out before it.
+		"GET /repos/o/r/issues/60/timeline",
+		"GET /repos/o/r/issues/80/timeline",
+		"DELETE /repos/o/r/issues/80/labels/blocked",
+		"POST /repos/o/r/issues/80/comments",
+		"GET /repos/o/r/issues/90/timeline",
+		"DELETE /repos/o/r/issues/90/labels/blocked",
+		"POST /repos/o/r/issues/90/comments",
 	} {
 		if strings.Contains(joined, never) {
 			t.Errorf("unexpected call %q in:\n%s", never, joined)
@@ -458,6 +481,10 @@ func TestEnumerateActionableRecordsBlockedRecheckAfter(t *testing.T) {
 		{Number: 1, Title: "soak", User: wireUser{"alice"}, Labels: []wireLabel{{Name: "blocked"}}, CreatedAt: hoursAgo(3),
 			Body: "checklist\n" + gfi.OpsTrackingMarker + "\n" + gfi.RecheckAfterMarker(at)},
 		{Number: 2, Title: "bare", User: wireUser{"bob"}, Labels: []wireLabel{{Name: "blocked"}}, CreatedAt: hoursAgo(2)},
+		// liftBlockedMarkerless reads both off the row: the review-backlog
+		// footer and GitHub's open "blocked by" count.
+		{Number: 3, Title: "backlog", User: wireUser{"hive-app[bot]"}, Labels: []wireLabel{{Name: "blocked"}}, CreatedAt: hoursAgo(1),
+			Body: "Finding: x\n\n" + reviewBacklogFooter + "\n", IssueDependenciesSummary: &wireDepsSummary{BlockedBy: 2, TotalBlockedBy: 2}},
 	}
 	server := httptest.NewServer(buildMux(t, org, repo, issues, []wirePR{}))
 	t.Cleanup(server.Close)
@@ -473,8 +500,11 @@ func TestEnumerateActionableRecordsBlockedRecheckAfter(t *testing.T) {
 	if r := rows[1]; r.Bucket != workBucketFiltered || r.Reason != "blocked until 2026-10-21T21:20:00Z" || !r.RecheckAfter.Equal(at) || !r.OpsTracking {
 		t.Fatalf("deadline row = %+v", r)
 	}
-	if r := rows[2]; r.Bucket != workBucketFiltered || r.Reason != "blocked" || !r.RecheckAfter.IsZero() || r.OpsTracking {
+	if r := rows[2]; r.Bucket != workBucketFiltered || r.Reason != "blocked" || !r.RecheckAfter.IsZero() || r.OpsTracking || r.ReviewBacklog || r.OpenBlockedBy != 0 {
 		t.Fatalf("bare row = %+v", r)
+	}
+	if r := rows[3]; r.Bucket != workBucketFiltered || r.Reason != "blocked" || !r.ReviewBacklog || r.OpenBlockedBy != 2 {
+		t.Fatalf("backlog row = %+v", r)
 	}
 }
 
@@ -906,6 +936,91 @@ func TestReconcileBlockedIssuesCommentMarkerOverridesBody(t *testing.T) {
 	res := ReconcileBlockedIssues(context.Background(), c, result, nil)
 	if res.Items != 1 || res.Unblocked != 0 || res.Stripped != 1 || res.Errors != 0 {
 		t.Fatalf("result = %+v, want Items=1 Unblocked=0 Stripped=1 Errors=0", res)
+	}
+}
+
+// A contributor relay's marker-less `blocked` carries the hive's own bot as
+// the labeled actor (the hub-minted task token). Lifting it put the issue
+// back in the ready band, the next agent re-hit the blocker and the relay
+// re-applied the label, every day. The sweep keeps it across passes; a
+// review-backlog item blocked without a marker (hivecommons/hive#13364) is
+// still lifted once, and one GitHub reports an open "blocked by" on stays.
+func TestSweepBlockedIssuesKeepsRelayMarkerlessBlock(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	lifted := false
+	backlogBody := "Filed from an out-of-scope finding in the Hive review of PR #9.\n\n" + reviewBacklogFooter + "\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		done := lifted
+		mu.Unlock()
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/repos/o/r/issues" && strings.Contains(r.URL.RawQuery, "labels=blocked"):
+			items := []map[string]any{
+				{"number": 80, "state": "open", "labels": []any{map[string]any{"name": "blocked"}}, "body": "Upgrade the client once the upstream API ships."},
+				{"number": 90, "state": "open", "labels": []any{map[string]any{"name": "blocked"}}, "body": backlogBody, "issue_dependencies_summary": map[string]any{"blocked_by": 1, "total_blocked_by": 1}},
+			}
+			if !done {
+				items = append(items, map[string]any{"number": 70, "state": "open", "labels": []any{map[string]any{"name": "blocked"}}, "body": backlogBody})
+			}
+			_ = json.NewEncoder(w).Encode(items)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = io.WriteString(w, `[{"id":1,"body":"Blocked: the upstream API this needs is not released yet."}]`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/timeline"):
+			_, _ = io.WriteString(w, `[{"event":"labeled","created_at":"2026-10-28T17:14:50Z","label":{"name":"blocked"},"actor":{"login":"`+testBot+`","type":"Bot"}}]`)
+		case r.Method == "DELETE" && r.URL.Path == "/repos/o/r/issues/70/labels/blocked":
+			mu.Lock()
+			lifted = true
+			mu.Unlock()
+			_, _ = io.WriteString(w, `[]`)
+		case r.Method == "POST" && r.URL.Path == "/repos/o/r/issues/70/comments":
+			_, _ = io.WriteString(w, `{"id":9}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprintf(w, `{"path":%q}`, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL)
+	c.appBotLogin = testBot
+	for pass := 1; pass <= 3; pass++ {
+		res, err := c.SweepBlockedIssues(context.Background(), BlockedSweepOptions{Repos: []string{"o/r"}})
+		if err != nil {
+			t.Fatalf("pass %d: SweepBlockedIssues failed: %v", pass, err)
+		}
+		wantUnblocked := 0
+		if pass == 1 {
+			wantUnblocked = 1
+		}
+		if res.Unblocked != wantUnblocked || res.Errors != 0 {
+			t.Fatalf("pass %d: res = %+v, want Unblocked=%d Errors=0", pass, res, wantUnblocked)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"GET /repos/o/r/issues/70/timeline",
+		"DELETE /repos/o/r/issues/70/labels/blocked",
+		"POST /repos/o/r/issues/70/comments",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing call %q in:\n%s", want, joined)
+		}
+	}
+	for _, never := range []string{
+		"DELETE /repos/o/r/issues/80/labels/blocked",
+		"POST /repos/o/r/issues/80/comments",
+		"GET /repos/o/r/issues/80/timeline",
+		"DELETE /repos/o/r/issues/90/labels/blocked",
+		"POST /repos/o/r/issues/90/comments",
+		"GET /repos/o/r/issues/90/timeline",
+	} {
+		if strings.Contains(joined, never) {
+			t.Errorf("unexpected call %q in:\n%s", never, joined)
+		}
 	}
 }
 

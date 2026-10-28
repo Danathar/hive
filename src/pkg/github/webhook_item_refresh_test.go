@@ -208,3 +208,35 @@ func TestFetchWebhookItemSnapshotRefusesDuringRateLimitCaution(t *testing.T) {
 		t.Fatalf("err = %v, want ErrRateLimitCaution", err)
 	}
 }
+
+// A webhook re-read of a blocked issue records the same row facts the
+// enumeration does, so a patched row cannot open liftBlockedMarkerless on
+// an issue GitHub still reports an open "blocked by" on.
+func TestFetchWebhookItemSnapshotBlockedRowFacts(t *testing.T) {
+	clock := &webhookTestClock{now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}
+	resetRESTAccountingForTest(t, clock.now)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/issues/5" {
+			t.Errorf("unexpected GitHub call %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 5, "title": "Review backlog (style): x", "state": "open",
+			"user":                       map[string]any{"login": "hive-app[bot]"},
+			"labels":                     []map[string]any{{"name": "blocked"}},
+			"body":                       "Finding: x\n\n" + reviewBacklogFooter + "\n",
+			"issue_dependencies_summary": map[string]any{"blocked_by": 1, "total_blocked_by": 1},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestClient(t, srv, "org", []string{"repo"})
+	snap, err := c.FetchWebhookItemSnapshot(context.Background(), "repo", 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := snap.Patch.WorkIssue
+	if row == nil || !row.ReviewBacklog || row.OpenBlockedBy != 1 {
+		t.Fatalf("blocked row = %+v, want ReviewBacklog and OpenBlockedBy=1", row)
+	}
+}

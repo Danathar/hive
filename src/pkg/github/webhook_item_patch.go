@@ -47,9 +47,10 @@ type WebhookItemPatch struct {
 }
 
 // classifyWebhookIssue places one open issue the way fetchIssues would,
-// minus the list-wide passes. Side effects (reporter-trust label writes) are
-// deliberately not performed here.
-func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, labels []string, now time.Time) WebhookItemPatch {
+// minus the list-wide passes. blockedBy is the payload's open "blocked by"
+// count (getIssueWithBlockedCount). Side effects (reporter-trust label
+// writes) are deliberately not performed here.
+func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, blockedBy int, labels []string, now time.Time) WebhookItemPatch {
 	issueFilter := c.getIssueFilter()
 	author := safeGetLogin(issue.GetUser())
 	sidelined := func(bucket, reason string) WebhookItemPatch {
@@ -83,8 +84,7 @@ func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, labels []str
 	}
 	if hasBlockedLabel(labels) {
 		row := c.repoWorkIssue(repo, issue, labels, "filtered", blockedFilterReason(issue.GetBody()))
-		row.RecheckAfter, row.OpsTracking = blockedRecheck(issue.GetBody())
-		row.RecheckDone = blockedRecheckDone(issue.GetBody())
+		setBlockedRowFacts(&row, issue.GetBody(), blockedBy)
 		return WebhookItemPatch{Bucket: WebhookBucketSidelined, WorkIssue: &row}
 	}
 	if labelPresent(labels, issueNeedsReporterConfirmationLabel) {
