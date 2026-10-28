@@ -138,9 +138,62 @@ func workKindFor(store *stagelabels.Store, taskKind, repo string, number int) (k
 	return kind, stage
 }
 
+// openPRIndex is the status snapshot's canonical open-PR set (repoOpenItems:
+// actionable, held, drafts and sidelined rows), keyed like the stage store.
+// It answers "is this PR closed?" only for a repo whose PR list is complete;
+// for any other repo, or with no snapshot yet, a PR counts as open.
+type openPRIndex struct {
+	repos map[string]bool // lower-cased owner/repo with a complete PR list
+	prs   map[string]bool // stagelabels.Key of every listed open PR
+}
+
+// openPRIndex builds the index from the hub server's current status. A repo
+// whose rows cannot vouch for a departure (ownershipRowsComplete: counts
+// incomplete, paused, or never enumerated), or whose counts are stale or carry
+// unlisted PRs, is left out: a PR missing from such a listing is not evidence
+// that it closed.
+func (h *ContributeWSHub) openPRIndex() openPRIndex {
+	var idx openPRIndex
+	if h == nil || h.server == nil {
+		return idx
+	}
+	h.server.statusMu.RLock()
+	status := h.server.status
+	h.server.statusMu.RUnlock()
+	if status == nil {
+		return idx
+	}
+	idx.repos, idx.prs = map[string]bool{}, map[string]bool{}
+	for _, repo := range status.Repos {
+		if !ownershipRowsComplete(repo) || repo.CountsStale || repo.UnlistedPRs > 0 {
+			continue
+		}
+		full := nonEmpty(repo.Full, repo.Name)
+		idx.repos[strings.ToLower(full)] = true
+		for _, it := range repoOpenItems(repo) {
+			if it.Kind == "pr" {
+				idx.prs[stagelabels.Key(full, it.Number)] = true
+			}
+		}
+	}
+	return idx
+}
+
+// closed reports whether the snapshot shows repo#number as no longer open:
+// the repo's PR list is complete and does not carry it
+// (hivecommons/hive#14708).
+func (idx openPRIndex) closed(repo string, number int) bool {
+	if !idx.repos[strings.ToLower(strings.TrimSpace(repo))] {
+		return false
+	}
+	return !idx.prs[stagelabels.Key(repo, number)]
+}
+
 // fleetReworkFor builds the rework view for one connection. Call with c.mu
-// held; it takes only the fix scheduler's and stage store's own locks.
-func (h *ContributeWSHub) fleetReworkFor(c *ContributorConnection, stale bool) FleetRework {
+// held; it takes only the fix scheduler's and stage store's own locks. open
+// drops PRs that have merged or closed: stage records outlive a PR whose
+// close the stage sweep never observed (hivecommons/hive#14708).
+func (h *ContributeWSHub) fleetReworkFor(c *ContributorConnection, stale bool, open openPRIndex) FleetRework {
 	var out FleetRework
 	store := h.stageStoreOrShared()
 	cap := h.fixCapacity(c)
@@ -212,7 +265,7 @@ func (h *ContributeWSHub) fleetReworkFor(c *ContributorConnection, stale bool) F
 	}
 	pending := map[string]FleetReworkPR{}
 	for _, it := range queued {
-		if inFlightKeys[it.Key()] {
+		if inFlightKeys[it.Key()] || open.closed(it.Repo, it.Number) {
 			continue
 		}
 		cause := it.Cause.Check
@@ -233,7 +286,7 @@ func (h *ContributeWSHub) fleetReworkFor(c *ContributorConnection, stale bool) F
 			continue
 		}
 		repo, number := splitStageKey(ai.Key)
-		if repo == "" || number == 0 {
+		if repo == "" || number == 0 || open.closed(repo, number) {
 			continue
 		}
 		pr := FleetReworkPR{Repo: repo, Number: number, Stage: ai.Record.Stage.Label()}
@@ -250,7 +303,7 @@ func (h *ContributeWSHub) fleetReworkFor(c *ContributorConnection, stale bool) F
 			continue
 		}
 		repo, number := splitStageKey(ai.Key)
-		if repo == "" || number == 0 {
+		if repo == "" || number == 0 || open.closed(repo, number) {
 			continue
 		}
 		pr := FleetReworkPR{Repo: repo, Number: number, Stage: ai.Record.Stage.Label(), State: FleetReworkStateAdopted}

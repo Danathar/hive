@@ -227,6 +227,7 @@ type FleetSnapshot struct {
 // last pong is older than wsHeartbeatTimeout is reported with Stale=true and its
 // in-flight task is treated as no longer active (matching LiveStates()).
 func (h *ContributeWSHub) FleetSnapshot() FleetSnapshot {
+	openPRs := h.openPRIndex()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	snap := FleetSnapshot{
@@ -326,7 +327,7 @@ func (h *ContributeWSHub) FleetSnapshot() FleetSnapshot {
 		if task == nil {
 			fc.IdleReason = c.lastIdleReason
 		}
-		fc.FleetRework = h.fleetReworkFor(c, fc.Stale)
+		fc.FleetRework = h.fleetReworkFor(c, fc.Stale, openPRs)
 		c.mu.Unlock()
 		fc.CurrentTask = task
 		fc.PromptPreview = promptPreview
