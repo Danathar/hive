@@ -1213,6 +1213,9 @@ func (c *Engine) evaluateContributorLanePR(ctx context.Context, displayRepo, own
 		}
 		return contributorLaneEval{pr: pr}, reason, nil
 	}
+	if reason := c.closingContradictionGate(owner, repo, pr); reason != "" {
+		return contributorLaneEval{pr: pr}, reason, nil
+	}
 	author := hgithub.SafeGetLogin(pr.GetUser())
 	headSHA := pr.GetHead().GetSHA()
 	eval := contributorLaneEval{pr: pr, author: author, headSHA: headSHA}
