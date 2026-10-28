@@ -35,7 +35,10 @@ const Marker = "<!-- hive:prior-art-gate -->"
 type Kind string
 
 const (
-	KindKnowledge   Kind = "knowledge"
+	KindKnowledge Kind = "knowledge"
+	// KindReview is past review output found by the search source: PR
+	// review evidence, reviewer findings, sentinel hits and bead notes.
+	KindReview      Kind = "review"
 	KindMergedPR    Kind = "merged_pr"
 	KindClosedIssue Kind = "closed_issue"
 	KindOpenIssue   Kind = "open_issue"
@@ -47,6 +50,9 @@ const (
 // Query is what a Source is asked.
 type Query struct {
 	Repo string
+	// Number is the gated issue's number (zero when unknown) so a source
+	// can drop records of the issue itself before they are ranked.
+	Number int
 	// Terms are the issue's key terms, highest weight first.
 	Terms []Term
 	// Identifiers are the Terms that look like code identifiers, config
@@ -232,7 +238,7 @@ func (s *Searcher) Find(ctx context.Context, issue Issue) Report {
 		s.remember(key, now, report)
 		return report
 	}
-	q := Query{Repo: issue.Repo, Terms: terms, Identifiers: identifiers(terms)}
+	q := Query{Repo: issue.Repo, Number: issue.Number, Terms: terms, Identifiers: identifiers(terms)}
 	ctx, cancel := context.WithTimeout(ctx, s.opts.Budget)
 	defer cancel()
 
@@ -318,12 +324,15 @@ func (s *Searcher) remember(key string, now time.Time, r Report) {
 	s.cache[key] = cacheEntry{at: now, report: r}
 }
 
-// sameItem drops the issue itself when a forge source echoes it back.
+// sameItem drops the issue itself when a forge source echoes it back, or
+// when the search source returns a bead or review record filed against it.
 func sameItem(c Candidate, issue Issue) bool {
 	if issue.Number <= 0 {
 		return false
 	}
-	if c.Kind != KindOpenIssue && c.Kind != KindClosedIssue && c.Kind != KindMergedPR {
+	switch c.Kind {
+	case KindOpenIssue, KindClosedIssue, KindMergedPR, KindReview:
+	default:
 		return false
 	}
 	n := strconv.Itoa(issue.Number)
@@ -342,14 +351,16 @@ func kindRank(k Kind) int {
 		return 2
 	case KindKnowledge:
 		return 3
-	case KindClosedIssue:
+	case KindReview:
 		return 4
-	case KindOpenIssue:
+	case KindClosedIssue:
 		return 5
-	case KindCode:
+	case KindOpenIssue:
 		return 6
+	case KindCode:
+		return 7
 	}
-	return 7
+	return 8
 }
 
 // SourceFunc adapts a function to Source.

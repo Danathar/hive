@@ -128,11 +128,13 @@ type fakeSource struct {
 	cands []Candidate
 	err   error
 	calls int
+	got   Query
 }
 
 func (f *fakeSource) Name() string { return f.name }
-func (f *fakeSource) Search(_ context.Context, _ Query) ([]Candidate, error) {
+func (f *fakeSource) Search(_ context.Context, q Query) ([]Candidate, error) {
 	f.calls++
+	f.got = q
 	return f.cands, f.err
 }
 
@@ -155,6 +157,9 @@ func TestSearcherRanksDedupesCapsAndCaches(t *testing.T) {
 	r := s.Find(context.Background(), issue)
 	if r.Errors != 1 || len(r.Sources) != 2 {
 		t.Fatalf("errors=%d sources=%v", r.Errors, r.Sources)
+	}
+	if a.got.Repo != issue.Repo || a.got.Number != issue.Number {
+		t.Fatalf("query = %+v, want the issue's repo and number", a.got)
 	}
 	if len(r.Findings) != 3 {
 		t.Fatalf("findings capped at 3, got %d", len(r.Findings))
@@ -402,7 +407,7 @@ func TestRenderHelpersAndSourceFunc(t *testing.T) {
 	if got := formatTTL(90 * time.Minute); got != "1h30m0s" {
 		t.Fatalf("formatTTL(90m) = %q", got)
 	}
-	for _, k := range []Kind{KindMergedPR, KindSetting, KindDoc, KindKnowledge, KindClosedIssue, KindOpenIssue, KindCode} {
+	for _, k := range []Kind{KindMergedPR, KindSetting, KindDoc, KindKnowledge, KindReview, KindClosedIssue, KindOpenIssue, KindCode} {
 		if kindRank(k) >= kindRank(Kind("other")) {
 			t.Errorf("kindRank(%s) must sort before unknown kinds", k)
 		}
@@ -428,6 +433,9 @@ func TestRenderHelpersAndSourceFunc(t *testing.T) {
 	}
 	if !sameItem(Candidate{Kind: KindClosedIssue, URL: "https://x/issues/12"}, Issue{Number: 12}) || sameItem(Candidate{Kind: KindDoc, Ref: "#12"}, Issue{Number: 12}) || sameItem(Candidate{Kind: KindOpenIssue, Ref: "#12"}, Issue{}) {
 		t.Fatalf("sameItem mismatch")
+	}
+	if !sameItem(Candidate{Kind: KindReview, Ref: "#12"}, Issue{Number: 12}) || !sameItem(Candidate{Kind: KindReview, Ref: "epic-12", URL: "https://x/issues/12"}, Issue{Number: 12}) || sameItem(Candidate{Kind: KindReview, Ref: "#41"}, Issue{Number: 12}) {
+		t.Fatalf("sameItem should drop review records of the gated issue only")
 	}
 	if !hasInnerUpper("maxRetries") || hasInnerUpper("Retries") || hasInnerUpper("plain") {
 		t.Fatalf("hasInnerUpper mismatch")
