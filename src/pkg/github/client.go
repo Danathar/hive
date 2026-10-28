@@ -38,7 +38,8 @@ import (
 var ErrNoGitHubClient = errors.New("no github client configured (hive is running without GitHub credentials)")
 
 type Client struct {
-	client *gh.Client
+	client      *gh.Client
+	linearTeams map[string][]string
 	// foldedTrackers records issues that finding folds landed on (#11587).
 	foldedTrackers foldedTrackerSet
 	// commentBudget caps automated comments per issue per day (#12733).
@@ -1943,7 +1944,7 @@ func prRequestedReviews(pr *gh.PullRequest) (logins, teams []string) {
 	return logins, teams
 }
 
-func reviewScopeContract(title, body, defaultRepo, runKey, planRef string) string {
+func reviewScopeContract(title, body, defaultRepo, runKey, planRef, headRef string, teamKeys []string) string {
 	refs := ParseClaimedIssues(title+"\n"+body, defaultRepo)
 	if len(refs) > 0 {
 		ref := refs[0]
@@ -1957,6 +1958,59 @@ func reviewScopeContract(title, body, defaultRepo, runKey, planRef string) strin
 			return fmt.Sprintf("lease task Hive-Run %s / Hive-Plan %s", strings.TrimSpace(runKey), strings.TrimSpace(planRef))
 		}
 		return fmt.Sprintf("lease task Hive-Run %s", strings.TrimSpace(runKey))
+	}
+	return linearScopeContract(title, body, headRef, teamKeys)
+}
+
+// SetLinearScopeTeams maps configured Linear teams to their repositories.
+func (c *Client) SetLinearScopeTeams(teams []config.LinearTeamSourceConfig) {
+	mapped := make(map[string][]string)
+	for _, team := range teams {
+		for _, repo := range append([]string{team.Repo}, linearProjectRepos(team.Projects)...) {
+			if repo != "" && team.Key != "" {
+				mapped[strings.ToLower(repo)] = append(mapped[strings.ToLower(repo)], strings.ToUpper(team.Key))
+			}
+		}
+	}
+	c.reposMu.Lock()
+	c.linearTeams = mapped
+	c.reposMu.Unlock()
+}
+
+func linearProjectRepos(projects []config.LinearProjectSourceConfig) []string {
+	var repos []string
+	for _, project := range projects {
+		repos = append(repos, project.Repo)
+	}
+	return repos
+}
+
+func (c *Client) linearScopeTeams(repo string) []string {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	return append([]string(nil), c.linearTeams[strings.ToLower(repo)]...)
+}
+
+var linearBodyScope = regexp.MustCompile(`(?i)\b(?:fixes|closes|part of)\s+([a-z][a-z0-9]*-[0-9]+)\b`)
+var linearTitleScope = regexp.MustCompile(`(?i)^\s*\[([a-z][a-z0-9]*-[0-9]+)\]`)
+var linearBranchScope = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])([a-z][a-z0-9]*-[0-9]+)(?:$|[^a-z0-9])`)
+
+func linearScopeContract(title, body, headRef string, keys []string) string {
+	for _, source := range []struct {
+		pattern *regexp.Regexp
+		text    string
+	}{
+		{linearBodyScope, body}, {linearTitleScope, title}, {linearBranchScope, headRef},
+	} {
+		for _, match := range source.pattern.FindAllStringSubmatch(source.text, -1) {
+			id := strings.ToUpper(match[1])
+			key := id[:strings.LastIndexByte(id, '-')]
+			for _, allowed := range keys {
+				if strings.EqualFold(key, allowed) {
+					return "linked Linear issue " + id
+				}
+			}
+		}
 	}
 	return ""
 }
@@ -1991,7 +2045,8 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 		labels = c.clearReleasedReporterTrustNeedsHuman(ctx, repo, pr.GetNumber(), labels)
 		attrMeta, hasAttr := ParseAttributionTrailer(pr.GetBody())
 		runKey, planRef := ParseRunTrailers(pr.GetBody())
-		scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef)
+		headRef, _, _ := prHeadOrigin(pr)
+		scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef, headRef, c.linearScopeTeams(owner+"/"+repoName))
 
 		if c.isHeld(labels) {
 			breakdown.Hold++
