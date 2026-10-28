@@ -973,7 +973,9 @@ func (c *Engine) SweepQueuedAutoMerges(ctx context.Context, opts AutoMergeSweepO
 			result.Seen++
 			if reason := c.prefilterQueuedIssue(issue, label); reason != "" {
 				c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, issue.GetNumber(), nil, hgithub.PRAuditPathQueue, reason)
-				if reason == "held" || reason == "exempt-label" {
+				// prefilterQueuedIssue reports holds as labelBlockReason's
+				// "label:hold", never the bare "held" used by the PR path.
+				if reason == "held" || reason == "label:hold" || reason == "exempt-label" {
 					c.debug("automerge sweep skipped PR", "repo", repo, "pr", issue.GetNumber(), "reason", reason)
 				} else {
 					c.info("automerge sweep skipped PR", "repo", repo, "pr", issue.GetNumber(), "reason", reason)
