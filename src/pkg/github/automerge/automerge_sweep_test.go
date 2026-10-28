@@ -2885,6 +2885,17 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/branches/main/protection/required_status_checks":
+			// This fixture exercises unknown required checks, with GitHub's
+			// merge endpoint enforcing protection rather than a known-empty set.
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/branches/main":
+			json.NewEncoder(w).Encode(map[string]any{"protected": true, "commit": map[string]string{"sha": "basesha"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/rules/branches/main":
+			json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/commits/basesha/status":
+			// No release-in-progress hold is active on the base branch.
+			json.NewEncoder(w).Encode(map[string]any{"state": "success", "total_count": 0, "statuses": []any{}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/issues":
 			if got := r.URL.Query().Get("labels"); got != expectedLabel {
 				t.Fatalf("issues labels query = %q, want %q", got, expectedLabel)
