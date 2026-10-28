@@ -16882,6 +16882,16 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (item.mirrored) return null;
       return (mods.indexOf('needs-decision') >= 0 || (Number(item.stage) || 0) === 45) ? item : null;
     }
+    // Pure: what bulk "Let hive decide" acts on for one row — its decision
+    // target when it has one (so "Decide PR #N" on an issue row stays on
+    // that PR), else every open PR of a multi-PR parent (the delegate-all
+    // fan-out); [] when there is nothing to decide.
+    function stageTrackerDelegateTargets(item) {
+      const target = stageTrackerDecisionTarget(item);
+      if (target) return [target];
+      const nested = stageTrackerNestedOpenPRs(item);
+      return nested.length >= STAGE_TRACKER_DELEGATE_ALL_MIN ? nested : [];
+    }
     // Pure: the decision choices for one decision target. On an issue
     // parked at 045 the verbs are /hive approve and /hive decision. On a PR
     // parked at 085, Approve posts the /lgtm + /approve commands as the
@@ -16981,7 +16991,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const per = items.map(it => ({ it, flat: stageTrackerFlatActions(stageTrackerRowActions(it, typeof ctxOf === 'function' ? ctxOf(it.repo) : ctxOf)) }));
       const judge = id => {
         for (const p of per) {
-          const a = p.flat[id];
+          // A multi-PR parent delegates all its PRs, not one ambiguous target.
+          const a = p.flat[id] || (id === 'decide:delegate' ? p.flat['decide:delegate-all'] : null);
           if (!a) return { enabled: false, why: 'Not applicable to ' + stageTrackerRefOf(p.it) };
           if (!a.enabled) return { enabled: false, why: a.why + ' (' + stageTrackerRefOf(p.it) + ')' };
         }
@@ -16989,10 +17000,12 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       };
       const decideIds = ['decide:delegate', 'decide:approve', 'decide:direction', 'decide:close-superseded', 'decide:close-wontfix'];
       const submenu = decideIds.map(id => Object.assign({ id, label: STAGE_TRACKER_ACTION_LABELS[id] + (id === 'decide:approve' || id === 'decide:delegate' ? '' : '…'), danger: id.indexOf('close') > 0 }, judge(id)));
-      const targets = items.map(stageTrackerDecisionTarget).filter(Boolean);
-      if (targets.length === items.length && items.length) {
+      // The kind mix counts a multi-PR parent's open PRs (what bulk
+      // delegation acts on), so a parent plus a parked issue is refused.
+      const targets = items.map(stageTrackerDelegateTargets);
+      if (items.length && targets.every(ts => ts.length)) {
         const kinds = {};
-        for (const t of targets) kinds[t.kind] = true;
+        for (const t of [].concat(...targets)) kinds[t.kind] = true;
         if (kinds.pr && kinds.issue) {
           for (const sm of submenu) if (sm.enabled) Object.assign(sm, { enabled: false, why: 'Selection mixes issues and pull requests waiting on a decision' });
         }
@@ -17957,7 +17970,13 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         // A row decides its parked PR when it has one (the issue's stage is
         // only mirrored from it); dedupe when the PR row is selected too.
         const seen = {};
-        items = items.map(stageTrackerDecisionTarget).filter(t => t && !seen[stageTrackerItemKey(t)] && (seen[stageTrackerItemKey(t)] = true));
+        // Bulk delegation expands a parent with no single target into the
+        // same open PRs as delegate-all — before deduping, so a selected
+        // parent and its sub-rows run each PR once, with every PR named in
+        // the shared confirmation. A parent with one parked PR keeps
+        // deciding just that PR ("Decide PR #N › Let hive decide").
+        items = [].concat(...items.map(it => id === 'decide:delegate' ? stageTrackerDelegateTargets(it) : [stageTrackerDecisionTarget(it)]))
+          .filter(t => t && !seen[stageTrackerItemKey(t)] && (seen[stageTrackerItemKey(t)] = true));
         if (!items.length) return { toasts: [], pending: [] };
       }
       const payload = await stageTrackerActionPayload(items, id);

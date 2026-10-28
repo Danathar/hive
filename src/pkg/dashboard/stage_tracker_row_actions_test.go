@@ -53,6 +53,7 @@ func stageTrackerRowActionsPreamble(t *testing.T, html string) string {
 		jsFunc(t, html, "stageTrackerPRParked"),
 		jsFunc(t, html, "stageTrackerParkedNestedPRs"),
 		jsFunc(t, html, "stageTrackerDecisionTarget"),
+		jsFunc(t, html, "stageTrackerDelegateTargets"),
 		jsFunc(t, html, "stageTrackerDecideOptions"),
 		jsFunc(t, html, "stageTrackerSupersederOptions"),
 		jsFunc(t, html, "stageTrackerSupersederValid"),
@@ -636,6 +637,37 @@ assert.ok(stageTrackerSelBarHtml([a, b], bulk).includes('data-arg0="decide:deleg
 const plain = { repo: 'o/r', kind: 'issue', number: 2, url: 'u', stage: 20, modifiers: [] };
 assert.strictEqual(stageTrackerSelectionActions([a, plain], () => ctx)[1].enabled, false, 'an item with nothing to decide disables the chip');
 
+// A parent selected alone or with its PR sub-rows offers bulk delegation.
+for (const selected of [[issue], [issue, a], [issue, a, b], [b, issue, a]]) {
+  const actions = stageTrackerSelectionActions(selected, () => ctx);
+  assert.strictEqual(actions[1].enabled, true, 'multi-PR parent must not grey out delegation');
+  assert.strictEqual(actions[0].submenu.find(x => x.id === 'decide:delegate').enabled, true);
+  assert.strictEqual(actions[0].submenu.find(x => x.id === 'decide:approve').enabled, false, 'no ambiguous bulk approval');
+}
+for (const denied of [{ ...ctx, user: false }, { ...ctx, canHold: false }]) {
+  const action = stageTrackerSelectionActions([issue, a, b], () => denied)[1];
+  assert.strictEqual(action.enabled, false, 'parent delegation retains write gates');
+  assert.ok(action.why.includes(STAGE_TRACKER_WHY_WRITE));
+}
+assert.strictEqual(stageTrackerSelectionActions([issue, plain], () => ctx)[1].enabled, false);
+// Bulk delegation on a parent expands to its open PRs only when no single
+// PR is its decision target; with one parked PR the row keeps that PR.
+assert.deepStrictEqual(stageTrackerDelegateTargets(issue).map(p => p.number), [15017, 15020]);
+const oneParked = { ...issue, linked_prs: [{ ...issue.linked_prs[0], stage: 60, manual_merge: false, human_merge_reason: '' }, issue.linked_prs[1], issue.linked_prs[2]] };
+assert.strictEqual(stageTrackerDecisionTarget(oneParked).number, 15020);
+assert.deepStrictEqual(stageTrackerNestedOpenPRs(oneParked).map(p => p.number), [15017, 15020], 'still a two-PR parent for delegate-all');
+assert.deepStrictEqual(stageTrackerDelegateTargets(oneParked).map(p => p.number), [15020], 'single parked PR: only that PR');
+assert.deepStrictEqual(stageTrackerDelegateTargets(a).map(p => p.number), [15017], 'a parked PR row is its own target');
+assert.deepStrictEqual(stageTrackerDelegateTargets(plain), []);
+// A parent's open PRs count as PR targets in the issue/PR mix check: a
+// multi-PR parent plus a 045 issue stays refused, as before.
+const parked045 = { repo: 'o/r', kind: 'issue', number: 1, url: 'u', stage: 45, modifiers: ['needs-decision'] };
+const mixed = stageTrackerSelectionActions([issue, parked045], () => ctx);
+assert.strictEqual(mixed[1].enabled, false, 'parent + parked issue mixes kinds');
+assert.ok(mixed[1].why.includes('mixes'), mixed[1].why);
+assert.strictEqual(stageTrackerSelectionActions([issue, a, parked045], () => ctx)[1].enabled, false);
+assert.strictEqual(stageTrackerSelectionActions([parked045, { ...parked045, number: 2 }], () => ctx)[1].enabled, true, 'two parked issues still delegate');
+
 // The tally: "3 sent · 2 decided · 1 no-op", counting each PR of a per-PR job.
 assert.strictEqual(stageTrackerDelegateTally([{ ok: true, result: { action: 'approved' } }, { ok: true, result: { action: 'approved' } }, { ok: true, result: { action: STAGE_TRACKER_ACTION_NOOP } }]), '3 sent · 2 decided · 1 no-op');
 assert.strictEqual(stageTrackerDelegateTally([{ ok: false }, { ok: true, result: { action: 'recommended' } }]), '2 sent · 1 decided · 0 no-op · 1 failed');
@@ -668,6 +700,38 @@ function stageTrackerAfterActions() {}
   // A PR row never runs the all-PRs action.
   const none = await runRowAction('decide:delegate-all', a);
   assert.strictEqual(none.toasts.length, 0); assert.strictEqual(calls.length, 1);
+
+  // Selection delegation expands parents like delegate-all, but dedupes
+  // selected sub-rows before confirmation and before sending any requests.
+  global.fetch = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    const number = Number(url.split('/').slice(-2)[0]);
+    return { ok: true, status: 200, json: async () => ({ status: 'done', result: { action: STAGE_TRACKER_ACTION_NOOP, target: { repo: issue.repo, kind: 'pr', number }, outcome: 'No change' } }) };
+  };
+  for (const selected of [[issue], [issue, a, b], [b, issue, a]]) {
+    calls.length = 0; dialogs.length = 0;
+    await runRowAction('decide:delegate', selected);
+    assert.deepStrictEqual(calls.map(c => c.url).sort(), [
+      '/api/repos/hivecommons/hive/items/15017/decide-delegated',
+      '/api/repos/hivecommons/hive/items/15020/decide-delegated',
+    ]);
+    assert.ok(calls.every(c => c.body.type === 'pr'), 'never delegate the ambiguous issue itself');
+    assert.strictEqual(dialogs.length, 1);
+    for (const number of [15017, 15020]) {
+      assert.strictEqual(dialogs[0].cfg.message.split('hivecommons/hive#' + number).length - 1, 1, 'confirm each PR exactly once');
+    }
+    assert.ok(!dialogs[0].cfg.message.includes('hivecommons/hive#15009'));
+  }
+  // The row menu's "Decide PR #15020 › Let hive decide" on a parent with
+  // one parked PR (of two open) delegates that PR alone — never the other
+  // in-flight PR, which only the explicit delegate-all touches.
+  for (const selected of [oneParked, [oneParked], [oneParked, b]]) {
+    calls.length = 0; dialogs.length = 0;
+    await runRowAction('decide:delegate', selected);
+    assert.deepStrictEqual(calls.map(c => c.url), ['/api/repos/hivecommons/hive/items/15020/decide-delegated']);
+    assert.strictEqual(dialogs.length, 1);
+    assert.ok(!dialogs[0].cfg.message.includes('hivecommons/hive#15017'), dialogs[0].cfg.message);
+  }
 })().catch(e => { console.error(e); process.exit(1); });
 `)
 }
