@@ -1717,8 +1717,16 @@ only the two list calls per repo move behind it.
 
 After a GitHub rate-limit refusal (a secondary-limit 403 or a primary-limit
 reset) the shared transport enters a slow-start caution window and paces
-requests about 2s apart. Pacing is prioritised so periodic housekeeping cannot
-starve the governor:
+requests about 2s apart. The window lasts the limit's back-off plus 10
+minutes. A primary refusal backs off until its `X-RateLimit-Reset`. A
+secondary 403 backs off for its `Retry-After` (seconds or an HTTP date), or
+until `X-RateLimit-Reset` when `X-RateLimit-Remaining` is `0`. Otherwise it
+follows GitHub's rule for secondary limits: wait one minute, doubling on each
+repeat within 30 minutes of the last back-off (1m, 2m, 4m, 8m, capped at
+15m). The rest of the burst refused by the same block does not count as a
+repeat. Before this, a header-less secondary 403 assumed a full hour, so one
+search refusal kept the hive pacing for 70 minutes. Pacing is prioritised so
+periodic housekeeping cannot starve the governor:
 
 - the reconcile pass (`EnumerateActionable`) runs **high** priority and is
   bounded only by its own deadline;
@@ -1732,6 +1740,12 @@ starve the governor:
   most once a minute per caller) and retried on its next tick;
 - the self-authored automerge sweep backs its tick off to at least 60s while
   the window is engaged and resumes its adaptive interval when it ends;
+- once an automerge lane (queued, self-authored, trusted-author, contributor)
+  reaches a candidate PR, that PR's evaluation and merge (the PR read, its
+  status and check-run reads, the merge call) run at **normal** priority, so
+  a green, approved PR is never skipped with `status-check` because its
+  status read was shed. The lanes evaluate one request at a time, so this adds
+  at most one slot to the queue;
 - GitHub App installation-token mints (and the other App-JWT endpoints) do
   not go through the pacer at all: they are a separate rate-limit bucket, and
   a mint that queued behind paced traffic failed every request that needed

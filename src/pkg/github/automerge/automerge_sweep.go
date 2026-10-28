@@ -501,6 +501,27 @@ func lowPriority(ctx context.Context) context.Context {
 	return hgithub.WithPacingClass(ctx, hgithub.PacingLow)
 }
 
+// mergeDecisionPriority lifts one candidate PR's evaluation and merge out of
+// the low pacing class the lane loop runs at. The lanes stay housekeeping
+// where it matters: the tick or floor pass still yields to a deep queue
+// (ShedLowPriorityTick) and backs off to its caution floor, and the
+// pre-candidate reads stay low. But once a PR passed the cheap prefilter,
+// shedding its status / check-run read is not load shedding, it is a missed
+// merge: on the projectbluefin hive (2026-10-28) an approved, 19/19-green
+// finpilot#599 was skipped with reason "status-check" ("request shed … class
+// low, queue 5.454s ahead, limit 5s") pass after pass for the whole caution
+// window. The lanes evaluate candidates one request at a time, so normal
+// class adds at most one slot to the queue and waits at most
+// slowStartNormalMaxQueue for it — it cannot rebuild the 2026-10-21 pile-up
+// the low class was introduced for (hivecommons/hive#13382). A ctx the caller
+// already classed (high, or explicitly normal) is left alone.
+func mergeDecisionPriority(ctx context.Context) context.Context {
+	if hgithub.PacingClassOf(ctx) != hgithub.PacingLow {
+		return ctx
+	}
+	return hgithub.WithPacingClass(ctx, hgithub.PacingNormal)
+}
+
 // selfAuthoredSweepBudgetShare caps the fraction of the App's hourly REST
 // budget this sweep alone may consume. The sweep is a background nicety; the
 // agents' own gh calls, the governor's eval cycle, the merge-eligible writer
@@ -949,7 +970,7 @@ func (c *Engine) SweepQueuedAutoMerges(ctx context.Context, opts AutoMergeSweepO
 				result.Skipped++
 				continue
 			}
-			event, reason, err := c.trySweepQueuedPR(ctx, repo, owner, repoName, issue.GetNumber(), label)
+			event, reason, err := c.trySweepQueuedPR(mergeDecisionPriority(ctx), repo, owner, repoName, issue.GetNumber(), label)
 			if err != nil {
 				c.warn("automerge sweep skipped PR", "repo", repo, "pr", issue.GetNumber(), "reason", reason, "error", err)
 				result.Skipped++
@@ -1146,7 +1167,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 			}
 			result.Candidates++
 			repoCandidates++
-			event, reason, err := c.trySweepSelfAuthoredPR(ctx, repo, owner, repoName, number, branchUpdateAttempts < selfAuthoredSweepMaxBranchUpdates)
+			event, reason, err := c.trySweepSelfAuthoredPR(mergeDecisionPriority(ctx), repo, owner, repoName, number, branchUpdateAttempts < selfAuthoredSweepMaxBranchUpdates)
 			if event.BranchUpdated || reason == "updated-branch" || reason == "update-branch" {
 				branchUpdateAttempts++
 			}
@@ -1291,7 +1312,7 @@ func (c *Engine) SweepTrustedAuthorAutoMerges(ctx context.Context, opts AutoMerg
 				continue
 			}
 			result.Candidates++
-			event, reason, err := c.trySweepTrustedAuthorPR(ctx, displayRepo, owner, repoName, number, policy)
+			event, reason, err := c.trySweepTrustedAuthorPR(mergeDecisionPriority(ctx), displayRepo, owner, repoName, number, policy)
 			if err != nil {
 				c.warn("trusted-author automerge sweep skipped PR", "repo", displayRepo, "pr", number, "reason", reason, "error", err)
 				result.Skipped++
