@@ -1666,3 +1666,108 @@ func TestContributorLaneAssociationTrusted(t *testing.T) {
 		t.Fatal("nil PR must not be trusted")
 	}
 }
+
+// TestContributorAutoPromotionSearchBudget pins the Search API budget of the
+// hive-wide auto-promotion check (#15088): a bot author is never searched
+// for, and one (repository, author) answer serves every sweep inside
+// contributorMergedReposTTL, while a failed search is retried.
+func TestContributorAutoPromotionSearchBudget(t *testing.T) {
+	hiveRepos := []string{"widget", "hive", "docs", "homebrew-hive"}
+	history := func(author string, n int) []map[string]any {
+		out := make([]map[string]any, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, mergedHistoryPR(author, "fix: clean change"))
+		}
+		return out
+	}
+	sweep := func(t *testing.T, engine *Engine, policy ContributorLanePolicy) string {
+		t.Helper()
+		_, reason, err := engine.trySweepContributorLanePR(context.Background(), "widget", "acme", "widget", 7, policy)
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		return reason
+	}
+	setup := func(t *testing.T, fx *contributorLaneFixture) (*Engine, ContributorLanePolicy, *contributorLaneClock, func()) {
+		t.Helper()
+		api := newContributorLaneAPI(t, fx)
+		policy := defaultContributorLanePolicy()
+		policy.AutoPromoteAfterMergedPR = 5
+		clock := &contributorLaneClock{at: time.Date(2026, 10, 28, 20, 0, 0, 0, time.UTC)}
+		engine := newContributorLaneEngineRepos(api.URL, hiveRepos, policy, clock, Options{ContributorSoak: soakedTracker(clock)})
+		return engine, policy, clock, api.Close
+	}
+
+	t.Run("bot author is never searched or promoted", func(t *testing.T) {
+		const bot = "github-actions[bot]"
+		fx := validContributorFixture()
+		fx.author = bot
+		fx.issueComments[0]["body"] = contributorClaimMarkerTier(bot, "contributor", contributorLaneTestHive, " tier=contributor verified=true")
+		fx.mergedHistory = history(bot, 1)
+		fx.otherHistory = map[string][]map[string]any{"hive": history(bot, 9)}
+		engine, policy, _, done := setup(t, &fx)
+		defer done()
+		sweep(t, engine, policy)
+		if fx.searches != 0 {
+			t.Fatalf("searches = %d, want 0 for a bot author (q=%q)", fx.searches, fx.searchQuery)
+		}
+		if fx.merges != 0 {
+			t.Fatalf("merges = %d, want 0: a bot must not be auto-promoted by merge count", fx.merges)
+		}
+	})
+
+	t.Run("one search per repository and author per window", func(t *testing.T) {
+		fx := validContributorFixture()
+		fx.issueComments[0]["body"] = contributorClaimMarkerTier(contributorLaneTestAuthor, "contributor", contributorLaneTestHive, " tier=contributor verified=true")
+		fx.mergedHistory = history(contributorLaneTestAuthor, 1)
+		fx.otherHistory = map[string][]map[string]any{"hive": history(contributorLaneTestAuthor, 2)}
+		engine, policy, clock, done := setup(t, &fx)
+		defer done()
+		for i := 0; i < 3; i++ {
+			if reason := sweep(t, engine, policy); reason != contributorLaneReasonClaimTier {
+				t.Fatalf("sweep %d reason = %q, want %q", i, reason, contributorLaneReasonClaimTier)
+			}
+		}
+		if fx.searches != 1 {
+			t.Fatalf("searches = %d after three sweeps in one window, want 1", fx.searches)
+		}
+		if strings.Join(fx.otherLists, ",") != "hive,hive,hive" {
+			t.Fatalf("other repos listed = %v, want the cached answer reused each sweep", fx.otherLists)
+		}
+		clock.advance(contributorMergedReposTTL)
+		sweep(t, engine, policy)
+		if fx.searches != 2 {
+			t.Fatalf("searches = %d after the window expired, want 2", fx.searches)
+		}
+	})
+
+	t.Run("failed search is not cached", func(t *testing.T) {
+		fx := validContributorFixture()
+		fx.issueComments[0]["body"] = contributorClaimMarkerTier(contributorLaneTestAuthor, "contributor", contributorLaneTestHive, " tier=contributor verified=true")
+		fx.mergedHistory = history(contributorLaneTestAuthor, 1)
+		fx.otherHistory = map[string][]map[string]any{"hive": history(contributorLaneTestAuthor, 9)}
+		fx.searchStatus = http.StatusUnprocessableEntity
+		engine, policy, _, done := setup(t, &fx)
+		defer done()
+		sweep(t, engine, policy)
+		sweep(t, engine, policy)
+		if fx.searches != 2 {
+			t.Fatalf("searches = %d, want 2: a failed search must be retried, not cached", fx.searches)
+		}
+	})
+}
+
+func TestContributorAutoPromotionExempt(t *testing.T) {
+	for login, want := range map[string]bool{
+		"github-actions[bot]":    true,
+		"Mergeraptor[Bot]":       true,
+		" hivecommons-hive[bot]": true,
+		"mrbobbytables":          false,
+		"bot-fan":                false,
+		"":                       false,
+	} {
+		if got := contributorAutoPromotionExempt(login); got != want {
+			t.Errorf("contributorAutoPromotionExempt(%q) = %v, want %v", login, got, want)
+		}
+	}
+}

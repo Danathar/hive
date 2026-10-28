@@ -209,6 +209,14 @@ type Engine struct {
 	maintainerPermMu sync.Mutex
 	maintainerPerm   map[string]maintainerPermEntry
 
+	// mergedReposCache caches, per (repository, author), which of the hive's
+	// repositories hold a merged PR by them (contributorMergedRepos): the
+	// hive-wide auto-promotion search runs once per (repository, author) per
+	// window, not
+	// once per PR per sweep (#15088).
+	mergedReposCacheMu sync.Mutex
+	mergedReposCache   map[string]contributorMergedReposEntry
+
 	requiredChecksMu      sync.RWMutex
 	requiredChecks        map[string]bool
 	requiredChecksForRepo func(repo string) (map[string]bool, bool)

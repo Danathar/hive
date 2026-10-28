@@ -626,7 +626,7 @@ func (c *Engine) admitContributor(ctx context.Context, owner, repo string, pr *g
 	if match.ObservedTier == "" {
 		match.ObservedTier = c.observedRegistryTier(author)
 	}
-	if err == nil && match.Reason != "" && policy.AutoPromoteAfterMergedPR > 0 && !contributorRegistryTierRevoked(c.observedRegistryTier(author)) {
+	if err == nil && match.Reason != "" && policy.AutoPromoteAfterMergedPR > 0 && !contributorAutoPromotionExempt(author) && !contributorRegistryTierRevoked(c.observedRegistryTier(author)) {
 		history, promoteErr := c.contributorCleanMergedHistory(ctx, owner, repo, author, policy.AutoPromoteAfterMergedPR, policy.hiveWideAutoPromotion())
 		if promoteErr != nil {
 			return contributorClaimMatch{Reason: "contributor-lane:auto-promote-history"}, promoteErr
@@ -797,14 +797,39 @@ type contributorRepoRef struct {
 // contributorSearchQueryMaxLen is GitHub's limit on a search `q` parameter.
 const contributorSearchQueryMaxLen = 256
 
+// contributorMergedReposTTL is how long contributorMergedRepos trusts an
+// author's search answer. Merged history only grows, so a stale answer at
+// worst delays a promotion by one window; without the cache every open PR by
+// the author repeated the same Search API calls on every sweep, and on a
+// 19-repository hive that tripped GitHub's search secondary rate limit
+// several times a day (#15088).
+const contributorMergedReposTTL = 10 * time.Minute
+
+type contributorMergedReposEntry struct {
+	found map[string]bool
+	at    time.Time
+}
+
+// contributorAutoPromotionExempt reports whether author can never be
+// auto-promoted: automation accounts (the GitHub `[bot]` suffix, which covers
+// the hive's own App). A bot is trusted only through the explicit trusted
+// bot authors setting, never by counting its merges, and asking the Search
+// API about one only spends the search budget.
+func contributorAutoPromotionExempt(author string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(author)), "[bot]")
+}
+
 // contributorMergedRepos returns the hive's other active repositories that
 // hold at least one merged PR by author, in the order the transport lists
 // them, excluding the PR's own (owner, repo). It asks search/issues
 // `is:pr is:merged author:<login> repo:… repo:…`, chunked to GitHub's
 // 256-character query limit, so a ten-repo hive costs one or two search
-// calls instead of ten closed-PR listings. A search failure degrades to the
-// PR's own repository with a warning rather than blocking the sweep: the
-// result is then exactly the pre-#14517 per-repo count.
+// calls instead of ten closed-PR listings. The answer is cached per
+// (repository, author) for contributorMergedReposTTL, so the author's other
+// PRs in the same repository reuse it instead of searching again on every
+// sweep. A search failure is not cached and degrades to the PR's own
+// repository with a warning rather than blocking the sweep: the result is
+// then exactly the pre-#14517 per-repo count.
 func (c *Engine) contributorMergedRepos(ctx context.Context, owner, repo, author string) []contributorRepoRef {
 	if c == nil || c.gh == nil || c.transport == nil {
 		return nil
@@ -827,7 +852,46 @@ func (c *Engine) contributorMergedRepos(ctx context.Context, owner, repo, author
 	if len(candidates) == 0 {
 		return nil
 	}
-	base := "is:pr is:merged author:" + strings.TrimPrefix(strings.TrimSpace(author), "@")
+	login := strings.TrimPrefix(strings.TrimSpace(author), "@")
+	key := own + "#" + strings.ToLower(login)
+	now := c.clock()
+	c.mergedReposCacheMu.Lock()
+	cached, ok := c.mergedReposCache[key]
+	c.mergedReposCacheMu.Unlock()
+	found := cached.found
+	if !ok || now.Sub(cached.at) >= contributorMergedReposTTL {
+		var err error
+		found, err = c.searchContributorMergedRepos(ctx, login, candidates)
+		if err != nil {
+			c.warn("contributor-lane auto-promotion repo search failed; counting the PR's repository only", "repo", owner+"/"+repo, "author", author, "error", err)
+			return nil
+		}
+		c.mergedReposCacheMu.Lock()
+		if c.mergedReposCache == nil {
+			c.mergedReposCache = map[string]contributorMergedReposEntry{}
+		}
+		for k, e := range c.mergedReposCache {
+			if now.Sub(e.at) >= contributorMergedReposTTL {
+				delete(c.mergedReposCache, k)
+			}
+		}
+		c.mergedReposCache[key] = contributorMergedReposEntry{found: found, at: now}
+		c.mergedReposCacheMu.Unlock()
+	}
+	out := make([]contributorRepoRef, 0, len(found))
+	for _, ref := range candidates {
+		if found[strings.ToLower(ref.Owner+"/"+ref.Repo)] {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// searchContributorMergedRepos runs the chunked search/issues query for
+// login's merged PRs across repos and returns the lower-cased owner/repo of
+// every repository that answered with at least one.
+func (c *Engine) searchContributorMergedRepos(ctx context.Context, login string, repos []contributorRepoRef) (map[string]bool, error) {
+	base := "is:pr is:merged author:" + login
 	found := map[string]bool{}
 	query := base
 	flush := func() error {
@@ -849,27 +913,19 @@ func (c *Engine) contributorMergedRepos(ctx context.Context, owner, repo, author
 		}
 		return nil
 	}
-	for _, ref := range candidates {
+	for _, ref := range repos {
 		qualifier := " repo:" + ref.Owner + "/" + ref.Repo
 		if len(query)+len(qualifier) > contributorSearchQueryMaxLen {
 			if err := flush(); err != nil {
-				c.warn("contributor-lane auto-promotion repo search failed; counting the PR's repository only", "repo", owner+"/"+repo, "author", author, "error", err)
-				return nil
+				return nil, err
 			}
 		}
 		query += qualifier
 	}
 	if err := flush(); err != nil {
-		c.warn("contributor-lane auto-promotion repo search failed; counting the PR's repository only", "repo", owner+"/"+repo, "author", author, "error", err)
-		return nil
+		return nil, err
 	}
-	out := make([]contributorRepoRef, 0, len(found))
-	for _, ref := range candidates {
-		if found[strings.ToLower(ref.Owner+"/"+ref.Repo)] {
-			out = append(out, ref)
-		}
-	}
-	return out
+	return found, nil
 }
 
 // repoFromRepositoryURL extracts lower-cased owner/repo from a search
