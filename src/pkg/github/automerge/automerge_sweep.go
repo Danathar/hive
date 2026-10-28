@@ -1993,7 +1993,10 @@ func (c *Engine) serializedLane(repo string) (bool, hgithub.SerializedLaneGate) 
 
 // rejectPrefilteredBeforeLane keeps cheap sweep rejections cheap for direct
 // repos, while letting a serialized front leave immediately. Queued issue list
-// entries lack the base branch, so only that path needs an extra PR fetch.
+// entries lack the base branch, so only that path needs an extra PR fetch:
+// on a hive-serialized repo every prefiltered queued PR (label-removed,
+// exempt-label, sentinel or label block) costs one PullRequests.Get per sweep,
+// because the sweep cannot tell from the issue entry whether it is the front.
 func (c *Engine) rejectPrefilteredBeforeLane(ctx context.Context, displayRepo, owner, repo string, number int, pr *gh.PullRequest, path, reason string) {
 	serialized, gate := c.serializedLane(displayRepo)
 	if !serialized {
