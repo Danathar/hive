@@ -2,7 +2,9 @@ package hub
 
 import (
 	cryptoRand "crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -601,8 +603,29 @@ func (s *HubServer) startProviderLogin(w http.ResponseWriter, r *http.Request, p
 		// scope is deliberate — the hub only needs WHO is logging in, and GitHub
 		// serves /user's public profile (including "login") unscoped. Do NOT add a
 		// scope without a feature that needs it.
-		authURL := fmt.Sprintf("%s?client_id=%s&scope=&redirect_uri=%s&state=%s",
-			p.AuthorizeURL, p.ClientID, oauthRedirectURI(), state)
+		//
+		// PKCE (RFC 7636, S256): mint a per-login code_verifier, keep it in its
+		// own short-lived host-scoped cookie (mirroring the state cookie), and
+		// send only its S256 challenge. The callback must present the verifier
+		// at token exchange, binding the authorization code to the browser that
+		// started the login as defence-in-depth.
+		verifier, err := oauthPKCEVerifier()
+		if err != nil {
+			s.logger.Warn("OAuth: cannot mint PKCE verifier", "error", err)
+			http.Error(w, "login unavailable", http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthPKCECookieName,
+			Value:    verifier,
+			Path:     "/",
+			MaxAge:   int(oauthStateTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		authURL := fmt.Sprintf("%s?client_id=%s&scope=&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+			p.AuthorizeURL, p.ClientID, oauthRedirectURI(), state, pkceS256Challenge(verifier))
 		http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 		return
 	}
@@ -718,6 +741,11 @@ text-decoration:none;font-size:16px;font-weight:600;transition:background .12s,b
 }
 
 func (s *HubServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	// PKCE verifier: read once and clear immediately, on every outcome, so it is
+	// single-use whether this callback succeeds or is rejected below.
+	pkceVerifier := s.oauthPKCEVerifierFromCookie(r)
+	s.clearOAuthPKCECookie(w)
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing code", http.StatusBadRequest)
@@ -790,7 +818,16 @@ func (s *HubServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		displayName = claims.Name
 		s.logger.Info("audit: hub OIDC login", "provider", p.Name, "user", canonicalID)
 	} else {
-		login, avatar, token, ok := s.exchangeGitHubLogin(w, code)
+		// Fail closed BEFORE the exchange: a missing or malformed verifier means
+		// this browser never started a PKCE login (or already used it), and the
+		// code must not be redeemed. In-flight logins from before PKCE land here
+		// too and are asked to start again.
+		if !validPKCEVerifier(pkceVerifier) {
+			s.logger.Warn("OAuth: rejected callback with missing or malformed PKCE verifier")
+			http.Error(w, "invalid login state — please start the login again", http.StatusBadRequest)
+			return
+		}
+		login, avatar, token, ok := s.exchangeGitHubLogin(w, code, pkceVerifier)
 		if !ok {
 			return // exchangeGitHubLogin already wrote the error
 		}
@@ -931,7 +968,11 @@ func (s *HubServer) parseCallbackState(r *http.Request) (provider, redirect stri
 // login, avatar, and user access token. On any failure it writes the HTTP error
 // and returns ok=false. This is the original callback logic, factored out so the
 // dispatcher can share the surrounding cookie/persistence code with OIDC.
-func (s *HubServer) exchangeGitHubLogin(w http.ResponseWriter, code string) (login, avatar, token string, ok bool) {
+//
+// The exchange is a form-encoded POST: the client secret, the one-time code and
+// the PKCE code_verifier travel in the body, never in the URL where request
+// logs could retain them.
+func (s *HubServer) exchangeGitHubLogin(w http.ResponseWriter, code, codeVerifier string) (login, avatar, token string, ok bool) {
 	clientID := os.Getenv("HIVE_HUB_OAUTH_CLIENT_ID")
 	clientSecret := os.Getenv("HIVE_HUB_OAUTH_CLIENT_SECRET")
 
@@ -942,6 +983,7 @@ func (s *HubServer) exchangeGitHubLogin(w http.ResponseWriter, code string) (log
 	form.Set("client_secret", clientSecret)
 	form.Set("code", code)
 	form.Set("redirect_uri", oauthRedirectURI())
+	form.Set("code_verifier", codeVerifier)
 	tokenReq, _ := http.NewRequest("POST", defaultGHTokenURL, strings.NewReader(form.Encode()))
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenReq.Header.Set("Accept", "application/json")
@@ -1417,7 +1459,73 @@ const (
 	// oauthStateNonceBytes is the entropy behind the nonce. 32 bytes is far
 	// beyond guessing and matches the other random values minted in this package.
 	oauthStateNonceBytes = 32
+
+	// oauthPKCECookieName holds the per-login PKCE code_verifier (RFC 7636) for
+	// the GitHub browser login. Separate from the state cookie so the state
+	// nonce format is untouched; host-scoped and single-use like it.
+	oauthPKCECookieName = "hive_oauth_pkce"
+
+	// oauthPKCEVerifierBytes is the entropy behind the code_verifier. 32 bytes
+	// base64url-encode to 43 characters, the RFC 7636 minimum length.
+	oauthPKCEVerifierBytes = 32
 )
+
+// oauthPKCEVerifier mints a PKCE code_verifier: 32 random bytes, base64url
+// without padding (43 unreserved characters).
+func oauthPKCEVerifier() (string, error) {
+	buf := make([]byte, oauthPKCEVerifierBytes)
+	if _, err := io.ReadFull(cryptoRand.Reader, buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// pkceS256Challenge returns BASE64URL(SHA256(verifier)), the S256 code_challenge.
+func pkceS256Challenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// validPKCEVerifier reports whether v is a well-formed RFC 7636 code_verifier:
+// 43–128 characters from the unreserved set [A-Za-z0-9-._~].
+func validPKCEVerifier(v string) bool {
+	if len(v) < 43 || len(v) > 128 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '.', c == '_', c == '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// oauthPKCEVerifierFromCookie returns the PKCE verifier this browser was issued
+// at login start, or "" if absent.
+func (s *HubServer) oauthPKCEVerifierFromCookie(r *http.Request) string {
+	c, err := r.Cookie(oauthPKCECookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// clearOAuthPKCECookie expires the PKCE verifier, making it single-use.
+func (s *HubServer) clearOAuthPKCECookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthPKCECookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
 
 // oauthStateNonce mints an unguessable login nonce.
 func oauthStateNonce() (string, error) {
