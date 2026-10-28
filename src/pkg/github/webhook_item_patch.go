@@ -133,7 +133,7 @@ func (c *Client) classifyWebhookPR(repo string, pr *gh.PullRequest, labels []str
 	owner, repoName := c.splitRepo(repo)
 	attrMeta, hasAttr := ParseAttributionTrailer(pr.GetBody())
 	runKey, planRef := ParseRunTrailers(pr.GetBody())
-	scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef)
+	scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef, pr.GetHead().GetRef(), c.linearScopeTeams(owner+"/"+repoName))
 	author := safeGetLogin(pr.GetUser())
 	headRef, headRepo, fromFork := prHeadOrigin(pr)
 	reqLogins, reqTeams := prRequestedReviews(pr)
