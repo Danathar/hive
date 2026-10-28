@@ -777,9 +777,9 @@ the front at once, without waiting for the front timeout, with the reason
 update it: …` naming which condition failed. Hive posts one comment asking the
 author to merge the target tip, and the next pull request starts. Once the
 author has merged the tip and the required checks pass, the pull request
-rejoins the lane and merges at a later turn. A queued pull request whose new
-head its queue approval no longer covers (for example, the update also changed
-files) must be queued again.
+rejoins the lane and merges at a later turn. A pull request merged through a
+`/hive queue` approval must be queued again after any new head, including a
+merge of the tip: the approval covers exactly the approved commit.
 
 ### Branches with GitHub's merge queue
 
