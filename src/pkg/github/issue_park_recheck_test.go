@@ -49,10 +49,17 @@ type parkFake struct {
 	timeline []map[string]any
 	comments []map[string]any
 	lookups  map[int]map[string]any // GET issues/{n} for named refs
-	posted   []string
-	edited   []string
-	labelOps int
-	nextID   int64
+	// timelines and others serve the timeline and comments of items other
+	// than the parked issue; reads, gets and creads record what was asked for.
+	timelines map[int][]map[string]any
+	others    map[int][]map[string]any
+	reads     []int
+	gets      []int
+	creads    []int
+	posted    []string
+	edited    []string
+	labelOps  int
+	nextID    int64
 }
 
 func newParkFake(t *testing.T, f *parkFake) *httptest.Server {
@@ -92,8 +99,25 @@ func newParkFake(t *testing.T, f *parkFake) *httptest.Server {
 			}
 			f.edited = append(f.edited, body["body"])
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": id})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "issues/") && strings.HasSuffix(path, "/timeline"):
+			num, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "issues/"), "/timeline"))
+			f.reads = append(f.reads, num)
+			if got, ok := f.timelines[num]; ok {
+				_ = json.NewEncoder(w).Encode(got)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "issues/") && strings.HasSuffix(path, "/comments"):
+			num, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "issues/"), "/comments"))
+			f.creads = append(f.creads, num)
+			if got, ok := f.others[num]; ok {
+				_ = json.NewEncoder(w).Encode(got)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "issues/"):
 			num, _ := strconv.Atoi(strings.TrimPrefix(path, "issues/"))
+			f.gets = append(f.gets, num)
 			if got, ok := f.lookups[num]; ok {
 				_ = json.NewEncoder(w).Encode(got)
 				return
@@ -284,5 +308,225 @@ func TestParkNamedRefs(t *testing.T) {
 	want := []string{"org/repo#722", "org/other#5"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parkNamedRefs = %v, want %v", got, want)
+	}
+}
+
+// prCrossRefBy is prCrossRef with the source's author.
+func prCrossRefBy(login, repo string, n int, isPR bool, state string, closedAt, mergedAt time.Time, body string) map[string]any {
+	ev := prCrossRef(repo, n, isPR, state, closedAt, mergedAt, body)
+	ev["source"].(map[string]any)["issue"].(map[string]any)["user"] = map[string]any{"login": login}
+	return ev
+}
+
+func prComment(id int64, login, body string, at time.Time) map[string]any {
+	return map[string]any{"id": id, "body": body, "user": map[string]any{"login": login}, "created_at": prTS(at),
+		"html_url": fmt.Sprintf("https://github.com/org/repo/pull/873#issuecomment-%d", id)}
+}
+
+// The utah#13 shape (2026-10-27): the park names #722; the hive adopted it
+// as #873 (body as automerge.AdoptionPRBody writes it) and #722 closed; a
+// maintainer then closed #873 unmerged saying other PRs landed the intent.
+// #873 never mentions #13, so only #722's own timeline leads to it.
+var (
+	parkCopyClosed = time.Date(2026, 10, 27, 2, 17, 25, 0, time.UTC)
+	parkCopyBody   = "<!-- hive:carried-fence reason=contributor-lane:workflow-path from=#722 -->\nSupersedes #722 (adopted after CI went red and the contributor was unavailable; original commits by @hanthor preserved).\n\nThis branch is #722's head."
+	parkCopyNote   = "Closing as superseded: #885 (monotonic ratchet, per-digest E2E evidence) and #905 (weekly :stable) landed the intent, and this PR's `run_e2e` switch would reintroduce the tip-equality dependency #885 removed (cc @castrojo).\n\nStill worth a fresh PR from main if wanted."
+)
+
+func prAdoptedCopyIssue(closedBy string) *parkFake {
+	f := prParkedIssue(13, "Most of the gate is being finished in open PR #722. Agents are asked not to open a competing implementation while #722 is in progress.")
+	f.timeline = append(f.timeline, prCrossRef("org/repo", 722, true, "closed", parkT0.Add(21*24*time.Hour), time.Time{}, "ci: gate testing promotion"))
+	f.timelines = map[int][]map[string]any{722: {
+		prCrossRefBy("reporter", "org/repo", 13, false, "open", time.Time{}, time.Time{}, "waiting on #722"),
+		// An earlier adoption the hive closed; the later copy is current.
+		prCrossRefBy("hive[bot]", "org/repo", 800, true, "closed", parkT0.Add(20*24*time.Hour), time.Time{}, strings.Replace(parkCopyBody, "This branch", "First attempt.", 1)),
+		prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", parkCopyClosed, time.Time{}, parkCopyBody),
+	}}
+	got := map[string]any{"number": 873, "state": "closed", "closed_at": prTS(parkCopyClosed), "pull_request": map[string]any{}}
+	if closedBy != "" {
+		got["closed_by"] = map[string]any{"login": closedBy}
+	}
+	f.lookups[873] = got
+	f.others = map[int][]map[string]any{873: {
+		prComment(1, "Danathar", "@hanthor quick check before anyone resolves the conflicts here.", parkCopyClosed.Add(-34*time.Hour)),
+		prComment(2, "hive[bot]", "<!-- hive:stage-needs-decision -->\nNeeds a manual merge decision.", parkCopyClosed.Add(-30*time.Minute)),
+		prComment(3, "hanthor", parkCopyNote, parkCopyClosed.Add(-time.Second)),
+		prComment(4, "castrojo", "Agreed.", parkCopyClosed.Add(10*time.Minute)),
+	}}
+	return f
+}
+
+const parkCopyHint = "If the closing note quoted above settles the question, a maintainer can reply `/fixed` to close this issue as completed, or `/hive decision <your instructions>` to un-park it."
+
+func TestParkRecheckFollowsAdoptedCopyClosingNote(t *testing.T) {
+	f := prAdoptedCopyIssue("hanthor")
+	recheck(t, f)
+	if len(f.posted) != 1 {
+		t.Fatalf("posted %q", f.posted)
+	}
+	note := f.posted[0]
+	wantNote(t, note,
+		"- #722 was closed without merging on 2026-10-24 (the park reason names it).\n",
+		"- #873 (the hive's copy of #722) was closed without merging on 2026-10-27 by hanthor: “Closing as superseded: #885 (monotonic ratchet, per-digest E2E evidence) and #905 (weekly :stable) landed the intent, and this PR's `run_e2e` switch would reintroduce the tip-equality dependency #885 removed (cc castrojo).” ([comment](https://github.com/org/repo/pull/873#issuecomment-3)).\n",
+		"Hive updates this note if more of the referenced work moves.\n\n"+parkCopyHint)
+	if !strings.HasSuffix(note, parkCopyHint) || strings.Contains(note, "Still worth") || strings.Contains(note, "@") {
+		t.Fatalf("hint not last, quote not the first paragraph, or a mention left:\n%s", note)
+	}
+	if strings.Join(intsToStrings(f.reads), ",") != "722" || strings.Join(intsToStrings(f.gets), ",") != "873" {
+		t.Fatalf("reads %v gets %v, want one timeline read of 722 and one get of 873", f.reads, f.gets)
+	}
+}
+
+func intsToStrings(ns []int) []string {
+	out := make([]string, 0, len(ns))
+	for _, n := range ns {
+		out = append(out, strconv.Itoa(n))
+	}
+	return out
+}
+
+// No person's note at the copy's close: the closer's comments are a day and
+// a half older or more than an hour later, or the hive closed the copy
+// itself (a person commenting then is not explaining the hive's close). The
+// copy line still says the adopted work closed too, since the park names
+// #722, but nothing is quoted and no reply is suggested. When the closer
+// cannot be read, any person's comment at the close counts.
+func TestParkRecheckAdoptedCopyClosedWithoutNote(t *testing.T) {
+	plain := "- #873 (the hive's copy of #722) was closed without merging on 2026-10-27.\n"
+	t.Run("closer silent at close", func(t *testing.T) {
+		f := prAdoptedCopyIssue("hanthor")
+		f.others[873] = []map[string]any{
+			prComment(1, "hanthor", "Earlier review discussion.", parkCopyClosed.Add(-34*time.Hour)),
+			prComment(2, "hanthor", "Follow-up much later.", parkCopyClosed.Add(parkCopyNoteWindow+time.Minute)),
+		}
+		recheck(t, f)
+		wantNote(t, f.posted[0], plain)
+		if strings.Contains(f.posted[0], parkCopyHint) {
+			t.Fatalf("hint without a note:\n%s", f.posted[0])
+		}
+	})
+	t.Run("hive closed it", func(t *testing.T) {
+		f := prAdoptedCopyIssue("hive[bot]")
+		recheck(t, f)
+		wantNote(t, f.posted[0], plain)
+		if strings.Contains(f.posted[0], "“") || len(f.creads) != 0 {
+			t.Fatalf("read or quoted comments on a copy the hive closed (reads %v):\n%s", f.creads, f.posted[0])
+		}
+	})
+	t.Run("closer unknown", func(t *testing.T) {
+		f := prAdoptedCopyIssue("")
+		f.others[873] = append(f.others[873], prComment(5, "hive[bot]", "<!-- hive:duplicate-sweep -->\nPossible duplicate.", parkCopyClosed.Add(20*time.Minute)))
+		recheck(t, f)
+		wantNote(t, f.posted[0], "by castrojo: “Agreed.”", parkCopyHint)
+	})
+	// A PR that only refers to the issue is not in the note when it closes
+	// unmerged, so its copy closing without a note is no change either.
+	t.Run("original only refers", func(t *testing.T) {
+		f := prAdoptedCopyIssue("hanthor")
+		f.comments[0]["body"] = "Maintainer decision needed."
+		f.timeline[len(f.timeline)-1] = prCrossRef("org/repo", 722, true, "closed", parkT0.Add(21*24*time.Hour), time.Time{}, "Refs #13")
+		f.others[873] = f.others[873][:2]
+		res := recheck(t, f)
+		if len(f.posted) != 0 || res.Posted != 0 {
+			t.Fatalf("note posted: %q", f.posted)
+		}
+	})
+}
+
+// A PR that refers to the issue is followed too: it is not in the note when
+// it closes unmerged, but its copy closing with a person's note is.
+func TestParkRecheckFollowsReferringPRCopy(t *testing.T) {
+	f := prAdoptedCopyIssue("hanthor")
+	f.comments[0]["body"] = "Maintainer decision needed."
+	f.timeline[len(f.timeline)-1] = prCrossRef("org/repo", 722, true, "closed", parkT0.Add(21*24*time.Hour), time.Time{}, "Refs #13")
+	recheck(t, f)
+	if len(f.posted) != 1 {
+		t.Fatalf("posted %q", f.posted)
+	}
+	wantNote(t, f.posted[0], "- #873 (the hive's copy of #722) was closed without merging on 2026-10-27 by hanthor: “Closing as superseded:", parkCopyHint)
+	if strings.Contains(f.posted[0], "- #722") {
+		t.Fatalf("an unnamed PR closed unmerged is listed:\n%s", f.posted[0])
+	}
+}
+
+// A merged copy: the hive closes the original once its copy merges, so the
+// original reads "closed without merging" and the merge would go unseen
+// unless the copy itself refers to the issue.
+func TestParkRecheckAdoptedCopyMerged(t *testing.T) {
+	merged := parkCopyClosed
+	t.Run("copy refers to the issue", func(t *testing.T) {
+		f := prAdoptedCopyIssue("hanthor")
+		body := parkCopyBody + "\nRefs #13"
+		f.timeline = append(f.timeline, prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", merged, merged, body))
+		f.timelines[722][2] = prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", merged, merged, body)
+		recheck(t, f)
+		wantNote(t, f.posted[0], "- #873 merged on 2026-10-27 (it refers to this issue).")
+		if strings.Count(f.posted[0], "#873") != 1 || len(f.gets) != 0 {
+			t.Fatalf("copy listed twice or its close read (gets %v):\n%s", f.gets, f.posted[0])
+		}
+	})
+	t.Run("copy does not refer to the issue", func(t *testing.T) {
+		f := prAdoptedCopyIssue("hanthor")
+		f.timelines[722][2] = prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", merged, merged, parkCopyBody)
+		recheck(t, f)
+		wantNote(t, f.posted[0], "- #873 (the hive's copy of #722) merged on 2026-10-27.\n")
+		if strings.Contains(f.posted[0], parkCopyHint) || len(f.gets) != 0 {
+			t.Fatalf("merged copy read as closed (gets %v):\n%s", f.gets, f.posted[0])
+		}
+	})
+}
+
+// Only the hive's adoption copy is followed: a person's PR saying
+// "Supersedes #722", a hive PR adopting another PR, a hive PR re-authoring a
+// bot's PR (automerge_bot_takeover.go, not an adoption), a hive issue, and
+// a hive PR in another repository are not.
+func TestParkRecheckIgnoresNonAdoptionCrossRefs(t *testing.T) {
+	cases := map[string]map[string]any{
+		"person's PR":     prCrossRefBy("hanthor", "org/repo", 873, true, "closed", parkCopyClosed, time.Time{}, parkCopyBody),
+		"adopts another":  prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", parkCopyClosed, time.Time{}, strings.Replace(parkCopyBody, "Supersedes #722", "Supersedes #721", 1)),
+		"bot takeover":    prCrossRefBy("hive[bot]", "org/repo", 873, true, "closed", parkCopyClosed, time.Time{}, "Supersedes #722. `github-actions[bot]` opened it with the workflow `GITHUB_TOKEN`."),
+		"hive issue":      prCrossRefBy("hive[bot]", "org/repo", 873, false, "closed", parkCopyClosed, time.Time{}, parkCopyBody),
+		"other repo's PR": prCrossRefBy("hive[bot]", "org/other", 873, true, "closed", parkCopyClosed, time.Time{}, parkCopyBody),
+	}
+	for name, ev := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := prAdoptedCopyIssue("hanthor")
+			f.timelines[722] = []map[string]any{f.timelines[722][0], ev}
+			recheck(t, f)
+			wantNote(t, f.posted[0], "- #722 was closed without merging")
+			if strings.Contains(f.posted[0], "copy") || len(f.gets) != 0 {
+				t.Fatalf("followed a non-adoption cross-reference (gets %v):\n%s", f.gets, f.posted[0])
+			}
+		})
+	}
+}
+
+// At most parkRecheckMaxCopyLookups closed PRs are followed per pass, the
+// earliest closed first, so the same ones are read every pass.
+func TestParkRecheckCopyLookupCap(t *testing.T) {
+	f := prParkedIssue(13, "Waiting on #705, #701, #704, #702 and #703.")
+	for n := 701; n <= 705; n++ {
+		f.timeline = append(f.timeline, prCrossRef("org/repo", n, true, "closed", parkT0.Add(time.Duration(n-700)*time.Hour), time.Time{}, ""))
+	}
+	recheck(t, f)
+	if got := strings.Join(intsToStrings(f.reads), ","); got != "701,702,703" {
+		t.Fatalf("timeline reads %s, want the three earliest-closed", got)
+	}
+}
+
+func TestParkCopyQuote(t *testing.T) {
+	long := strings.Repeat("word ", 100)
+	got := parkCopyQuote("  Closing:\r\n@hanthor and @org/team <!-- hive:park-recheck --> see #885.  " + long + "\r\n\r\nSecond paragraph.")
+	if strings.ContainsAny(got, "@\n\r") || strings.Contains(got, "<!--") || strings.Contains(got, "Second") {
+		t.Fatalf("quote not sanitized: %q", got)
+	}
+	if !strings.HasPrefix(got, "Closing: hanthor and org/team see #885. word") || !strings.HasSuffix(got, " …") {
+		t.Fatalf("quote = %q", got)
+	}
+	if n := len([]rune(got)); n > parkCopyQuoteMax {
+		t.Fatalf("quote is %d runes, over %d", n, parkCopyQuoteMax)
+	}
+	if got := parkCopyQuote("Short."); got != "Short." {
+		t.Fatalf("short quote = %q", got)
 	}
 }

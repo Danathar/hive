@@ -82,8 +82,14 @@ When, after the park began, a PR or issue the park text names merged or
 closed, or a PR that refers to the issue ("Refs #N", a closing keyword, "part
 of", …, a list of at most 10 references) merged, Hive posts one note
 (`<!-- hive:park-recheck -->`) listing what changed, and edits it in place as
-more moves. The note never un-parks the issue: leaving 045 stays a
-maintainer's reply.
+more moves. When such a PR closed unmerged because the hive adopted it, Hive
+follows it to the hive's copy (the App PR whose body says `Supersedes #N`)
+and lists the copy too if it merged or closed unmerged; when a person closed
+the copy, the note quotes the first paragraph of their closing comment (at
+most 300 characters, mentions defanged) and adds the replies that act on it,
+`/fixed` or `/hive decision <your instructions>`
+([projectbluefin/utah#13](https://github.com/projectbluefin/utah/issues/13)).
+The note never un-parks the issue: leaving 045 stays a maintainer's reply.
 
 The on-demand `/hive help` workflow uses the same first-line command shape, is
 ignored for bot comments, and allows `triage`, `write`, `maintain`, or `admin`

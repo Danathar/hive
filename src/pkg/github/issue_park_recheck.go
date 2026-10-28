@@ -16,6 +16,15 @@ package github
 //   - a pull request that refers to the issue ("Refs #N", a closing keyword,
 //     "part of", …) merged.
 //
+// A pull request either kind of reference names that closed unmerged may
+// have been adopted: the hive's copy of it supersedes it and lives on
+// (automerge.AdoptionPRBody). The re-check follows it there and lists the
+// copy when it merged, or when it closed unmerged, then with the note the
+// person who closed it left. projectbluefin/utah#13 waited on #722; the
+// hive's copy #873 was closed by a maintainer saying #885 and #905 landed
+// the intent, and #873 never mentions #13, so nothing on the issue said
+// its question had been answered.
+//
 // A PR that only lists the issue in passing is not a change: a person's
 // intake table once linked ~65 issues (see hard_suppress_reconcile.go).
 //
@@ -53,6 +62,22 @@ const parkTextWindow = 15 * time.Minute
 // text names that do not cross-reference the issue.
 const parkRecheckMaxNamedLookups = 10
 
+// parkRecheckMaxCopyLookups bounds the closed pull requests per issue that
+// are followed to the hive's copy: one timeline read each, plus the copy's
+// issue and comments when the copy closed unmerged too.
+const parkRecheckMaxCopyLookups = 3
+
+// parkCopyNoteWindow is how far from the copy's close a person's comment may
+// be and still read as the closing note. GitHub's "Close with comment" posts
+// both in the same second (utah#873: comment 02:17:24Z, closed 02:17:25Z);
+// an hour also covers a person explaining just before or after closing by
+// hand, while review discussion from earlier days (a question on #873 a day
+// and a half before it closed) stays out.
+const parkCopyNoteWindow = time.Hour
+
+// parkCopyQuoteMax is the most runes of a closing note the re-check quotes.
+const parkCopyQuoteMax = 300
+
 // ParkRecheckConfig scopes one pass.
 type ParkRecheckConfig struct {
 	Repos []string
@@ -83,6 +108,11 @@ type parkChange struct {
 	verb  string // "merged", "was closed without merging", "was closed"
 	at    time.Time
 	named bool // the park text names it; else it refers to the issue
+	// copyOf is set when ref is the hive's adoption copy of that PR.
+	copyOf string
+	// by, quote and link are the closing note a person left when the copy
+	// closed unmerged, if any.
+	by, quote, link string
 }
 
 // RecheckParkedIssues posts or refreshes the re-check note on every open
@@ -150,6 +180,10 @@ func (c *Client) recheckParkedIssue(ctx context.Context, owner, repo string, iss
 		}
 	}
 	changes := parkChanges(refs, named, owner+"/"+repo, number, start)
+	if copies := c.parkCopyChanges(ctx, refs, named, owner+"/"+repo, number, start, changes); len(copies) > 0 {
+		changes = append(changes, copies...)
+		sortParkChanges(changes)
+	}
 	if len(changes) == 0 {
 		result.Skipped++
 		return nil
@@ -392,12 +426,7 @@ func parkChanges(refs map[string]parkRef, named []string, issueRepo string, numb
 	for _, key := range named {
 		isNamed[key] = true
 	}
-	render := func(ref parkRef) string {
-		if strings.EqualFold(ref.repo, issueRepo) {
-			return "#" + strconv.Itoa(ref.number)
-		}
-		return ref.repo + "#" + strconv.Itoa(ref.number)
-	}
+	render := func(ref parkRef) string { return parkRefDisplay(ref, issueRepo) }
 	var out []parkChange
 	for key, ref := range refs {
 		switch {
@@ -414,13 +443,180 @@ func parkChanges(refs map[string]parkRef, named []string, issueRepo string, numb
 			out = append(out, parkChange{ref: render(ref), verb: "merged", at: ref.mergedAt})
 		}
 	}
+	sortParkChanges(out)
+	return out
+}
+
+// sortParkChanges orders changes oldest first, then by reference.
+func sortParkChanges(out []parkChange) {
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].at.Equal(out[j].at) {
 			return out[i].at.Before(out[j].at)
 		}
 		return out[i].ref < out[j].ref
 	})
+}
+
+// parkRefDisplay renders ref as "#N", or "owner/repo#N" outside issueRepo.
+func parkRefDisplay(ref parkRef, issueRepo string) string {
+	if strings.EqualFold(ref.repo, issueRepo) {
+		return "#" + strconv.Itoa(ref.number)
+	}
+	return ref.repo + "#" + strconv.Itoa(ref.number)
+}
+
+// parkCopyChanges follows each pull request the park depends on (named, or
+// referring to the issue) that closed unmerged after start to the hive's
+// adoption copy of it, and lists the copy when it merged or closed unmerged
+// after start. A copy already listed (its merge refers to the issue itself)
+// is not listed twice. An unmerged copy is listed when a person left a
+// closing note on it, or when the park names the original, whose own close
+// the note already lists: the copy's line says the adopted work closed too
+// rather than living on. A read that fails counts as no copy, as in
+// readParkRef.
+func (c *Client) parkCopyChanges(ctx context.Context, refs map[string]parkRef, named []string, issueRepo string, number int, start time.Time, listed []parkChange) []parkChange {
+	isNamed := map[string]bool{}
+	for _, key := range named {
+		isNamed[key] = true
+	}
+	var follow []string
+	for key, ref := range refs {
+		if ref.isPR && ref.mergedAt.IsZero() && strings.EqualFold(ref.state, "closed") && ref.closedAt.After(start) &&
+			(isNamed[key] || parkRefersTo(ref.body, ref.repo, issueRepo, number)) {
+			follow = append(follow, key)
+		}
+	}
+	// Oldest close first, so the cap keeps the same PRs on every pass.
+	sort.Slice(follow, func(i, j int) bool {
+		a, b := refs[follow[i]], refs[follow[j]]
+		if !a.closedAt.Equal(b.closedAt) {
+			return a.closedAt.Before(b.closedAt)
+		}
+		return follow[i] < follow[j]
+	})
+	if len(follow) > parkRecheckMaxCopyLookups {
+		follow = follow[:parkRecheckMaxCopyLookups]
+	}
+	seen := map[string]bool{}
+	for _, ch := range listed {
+		seen[ch.ref] = true
+	}
+	var out []parkChange
+	for _, key := range follow {
+		orig := refs[key]
+		owner, repo := c.splitRepo(orig.repo)
+		events, err := c.listIssueTimelineAll(ctx, owner, repo, orig.number)
+		if err != nil {
+			continue
+		}
+		cp, ok := c.parkAdoptionCopy(events, orig)
+		if !ok {
+			continue
+		}
+		ch := parkChange{ref: parkRefDisplay(cp, issueRepo), copyOf: parkRefDisplay(orig, issueRepo), named: isNamed[key]}
+		switch {
+		case seen[ch.ref]:
+			continue
+		case cp.mergedAt.After(start):
+			ch.verb, ch.at = "merged", cp.mergedAt
+		case cp.mergedAt.IsZero() && strings.EqualFold(cp.state, "closed") && cp.closedAt.After(start):
+			ch.verb, ch.at = "was closed without merging", cp.closedAt
+			if note := c.parkCopyClosingNote(ctx, owner, repo, cp); note != nil {
+				ch.by, ch.quote, ch.link = note.GetUser().GetLogin(), parkCopyQuote(note.GetBody()), note.GetHTMLURL()
+			}
+			if ch.quote == "" && !ch.named {
+				continue
+			}
+		default:
+			continue
+		}
+		seen[ch.ref] = true
+		out = append(out, ch)
+	}
 	return out
+}
+
+// parkAdoptionCopy returns the hive's adoption copy of orig from orig's own
+// timeline: the latest pull request in orig's repository that cross-
+// references it, is authored by one of the hive's accounts, and whose body
+// carries AdoptionPRBody's "Supersedes #N (…; original commits by @…
+// preserved)" line for orig (AdoptedFrom). The latest, because once a copy
+// closes unmerged the hive may adopt the original again.
+func (c *Client) parkAdoptionCopy(events []*gh.Timeline, orig parkRef) (parkRef, bool) {
+	var out parkRef
+	found := false
+	for _, ev := range events {
+		if ev == nil || !strings.EqualFold(ev.GetEvent(), "cross-referenced") || ev.GetSource() == nil || ev.GetSource().Issue == nil {
+			continue
+		}
+		is := ev.GetSource().Issue
+		if !is.IsPullRequest() || is.GetNumber() == orig.number || !strings.EqualFold(is.GetRepository().GetFullName(), orig.repo) || !c.isHiveAccount(is.GetUser()) {
+			continue
+		}
+		if n, _, ok := AdoptedFrom(is.GetBody()); !ok || n != orig.number {
+			continue
+		}
+		out = parkRef{repo: orig.repo, number: is.GetNumber(), isPR: true, state: is.GetState(), closedAt: is.GetClosedAt().Time,
+			mergedAt: is.GetPullRequestLinks().GetMergedAt().Time, body: is.GetBody()}
+		found = true
+	}
+	return out, found
+}
+
+// parkCopyClosingNote returns the comment a person left closing the copy:
+// the latest one within parkCopyNoteWindow of the close by the account that
+// closed it, or by any person when the closer cannot be read. A copy the
+// hive or another bot closed has no such note.
+func (c *Client) parkCopyClosingNote(ctx context.Context, owner, repo string, cp parkRef) *gh.IssueComment {
+	var closer *gh.User
+	if issue, _, err := c.client.Issues.Get(ctx, owner, repo, cp.number); err == nil && issue != nil {
+		closer = issue.ClosedBy
+	}
+	if closer != nil && !c.isHumanAuthor(closer) {
+		return nil
+	}
+	comments, err := c.listIssueCommentsSince(ctx, owner, repo, cp.number, cp.closedAt.Add(-parkCopyNoteWindow))
+	if err != nil {
+		return nil
+	}
+	var note *gh.IssueComment
+	for _, cm := range comments {
+		if cm == nil || !c.isHumanAuthor(cm.GetUser()) {
+			continue
+		}
+		if closer != nil && !strings.EqualFold(cm.GetUser().GetLogin(), closer.GetLogin()) {
+			continue
+		}
+		at := cm.GetCreatedAt().Time
+		if d := at.Sub(cp.closedAt); d < -parkCopyNoteWindow || d > parkCopyNoteWindow {
+			continue
+		}
+		if note == nil || !at.Before(note.GetCreatedAt().Time) {
+			note = cm
+		}
+	}
+	if note == nil || parkCopyQuote(note.GetBody()) == "" {
+		return nil
+	}
+	return note
+}
+
+// parkCopyQuote is the first paragraph of a closing note as one line, cut to
+// parkCopyQuoteMax runes. The comment is a person's, not the hive's: HTML
+// comments are removed so no hive marker is laundered into the note, and
+// @mentions are defanged so quoting it notifies nobody, as in
+// unparkOptionSummary.
+func parkCopyQuote(body string) string {
+	body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
+	if i := strings.Index(body, "\n\n"); i >= 0 {
+		body = body[:i]
+	}
+	q := unparkHTMLCommentPattern.ReplaceAllString(strings.Join(strings.Fields(body), " "), " ")
+	q = strings.Join(strings.Fields(defangMentions(q)), " ")
+	if r := []rune(q); len(r) > parkCopyQuoteMax {
+		q = strings.TrimSpace(string(r[:parkCopyQuoteMax-2])) + " …"
+	}
+	return q
 }
 
 // parkRecheckNote renders the note. It is deterministic for one set of
@@ -429,7 +625,20 @@ func parkRecheckNote(label string, start time.Time, changes []parkChange) string
 	var b strings.Builder
 	b.WriteString(parkRecheckMarker)
 	fmt.Fprintf(&b, "\n**The reason this issue is parked may be out of date.** It has been parked for a maintainer (`%s`) since %s, and since then:\n\n", label, start.UTC().Format("2006-01-02"))
+	noted := false
 	for _, ch := range changes {
+		if ch.copyOf != "" {
+			fmt.Fprintf(&b, "- %s (the hive's copy of %s) %s on %s", ch.ref, ch.copyOf, ch.verb, ch.at.UTC().Format("2006-01-02"))
+			if ch.quote != "" {
+				noted = true
+				fmt.Fprintf(&b, " by %s: “%s”", ch.by, ch.quote)
+				if ch.link != "" {
+					fmt.Fprintf(&b, " ([comment](%s))", ch.link)
+				}
+			}
+			b.WriteString(".\n")
+			continue
+		}
 		why := "it refers to this issue"
 		if ch.named {
 			why = "the park reason names it"
@@ -437,5 +646,8 @@ func parkRecheckNote(label string, start time.Time, changes []parkChange) string
 		fmt.Fprintf(&b, "- %s %s on %s (%s).\n", ch.ref, ch.verb, ch.at.UTC().Format("2006-01-02"), why)
 	}
 	b.WriteString("\nThe park reason was written before these changes. Re-read it against the current state before deciding. This note does not un-park the issue: it stays with a maintainer, and Hive updates this note if more of the referenced work moves.")
+	if noted {
+		b.WriteString("\n\nIf the closing note quoted above settles the question, a maintainer can reply `/fixed` to close this issue as completed, or `/hive decision <your instructions>` to un-park it.")
+	}
 	return b.String()
 }
