@@ -346,7 +346,7 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, scope withheldScope)
 		if len(repo.ActionableIssues) == 0 {
 			continue
 		}
-		if config.MatchesAny(repo.Full, disabledRepos) || config.MatchesAny(repo.Name, disabledRepos) {
+		if config.RepoMatchesAny(repo.Full, repo.Name, disabledRepos) {
 			// #6902: a disabled repository refuses all its candidates before
 			// the per-issue ladder, so explain them here. Skip decoding when
 			// diagnostics are not being collected.
