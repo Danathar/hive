@@ -1868,8 +1868,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			breakdown.Filtered++
 			breakdown.Blocked++
 			row := c.workIssue(repo, issue, labels, "filtered", blockedFilterReason(issue.GetBody()))
-			row.RecheckAfter, row.OpsTracking = blockedRecheck(issue.GetBody())
-			row.RecheckDone = blockedRecheckDone(issue.GetBody())
+			setBlockedRowFacts(&row, issue.GetBody(), blockedCounts[issue.GetNumber()])
 			details = append(details, row)
 			continue
 		}
@@ -4624,6 +4623,12 @@ type RepoWorkIssue struct {
 	// RecheckDone is set once the soak triage has stamped
 	// `<!-- hive:recheck-done -->` into the body (hivecommons/hive#13311).
 	RecheckDone bool `json:"recheck_done,omitempty"`
+	// ReviewBacklog (the body is a review-backlog item's) and OpenBlockedBy
+	// (GitHub's open "blocked by" count, #9839) decide whether
+	// ReconcileBlockedIssues may lift a marker-less block
+	// (liftBlockedMarkerless).
+	ReviewBacklog bool `json:"review_backlog,omitempty"`
+	OpenBlockedBy int  `json:"open_blocked_by,omitempty"`
 }
 
 func repoWorkIssueFromIssue(issue Issue, bucket, reason string) RepoWorkIssue {
