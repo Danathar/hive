@@ -969,6 +969,21 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 					pass.EscalationReason = esc.Reason
 				}
 			}
+			if hadPrev && verdict.Stage == stagelabels.ReturnedToContributor && !prevRec.AdoptionLive(obs.HeadSHA) && prevRec.ForkRehomeRefused(obs.HeadSHA) {
+				// A fork PR the hive declined to adopt waits with its
+				// author for the 072 dwell, then goes to a person.
+				esc, n, err := c.escalateUnadoptableFork(ctx, store, key, obs, policy, now)
+				result.Comments += n
+				if err != nil && firstErr == nil {
+					firstErr = err
+				}
+				if esc.Escalated {
+					verdict.Stage = stagelabels.NeedsDecision
+					verdict.Rank = stageRankOwned
+					obs.Reason = esc.Reason
+					pass.ForkEscalationReason = esc.Reason
+				}
+			}
 			tr = store.Observe(key, verdict.Stage, obs.Reason)
 			// hivecommons/hive#12502: remember the author so the dashboard can
 			// list "PRs returned to this contributor" from the store alone.

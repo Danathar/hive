@@ -724,10 +724,14 @@ it on that branch (never a replacement PR), after which it follows the normal
 is never superseded or re-homed into `hive/adopt-<n>`: a branch in the base
 repository makes a same-repository PR, which runs with the repository's
 secrets and write tokens and skips its fork-only guards, so unreviewed fork
-code would run as trusted. The hive records the refusal and the next pass
-parks the PR at `085` as `adoption-stalled:fork-rehome-refused` with a
-maintainer ask; in-place adoption on the fork's own branch (when the
-contributor allows maintainer edits) is unchanged. When adoption is in-place on the contributor PR's own
+code would run as trusted. So a fork PR the hive cannot push to is not
+adopted at all: it stays at `072` with its author's nudge and queued `fix-pr`
+task, and only after the `072` dwell (24h) since the nudge on that head does
+it park at `085` as `adoption-stalled:fork-rehome-refused` with a maintainer
+ask. In-place adoption on the fork's own branch (when the contributor allows
+maintainer edits) is unchanged; if such an adoption later needs a re-home,
+the hive records the refusal and the next pass parks it at `085` with the
+same ask. When adoption is in-place on the contributor PR's own
 branch, the hive owns the head it pushed: once that head is green, approved
 by the reviewer, DCO-clean and soaked, the contributor lane admits it under
 the hive's own authority (`contributor-lane:adopted-by-hive`, see the

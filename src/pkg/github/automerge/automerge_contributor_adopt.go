@@ -527,8 +527,7 @@ func adoptionBlockerText(obs stageObservation, rec stagelabels.Record) string {
 		}
 		return msg + "."
 	case rec.ForkRehomeRefused(obs.HeadSHA):
-		return fmt.Sprintf("this PR comes from a fork (`%s`) and the hive cannot finish it on the fork's own branch. Moving its commits to `%s%d` in this repository would run code no maintainer has reviewed with the repository's trusted CI (secrets, write tokens, no fork guards), so the hive did not. "+
-			"**Ask (maintainer):** review the change; if it should land, bring it into the repository yourself or follow the repository's process for fork pull requests, otherwise close it.", nonEmpty(obs.HeadRepo, "unknown"), adoptBranchPrefix, obs.Number)
+		return forkRehomeBlockerText(obs)
 	case rec.AdoptionAttemptedNothingOpened(obs.HeadSHA):
 		return fmt.Sprintf("the hive tried to re-home this PR onto `%s%d` (`%s`) and could not open the superseding PR.", adoptBranchPrefix, obs.Number, rec.AdoptReason)
 	}
@@ -539,6 +538,28 @@ func adoptionBlockerText(obs stageObservation, rec stagelabels.Record) string {
 		return fmt.Sprintf("`%s` on this head and no fix landed.", obs.LaneReason)
 	}
 	return fmt.Sprintf("lane reason `%s` on this head and nothing changed.", nonEmpty(obs.LaneReason, obs.Reason))
+}
+
+// forkRehomeBlockerText is the maintainer ask for a fork PR the hive cannot
+// finish on the fork's own branch and will not move into this repository.
+func forkRehomeBlockerText(obs stageObservation) string {
+	return fmt.Sprintf("this PR comes from a fork (`%s`) and the hive cannot finish it on the fork's own branch. Moving its commits to `%s%d` in this repository would run code no maintainer has reviewed with the repository's trusted CI (secrets, write tokens, no fork guards), so the hive did not. "+
+		"**Ask (maintainer):** review the change; if it should land, bring it into the repository yourself or follow the repository's process for fork pull requests, otherwise close it.", nonEmpty(obs.HeadRepo, "unknown"), adoptBranchPrefix, obs.Number)
+}
+
+// ForkNotAdoptedComment is the one note left on a fork PR the hive declined
+// to adopt (adoptContributorPR) when it is handed to a person after waiting
+// on its author for the 072 dwell.
+func ForkNotAdoptedComment(obs stageObservation, reason string, sat time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s head=%s reason=%s -->\n", AdoptionStalledMarker, obs.HeadSHA, reason)
+	fmt.Fprintf(&b, "Head `%s` has waited on its author at `%s` for %s since the nudge (lane reason `%s`). The hive did not adopt it: it cannot push to this fork's branch, and it does not move a fork's commits into this repository.\n\n", shortSHA(obs.HeadSHA), stagelabels.ReturnedToContributor.Label(), formatSat(sat), nonEmpty(obs.LaneReason, obs.Reason))
+	b.WriteString("**Blocker:** ")
+	b.WriteString(forkRehomeBlockerText(obs))
+	b.WriteString("\n\nMoving to `")
+	b.WriteString(stagelabels.NeedsDecision.Label())
+	b.WriteString("` so a person sees it. A new head from the author returns it to the normal path.")
+	return b.String()
 }
 
 // AdoptionComment is the one note left on the original PR when adopted by
@@ -629,6 +650,10 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	if !due {
 		return 0, nil
 	}
+	if !requested && rec.ForkRehomeRefused(obs.HeadSHA) {
+		// Declined for this head already (below): it waits with its author.
+		return 0, nil
+	}
 	if l := adoptionBlocked(obs.Labels); l != "" {
 		c.info("stage labels: adoption due but blocked by label", "repo", obs.Display, "pr", obs.Number, "label", l)
 		return 0, nil
@@ -658,6 +683,19 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 		canPushInPlace = c.canPushToPRBranch(ctx, obs)
 	}
 	dcoRehome := adoptionNeedsDCORehome(obs, canPushInPlace)
+	if !requested && adoptionFromFork(obs) && !(policy.AdoptInPlace && canPushInPlace && !dcoRehome) {
+		// The only adoption a fork PR can have is in place: superseding it
+		// would move fork code into this repository (supersedeAdoptedPR).
+		// Adopting one the hive cannot push to parked it at 085 on the next
+		// pass, minutes after its relay went offline, for a maintainer to
+		// rebase someone else's fork. It stays at 072 instead, with the nudge
+		// and its relay's queued fix-pr task, and goes to a person only
+		// after the 072 dwell (escalateUnadoptableFork). The record keeps
+		// this head from being re-checked every sweep; a new head re-arms.
+		store.MarkForkRehomeRefused(key, obs.HeadSHA)
+		c.info("stage labels: not adopting a fork PR the hive cannot finish on the fork's own branch; it stays with its author", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "head_repo", obs.HeadRepo, "head", obs.HeadSHA, "reason", reason, "in_place_allowed", policy.AdoptInPlace, "can_push", canPushInPlace, "dco_rehome", dcoRehome)
+		return 0, nil
+	}
 	// Record the attempt first: whatever happens below, this head is tried once.
 	store.MarkAdopted(key, obs.HeadSHA, 0, now)
 	store.NoteAdoptDiffFence(key, fence)
@@ -1580,4 +1618,36 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 		comments++
 	}
 	return adoptionEscape{Escalated: true, Reason: reason}, comments, firstErr
+}
+
+// escalateUnadoptableFork hands a fork PR the hive declined to adopt
+// (adoptContributorPR) to a person once its head has waited at 072 for the
+// stage dwell since the nudge: the same 085 park and maintainer ask an
+// adopted fork PR gets, but after the author's relay had its fix-pr window
+// rather than minutes after it went offline. A zero dwell (never stalled)
+// never escalates. The note posts once per head. Returns the decision and
+// the number of comments posted.
+func (c *Engine) escalateUnadoptableFork(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, policy StageLabelPolicy, now time.Time) (adoptionEscape, int, error) {
+	rec, ok := store.Get(key)
+	if !ok || obs.HeadSHA == "" || !rec.ForkRehomeRefused(obs.HeadSHA) || rec.AdoptionLive(obs.HeadSHA) || rec.NudgeHead != obs.HeadSHA {
+		return adoptionEscape{}, 0, nil
+	}
+	start := rec.NudgeStart()
+	wait := stagelabels.Dwell(stagelabels.ReturnedToContributor, policy.Dwell)
+	if start.IsZero() || wait <= 0 || now.Sub(start) < wait {
+		return adoptionEscape{}, 0, nil
+	}
+	reason := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+	esc := adoptionEscape{Escalated: true, Reason: reason}
+	noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
+	store.MarkAdoptionEscalated(key, obs.HeadSHA, reason)
+	if noted {
+		return esc, 0, nil
+	}
+	c.info("stage labels: fork PR the hive cannot adopt waited past the 072 dwell; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "head_repo", obs.HeadRepo, "nudged_at", start, "lane_reason", nonEmpty(obs.LaneReason, obs.Reason))
+	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(ForkNotAdoptedComment(obs, reason, now.Sub(start)))}); err != nil {
+		c.warn("stage labels: fork escalation note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
+		return esc, 0, err
+	}
+	return esc, 1, nil
 }

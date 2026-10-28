@@ -1551,22 +1551,98 @@ func TestAdoptionSupersedePersistsAtAdoptedHead(t *testing.T) {
 	}
 }
 
-// In-place requested but the fork forbids maintainer edits: supersede.
-// A fork PR the hive cannot push to (no "allow edits by maintainers") used
-// to fall back to a supersede on a branch in the base repository. It is
-// never moved there: no branch, no superseding PR, and 085 next pass.
-func TestAdoptionForkWithoutPushIsNotSuperseded(t *testing.T) {
+// A fork PR the hive cannot push to (no "allow edits by maintainers") is
+// never moved into the base repository (hivecommons/hive#14306), so adopting
+// it only parked it at 085 on the next pass, minutes after its relay went
+// offline (projectbluefin/utah#919). It is not adopted: it stays at 072 with
+// its author's nudge and relay task, and goes to a person (085, one note)
+// only once the head has waited the 072 dwell. A new head re-arms the path.
+func TestAdoptionForkWithoutPushStaysWithAuthorUntilDwell(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.sink.presence = &ContributorPresence{Registered: true, Online: false}
+	h.adopt.allowMaintainerEdits(7, false)
+	key := stageKey("acme", "widget", 7)
+	returned := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
+	stageIs := func(want stagelabels.Stage, when string) stagelabels.Record {
+		t.Helper()
+		rec, _ := h.e.stageStoreOrShared().Get(key)
+		if rec.Stage != want {
+			t.Fatalf("%s: stage %s, want %s (reason %q)", when, rec.Stage, want, rec.Reason)
+		}
+		return rec
+	}
+
+	h.observe(forkPR(7, "aaa"), "conflicting")
+	stageIs(stagelabels.ReturnedToContributor, "nudged")
+	h.clock.advance(30 * time.Minute)
+	h.observe(forkPR(7, "aaa", returned...), "conflicting")
+	if rec := stageIs(stagelabels.ReturnedToContributor, "relay offline past after_offline"); !rec.ForkRehomeRefused("aaa") || rec.AdoptedHead != "" {
+		t.Fatalf("decline not recorded, or recorded as an adoption: %+v", rec)
+	}
+	if len(adoptionComments(h.api)) != 0 || len(stalledComments(h.api)) != 0 || len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+		t.Fatalf("fork PR adopted or parked: comments=%v pulls=%v refs=%v", h.api.comments, h.adopt.pulls, h.adopt.refs)
+	}
+
+	// Short of the dwell (24h since the nudge): still the author's.
+	h.clock.advance(23 * time.Hour)
+	h.observe(forkPR(7, "aaa", returned...), "conflicting")
+	stageIs(stagelabels.ReturnedToContributor, "before the dwell")
+	if len(stalledComments(h.api)) != 0 {
+		t.Fatalf("parked before the dwell: %v", h.api.comments)
+	}
+
+	h.clock.advance(time.Hour)
+	h.observe(forkPR(7, "aaa", returned...), "conflicting")
+	want := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+	if rec := stageIs(stagelabels.NeedsDecision, "past the dwell"); rec.Reason != want {
+		t.Fatalf("reason %q, want %q", rec.Reason, want)
+	}
+	notes := stalledComments(h.api)
+	if len(notes) != 1 {
+		t.Fatalf("escalation note: %v", h.api.comments)
+	}
+	for _, s := range []string{"reason=" + want, "waited on its author at `stage/072-returned-to-contributor` for 24h", "lane reason `conflicting`", "comes from a fork (`mallory/widget`)", "**Ask (maintainer):**"} {
+		if !strings.Contains(notes[0], s) {
+			t.Fatalf("note missing %q:\n%s", s, notes[0])
+		}
+	}
+
+	// It holds at 085 with no second note.
+	h.clock.advance(time.Hour)
+	h.observe(forkPR(7, "aaa", "stage/085-needs-decision", "role/contributor", "author/clanker"), "conflicting")
+	stageIs(stagelabels.NeedsDecision, "next pass")
+	if n := len(stalledComments(h.api)); n != 1 {
+		t.Fatalf("escalation note repeated: %v", h.api.comments)
+	}
+	if len(adoptionComments(h.api)) != 0 || len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+		t.Fatalf("fork PR adopted or re-homed: comments=%v pulls=%v refs=%v", h.api.comments, h.adopt.pulls, h.adopt.refs)
+	}
+
+	// The author pushes: the new head is theirs again, not a person's.
+	h.clock.advance(time.Minute)
+	h.observe(forkPR(7, "bbb", "stage/085-needs-decision", "role/contributor", "author/clanker"), "conflicting")
+	stageIs(stagelabels.ReturnedToContributor, "new head")
+}
+
+// An explicit owner-delegated adoption still goes through the supersede
+// path, which refuses a fork and parks it for a maintainer: the request is
+// one attempt, so it must be recorded, not declined like the timed path.
+func TestDelegatedAdoptionOfForkWithoutPushIsRecordedAndParked(t *testing.T) {
 	p := adoptPolicy()
 	p.AdoptInPlace = true
 	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
 	defer done()
 	h.adopt.allowMaintainerEdits(7, false)
 	h.observe(forkPR(7, "aaa"), "check-failing:unit")
-	h.clock.advance(30 * time.Minute)
-	labels := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
-	h.observe(forkPR(7, "aaa", labels...), "check-failing:unit")
-	if len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
-		t.Fatalf("fork PR superseded into the base repo: pulls=%v refs=%v", h.adopt.pulls, h.adopt.refs)
+	key := stageKey("acme", "widget", 7)
+	h.clock.advance(time.Minute)
+	h.observe(forkPR(7, "aaa", "stage/072-returned-to-contributor", "role/contributor", "author/clanker", delegatedecision.LabelAdoptSupersede), "check-failing:unit")
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if !rec.Adopted("aaa") || !rec.ForkRehomeRefused("aaa") || len(h.adopt.pulls) != 0 || len(h.adopt.refs) != 0 {
+		t.Fatalf("delegated fork adoption: rec=%+v pulls=%v refs=%v", rec, h.adopt.pulls, h.adopt.refs)
 	}
 	h.api.reset()
 	assertForkRehomeParked(t, h, forkPR(7, "aaa", "stage/074-adopted-by-hive", "role/contributor", "author/clanker"), "check-failing:unit")

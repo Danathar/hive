@@ -282,6 +282,11 @@ func passDecision(verdict stageVerdict, role stagelabels.Role, obs stageObservat
 			obs.Reason = pass.EscalationReason
 		}
 	}
+	if !verdict.Terminal && !pass.AdoptionLive && pass.ForkEscalationReason != "" && verdict.Stage == stagelabels.ReturnedToContributor {
+		verdict.Stage = stagelabels.NeedsDecision
+		verdict.Rank = stageRankOwned
+		obs.Reason = pass.ForkEscalationReason
+	}
 	d := Decision{
 		Stage:      verdict.Stage,
 		Role:       role,
