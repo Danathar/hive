@@ -253,6 +253,32 @@ func TestPRDeriverPassCarriesStalledAndKindLabels(t *testing.T) {
 	}
 }
 
+// TestPRDeriverPassCarriesForkEscalation: a fork PR the hive declined to
+// adopt that waited at 072 past the dwell is moved to 085 by the pass
+// (escalateUnadoptableFork); the engine must derive the same stage and
+// reason from PRPassFacts.ForkEscalationReason, and nothing without it.
+func TestPRDeriverPassCarriesForkEscalation(t *testing.T) {
+	list := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Reason: "conflicting", Detail: stageDetail{Role: stagelabels.RoleContributor}}}
+	reason := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+	for _, tc := range []struct {
+		name   string
+		pass   stageengine.PRPassFacts
+		stage  stagelabels.Stage
+		reason string
+	}{
+		{"escalated", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, ForkEscalationReason: reason}, stagelabels.NeedsDecision, reason},
+		{"waiting", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker}, stagelabels.ReturnedToContributor, ""},
+	} {
+		f := factsFrom(list)
+		pass := tc.pass
+		f.PR.Pass = &pass
+		got := stageengine.PRDeriver().Derive(f)
+		if got.Abstain || got.Stage != tc.stage || (tc.reason != "" && got.Reason != tc.reason) {
+			t.Errorf("%s: derived %+v, want %s %q", tc.name, got, tc.stage, tc.reason)
+		}
+	}
+}
+
 // TestVerdictStateFold pins the ReviewFacts.State fold ADR-0025 defines
 // (review-state fold, resolved in plan PR-F): the one verdict fact the PR
 // deriver routes on.

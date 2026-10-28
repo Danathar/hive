@@ -250,6 +250,9 @@ type PRPassFacts struct {
 	// the stalled-adoption escape moved it to 085 instead.
 	AdoptionLive     bool
 	EscalationReason string
+	// ForkEscalationReason is set when a fork PR the hive declined to adopt
+	// waited at 072 past the stage dwell and the pass moved it to 085.
+	ForkEscalationReason string
 	// Stalled is the pass's dwell verdict (stagelabels.StalledWith over the
 	// store record after this pass's Observe); KindLabels are the
 	// configured author/<kind> names. Both are outputs of the pass the
