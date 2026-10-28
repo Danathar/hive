@@ -170,10 +170,15 @@ type Record struct {
 	// when the blocker clears or the head moves.
 	AdoptEscalatedHead   string `json:"adopt_escalated_head,omitempty"`
 	AdoptEscalatedReason string `json:"adopt_escalated_reason,omitempty"`
-	// AdoptEscalationNotedHead is the head the escalation note was posted
-	// for; it survives ClearAdoptionEscalation so a blocker that flaps on
-	// one head is noted once.
-	AdoptEscalationNotedHead string `json:"adopt_escalation_noted_head,omitempty"`
+	// AdoptEscalationNotedHead / AdoptEscalationNotedReasons are the head
+	// the escalation note was posted for and every escalation reason a note
+	// explained on it. They are written only once GitHub accepted the post,
+	// so a failed one is retried on a later sweep, and they survive
+	// ClearAdoptionEscalation so a blocker that flaps on one head is noted
+	// once per reason. A head with no reasons is a record from before the
+	// reasons were kept; AdoptionEscalationNoted reads it as noted for any.
+	AdoptEscalationNotedHead    string   `json:"adopt_escalation_noted_head,omitempty"`
+	AdoptEscalationNotedReasons []string `json:"adopt_escalation_noted_reasons,omitempty"`
 	// AdoptRecoveryAttempt is the "<head>@<base tip>" pair the hive last
 	// tried to recover a stale-red in-place adoption on (update-branch or a
 	// re-run of the failed jobs, hivecommons/hive#14500); one attempt per
@@ -923,10 +928,20 @@ func (r Record) AdoptionEscalated(head string) bool {
 	return head != "" && r.AdoptEscalatedHead == head
 }
 
-// AdoptionEscalationNoted reports whether the escalation note was already
-// posted for head, whether or not the escalation still holds.
-func (r Record) AdoptionEscalationNoted(head string) bool {
-	return head != "" && r.AdoptEscalationNotedHead == head
+// AdoptionEscalationNoted reports whether an escalation note for reason
+// was already posted on head, whether or not the escalation still holds. A
+// new reason on the same head is not noted: the maintainer who read the
+// first note must learn what holds the PR now, as the 085 entry comment
+// does (hivecommons/hive#13139). Records written before reasons were kept
+// (a noted head, no reasons) are taken as noted for every reason on that
+// head: the reason they posted is unknown — a cleared escalation keeps
+// none — and a repost on every parked PR after an upgrade is worse than
+// one missed refresh.
+func (r Record) AdoptionEscalationNoted(head, reason string) bool {
+	if head == "" || r.AdoptEscalationNotedHead != head {
+		return false
+	}
+	return len(r.AdoptEscalationNotedReasons) == 0 || slices.Contains(r.AdoptEscalationNotedReasons, reason)
 }
 
 // ForkRehomeRefused reports whether the hive declined to re-home head, a
@@ -1066,6 +1081,7 @@ func (s *Store) MarkYielded(key, head string) {
 	r.AdoptedHead, r.AdoptedBy, r.AdoptedAt, r.AdoptCheckedAt = "", 0, time.Time{}, time.Time{}
 	r.AdoptMode, r.AdoptReason, r.AdoptDiffFence = "", "", ""
 	r.AdoptedHeadAt, r.AdoptEscalatedHead, r.AdoptEscalatedReason, r.AdoptEscalationNotedHead = time.Time{}, "", "", ""
+	r.AdoptEscalationNotedReasons = nil
 	r.AdoptRecoveryAttempt, r.AdoptRecoveryCount = "", 0
 	r.YieldedHead = head
 	s.items[key] = r
@@ -1115,16 +1131,37 @@ func (s *Store) MarkAdoptChecked(key string, now time.Time) {
 }
 
 // MarkAdoptionEscalated records that the adoption at head is a person's
-// for reason (stage 085) and that head has been noted; AdoptionEscalated
-// (head) then holds until ClearAdoptionEscalation or the head changes.
+// for reason (stage 085); AdoptionEscalated(head) then holds until
+// ClearAdoptionEscalation or the head changes. It does not mark the note:
+// MarkAdoptionEscalationNoted does, after the post succeeds, so a note
+// GitHub refused is not taken as posted.
 func (s *Store) MarkAdoptionEscalated(key, head, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.items[key]
-	if !ok || head == "" || (r.AdoptEscalatedHead == head && r.AdoptEscalatedReason == reason && r.AdoptEscalationNotedHead == head) {
+	if !ok || head == "" || (r.AdoptEscalatedHead == head && r.AdoptEscalatedReason == reason) {
 		return
 	}
-	r.AdoptEscalatedHead, r.AdoptEscalatedReason, r.AdoptEscalationNotedHead = head, reason, head
+	r.AdoptEscalatedHead, r.AdoptEscalatedReason = head, reason
+	s.items[key] = r
+	s.dirty = true
+}
+
+// MarkAdoptionEscalationNoted records that the escalation note for reason
+// was posted on head. A new head starts the reason list over; a record from
+// before reasons were kept already reads as noted for every reason on its
+// head and is left alone.
+func (s *Store) MarkAdoptionEscalationNoted(key, head, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || reason == "" || r.AdoptionEscalationNoted(head, reason) {
+		return
+	}
+	if r.AdoptEscalationNotedHead != head {
+		r.AdoptEscalationNotedHead, r.AdoptEscalationNotedReasons = head, nil
+	}
+	r.AdoptEscalationNotedReasons = append(slices.Clone(r.AdoptEscalationNotedReasons), reason)
 	s.items[key] = r
 	s.dirty = true
 }
@@ -1178,7 +1215,8 @@ func (s *Store) MarkSignoffAttributionNoted(key, head string) {
 
 // ClearAdoptionEscalation releases a stage-085 escalation whose reason no
 // longer holds (the blocker cleared), returning the adoption to 074 flow.
-// The noted head is kept so the same head is not noted twice.
+// The noted head and reasons are kept so the same head is not noted twice
+// for one reason.
 func (s *Store) ClearAdoptionEscalation(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1202,6 +1240,7 @@ func (s *Store) ClearAdoption(key string) {
 	r.AdoptedHead, r.AdoptedBy, r.AdoptedAt, r.AdoptCheckedAt = "", 0, time.Time{}, time.Time{}
 	r.AdoptMode, r.AdoptReason, r.AdoptDiffFence = "", "", ""
 	r.AdoptedHeadAt, r.AdoptEscalatedHead, r.AdoptEscalatedReason, r.AdoptEscalationNotedHead = time.Time{}, "", "", ""
+	r.AdoptEscalationNotedReasons = nil
 	r.AdoptRecoveryAttempt, r.AdoptRecoveryCount = "", 0
 	r.SupersededBy, r.SupersededAt, r.SupersededOpen, r.SupersederMergedNotedHead = 0, time.Time{}, false, ""
 	s.items[key] = r

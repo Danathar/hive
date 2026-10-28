@@ -774,7 +774,8 @@ at most once per (head, base tip) and three times per adoption, logged as
 (hivecommons/hive#14500). An adoption with nothing the hive can
 push past the dwell — after that recovery was tried and the head is still
 red — goes to `stage/085-needs-decision` as
-`adoption-stalled:<lane reason>` with one comment naming the blocker, so the
+`adoption-stalled:<lane reason>` with one comment naming the blocker (once
+per head and reason, retried until GitHub accepts it), so the
 dashboard shows a person's item, not a silent 074; "waiting on maintainer
 lgtm" is only ever the state at 080+ (hivecommons/hive#12858). The dwell runs
 from the head's last hive push, a red optional check alone is not a blocker,

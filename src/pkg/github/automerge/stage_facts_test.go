@@ -279,6 +279,69 @@ func TestPRDeriverPassCarriesForkEscalation(t *testing.T) {
 	}
 }
 
+// TestPRDeriverPassHoldsEscalationAgainstWeakOpinion: a lane that errored
+// on an approved head reads it author-side done, 080 at role rank. With an
+// active escalation on the head the pass keeps 085 (projectbluefin/utah#919
+// flipped 085 → 080 → 085 on one head); the engine must derive the same
+// from PRPassFacts, and 080 without an escalation.
+func TestPRDeriverPassHoldsEscalationAgainstWeakOpinion(t *testing.T) {
+	approved := stageDetail{Role: stagelabels.RoleContributor, VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Approved: true, Verdict: "approve"}}
+	list := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Err: true, Detail: approved}}
+	if v, _, _ := resolveStage(list); v.Stage != stagelabels.AwaitingMergeAdmission || v.Rank != stageRankRole {
+		t.Fatalf("fixture: errored approved lane resolved %+v, want weak 080", v)
+	}
+	stalled := stagelabels.LaneReasonAdoptionStalledPrefix + "check-failure"
+	fork := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+	for _, tc := range []struct {
+		name   string
+		pass   stageengine.PRPassFacts
+		stage  stagelabels.Stage
+		reason string
+	}{
+		{"adoption escalated", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, AdoptionLive: true, EscalationReason: stalled}, stagelabels.NeedsDecision, stalled},
+		{"fork escalated", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, ForkEscalationReason: fork}, stagelabels.NeedsDecision, fork},
+		{"adopted, not escalated", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, AdoptionLive: true}, stagelabels.AwaitingMergeAdmission, ""},
+		{"nothing", stageengine.PRPassFacts{AuthorKind: authorkind.Clanker}, stagelabels.AwaitingMergeAdmission, ""},
+	} {
+		f := factsFrom(list)
+		pass := tc.pass
+		f.PR.Pass = &pass
+		got := stageengine.PRDeriver().Derive(f)
+		if got.Abstain || got.Stage != tc.stage || (tc.reason != "" && got.Reason != tc.reason) {
+			t.Errorf("%s: derived %+v, want %s %q", tc.name, got, tc.stage, tc.reason)
+		}
+	}
+
+	// Only a weak opinion is held: an owned one past the merge gate (the
+	// lane admitted the head and is soaking it) is the lane's to state, and
+	// a weak 085 (a requires_human verdict on an author no lane vouches
+	// for, hivecommons/hive#13115) keeps its own reason.
+	soaking := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Reason: contributorLaneReasonSoaking, Detail: approved}}
+	weakHuman := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Reason: "untrusted-author-role", Detail: stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human"}}}}
+	for _, tc := range []struct {
+		name string
+		list []stageObservation
+		rank int
+	}{
+		{"owned soak", soaking, stageRankOwned},
+		{"weak 085", weakHuman, stageRankRole},
+	} {
+		v, _, _ := resolveStage(tc.list)
+		owned := tc.rank == stageRankOwned
+		if (owned && (v.Rank != stageRankOwned || v.Stage.YieldsToAdoption() || v.Stage == stagelabels.NeedsDecision)) || (!owned && (v.Rank >= stageRankOwned || v.Stage != stagelabels.NeedsDecision)) {
+			t.Fatalf("%s fixture: resolved %+v", tc.name, v)
+		}
+		plain := factsFrom(tc.list)
+		plain.PR.Pass = &stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, AdoptionLive: true}
+		want := stageengine.PRDeriver().Derive(plain)
+		f := factsFrom(tc.list)
+		f.PR.Pass = &stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, AdoptionLive: true, EscalationReason: stalled}
+		if got := stageengine.PRDeriver().Derive(f); got.Stage != want.Stage || got.Reason != want.Reason || got.Reason == stalled {
+			t.Errorf("%s: escalation overrode the opinion: derived %+v, want %+v", tc.name, got, want)
+		}
+	}
+}
+
 // TestVerdictStateFold pins the ReviewFacts.State fold ADR-0025 defines
 // (review-state fold, resolved in plan PR-F): the one verdict fact the PR
 // deriver routes on.

@@ -48,6 +48,12 @@ type stageAPI struct {
 	// lane's reason alone states it.
 	prFiles   map[int][]string
 	fileReads int
+	// failComments answers that many comment POSTs with a 500 before
+	// accepting any, as GitHub did for the adoption-stalled note on
+	// projectbluefin/utah-packages#650; failCommentsOn, when set, limits
+	// that to bodies starting with it.
+	failComments   int
+	failCommentsOn string
 	// extra handles routes beyond labels/comments (returns true when it
 	// served the request); the adoption tests use it for refs and pulls.
 	extra func(w http.ResponseWriter, r *http.Request) bool
@@ -154,6 +160,11 @@ func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/comments"):
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if api.failComments > 0 && strings.HasPrefix(body["body"], api.failCommentsOn) {
+				api.failComments--
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			api.comments = append(api.comments, body["body"])
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})

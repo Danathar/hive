@@ -3,6 +3,7 @@ package automerge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -1627,6 +1628,70 @@ func TestAdoptionForkWithoutPushStaysWithAuthorUntilDwell(t *testing.T) {
 	stageIs(stagelabels.ReturnedToContributor, "new head")
 }
 
+// The fork escalation note (escalateUnadoptableFork) is recorded only once
+// GitHub accepted it: a 500 on the post is retried on the next sweep, and
+// a weak opinion from a lane that errored on an approved head does not
+// drop the parked PR to 080 for a pass (projectbluefin/utah#919, 10-28).
+func TestForkEscalationNoteRetriedAndHeld(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	h.sink.presence = &ContributorPresence{Registered: true, Online: false}
+	h.adopt.allowMaintainerEdits(7, false)
+	key := stageKey("acme", "widget", 7)
+	returned := []string{"stage/072-returned-to-contributor", "role/contributor", "author/clanker"}
+	parked := []string{"stage/085-needs-decision", "role/contributor", "author/clanker"}
+	want := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
+
+	h.observe(forkPR(7, "aaa"), "conflicting")
+	h.clock.advance(30 * time.Minute)
+	h.observe(forkPR(7, "aaa", returned...), "conflicting")
+	h.clock.advance(24 * time.Hour)
+	h.api.reset()
+	h.api.failComments, h.api.failCommentsOn = 1, AdoptionStalledMarker
+	if _, err := h.observeErr(forkPR(7, "aaa", returned...), "conflicting"); err == nil {
+		t.Fatal("the refused note was not reported")
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if rec.Stage != stagelabels.NeedsDecision || rec.Reason != want || rec.AdoptionEscalationNoted("aaa", want) || len(stalledComments(h.api)) != 0 {
+		t.Fatalf("failed post: %+v comments=%v", rec, h.api.comments)
+	}
+
+	h.api.reset()
+	h.clock.advance(5 * time.Minute)
+	h.observe(forkPR(7, "aaa", parked...), "conflicting")
+	if notes := stalledComments(h.api); len(notes) != 1 || !strings.Contains(notes[0], "reason="+want) {
+		t.Fatalf("fork note not retried: %v", h.api.comments)
+	}
+	if len(h.api.added) != 0 || len(h.api.removed) != 0 {
+		t.Fatalf("retry churned labels: added=%v removed=%v", h.api.added, h.api.removed)
+	}
+
+	h.api.reset()
+	h.clock.advance(5 * time.Minute)
+	h.observe(forkPR(7, "aaa", parked...), "conflicting")
+	if len(h.api.comments) != 0 {
+		t.Fatalf("fork note repeated: %v", h.api.comments)
+	}
+
+	h.api.reset()
+	h.clock.advance(2 * time.Minute)
+	pr := forkPR(7, "aaa", parked...)
+	h.e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, "", false, errors.New("lane tripped"))
+	h.e.noteStageRole("acme", "widget", 7, stagelabels.RoleContributor)
+	h.e.noteStageVerdict("acme", "widget", 7, ContributorLaneVerdict{Configured: true, Approved: true, Verdict: "approve"})
+	if _, err := h.e.ApplyStageLabels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ = h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.NeedsDecision || rec.Reason != want {
+		t.Fatalf("errored lane dropped the fork escalation: %+v", rec)
+	}
+	if len(h.api.added) != 0 || len(h.api.removed) != 0 || len(h.api.comments) != 0 {
+		t.Fatalf("fork escalation churned: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
+	}
+}
+
 // An explicit owner-delegated adoption still goes through the supersede
 // path, which refuses a fork and parks it for a maintainer: the request is
 // one attempt, so it must be recorded, not declined like the timed path.
@@ -2137,6 +2202,7 @@ func TestDelegatedSupersedeWorkflowPathNotesOverStalledNote(t *testing.T) {
 	h.e.noteStageRole("acme", "widget", 7, stagelabels.RoleContributor)
 	key := stageKey("acme", "widget", 7)
 	h.e.stageStoreOrShared().MarkAdoptionEscalated(key, "aaa", stagelabels.LaneReasonAdoptionStalledPrefix+"stalled")
+	h.e.stageStoreOrShared().MarkAdoptionEscalationNoted(key, "aaa", stagelabels.LaneReasonAdoptionStalledPrefix+"stalled")
 	if _, err := h.e.ApplyStageLabels(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2338,5 +2404,42 @@ func TestAdoptionClosesCarriesRefs(t *testing.T) {
 	got := adoptionCloses("Refs #14389 — addresses root cause 2\nRefs #5\nCloses #12\n")
 	if len(got) != 2 || got[0] != "Refs #5" || got[1] != "Closes #12" {
 		t.Fatalf("adoptionCloses: %v", got)
+	}
+}
+
+// A workflow-path refusal note GitHub answered with a 500 is posted on the
+// next sweep: the refusing path does not run again for the head, so the
+// held escalation retries it, once.
+func TestWorkflowPathRefusalNoteRetriedAfterFailedPost(t *testing.T) {
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{}, adoptPolicy())
+	defer done()
+	h.adopt.prFiles = []map[string]any{{"filename": ".github/workflows/ci.yml", "status": "modified"}}
+	pr := adoptPR(7, "aaa", "stage/050-review-pending", delegatedecision.LabelAdoptSupersede)
+	h.adopt.mu.Lock()
+	h.adopt.heads[7] = "aaa"
+	h.adopt.mu.Unlock()
+	key := stageKey("acme", "widget", 7)
+	h.api.failComments, h.api.failCommentsOn = 1, AdoptionWorkflowRefusedMarker
+	h.e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, contributorLaneReasonNoReviewer, false, nil)
+	h.e.noteStageRole("acme", "widget", 7, stagelabels.RoleContributor)
+	if _, err := h.e.ApplyStageLabels(context.Background()); err == nil {
+		t.Fatal("the refused note was not reported")
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if rec.AdoptEscalatedReason != adoptionWorkflowRefusedReason || rec.AdoptionEscalationNoted("aaa", adoptionWorkflowRefusedReason) || len(workflowRefusedComments(h.api)) != 0 {
+		t.Fatalf("failed post: %+v comments=%v", rec, h.api.comments)
+	}
+	for i, want := range []int{1, 0} {
+		h.api.reset()
+		h.clock.advance(5 * time.Minute)
+		// A lane opinion the adoption pin claims (review pending) is what
+		// re-runs the escape for the adopted head.
+		h.observe(adoptPR(7, "aaa", "stage/085-needs-decision", "role/contributor", "author/clanker"), contributorLaneReasonNoVerdict)
+		if got := len(workflowRefusedComments(h.api)); got != want {
+			t.Fatalf("sweep %d: refusal notes = %d, want %d: %v", i+1, got, want, h.api.comments)
+		}
+		if rec, _ = h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.NeedsDecision {
+			t.Fatalf("sweep %d: stage %s", i+1, rec.Stage)
+		}
 	}
 }

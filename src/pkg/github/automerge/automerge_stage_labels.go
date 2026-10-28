@@ -984,6 +984,21 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 					pass.ForkEscalationReason = esc.Reason
 				}
 			}
+			if hadPrev && stageengine.HoldsEscalation(verdict) && prevRec.AdoptionEscalated(obs.HeadSHA) && (prevRec.AdoptionLive(obs.HeadSHA) || prevRec.ForkRehomeRefused(obs.HeadSHA)) {
+				// The escalation is the hive's own verdict on this head; a
+				// weak opinion (an errored lane reading an approved head as
+				// 080) does not release it — only the escape above, on an
+				// owned opinion, does. Without the hold the PR flipped
+				// 085 → 080 → 085 on one head.
+				verdict.Stage = stagelabels.NeedsDecision
+				verdict.Rank = stageRankOwned
+				obs.Reason = prevRec.AdoptEscalatedReason
+				if prevRec.AdoptionLive(obs.HeadSHA) {
+					pass.AdoptionLive, pass.EscalationReason = true, prevRec.AdoptEscalatedReason
+				} else {
+					pass.ForkEscalationReason = prevRec.AdoptEscalatedReason
+				}
+			}
 			tr = store.Observe(key, verdict.Stage, obs.Reason)
 			// hivecommons/hive#12502: remember the author so the dashboard can
 			// list "PRs returned to this contributor" from the store alone.

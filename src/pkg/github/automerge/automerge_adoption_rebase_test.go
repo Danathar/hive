@@ -28,6 +28,7 @@ func TestAdoptedNeedsRebaseSupersedesInsteadOfStalling(t *testing.T) {
 				store := h.e.stageStoreOrShared()
 				reason := stagelabels.LaneReasonAdoptionStalledPrefix + "label:needs-rebase"
 				store.MarkAdoptionEscalated(key, "aaa", reason)
+				store.MarkAdoptionEscalationNoted(key, "aaa", reason)
 				store.Observe(key, stagelabels.NeedsDecision, reason)
 				labels[0] = stagelabels.NeedsDecision.Label()
 			}

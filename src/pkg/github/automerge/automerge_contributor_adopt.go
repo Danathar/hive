@@ -764,18 +764,16 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 		// delegated request; the head goes to a person (085) with one note.
 		store.NoteAdoptReason(key, reason)
 		// A note for another reason (a stalled adoption) does not explain
-		// the refusal of a maintainer's explicit request, so it still posts.
-		noted := rec.AdoptionEscalationNoted(obs.HeadSHA) && !(requested && rec.AdoptEscalatedReason != adoptionWorkflowRefusedReason)
+		// the refusal of a maintainer's explicit request, so it still posts;
+		// the explicit check covers records from before notes were kept per
+		// reason, which read as noted for every reason on the head.
+		noted := rec.AdoptionEscalationNoted(obs.HeadSHA, adoptionWorkflowRefusedReason) && !(requested && rec.AdoptEscalatedReason != adoptionWorkflowRefusedReason)
 		store.MarkAdoptionEscalated(key, obs.HeadSHA, adoptionWorkflowRefusedReason)
 		c.warn("stage labels: refusing workflow-path supersession; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "noted", noted)
 		if noted {
 			return 0, nil
 		}
-		if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(AdoptionWorkflowRefusedComment(obs))}); err != nil {
-			c.warn("stage labels: workflow-path refusal note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-			return 0, err
-		}
-		return 1, nil
+		return c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
 	}
 	if appLogin == "" {
 		c.warn("stage labels: cannot adopt contributor PR, App login unknown", "repo", obs.Display, "pr", obs.Number)
@@ -1008,17 +1006,13 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 				// Terminal for this head: refuse publication, keep the
 				// in-place adoption and hand the re-home to a person (085).
 				store.NoteAdoptDiffFence(key, fence)
-				noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
+				noted := rec.AdoptionEscalationNoted(obs.HeadSHA, adoptionWorkflowRefusedReason)
 				store.MarkAdoptionEscalated(key, obs.HeadSHA, adoptionWorkflowRefusedReason)
 				c.warn("stage labels: refusing workflow-path DCO re-home; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "noted", noted)
 				if noted {
 					return 0, nil
 				}
-				if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(AdoptionWorkflowRefusedComment(obs))}); err != nil {
-					c.warn("stage labels: workflow-path refusal note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-					return 0, err
-				}
-				return 1, nil
+				return c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
 			}
 			if fence != "" {
 				// The fence travels into the superseding PR's body; the
@@ -1466,6 +1460,21 @@ type adoptionEscape struct {
 	Reason    string
 }
 
+// postAdoptionEscalationNote posts body as the 085 note for reason on the
+// head and records it as noted only once GitHub accepted it: marking first
+// left a post that failed (a 500) noted, so the PR sat at 085 with no
+// comment on that head ever. Callers check AdoptionEscalationNoted(head,
+// reason) first; failed is the warning logged on an error. Returns the
+// comments posted.
+func (c *Engine) postAdoptionEscalationNote(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, reason, body, failed string) (int, error) {
+	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
+		c.warn(failed, "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "error", err)
+		return 0, err
+	}
+	store.MarkAdoptionEscalationNoted(key, obs.HeadSHA, reason)
+	return 1, nil
+}
+
 // adoptionCIPending reports whether the lane saw CI still running on the
 // head: a fix may be in flight, so the head is not stale yet.
 func adoptionCIPending(obs stageObservation) bool {
@@ -1564,8 +1573,9 @@ func adoptionStalledReason(obs stageObservation, rec stagelabels.Record, policy 
 // escapeStalledAdoption runs before the 074 pin for a PR the hive owns whose
 // lane verdict is still below the merge gate. It converts a dead-end
 // in-place adoption to a supersession, or escalates an adoption nobody is
-// working to 085 with a comment naming the lane reason; the re-home and the
-// note happen once per head. An escalation holds only while its reason
+// working to 085 with a comment naming the lane reason; the re-home happens
+// once per head and the note once per (head, reason), retried until GitHub
+// accepts it. An escalation holds only while its reason
 // does: the sweep re-evaluates it and releases the PR to 074 when the
 // blocker clears (hivecommons/hive#13040). Returns the decision and the
 // number of comments posted.
@@ -1599,12 +1609,32 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 	if rec.AdoptionEscalated(obs.HeadSHA) {
 		// A workflow-path refusal is a verdict on the head itself: it holds
 		// until the head moves, whatever the re-home or stall reasons say.
-		if rec.AdoptEscalatedReason == adoptionWorkflowRefusedReason || (rehomeReason == "" && adoptionStalledReason(obs, rec, policy, now) != "") {
-			return adoptionEscape{Escalated: true, Reason: rec.AdoptEscalatedReason}, 0, nil
+		// Its note is retried here if the post that recorded it failed: the
+		// path that refused the head does not run again for it.
+		if rec.AdoptEscalatedReason == adoptionWorkflowRefusedReason {
+			esc := adoptionEscape{Escalated: true, Reason: adoptionWorkflowRefusedReason}
+			if rec.AdoptionEscalationNoted(obs.HeadSHA, adoptionWorkflowRefusedReason) {
+				return esc, 0, nil
+			}
+			n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
+			return esc, n, err
 		}
-		store.ClearAdoptionEscalation(key)
-		c.info("stage labels: adoption escalation reason cleared; back to adopted-by-hive", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "was", rec.AdoptEscalatedReason, "lane_reason", nonEmpty(obs.Reason, obs.LaneReason), "merge_commit", obs.Detail.MergeCommit)
-		rec, _ = store.Get(key)
+		stalled := ""
+		if rehomeReason == "" {
+			stalled = adoptionStalledReason(obs, rec, policy, now)
+		}
+		if stalled != "" && stalled == rec.AdoptEscalatedReason && rec.AdoptionEscalationNoted(obs.HeadSHA, stalled) {
+			return adoptionEscape{Escalated: true, Reason: stalled}, 0, nil
+		}
+		if stalled == "" {
+			store.ClearAdoptionEscalation(key)
+			c.info("stage labels: adoption escalation reason cleared; back to adopted-by-hive", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "was", rec.AdoptEscalatedReason, "lane_reason", nonEmpty(obs.Reason, obs.LaneReason), "merge_commit", obs.Detail.MergeCommit)
+			rec, _ = store.Get(key)
+		}
+		// Otherwise the escalation holds but its note never posted, or the
+		// blocker changed on this head (a check failure, then the hive's
+		// own sign-off attribution): the stall path below records the
+		// current reason and posts the note it is owed.
 	}
 	comments := 0
 	var firstErr error
@@ -1626,18 +1656,15 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 			// Terminal for this head: refuse publication, keep the in-place
 			// adoption and hand the re-home to a person (085) with one note.
 			store.NoteAdoptDiffFence(key, fence)
-			noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
+			noted := rec.AdoptionEscalationNoted(obs.HeadSHA, adoptionWorkflowRefusedReason)
 			store.MarkAdoptionEscalated(key, obs.HeadSHA, adoptionWorkflowRefusedReason)
 			c.warn("stage labels: refusing workflow-path re-home; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "noted", noted)
 			esc := adoptionEscape{Escalated: true, Reason: adoptionWorkflowRefusedReason}
 			if noted {
 				return esc, 0, nil
 			}
-			if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(AdoptionWorkflowRefusedComment(obs))}); err != nil {
-				c.warn("stage labels: workflow-path refusal note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-				return esc, 0, err
-			}
-			return esc, 1, nil
+			n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
+			return esc, n, err
 		}
 		if fence != "" {
 			store.NoteAdoptDiffFence(key, fence)
@@ -1659,11 +1686,12 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 	if reason == "" {
 		return adoptionEscape{}, comments, firstErr
 	}
-	noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
+	noted := rec.AdoptionEscalationNoted(obs.HeadSHA, reason)
 	store.MarkAdoptionEscalated(key, obs.HeadSHA, reason)
 	c.info("stage labels: adopted PR sits with nothing the hive can push; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "reason", reason, "head_since", rec.AdoptedHeadSince(), "noted", noted)
 	if noted {
-		// The blocker flapped on a head already noted: re-escalate silently.
+		// The blocker flapped back to a reason already noted on this head:
+		// re-escalate silently.
 		return adoptionEscape{Escalated: true, Reason: reason}, comments, firstErr
 	}
 	if adoptedHeadSignoffUnfixable(obs, rec) {
@@ -1671,13 +1699,10 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 		obs = c.withMergeAskFacts(ctx, key, obs)
 	}
 	body := AdoptionStalledComment(obs, rec, reason, now.Sub(rec.AdoptedHeadSince()))
-	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {
-		c.warn("stage labels: adoption escalation note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-		if firstErr == nil {
-			firstErr = err
-		}
-	} else {
-		comments++
+	n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, reason, body, "stage labels: adoption escalation note failed")
+	comments += n
+	if err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return adoptionEscape{Escalated: true, Reason: reason}, comments, firstErr
 }
@@ -1687,7 +1712,8 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 // stage dwell since the nudge: the same 085 park and maintainer ask an
 // adopted fork PR gets, but after the author's relay had its fix-pr window
 // rather than minutes after it went offline. A zero dwell (never stalled)
-// never escalates. The note posts once per head. Returns the decision and
+// never escalates. The note posts once per (head, reason), retried until
+// GitHub accepts it. Returns the decision and
 // the number of comments posted.
 func (c *Engine) escalateUnadoptableFork(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, policy StageLabelPolicy, now time.Time) (adoptionEscape, int, error) {
 	rec, ok := store.Get(key)
@@ -1701,15 +1727,12 @@ func (c *Engine) escalateUnadoptableFork(ctx context.Context, store *stagelabels
 	}
 	reason := stagelabels.LaneReasonAdoptionStalledPrefix + adoptStallForkRehomeRefused
 	esc := adoptionEscape{Escalated: true, Reason: reason}
-	noted := rec.AdoptionEscalationNoted(obs.HeadSHA)
+	noted := rec.AdoptionEscalationNoted(obs.HeadSHA, reason)
 	store.MarkAdoptionEscalated(key, obs.HeadSHA, reason)
 	if noted {
 		return esc, 0, nil
 	}
 	c.info("stage labels: fork PR the hive cannot adopt waited past the 072 dwell; escalating to needs-decision", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "head_repo", obs.HeadRepo, "nudged_at", start, "lane_reason", nonEmpty(obs.LaneReason, obs.Reason))
-	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(ForkNotAdoptedComment(obs, reason, now.Sub(start)))}); err != nil {
-		c.warn("stage labels: fork escalation note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
-		return esc, 0, err
-	}
-	return esc, 1, nil
+	n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, reason, ForkNotAdoptedComment(obs, reason, now.Sub(start)), "stage labels: fork escalation note failed")
+	return esc, n, err
 }

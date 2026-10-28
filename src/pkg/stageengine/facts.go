@@ -247,11 +247,13 @@ type PRPassFacts struct {
 	SignoffHiveCaused bool
 	// AdoptionLive is prev.AdoptionLive(head): the hive owns the PR, so a
 	// stage that yields to adoption reads 074. EscalationReason is set when
-	// the stalled-adoption escape moved it to 085 instead.
+	// the stalled-adoption escape moved it to 085 instead, or when the pass
+	// held that escalation against a weak opinion (HoldsEscalation).
 	AdoptionLive     bool
 	EscalationReason string
 	// ForkEscalationReason is set when a fork PR the hive declined to adopt
-	// waited at 072 past the stage dwell and the pass moved it to 085.
+	// waited at 072 past the stage dwell and the pass moved it to 085, or
+	// held that escalation against a weak opinion.
 	ForkEscalationReason string
 	// Stalled is the pass's dwell verdict (stagelabels.StalledWith over the
 	// store record after this pass's Observe); KindLabels are the
