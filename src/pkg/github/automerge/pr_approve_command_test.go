@@ -15,8 +15,11 @@ import (
 func TestPRApproveReply(t *testing.T) {
 	for _, tc := range []struct {
 		name, author, actor, verdict, file, body, want string
-		labels                                         []string
-		bot, disabled, readError, trustedAuthor        bool
+		// removedTest adds a deleted test file to the diff.
+		removedTest                             string
+		labels                                  []string
+		bot, disabled, readError, trustedAuthor bool
+		releaseFence                            bool
 	}{
 		{name: "says no needs-human blocks", author: testHiveAppBotLogin, actor: "owner", want: "No `needs-human` label blocks this PR."},
 		{name: "says needs-human still blocks", author: testHiveAppBotLogin, actor: "owner", labels: []string{"needs-human"}, want: "`needs-human` still blocks this PR"},
@@ -32,6 +35,8 @@ func TestPRApproveReply(t *testing.T) {
 		{name: "bot", author: "contributor", actor: "owner", bot: true, want: "a bot cannot release"},
 		{name: "rejected contributor", author: "contributor", actor: "owner", verdict: "reject", want: "cannot override this contributor-lane verdict"},
 		{name: "manual workflow", author: "contributor", actor: "owner", file: ".github/workflows/ci.yml", want: "requires a person to merge manually"},
+		{name: "owner approval releases workflow fence", author: "contributor", actor: "owner", file: ".github/workflows/ci.yml", releaseFence: true, want: "merges only on a hive owner's explicit approval"},
+		{name: "workflow fence with removed test stays manual", author: "contributor", actor: "owner", file: ".github/workflows/ci.yml", removedTest: "src/pkg/widget/widget_test.go", releaseFence: true, want: "requires a person to merge manually"},
 		{name: "manual path", author: testHiveAppBotLogin, actor: "owner", file: "sensitive/config.yaml", want: "requires a person to merge manually"},
 		{name: "carried fence on App lane", author: testHiveAppBotLogin, actor: "owner", body: CarriedFenceMarker(contributorLaneReasonTestsRemoved, 9), want: "carries a diff fence from the contributor PR it supersedes"},
 		{name: "disabled lane", author: "contributor", actor: "owner", disabled: true, want: "must merge it manually"},
@@ -64,7 +69,11 @@ func TestPRApproveReply(t *testing.T) {
 					if file == "" {
 						file = "src/main.go"
 					}
-					json.NewEncoder(w).Encode([]*gh.CommitFile{{Filename: gh.Ptr(file), Status: gh.Ptr("modified")}})
+					files := []*gh.CommitFile{{Filename: gh.Ptr(file), Status: gh.Ptr("modified")}}
+					if tc.removedTest != "" {
+						files = append(files, &gh.CommitFile{Filename: gh.Ptr(tc.removedTest), Status: gh.Ptr("removed")})
+					}
+					json.NewEncoder(w).Encode(files)
 				default:
 					t.Errorf("unexpected read: %s", r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
@@ -74,10 +83,12 @@ func TestPRApproveReply(t *testing.T) {
 			client := hgithub.NewClient("token", "acme", []string{"widget"}, nil, api.URL)
 			client.SetAppBotLogin(testHiveAppBotLogin)
 			e := New(client, Options{
-				MergerAuthorizer:      func(login string) bool { return login == "owner" },
-				TrustedAuthorPolicy:   func() TrustedAuthorPolicy { return TrustedAuthorPolicy{Enabled: tc.trustedAuthor} },
-				TrustedAuthorizer:     func(string, string) TrustedAuthorDecision { return TrustedAuthorDecision{Allowed: tc.trustedAuthor} },
-				ContributorLanePolicy: func() ContributorLanePolicy { return ContributorLanePolicy{Enabled: true} },
+				MergerAuthorizer:    func(login string) bool { return login == "owner" },
+				TrustedAuthorPolicy: func() TrustedAuthorPolicy { return TrustedAuthorPolicy{Enabled: tc.trustedAuthor} },
+				TrustedAuthorizer:   func(string, string) TrustedAuthorDecision { return TrustedAuthorDecision{Allowed: tc.trustedAuthor} },
+				ContributorLanePolicy: func() ContributorLanePolicy {
+					return ContributorLanePolicy{Enabled: true, OwnerApprovalReleasesWorkflowFence: tc.releaseFence}
+				},
 				ContributorLaneVerdict: func(string, int, string) ContributorLaneVerdict {
 					return ContributorLaneVerdict{Configured: true, Verdict: verdict}
 				},
