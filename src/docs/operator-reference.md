@@ -773,12 +773,18 @@ into its branch, pinned to the evaluated head; it never rebases or
 force-pushes, and never rewrites a contributor's commits. A fork pull request
 that already contains the current tip with passing required checks needs no
 update and merges normally. Fork CI waiting for maintainer approval
-(`action_required`) counts as not passed. When Hive cannot update a fork's
-branch (GitHub refuses the update, for example because "Allow edits by
-maintainers" is off), the pull request does not merge from the front; it
-leaves the front with the recorded reason once the front timeout runs out,
-the next pull request starts, and it stays eligible to merge at a later turn
-once its author has brought it up to date.
+(`action_required`) counts as not passed. The lane updates a behind fork
+branch only when GitHub reports that Hive can update it
+(`viewerCanUpdateBranch`, which needs "Allow edits by maintainers") **and**
+`review.contributor_prs.base_sync` is on. Otherwise the pull request leaves
+the front at once, without waiting for the front timeout, with the reason
+`fork pull request is behind the target branch and Hive is not allowed to
+update it: …` naming which condition failed. Hive posts one comment asking the
+author to merge the target tip, and the next pull request starts. Once the
+author has merged the tip and the required checks pass, the pull request
+rejoins the lane and merges at a later turn. A pull request merged through a
+`/hive queue` approval must be queued again after any new head, including a
+merge of the tip: the approval covers exactly the approved commit.
 
 ### Branches with GitHub's merge queue
 
