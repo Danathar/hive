@@ -647,6 +647,12 @@ func (a AgentConfig) BackendIsOperatorOwned() bool {
 	return a.BackendOwner == FieldOwnerOperator
 }
 
+// BackendIsPackOwned reports whether an ACMM pack wrote this agent's backend,
+// as opposed to an operator's pick or a legacy value with no owner.
+func (a AgentConfig) BackendIsPackOwned() bool {
+	return a.BackendOwner == FieldOwnerPack
+}
+
 // PauseIsOperatorOwned reports whether an operator explicitly owns this
 // agent's pause/run state — stamped at dashboard-API create and on an explicit
 // operator resume — which makes the agent immune to the ACMM pack visibility
