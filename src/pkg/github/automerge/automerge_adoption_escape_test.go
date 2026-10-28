@@ -582,3 +582,57 @@ func TestFormatSat(t *testing.T) {
 		}
 	}
 }
+
+// projectbluefin/testsuite#1037's shape: adopted in place, the hive's
+// App-signed commit beside the contributor's, a requires_human verdict that
+// blocks the re-home, a CI workflow edit and a sentinel alert. The stall
+// note asked for an Approve review while the 085 entry comment said no
+// approval overrides the manual-merge rule. Under an absolute rule both now
+// say a person merges by hand; with the owner-approval release on, both ask
+// for the approval (hivecommons/hive#14664).
+func TestAdoptedSignoffStallAskAgreesWithWorkflowFence(t *testing.T) {
+	for name, release := range map[string]bool{"release off": false, "release on": true} {
+		t.Run(name, func(t *testing.T) {
+			p := adoptPolicy()
+			p.AdoptInPlace = true
+			p.DCORequired = func(string) (bool, bool) { return true, true }
+			h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+			defer done()
+			if release {
+				releaseWorkflowFence(h.e)
+			}
+			h.api.commitDetails = map[int][]stageCommitFixture{7: {
+				{message: "ci: run e2e on the new runner\n\nSigned-off-by: Mallory <mallory@example.com>", authorLogin: "mallory", authorName: "Mallory", authorEmail: "mallory@example.com"},
+				{message: "ci: pin the runner image\n\nSigned-off-by: hive[bot] <12345+hive[bot]@users.noreply.github.com>", authorLogin: testHiveAppBotLogin, authorName: "hive[bot]", authorEmail: "12345+hive[bot]@users.noreply.github.com"},
+			}}
+			h.adopt.prFiles = []map[string]any{{"filename": ".github/workflows/e2e.yml", "status": "modified", "additions": 3, "deletions": 1}}
+			adoptInPlaceAt(h, "f72fa44", contributorLaneReasonNoVerdict)
+			h.adopt.setCommitAuthor("f72fa44", testHiveAppBotLogin)
+			h.clock.advance(time.Minute)
+			h.e.noteStageVerdict("acme", "widget", 7, requiresHumanVerdict)
+			h.observe(adoptPR(7, "f72fa44", append([]string{"sentinel-alert"}, adoptedLabels...)...), contributorLaneReasonNoVerdict)
+
+			notes := stalledComments(h.api)
+			if len(notes) != 1 {
+				t.Fatalf("stall note: %q", h.api.comments)
+			}
+			if !strings.Contains(notes[0], "A sentinel alert is open on this PR: resolve it and have a maintainer clear its label first.") {
+				t.Fatalf("stall note does not name the sentinel alert:\n%s", notes[0])
+			}
+			hand := strings.Contains(notes[0], "The hive will not merge this head itself, approved or not: the PR edits CI workflow / action files")
+			approve := strings.Contains(notes[0], "approve the current head with a GitHub **Approve** review")
+			if hand == release || approve != release {
+				t.Fatalf("stall note (release=%v) hand=%v approve=%v:\n%s", release, hand, approve, notes[0])
+			}
+			var entry string
+			for _, c := range h.api.comments {
+				if strings.HasPrefix(c, stagelabels.DecisionCommentMarker) {
+					entry = c
+				}
+			}
+			if manual := strings.Contains(entry, "a maintainer must review and merge this PR manually"); entry == "" || manual == release || strings.Contains(entry, "releases the CI workflow-file fence") != release {
+				t.Fatalf("085 entry comment disagrees with the stall note (release=%v):\n%s", release, entry)
+			}
+		})
+	}
+}

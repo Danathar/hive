@@ -473,23 +473,81 @@ func AdoptionWorkflowRefusedComment(obs stageObservation) string {
 // (stageDetail.MergeCommitRefused) and what a maintainer can do. The
 // contributor did not make the hive's commits, so it never asks them to
 // rewrite anything.
+//
+// A head under a lane rule no approval overrides (Detail.ManualMergeRule)
+// is never offered the approve route: the lane would still refuse it, so
+// the note named an approval while the 085 entry comment said none helps
+// (projectbluefin/testsuite#1037). An open sentinel alert is named too: its
+// label must be cleared whichever way the head lands.
 func mergeCommitRefusalText(obs stageObservation) string {
 	var b strings.Builder
-	switch obs.Detail.MergeCommitRefused {
-	case mergeCommitRefusedSquashOnly:
+	rule := strings.TrimSpace(obs.Detail.ManualMergeRule)
+	switch {
+	case obs.Detail.MergeCommitRefused == mergeCommitRefusedSquashOnly:
 		fmt.Fprintf(&b, "Every commit already carries a sign-off matching its own author, so a merge commit would land them without rewriting history, but `%s` is squash-only (`auto_merge.squash_only`), so the hive did not select one. ", obs.Display)
-		b.WriteString("**Ask (maintainer):** either lift the squash-only policy for this repo (the hive then merges with a merge commit on its next sweep), or re-author the hive's commits under a maintainer's own sign-off and push a new head.")
-	case mergeCommitRefusedRole:
+		then := "the hive then merges with a merge commit on its next sweep"
+		if rule != "" {
+			then = "a maintainer still merges it by hand with a merge commit: " + rule
+		}
+		b.WriteString("**Ask (maintainer):** either lift the squash-only policy for this repo (" + then + "), or re-author the hive's commits under a maintainer's own sign-off and push a new head.")
+	case obs.Detail.MergeCommitRefused == mergeCommitRefusedRole && rule != "":
+		fmt.Fprintf(&b, "The hive will not merge this head itself, approved or not: %s. ", rule)
+		fmt.Fprintf(&b, "**Ask (maintainer):** every commit already carries a sign-off matching its own author, so DCO holds without rewriting history: review the change and merge it by hand with a merge commit (`gh pr merge %d --merge`, not squash); an approving review would not land it.", obs.Number)
+	case obs.Detail.MergeCommitRefused == mergeCommitRefusedRole:
 		fmt.Fprintf(&b, "The hive selects a merge commit for this shape by itself only on a `%s` PR or a head a trusted maintainer has approved; this one is neither yet. ", stagelabels.RoleTrusted.Label())
 		fmt.Fprintf(&b, "**Ask (maintainer):** every commit already carries a sign-off matching its own author, so DCO holds without rewriting history: approve the current head with a GitHub **Approve** review (the hive then selects the merge commit itself), or merge it by hand with a merge commit (`gh pr merge %d --merge`, not squash).", obs.Number)
-	case mergeCommitRefusedHiveOnly:
+	case obs.Detail.MergeCommitRefused == mergeCommitRefusedHiveOnly:
 		fmt.Fprintf(&b, "Every non-merge commit on the head is the hive's, so there is no contributor authorship for a merge commit to preserve. **Ask (maintainer):** merge with a merge commit (`gh pr merge %d --merge`, not squash), or close this PR if the hive's change is not wanted.", obs.Number)
-	case mergeCommitRefusedUnsigned:
+	case obs.Detail.MergeCommitRefused == mergeCommitRefusedUnsigned:
 		fmt.Fprintf(&b, "Some commits on the head carry no sign-off at all, so the hive did not select a merge commit. **Ask (maintainer):** decide whether those commits need a sign-off before merging; if not, merge with a merge commit (`gh pr merge %d --merge`, not squash).", obs.Number)
 	default:
 		fmt.Fprintf(&b, "**Ask (maintainer):** every commit already carries a sign-off matching its own author, so a maintainer can merge this PR with a merge commit (`gh pr merge %d --merge`, not squash) and DCO holds without rewriting history.", obs.Number)
 	}
+	if obs.Detail.SentinelAlert {
+		b.WriteString(" A sentinel alert is open on this PR: resolve it and have a maintainer clear its label first.")
+	}
 	return b.String()
+}
+
+// withMergeAskFacts fills the Detail facts mergeCommitRefusalText reads:
+// the absolute manual-merge rule for the head and the sentinel alert. It
+// runs only right before a note is posted, once per head, so the diff read
+// the rule may need is one cached files read per head (headDiffFence), not
+// a call per sweep.
+func (c *Engine) withMergeAskFacts(ctx context.Context, key string, obs stageObservation) stageObservation {
+	obs.Detail.ManualMergeRule = c.headManualMergeRule(ctx, key, obs)
+	sentinel := c.sentinelLabelName()
+	if sentinel == "" {
+		sentinel = defaultSentinelLabel
+	}
+	obs.Detail.SentinelAlert = hasLabelFold(obs.Labels, sentinel)
+	return obs
+}
+
+// headManualMergeRule names the lane rule under which the hive never
+// merges obs's head unattended, approval or not ("" when none or unknown):
+// the lane's own reason first (the stage pass may have replaced Reason with
+// the sign-off one, so LaneReason too), then, on the contributor lane, the
+// head's diff fence, which the lane reaches only after a sentinel alert,
+// hold or verdict clears. A workflow-path fence the owner's approval
+// releases is not such a rule (hivecommons/hive#14664).
+func (c *Engine) headManualMergeRule(ctx context.Context, key string, obs stageObservation) string {
+	if obs.HeadSHA == "" {
+		return ""
+	}
+	workflowManual := c.workflowFenceManual(obs.Owner, obs.Repo, obs.Number, obs.HeadSHA)
+	for _, reason := range []string{obs.Reason, obs.LaneReason} {
+		if manualMergeRuleReasonFor(reason, workflowManual) {
+			return decisionCauseFor(reason, workflowManual)
+		}
+	}
+	if obs.Lane != stageLaneContributor {
+		return ""
+	}
+	if fence, ok := c.headDiffFence(ctx, c.stageTrackerOrShared(), key, obs); ok && manualMergeRuleReasonFor(fence, workflowManual) {
+		return decisionCauseFor(fence, workflowManual)
+	}
+	return ""
 }
 
 // adoptionBlockerText spells out what the lane reason stands for.
@@ -1607,6 +1665,10 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 	if noted {
 		// The blocker flapped on a head already noted: re-escalate silently.
 		return adoptionEscape{Escalated: true, Reason: reason}, comments, firstErr
+	}
+	if adoptedHeadSignoffUnfixable(obs, rec) {
+		// Only this blocker's text carries the merge-commit ask.
+		obs = c.withMergeAskFacts(ctx, key, obs)
 	}
 	body := AdoptionStalledComment(obs, rec, reason, now.Sub(rec.AdoptedHeadSince()))
 	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil {

@@ -63,6 +63,15 @@ type Detail struct {
 	// question never arose).
 	MergeCommit        bool
 	MergeCommitRefused string
+	// ManualMergeRule names the lane rule under which the hive never merges
+	// the head unattended, approval or not (removed tests, a human-merge
+	// path, a CI workflow edit the owner's approval cannot release), and
+	// SentinelAlert says the sentinel alert label is on the PR. Both are
+	// filled only right before a sign-off attribution note is posted, so
+	// its merge-commit ask never offers an approval that cannot land the
+	// head (projectbluefin/testsuite#1037).
+	ManualMergeRule string
+	SentinelAlert   bool
 	// DCOGate / DCOGateHead record whether the CI gate saw a DCO context
 	// on the head (required-check set or reported status/check run): the
 	// detected "this repo enforces DCO" signal the 072 override needs when

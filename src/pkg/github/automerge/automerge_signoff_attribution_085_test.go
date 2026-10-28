@@ -33,12 +33,20 @@ type signoffCase struct {
 	approvedHead string
 	// squashGate: the head's checks include `Sign-off survives the squash`.
 	squashGate bool
+	// files is the head's diff (GET /pulls/991/files); labels are extra
+	// labels on the PR; setup adjusts the engine before the sweep.
+	files  []string
+	labels []string
+	setup  func(*Engine)
 }
 
 func runSignoffCase(t *testing.T, tc signoffCase) (*stageAPI, stagelabels.Record, *Engine, func()) {
 	t.Helper()
 	const n = 991
 	api := &stageAPI{labels: map[string]string{}, commitDetails: map[int][]stageCommitFixture{n: tc.commits}}
+	if tc.files != nil {
+		api.prFiles = map[int][]string{n: tc.files}
+	}
 	reviewReads := 0
 	api.extra = func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || r.URL.Path != "/repos/acme/widget/pulls/991/reviews" {
@@ -64,7 +72,10 @@ func runSignoffCase(t *testing.T, tc signoffCase) (*stageAPI, stagelabels.Record
 		}
 		return p
 	}
-	pr := stagePR(n, "role/contributor", "author/clanker")
+	if tc.setup != nil {
+		tc.setup(e)
+	}
+	pr := stagePR(n, append([]string{"role/contributor", "author/clanker"}, tc.labels...)...)
 	pr.User = &gh.User{Login: gh.Ptr("j1mc")}
 	e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, tc.reason, false, nil)
 	e.noteStageRole("acme", "widget", n, stagelabels.RoleContributor)
@@ -79,7 +90,7 @@ func runSignoffCase(t *testing.T, tc signoffCase) (*stageAPI, stagelabels.Record
 		// Same head, next sweep, carrying the labels the first one wrote:
 		// nothing new is posted.
 		before := len(api.comments)
-		pr = stagePR(n, append([]string{"role/contributor", "author/clanker"}, addedAll(api)...)...)
+		pr = stagePR(n, append(append([]string{"role/contributor", "author/clanker"}, tc.labels...), addedAll(api)...)...)
 		pr.User = &gh.User{Login: gh.Ptr("j1mc")}
 		e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, tc.reason, false, nil)
 		e.noteStageRole("acme", "widget", n, stagelabels.RoleContributor)
@@ -182,6 +193,90 @@ func TestHiveCausedSignoffAttributionStaleApprovalStillParks(t *testing.T) {
 	}
 	assertNoContributorAsk(t, api)
 	again()
+}
+
+// projectbluefin/testsuite#1037: the sign-off attribution note asked for an
+// Approve review on a head that edits CI workflow files while the 085 entry
+// comment said no approval overrides the lane's manual-merge rule. When the
+// lane never merges the head unattended, the note offers only the by-hand
+// merge and names the rule; an open sentinel alert is named as well.
+func TestHiveCausedSignoffAttributionUnderManualMergeRuleAsksHandMerge(t *testing.T) {
+	for name, tc := range map[string]signoffCase{
+		// The owner-approval release is off (the test policy's default).
+		"workflow fence, release off": {files: []string{".github/workflows/e2e.yml"}},
+		"workflow fence, App lacks workflows": {files: []string{".github/workflows/e2e.yml"}, setup: func(e *Engine) {
+			releaseWorkflowFence(e)
+			e.unauthorized = map[string]unauthorizedState{e.unauthorizedKey("acme", "widget", 991): {Head: "sha", Step: unauthorizedStepMergeWorkflowPath}}
+		}},
+		// The lane's own reason, replaced by the sign-off one in the stage
+		// pass, still names the rule; no diff read is needed.
+		"tests removed lane reason": {reason: contributorLaneReasonTestsRemoved},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.commits = testsuite991Commits
+			if tc.reason == "" {
+				tc.reason = contributorLaneReasonNoVerdict
+			}
+			tc.labels = []string{"sentinel-alert"}
+			api, rec, _, again := runSignoffCase(t, tc)
+			if rec.Stage != stagelabels.NeedsDecision || rec.Reason != stagelabels.LaneReasonHiveSignoffAttribution {
+				t.Fatalf("record %+v, want 085 on hive-signoff-attribution", rec)
+			}
+			notes := commentsWith(api, SignoffAttributionDecisionMarkerPrefix)
+			if len(notes) != 1 {
+				t.Fatalf("maintainer note: %q", api.comments)
+			}
+			rule := "edits CI workflow / action files, which the lane never merges unattended"
+			if tc.reason == contributorLaneReasonTestsRemoved {
+				rule = "removes tests, which the lane never merges unattended"
+			}
+			for _, want := range []string{"The hive will not merge this head itself, approved or not", rule, "merge it by hand with a merge commit (`gh pr merge 991 --merge`, not squash)", "an approving review would not land it", "A sentinel alert is open on this PR: resolve it and have a maintainer clear its label first."} {
+				if !strings.Contains(notes[0], want) {
+					t.Fatalf("note missing %q:\n%s", want, notes[0])
+				}
+			}
+			if strings.Contains(notes[0], "approve the current head") || strings.Contains(notes[0], "selects the merge commit itself") {
+				t.Fatalf("note offers an approval that cannot land the head:\n%s", notes[0])
+			}
+			again()
+		})
+	}
+}
+
+// A workflow fence the owner's approval releases (hivecommons/hive#14664)
+// keeps the approve route: the hive then merges the head itself.
+func TestHiveCausedSignoffAttributionReleasableWorkflowFenceKeepsApproveRoute(t *testing.T) {
+	api, _, _, again := runSignoffCase(t, signoffCase{commits: testsuite991Commits, reason: contributorLaneReasonNoVerdict, files: []string{".github/workflows/e2e.yml"}, setup: releaseWorkflowFence})
+	notes := commentsWith(api, SignoffAttributionDecisionMarkerPrefix)
+	if len(notes) != 1 || !strings.Contains(notes[0], "approve the current head with a GitHub **Approve** review") || strings.Contains(notes[0], "approved or not") || strings.Contains(notes[0], "sentinel") {
+		t.Fatalf("note: %q", api.comments)
+	}
+	again()
+}
+
+func TestMergeCommitRefusalTextManualMergeRuleAndSentinel(t *testing.T) {
+	obs := stageObservation{Number: 1037, Display: "acme/widget", Detail: stageDetail{MergeCommitRefused: mergeCommitRefusedRole}}
+	if got := mergeCommitRefusalText(obs); !strings.Contains(got, "approve the current head") || strings.Contains(got, "sentinel") {
+		t.Fatalf("no rule: %q", got)
+	}
+	obs.Detail.ManualMergeRule = "the PR touches a human-merge path (auto_merge.human_merge_paths)"
+	if got := mergeCommitRefusalText(obs); strings.Contains(got, "approve the current head") || !strings.Contains(got, "approved or not: the PR touches a human-merge path") || !strings.Contains(got, "`gh pr merge 1037 --merge`") {
+		t.Fatalf("role, rule: %q", got)
+	}
+	obs.Detail.MergeCommitRefused = mergeCommitRefusedSquashOnly
+	if got := mergeCommitRefusalText(obs); strings.Contains(got, "the hive then merges") || !strings.Contains(got, "a maintainer still merges it by hand with a merge commit: the PR touches a human-merge path") {
+		t.Fatalf("squash-only, rule: %q", got)
+	}
+	obs.Detail.ManualMergeRule = ""
+	if got := mergeCommitRefusalText(obs); !strings.Contains(got, "the hive then merges with a merge commit") {
+		t.Fatalf("squash-only: %q", got)
+	}
+	for _, refused := range []string{mergeCommitRefusedRole, mergeCommitRefusedSquashOnly, mergeCommitRefusedHiveOnly, mergeCommitRefusedUnsigned, ""} {
+		obs.Detail = stageDetail{MergeCommitRefused: refused, SentinelAlert: true}
+		if got := mergeCommitRefusalText(obs); !strings.HasSuffix(got, " A sentinel alert is open on this PR: resolve it and have a maintainer clear its label first.") {
+			t.Fatalf("%q sentinel: %q", refused, got)
+		}
+	}
 }
 
 // A red check on a PR made only of the contributor's own commits is still

@@ -153,6 +153,9 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		ManualMerge:      manualMergeReason(obs.Reason),
 		LaneReason:       obs.Reason,
 		ManualMergeRule:  manualMergeRuleReasonFor(obs.Reason, workflowManual),
+		// The 085 actions ask for the approval that releases the fence
+		// instead of saying none helps (hivecommons/hive#14664).
+		ApprovalReleasesFence: obs.Reason == contributorLaneReasonWorkflowPath && !workflowManual,
 	}
 	// A trusted merger's APPROVED review on exactly this head is the human
 	// decision the lane noted (latestTrustedHumanApproval): it settles a
@@ -173,10 +176,13 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		// was then asked for an approval that can never lead to a merge,
 		// and told it is manual-merge only once the first block cleared.
 		// Name the fence from the start.
+		// The fence's standing is this head's, as for a lane reason: an
+		// owner's approval may release a workflow-path fence.
 		if fence, ok := c.headDiffFence(ctx, tracker, key, obs); ok && manualMergeReason(fence) {
 			e.ManualMerge = true
+			e.ApprovalReleasesFence = fence == contributorLaneReasonWorkflowPath && !workflowManual
 			if e.CauseReason == "" {
-				e.CauseReason = decisionCause(fence)
+				e.CauseReason = decisionCauseFor(fence, workflowManual)
 			}
 		}
 	}
