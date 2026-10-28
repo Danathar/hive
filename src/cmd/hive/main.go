@@ -11195,10 +11195,11 @@ func parseReviseCutoff(raw string, logger *slog.Logger) time.Time {
 // reads: a PR's changed paths for the bot-author model route
 // (review.bot_author_full_review_paths) and the compare between the head
 // the hive last judged and the current one for the delta re-review
-// (review.delta_rereview).
+// (review.delta_rereview), which also proves a hive base-sync against the
+// PR's base branch.
 type reviewPlannerGitHub interface {
 	ReviewPRChangedFiles(ctx context.Context, repo string, number int) ([]string, bool)
-	ReviewDeltaDiff(ctx context.Context, repo, previousHead, head string) review.DeltaDiff
+	ReviewDeltaDiff(ctx context.Context, repo, baseRef, previousHead, head string) review.DeltaDiff
 }
 
 func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult, agentMgr crux.Runtime, beadStores map[string]*beads.Store, logger *slog.Logger) review.DispatchPlan {
@@ -11233,8 +11234,9 @@ func reviewBotRouteFilesFor(ctx context.Context, cfg *config.Config, lister revi
 // delta re-review candidate: delta mode on, no verdict yet at this head, no
 // dispatch entry for it (a compare per cycle for a review in flight would be
 // API spend for nothing), and a prior verdict at another head to diff from.
-// nil otherwise, which the planner reads as "not fetched".
-func reviewDeltaDiffFor(ctx context.Context, cfg *config.Config, differ reviewPlannerGitHub, artifact review.Artifact, state review.DispatchState, repo string, number int, headSHA, bodyDigest string) *review.DeltaDiff {
+// nil otherwise, which the planner reads as "not fetched". baseRef lets the
+// compare recognise the hive's own merge of the base (DeltaDiff.BaseSync).
+func reviewDeltaDiffFor(ctx context.Context, cfg *config.Config, differ reviewPlannerGitHub, artifact review.Artifact, state review.DispatchState, repo string, number int, baseRef, headSHA, bodyDigest string) *review.DeltaDiff {
 	if differ == nil || !cfg.Review.DeltaRereviewEnabled() || strings.TrimSpace(headSHA) == "" {
 		return nil
 	}
@@ -11248,7 +11250,7 @@ func reviewDeltaDiffFor(ctx context.Context, cfg *config.Config, differ reviewPl
 	if !ok {
 		return nil
 	}
-	diff := differ.ReviewDeltaDiff(ctx, repo, prior.HeadSHA, headSHA)
+	diff := differ.ReviewDeltaDiff(ctx, repo, baseRef, prior.HeadSHA, headSHA)
 	return &diff
 }
 
@@ -11342,8 +11344,9 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 			// fix lane with it instead of reviewing the head again.
 			HumanChangeRequest: review.HumanChangeRequestFor(review.DefaultHumanChangeRequests(), fullRepo, pr.Number, pr.HeadSHA),
 			// The compare from the last judged head, for the delta
-			// re-review and its trivial skip (review.delta_rereview).
-			DeltaDiff: reviewDeltaDiffFor(ctx, cfg, ghr, artifact, state, fullRepo, pr.Number, pr.HeadSHA, pr.BodyDigest),
+			// re-review, its trivial skip and the hive base-sync carry
+			// (review.delta_rereview).
+			DeltaDiff: reviewDeltaDiffFor(ctx, cfg, ghr, artifact, state, fullRepo, pr.Number, pr.BaseRef, pr.HeadSHA, pr.BodyDigest),
 		}
 		// Changed paths for the bot-author model route's path exceptions
 		// (review.bot_author_full_review_paths); fetched only for a listed
@@ -11460,7 +11463,8 @@ func recordReviewDeltaRestamps(plan review.DispatchPlan, logger *slog.Logger) {
 		if r.Aggregate.Delta != nil {
 			note = r.Aggregate.Delta.Note
 		}
-		logger.Info("review delta re-stamped verdict without a session", "repo", r.Repo, "pr", r.Number, "head", r.HeadSHA, "previous_head", r.PreviousHead, "verdict", r.Aggregate.Verdict, "note", note)
+		baseSync := r.Aggregate.Delta != nil && r.Aggregate.Delta.BaseSync
+		logger.Info("review delta re-stamped verdict without a session", "repo", r.Repo, "pr", r.Number, "head", r.HeadSHA, "previous_head", r.PreviousHead, "verdict", r.Aggregate.Verdict, "base_sync", baseSync, "note", note)
 	}
 	if _, err := review.RecordDeltaRestamps("", plan.DeltaRestamps, time.Now().UTC()); err != nil {
 		logger.Warn("failed to record review delta re-stamps", "error", err, "count", len(plan.DeltaRestamps))

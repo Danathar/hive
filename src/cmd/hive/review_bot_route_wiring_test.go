@@ -18,7 +18,7 @@ func (f *fakeChangedFilesLister) ReviewPRChangedFiles(context.Context, string, i
 	return f.files, f.known
 }
 
-func (f *fakeChangedFilesLister) ReviewDeltaDiff(_ context.Context, _, previousHead, _ string) review.DeltaDiff {
+func (f *fakeChangedFilesLister) ReviewDeltaDiff(_ context.Context, _, _, previousHead, _ string) review.DeltaDiff {
 	return review.DeltaDiff{PreviousHead: previousHead}
 }
 
