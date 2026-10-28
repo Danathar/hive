@@ -91,6 +91,7 @@ The prose may be reworded; the codes are stable identifiers:
 | `supervisor_no_issues`, `acmm_level` | wrapper | level-based fallback gates |
 | `merge_no_identifier`, `merge_not_eligible`, `merge_gate_unavailable` | wrapper | merge-eligibility gate |
 | `contributor_api_write`, `api_write_issues_pulls` | wrapper | mutating `gh api` |
+| `empty_body`, `body_file_reference`, `blanking_edit` | wrapper | a create, comment or edit body that would post nothing usable: empty once trimmed (the footer would land alone; a create or comment with no body flag counts, unless `--fill`/`--template`/`--web` asks gh to build it; reviews may stay empty), only an `@path` (gh posts it literally; use `--body-file`), or an edit that blanks the existing body |
 | `repo_paused` | proxy | repo paused by the operator (#6203) |
 | `agent_repo_scope` | proxy | agent not scoped to the repo (#6204) |
 | `repo_auto_merge_disabled` | proxy | `repo_policies[].auto_merge=false` |
