@@ -16648,7 +16648,8 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const per = items.map(it => ({ it, flat: stageTrackerFlatActions(stageTrackerRowActions(it, typeof ctxOf === 'function' ? ctxOf(it.repo) : ctxOf)) }));
       const judge = id => {
         for (const p of per) {
-          const a = p.flat[id];
+          // A multi-PR parent delegates all its PRs, not one ambiguous target.
+          const a = p.flat[id] || (id === 'decide:delegate' ? p.flat['decide:delegate-all'] : null);
           if (!a) return { enabled: false, why: 'Not applicable to ' + stageTrackerRefOf(p.it) };
           if (!a.enabled) return { enabled: false, why: a.why + ' (' + stageTrackerRefOf(p.it) + ')' };
         }
@@ -17591,7 +17592,12 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
         // A row decides its parked PR when it has one (the issue's stage is
         // only mirrored from it); dedupe when the PR row is selected too.
         const seen = {};
-        items = items.map(stageTrackerDecisionTarget).filter(t => t && !seen[stageTrackerItemKey(t)] && (seen[stageTrackerItemKey(t)] = true));
+        // Bulk delegation includes the same open PRs as delegate-all. Expand
+        // before deduping so a selected parent and its sub-rows run each PR
+        // once, with every PR named in the shared confirmation.
+        items = [].concat(...items.map(it => id === 'decide:delegate' && stageTrackerNestedOpenPRs(it).length >= STAGE_TRACKER_DELEGATE_ALL_MIN
+          ? stageTrackerNestedOpenPRs(it) : [stageTrackerDecisionTarget(it)]))
+          .filter(t => t && !seen[stageTrackerItemKey(t)] && (seen[stageTrackerItemKey(t)] = true));
         if (!items.length) return { toasts: [], pending: [] };
       }
       const payload = await stageTrackerActionPayload(items, id);
