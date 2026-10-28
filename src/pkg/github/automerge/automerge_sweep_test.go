@@ -36,6 +36,7 @@ type sweepPR struct {
 	checkStatus     string
 	checkConclusion string
 	headRepo        string
+	baseRef         string
 }
 
 func issueLabels(primary string, extra []string) []map[string]string {
@@ -2885,17 +2886,6 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/branches/main/protection/required_status_checks":
-			// This fixture exercises unknown required checks, with GitHub's
-			// merge endpoint enforcing protection rather than a known-empty set.
-			http.Error(w, "forbidden", http.StatusForbidden)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/branches/main":
-			json.NewEncoder(w).Encode(map[string]any{"protected": true, "commit": map[string]string{"sha": "basesha"}})
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/rules/branches/main":
-			json.NewEncoder(w).Encode([]any{})
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/commits/basesha/status":
-			// No release-in-progress hold is active on the base branch.
-			json.NewEncoder(w).Encode(map[string]any{"state": "success", "total_count": 0, "statuses": []any{}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/issues":
 			if got := r.URL.Query().Get("labels"); got != expectedLabel {
 				t.Fatalf("issues labels query = %q, want %q", got, expectedLabel)
@@ -2980,6 +2970,13 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 			if headRepo == "" {
 				headRepo = "acme/widget"
 			}
+			// The base ref is omitted unless a test opts in, so existing
+			// callers keep the empty-base-branch path and need no
+			// protection or base-status stubs.
+			base := map[string]any{"repo": map[string]string{"full_name": "acme/widget"}}
+			if pr.baseRef != "" {
+				base["ref"] = pr.baseRef
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"number":          pr.number,
 				"state":           "open",
@@ -2988,7 +2985,7 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				"mergeable":       pr.mergeableState == "clean",
 				"user":            map[string]string{"login": pr.author},
 				"head":            map[string]any{"sha": headSHA, "repo": map[string]string{"full_name": headRepo}},
-				"base":            map[string]any{"ref": "main", "repo": map[string]string{"full_name": "acme/widget"}},
+				"base":            base,
 				"labels":          prLabels,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/status") && hasShaNumber(r.URL.Path):

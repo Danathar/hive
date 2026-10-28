@@ -501,6 +501,7 @@ func TestLaneSweep_HeldQueuedFrontLeavesTheLane(t *testing.T) {
 						} else {
 							pr := greenLanePR(7)
 							pr.extraLabels = []string{label}
+							pr.baseRef = "main"
 							api = newAutoMergeSweepAPI(t, hgithub.AutoMergeQueuedLabel, []sweepPR{pr}, &merged)
 						}
 						defer api.Close()

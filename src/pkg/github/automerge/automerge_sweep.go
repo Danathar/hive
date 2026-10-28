@@ -1147,7 +1147,9 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 					continue
 				} else if reason != "" {
 					if reason == "hold" {
-						c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, number, pr, hgithub.PRAuditPathSweep, reason)
+						// Same reason string as labelBlockReason so the lane
+						// rejection log reads alike on every hold path.
+						c.rejectPrefilteredBeforeLane(ctx, repo, owner, repoName, number, pr, hgithub.PRAuditPathSweep, "label:hold")
 						reason = "held"
 					}
 					result.Skipped++
