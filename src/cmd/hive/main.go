@@ -5700,6 +5700,24 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				}
 				b.logger.Info("audit: agent restart counter reset from hub", "agent", name)
 			}),
+			// Whole-hive pause/resume requested from the hub's per-hive menu
+			// (#15092). Same fleet-breaker calls as the dashboard's
+			// /api/breaker/{engage,release}; the run loop's regular persist
+			// makes the result durable.
+			spoke.BreakerCallback(func(action string) {
+				switch action {
+				case spoke.BreakerEngage:
+					paused := b.agentMgr.EngageBreaker()
+					b.dashSrv.AuditLog("hub", "breaker-engage", "count="+strconv.Itoa(len(paused))+", agents="+strings.Join(paused, ","), "")
+					b.logger.Info("audit: fleet breaker engaged from hub", "agents", paused)
+				case spoke.BreakerRelease:
+					resumed := b.agentMgr.ReleaseBreaker(b.ctx)
+					b.dashSrv.AuditLog("hub", "breaker-release", "count="+strconv.Itoa(len(resumed))+", agents="+strings.Join(resumed, ","), "")
+					b.logger.Info("audit: fleet breaker released from hub", "agents", resumed)
+				default:
+					b.logger.Warn("unknown breaker instruction from hub; ignoring", "action", action)
+				}
+			}),
 			spoke.AuthorizedUsersCallback(func(users []string, names map[string]string) {
 				// The hub delivered its authoritative access list. Reconcile our
 				// login allowlist so Manage Access grants take effect on this
