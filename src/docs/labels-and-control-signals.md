@@ -933,7 +933,8 @@ When a clanker-authored contributor PR goes red the hive does not just relabel i
    queued `fix-pr` task, and after the `072` dwell (24h) since the nudge on
    that head it parks at `085` as `adoption-stalled:fork-rehome-refused`
    with one note asking a maintainer to review it and bring it in or close
-   it. A new head from the author re-arms the normal path. An explicit
+   it (once per head and reason, retried on later sweeps until GitHub
+   accepts it; an errored lane's weak 080 does not lift it). A new head from the author re-arms the normal path. An explicit
    owner-delegated adoption request is still recorded and parks at once.
    - `reason=dco-rehome` (always `mode=supersede`) — not a fresh adoption
      but a second takeover: an in-place-adopted head stayed
@@ -1079,9 +1080,15 @@ When a clanker-authored contributor PR goes red the hive does not just relabel i
      person to decide and the PR stays 074. The escalation holds only while
      its reason holds — the sweep re-evaluates it every pass and when the
      blocker clears (CI re-runs, the check goes green, a verdict lands) the
-     PR returns to 074 and the lane carries on; the comment is posted once
-     per head even if the blocker flaps, and a hive push to a new head
-     starts over. A pending `tide` or missing `lgtm` is never the reason —
+     PR returns to 074 and the lane carries on. A weak opinion is not such
+     a release: a lane that errored on an approved head (080 at role rank)
+     leaves the escalation at 085 for that pass instead of flipping the PR
+     085 → 080 → 085. The comment is posted once per (head, reason): the
+     same blocker flapping back stays silent, a different blocker on the
+     same head (a check failure, then the hive's own sign-off attribution)
+     gets its own note, and a post GitHub refuses is not counted, so the
+     next sweep retries it until it lands. A hive push to a new head starts
+     over. A pending `tide` or missing `lgtm` is never the reason —
      the lane has not admitted the head; the comment says so.
    - **supersede** (`mode=supersede`) — the fork forbids maintainer edits,
      `in_place: false`, or the adopted head has unsigned commits (`no-dco`)

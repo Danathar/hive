@@ -1211,11 +1211,21 @@ func TestStoreAdoptionEscapeBookkeeping(t *testing.T) {
 	}
 	s.MarkAdoptionEscalated(key, "f72fa44", "adoption-stalled:check-failing:unit")
 	r, _ = s.Get(key)
-	if !r.AdoptionEscalated("f72fa44") || r.AdoptionEscalated("5665cda") || r.AdoptEscalatedReason != "adoption-stalled:check-failing:unit" || !r.AdoptionEscalationNoted("f72fa44") {
+	if !r.AdoptionEscalated("f72fa44") || r.AdoptionEscalated("5665cda") || r.AdoptEscalatedReason != "adoption-stalled:check-failing:unit" {
 		t.Fatalf("escalation not recorded: %+v", r)
+	}
+	// The escalation alone is not a posted note: a post GitHub refused
+	// must be retried, not read back as noted.
+	if r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:check-failing:unit") || r.AdoptEscalationNotedHead != "" {
+		t.Fatalf("escalating marked the note posted: %+v", r)
+	}
+	s.MarkAdoptionEscalationNoted(key, "f72fa44", "adoption-stalled:check-failing:unit")
+	if r, _ = s.Get(key); !r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:check-failing:unit") || r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:hive-signoff-attribution") {
+		t.Fatalf("note not recorded per reason: %+v", r)
 	}
 	s.dirty = false
 	s.MarkAdoptionEscalated(key, "f72fa44", "adoption-stalled:check-failing:unit")
+	s.MarkAdoptionEscalationNoted(key, "f72fa44", "adoption-stalled:check-failing:unit")
 	if s.dirty {
 		t.Fatal("re-marking the same escalation dirtied the store")
 	}
@@ -1223,8 +1233,13 @@ func TestStoreAdoptionEscapeBookkeeping(t *testing.T) {
 	// clears, but the head stays noted so a flapping blocker is noted once.
 	s.ClearAdoptionEscalation(key)
 	r, _ = s.Get(key)
-	if r.AdoptionEscalated("f72fa44") || r.AdoptEscalatedReason != "" || !r.AdoptionEscalationNoted("f72fa44") || r.AdoptionEscalationNoted("5665cda") {
+	if r.AdoptionEscalated("f72fa44") || r.AdoptEscalatedReason != "" || !r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:check-failing:unit") || r.AdoptionEscalationNoted("5665cda", "adoption-stalled:check-failing:unit") {
 		t.Fatalf("escalation not released: %+v", r)
+	}
+	// A second reason on the same head is noted beside the first.
+	s.MarkAdoptionEscalationNoted(key, "f72fa44", "adoption-stalled:hive-signoff-attribution")
+	if r, _ = s.Get(key); !r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:check-failing:unit") || !r.AdoptionEscalationNoted("f72fa44", "adoption-stalled:hive-signoff-attribution") {
+		t.Fatalf("second reason lost the first: %+v", r)
 	}
 	s.dirty = false
 	s.ClearAdoptionEscalation(key)
@@ -1258,6 +1273,54 @@ func TestStoreAdoptionEscapeBookkeeping(t *testing.T) {
 	s.ClearAdoption(key)
 	if r, _ = s.Get(key); r.AdoptEscalatedHead != "" || r.AdoptEscalationNotedHead != "" || !r.AdoptedHeadAt.IsZero() {
 		t.Fatalf("clear kept escape state: %+v", r)
+	}
+}
+
+// A note marked for one head starts over on the next, and a record written
+// before the noted reasons were kept reads as noted for every reason on its
+// head (no mass repost after an upgrade) but for nothing on another head.
+func TestAdoptionEscalationNotedPerHeadAndLegacy(t *testing.T) {
+	s := &Store{items: map[string]Record{}}
+	const key = "o/r#650"
+	s.items[key] = Record{AdoptEscalatedHead: "aaa", AdoptEscalatedReason: "adoption-stalled:check-failure", AdoptEscalationNotedHead: "aaa"}
+	r, _ := s.Get(key)
+	if !r.AdoptionEscalationNoted("aaa", "adoption-stalled:check-failure") || !r.AdoptionEscalationNoted("aaa", "adoption-stalled:hive-signoff-attribution") {
+		t.Fatalf("legacy noted head not read as noted for every reason: %+v", r)
+	}
+	if r.AdoptionEscalationNoted("bbb", "adoption-stalled:check-failure") || r.AdoptionEscalationNoted("", "") {
+		t.Fatalf("legacy noted head leaked to another head: %+v", r)
+	}
+	s.dirty = false
+	s.MarkAdoptionEscalationNoted(key, "aaa", "adoption-stalled:hive-signoff-attribution")
+	if r, _ = s.Get(key); s.dirty || len(r.AdoptEscalationNotedReasons) != 0 {
+		t.Fatalf("marking a legacy noted head narrowed it to one reason: %+v", r)
+	}
+	s.MarkAdoptionEscalationNoted(key, "bbb", "adoption-stalled:check-failure")
+	r, _ = s.Get(key)
+	if r.AdoptEscalationNotedHead != "bbb" || !r.AdoptionEscalationNoted("bbb", "adoption-stalled:check-failure") || r.AdoptionEscalationNoted("bbb", "adoption-stalled:x") || r.AdoptionEscalationNoted("aaa", "adoption-stalled:check-failure") {
+		t.Fatalf("new head did not start the reasons over: %+v", r)
+	}
+	s.MarkAdoptionEscalationNoted(key, "ccc", "adoption-stalled:hive-signoff-attribution")
+	if r, _ = s.Get(key); r.AdoptionEscalationNoted("ccc", "adoption-stalled:check-failure") || !r.AdoptionEscalationNoted("ccc", "adoption-stalled:hive-signoff-attribution") {
+		t.Fatalf("a reason noted on the previous head carried over: %+v", r)
+	}
+	s.MarkAdoptionEscalationNoted(key, "", "adoption-stalled:x")
+	s.MarkAdoptionEscalationNoted(key, "ccc", "")
+	s.MarkAdoptionEscalationNoted("missing", "bbb", "adoption-stalled:x")
+	if r, _ = s.Get(key); len(r.AdoptEscalationNotedReasons) != 1 || r.AdoptEscalationNotedHead != "ccc" {
+		t.Fatalf("empty head/reason or missing key was recorded: %+v", r)
+	}
+	if _, ok := s.Get("missing"); ok {
+		t.Fatal("MarkAdoptionEscalationNoted created a record")
+	}
+	// The reasons survive the JSON round trip the store file takes.
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Record
+	if err := json.Unmarshal(b, &back); err != nil || !back.AdoptionEscalationNoted("ccc", "adoption-stalled:hive-signoff-attribution") || back.AdoptionEscalationNoted("ccc", "adoption-stalled:x") {
+		t.Fatalf("reasons lost in JSON (%v): %s", err, b)
 	}
 }
 

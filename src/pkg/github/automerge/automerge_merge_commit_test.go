@@ -238,6 +238,7 @@ func TestParkedSignoffAttributionEscalationReleasesOnMergeCommitElection(t *test
 	// The previous build's record: escalated and noted on this head, the
 	// adopted-head clock long past the dwell, stage 085 written.
 	store.MarkAdoptionEscalated(key, "a1899cc", stalled)
+	store.MarkAdoptionEscalationNoted(key, "a1899cc", stalled)
 	store.Observe(key, stagelabels.NeedsDecision, stalled)
 	h.clock.advance(adoptedDwell + time.Hour)
 	if rec, _ := store.Get(key); !rec.AdoptionEscalated("a1899cc") || rec.Stage != stagelabels.NeedsDecision {
@@ -250,7 +251,7 @@ func TestParkedSignoffAttributionEscalationReleasesOnMergeCommitElection(t *test
 	if rec.AdoptionEscalated("a1899cc") || rec.Stage != stagelabels.AdoptedByHive || rec.Reason == stalled {
 		t.Fatalf("escalation not released: %+v", rec)
 	}
-	if !rec.AdoptionEscalationNoted("a1899cc") {
+	if !rec.AdoptionEscalationNoted("a1899cc", stalled) {
 		t.Fatalf("noted head forgotten: %+v", rec)
 	}
 	if added := h.addedLabels(); !containsLabel(added, stagelabels.MergeCommitLabel) || !containsLabel(added, stagelabels.AdoptedByHive.Label()) {

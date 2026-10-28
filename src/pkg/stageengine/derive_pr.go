@@ -287,6 +287,17 @@ func passDecision(verdict stageVerdict, role stagelabels.Role, obs stageObservat
 		verdict.Rank = stageRankOwned
 		obs.Reason = pass.ForkEscalationReason
 	}
+	if HoldsEscalation(verdict) {
+		reason := pass.ForkEscalationReason
+		if pass.AdoptionLive {
+			reason = pass.EscalationReason
+		}
+		if reason != "" {
+			verdict.Stage = stagelabels.NeedsDecision
+			verdict.Rank = stageRankOwned
+			obs.Reason = reason
+		}
+	}
 	d := Decision{
 		Stage:      verdict.Stage,
 		Role:       role,
@@ -309,6 +320,18 @@ func passDecision(verdict stageVerdict, role stagelabels.Role, obs stageObservat
 		d.Stalled = pass.Stalled
 	}
 	return d
+}
+
+// HoldsEscalation reports whether an active 085 escalation on the head (a
+// stalled adoption or an unadoptable fork PR) outranks the pass's opinion:
+// a weak one at or past the merge gate that neither yields to adoption nor
+// is already 085. Such an opinion is not evidence the blocker cleared — an
+// errored lane whose approved head looks author-side done reads 080 at role
+// rank — and dropping the escalation on it flipped a parked PR 085 → 080 →
+// 085 within one sweep pair on an unchanged head. The escalation holds for
+// the pass; the next owned opinion is what re-evaluates it.
+func HoldsEscalation(v stageVerdict) bool {
+	return !v.Terminal && v.Rank != stageRankNone && v.Rank < stageRankOwned && v.Stage != stagelabels.None && v.Stage != stagelabels.NeedsDecision && !v.Stage.YieldsToAdoption()
 }
 
 // decisionFrom renders ResolveStage's answer as a Decision. The recorded

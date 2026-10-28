@@ -3,11 +3,14 @@ package automerge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	gh "github.com/google/go-github/v72/github"
 
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
@@ -533,7 +536,7 @@ func TestAdoptedEscalationReleasesWhenReasonClears(t *testing.T) {
 	if added := h.addedLabels(); len(added) != 1 || added[0] != stagelabels.AdoptedByHive.Label() || len(h.api.removed) != 1 || h.api.removed[0] != stagelabels.NeedsDecision.Label() {
 		t.Fatalf("085 → 074: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
 	}
-	if rec.Stage != stagelabels.AdoptedByHive || rec.AdoptionEscalated("aaa") || !rec.AdoptionEscalationNoted("aaa") || !rec.AdoptedInPlace() || rec.AdoptedHead != "aaa" {
+	if rec.Stage != stagelabels.AdoptedByHive || rec.AdoptionEscalated("aaa") || !rec.AdoptionEscalationNoted("aaa", stagelabels.LaneReasonAdoptionStalledPrefix+"check-failing:unit") || !rec.AdoptedInPlace() || rec.AdoptedHead != "aaa" {
 		t.Fatalf("escalation not released: %+v", rec)
 	}
 	if len(stalledComments(h.api)) != 0 {
@@ -560,7 +563,7 @@ func TestAdoptedEscalationReleasesWhenReasonClears(t *testing.T) {
 	h.api.reset()
 	h.clock.advance(time.Minute)
 	h.observe(adoptPR(7, "bbb", escalated...), "check-failing:unit")
-	if rec, _ = h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.AdoptedByHive || rec.AdoptionEscalated("bbb") || rec.AdoptionEscalationNoted("bbb") {
+	if rec, _ = h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.AdoptedByHive || rec.AdoptionEscalated("bbb") || rec.AdoptionEscalationNoted("bbb", stagelabels.LaneReasonAdoptionStalledPrefix+"check-failing:unit") {
 		t.Fatalf("new head: %+v", rec)
 	}
 	h.clock.advance(adoptedDwell + time.Minute)
@@ -634,5 +637,204 @@ func TestAdoptedSignoffStallAskAgreesWithWorkflowFence(t *testing.T) {
 				t.Fatalf("085 entry comment disagrees with the stall note (release=%v):\n%s", release, entry)
 			}
 		})
+	}
+}
+
+// observeErr is observe for a pass whose error the test expects (a comment
+// POST the fake API refuses): the pass still runs to the end.
+func (h *adoptHarness) observeErr(pr *gh.PullRequest, reason string) (StageLabelResult, error) {
+	h.t.Helper()
+	h.adopt.mu.Lock()
+	h.adopt.heads[pr.GetNumber()] = pr.GetHead().GetSHA()
+	h.adopt.mu.Unlock()
+	h.e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, reason, false, nil)
+	h.e.noteStageRole("acme", "widget", pr.GetNumber(), stagelabels.RoleContributor)
+	return h.e.ApplyStageLabels(context.Background())
+}
+
+// projectbluefin/utah-packages#650 and #652: GitHub answered the
+// adoption-stalled note with a 500, and the escalation had already marked
+// the head noted, so the PR sat at 085 with no comment on that head ever.
+// The note is recorded only once posted: the next sweep posts it, and the
+// one after does not repeat it.
+func TestAdoptionStalledNoteRetriedAfterFailedPost(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	key := adoptInPlaceAt(h, "aaa", "check-failing:unit")
+	reason := stagelabels.LaneReasonAdoptionStalledPrefix + "check-failing:unit"
+	parked := []string{stagelabels.NeedsDecision.Label(), "role/contributor", "author/clanker"}
+
+	h.clock.advance(adoptedDwell + time.Minute)
+	h.api.failComments, h.api.failCommentsOn = 1, AdoptionStalledMarker
+	if _, err := h.observeErr(adoptPR(7, "aaa", adoptedLabels...), "check-failing:unit"); err == nil {
+		t.Fatal("the refused note was not reported")
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if rec.Stage != stagelabels.NeedsDecision || !rec.AdoptionEscalated("aaa") || rec.AdoptionEscalationNoted("aaa", reason) || len(stalledComments(h.api)) != 0 {
+		t.Fatalf("failed post: %+v comments=%v", rec, h.api.comments)
+	}
+
+	h.api.reset()
+	h.clock.advance(5 * time.Minute)
+	res := h.observe(adoptPR(7, "aaa", parked...), "check-failing:unit")
+	if notes := stalledComments(h.api); len(notes) != 1 || !strings.Contains(notes[0], "reason="+reason) || res.Comments != 1 {
+		t.Fatalf("note not retried: res=%+v comments=%v", res, h.api.comments)
+	}
+	if len(h.api.added) != 0 || len(h.api.removed) != 0 {
+		t.Fatalf("retry churned labels: added=%v removed=%v", h.api.added, h.api.removed)
+	}
+	if rec, _ = h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.NeedsDecision || !rec.AdoptionEscalationNoted("aaa", reason) {
+		t.Fatalf("retried note not recorded: %+v", rec)
+	}
+
+	h.api.reset()
+	h.clock.advance(5 * time.Minute)
+	h.observe(adoptPR(7, "aaa", parked...), "check-failing:unit")
+	if len(h.api.comments) != 0 || len(h.api.added) != 0 || len(h.api.removed) != 0 {
+		t.Fatalf("same head and reason repeated: comments=%v added=%v removed=%v", h.api.comments, h.api.added, h.api.removed)
+	}
+}
+
+// A different blocker on the same head is a different note: the maintainer
+// who read the first must learn what holds the PR now. Each reason is
+// explained once per head, so the blocker flapping back stays silent.
+func TestAdoptionStalledNotePerReasonOnSameHead(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	key := adoptInPlaceAt(h, "aaa", "check-failing:unit")
+	parked := []string{stagelabels.NeedsDecision.Label(), "role/contributor", "author/clanker"}
+
+	h.clock.advance(adoptedDwell + time.Minute)
+	h.observe(adoptPR(7, "aaa", adoptedLabels...), "check-failing:unit")
+	if notes := stalledComments(h.api); len(notes) != 1 {
+		t.Fatalf("first note: %v", h.api.comments)
+	}
+
+	h.api.reset()
+	h.clock.advance(5 * time.Minute)
+	h.observe(adoptPR(7, "aaa", parked...), "check-failing:lint")
+	lint := stagelabels.LaneReasonAdoptionStalledPrefix + "check-failing:lint"
+	if notes := stalledComments(h.api); len(notes) != 1 || !strings.Contains(notes[0], "reason="+lint) {
+		t.Fatalf("changed reason not noted: %v", h.api.comments)
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if rec.Stage != stagelabels.NeedsDecision || rec.Reason != lint || rec.AdoptEscalatedReason != lint {
+		t.Fatalf("escalation kept the stale reason: %+v", rec)
+	}
+	if len(h.api.added) != 0 || len(h.api.removed) != 0 {
+		t.Fatalf("reason change churned labels: added=%v removed=%v", h.api.added, h.api.removed)
+	}
+
+	for _, lane := range []string{"check-failing:unit", "check-failing:lint", "check-failing:lint"} {
+		h.api.reset()
+		h.clock.advance(5 * time.Minute)
+		h.observe(adoptPR(7, "aaa", parked...), lane)
+		if len(h.api.comments) != 0 {
+			t.Fatalf("%s: reason already noted on this head posted again: %v", lane, h.api.comments)
+		}
+		// The record follows the blocker, so a later hold (a weak opinion)
+		// names the current one.
+		if rec, _ := h.e.stageStoreOrShared().Get(key); rec.AdoptEscalatedReason != stagelabels.LaneReasonAdoptionStalledPrefix+lane || rec.Reason != rec.AdoptEscalatedReason {
+			t.Fatalf("%s: escalation reason lags the blocker: %+v", lane, rec)
+		}
+	}
+}
+
+// A record from before the noted reasons were kept: escalated and noted on
+// the head, no reasons. It reads as noted for every reason on that head, so
+// an upgrade does not repost on every parked PR.
+func TestAdoptionStalledLegacyNotedHeadNoRepost(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	key := adoptInPlaceAt(h, "aaa", "check-failing:unit")
+	parked := []string{stagelabels.NeedsDecision.Label(), "role/contributor", "author/clanker"}
+	h.clock.advance(adoptedDwell + time.Minute)
+	h.observe(adoptPR(7, "aaa", adoptedLabels...), "check-failing:unit")
+	if notes := stalledComments(h.api); len(notes) != 1 {
+		t.Fatalf("first note: %v", h.api.comments)
+	}
+
+	// Rewrite the record as the previous binary left it.
+	path := filepath.Join(t.TempDir(), "legacy-stage.json")
+	store := stagelabels.NewStore(path, h.clock.now)
+	src := h.e.stageStoreOrShared()
+	raw, err := json.Marshal(map[string]stagelabels.Record{key: func() stagelabels.Record { r, _ := src.Get(key); return r }()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items map[string]map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := items[key]["adopt_escalation_noted_reasons"]; !ok {
+		t.Fatalf("fixture: no noted reasons to strip: %s", raw)
+	}
+	delete(items[key], "adopt_escalation_noted_reasons")
+	raw, _ = json.Marshal(items)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := store.Get(key); rec.AdoptEscalationNotedHead != "aaa" || len(rec.AdoptEscalationNotedReasons) != 0 {
+		t.Fatalf("legacy fixture: %+v", rec)
+	}
+	h.e.stageStore = store
+
+	for _, lane := range []string{"check-failing:unit", "check-failing:lint"} {
+		h.api.reset()
+		h.clock.advance(5 * time.Minute)
+		h.observe(adoptPR(7, "aaa", parked...), lane)
+		if len(h.api.comments) != 0 {
+			t.Fatalf("%s: legacy noted head reposted: %v", lane, h.api.comments)
+		}
+		if rec, _ := store.Get(key); rec.Stage != stagelabels.NeedsDecision {
+			t.Fatalf("%s: legacy escalation dropped: %+v", lane, rec)
+		}
+	}
+}
+
+// projectbluefin/utah#919 flipped 085 → 080 → 085 within two minutes on
+// one head: a lane that errored on an approved head reads it author-side
+// done (080 at role rank), which is not a stage the adoption pin claims,
+// so the pass dropped the active escalation for that sweep. A weak opinion
+// does not release it; the labels (written from the engine's derivation)
+// stay put.
+func TestAdoptionEscalationHoldsAgainstErroredLane(t *testing.T) {
+	p := adoptPolicy()
+	p.AdoptInPlace = true
+	h, done := newAdoptHarness(t, ContributorNudgeOutcome{Mode: "comment"}, p)
+	defer done()
+	key := adoptInPlaceAt(h, "aaa", "check-failing:unit")
+	reason := stagelabels.LaneReasonAdoptionStalledPrefix + "check-failing:unit"
+	parked := []string{stagelabels.NeedsDecision.Label(), "role/contributor", "author/clanker"}
+	h.clock.advance(adoptedDwell + time.Minute)
+	h.observe(adoptPR(7, "aaa", adoptedLabels...), "check-failing:unit")
+	if rec, _ := h.e.stageStoreOrShared().Get(key); rec.Stage != stagelabels.NeedsDecision || len(stalledComments(h.api)) != 1 {
+		t.Fatalf("not escalated: %+v comments=%v", rec, h.api.comments)
+	}
+
+	h.api.reset()
+	h.clock.advance(2 * time.Minute)
+	pr := adoptPR(7, "aaa", parked...)
+	h.e.recordStage(stageLaneContributor, "acme/widget", "acme", "widget", pr, "", false, errors.New("lane tripped"))
+	h.e.noteStageRole("acme", "widget", 7, stagelabels.RoleContributor)
+	h.e.noteStageVerdict("acme", "widget", 7, ContributorLaneVerdict{Configured: true, Approved: true, Verdict: "approve"})
+	if _, err := h.e.ApplyStageLabels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := h.e.stageStoreOrShared().Get(key)
+	if rec.Stage != stagelabels.NeedsDecision || rec.Reason != reason || !rec.AdoptionEscalated("aaa") {
+		t.Fatalf("errored lane dropped the escalation: %+v", rec)
+	}
+	if len(h.api.added) != 0 || len(h.api.removed) != 0 || len(h.api.comments) != 0 {
+		t.Fatalf("escalation churned: added=%v removed=%v comments=%v", h.api.added, h.api.removed, h.api.comments)
 	}
 }
