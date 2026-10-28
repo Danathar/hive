@@ -556,7 +556,10 @@ A PR merges through this tier only when all of the following hold:
   attributed to the maintainer and bound to the head) or a trusted merger's
   own `/hive decision approve` comment posted after the head. Approval on an
   earlier head never counts: a new push re-arms the fence and the 085 note
-  reads "awaiting owner approval … re-approve after a push". When released
+  reads "awaiting owner approval … re-approve after a push"; its **What to
+  do** asks for that review (a `/hive approve` reply does not release the
+  fence) and still lists a sentinel alert or hold label a person must clear
+  (projectbluefin/testsuite#1037). When released
   the lane logs `workflow-path fence released by owner approval login=…
   head=…`, leaves one `<!-- hive:workflow-approval head=… by=… -->` audit
   comment per head, and the PR goes through every other gate below like any

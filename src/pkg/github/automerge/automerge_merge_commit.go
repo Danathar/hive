@@ -195,6 +195,7 @@ func (c *Engine) noteSignoffAttributionDecision(ctx context.Context, store *stag
 	if rec, ok := store.Get(key); ok && rec.SignoffAttributionNoted(obs.HeadSHA) {
 		return 0, nil
 	}
+	obs = c.withMergeAskFacts(ctx, key, obs)
 	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(SignoffAttributionDecisionComment(obs))}); err != nil {
 		c.warn("stage labels: sign-off attribution 085 note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
 		return 0, err

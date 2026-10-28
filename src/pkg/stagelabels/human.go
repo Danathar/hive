@@ -130,6 +130,13 @@ type Evidence struct {
 	// human-merge path touched): a review approval or `/hive approve` does
 	// not override it, only a person merging does (hivecommons/hive#13087).
 	ManualMerge bool
+	// ApprovalReleasesFence is true when the manual-merge reason is the
+	// contributor lane's CI workflow-path fence and a trusted merger's
+	// GitHub Approve review on Head releases it, so the hive merges the PR
+	// itself once the other gates clear (hivecommons/hive#14664): ManualMerge
+	// stays true until that approval, but the 085 actions must ask for the
+	// approval rather than say no approval helps.
+	ApprovalReleasesFence bool
 	// ForkGuard names the red checks that refuse the PR only because it is
 	// from a fork (a fork-publication or fork-secrets guard). They are not
 	// the author's to fix: only a maintainer can clear them, so they route
@@ -214,6 +221,9 @@ type Route struct {
 	Holds        []string
 	Sentinel     bool
 	ManualMerge  bool
+	// ApprovalReleasesFence is Evidence.ApprovalReleasesFence: the
+	// manual-merge reason is a workflow-path fence an approval releases.
+	ApprovalReleasesFence bool
 	// HumanApprover is the trusted merger whose approval on Head settled
 	// the requires_human verdict / manual-merge rule ("" when none).
 	HumanApprover string
@@ -320,7 +330,7 @@ func RouteHuman(e Evidence) Route {
 	}
 	if len(decide) > 0 {
 		return Route{Stage: NeedsDecision, Reasons: decide, Summary: summary, Head: e.Head, SelfAuthored: e.SelfAuthored, Verdict: e.Verdict,
-			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, ManualMerge: e.ManualMerge, HumanApprover: approver}
+			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, ManualMerge: e.ManualMerge, ApprovalReleasesFence: e.ManualMerge && e.ApprovalReleasesFence, HumanApprover: approver}
 	}
 	var wait []string
 	switch {
@@ -495,7 +505,7 @@ func ReadyComment(r Route, blockedBy string) string {
 func DecisionComment(r Route) string {
 	var b strings.Builder
 	b.WriteString(DecisionCommentMarker)
-	if r.ManualMerge {
+	if r.ManualMerge && !r.ApprovalReleasesFence {
 		b.WriteString("\nNeeds a manual merge decision")
 	} else {
 		b.WriteString("\nNeeds a decision, not a merge")
@@ -531,6 +541,11 @@ func DecisionComment(r Route) string {
 //
 //   - A lane whose rule allows no unattended merge (ManualMerge) is named
 //     first and alone: approvals and `/hive approve` do not override it.
+//   - A workflow-path fence an approval releases (ApprovalReleasesFence) is
+//     not such a rule: a trusted merger's GitHub Approve review on the head
+//     releases it and the hive merges once the other gates clear
+//     (hivecommons/hive#14664, projectbluefin/testsuite#1037); the sentinel
+//     and hold steps below still apply.
 //   - `requires_human` on a hive-authored PR: approve the head (GitHub
 //     review, or a `/hive approve` reply posted after the verdict) to merge
 //     as-is, or request changes (review or `/hive decision`) and the hive
@@ -544,12 +559,20 @@ func DecisionActions(r Route) string {
 	if r.Stage != NeedsDecision {
 		return ""
 	}
-	if r.ManualMerge {
+	if r.ManualMerge && !r.ApprovalReleasesFence {
 		return "**What to do:** a maintainer must review and merge this PR manually; an approving review or `/hive approve` does not override this lane's manual-merge rule."
 	}
 	var steps []string
-	if r.Verdict == VerdictRequiresHuman {
-		head := "`" + ShortSHA(r.Head) + "`"
+	head := "`" + ShortSHA(r.Head) + "`"
+	if r.ManualMerge {
+		// Only `/hive decision approve` and an Approve review release the
+		// fence; `/hive approve` never does (hivecommons/hive#14672).
+		settles := ""
+		if r.Verdict == VerdictRequiresHuman {
+			settles = " and settles the reviewer's `requires_human` verdict"
+		}
+		steps = append(steps, "a trusted merger approves this head ("+head+") with a GitHub **Approve** review (or a dashboard `/hive decision approve`), which releases the CI workflow-file fence"+settles+", and the hive merges the PR once the other gates clear; approval on an earlier head does not count, and a `/hive approve` reply does not release the fence")
+	} else if r.Verdict == VerdictRequiresHuman {
 		if r.SelfAuthored {
 			steps = append(steps, "approve this head ("+head+") to merge as-is — a GitHub **Approve** review, or a `/hive approve` reply posted after the verdict — or leave a *changes requested* review (or reply `/hive decision <what to change>`) and the hive will push the fix")
 		} else {

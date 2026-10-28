@@ -538,6 +538,74 @@ func TestDecisionCommentNamesActionsPerLane(t *testing.T) {
 	}
 }
 
+// TestDecisionActionsWorkflowFenceApprovalReleases pins
+// projectbluefin/testsuite#1037: since hivecommons/hive#14664 a trusted
+// merger's Approve review on the head releases the workflow-path fence, so
+// the 085 actions ask for that review (and still list the sentinel alert
+// and hold labels a person must clear) instead of saying no approval helps.
+// An absolute rule keeps the manual-merge text.
+func TestDecisionActionsWorkflowFenceApprovalReleases(t *testing.T) {
+	e := readyEvidence()
+	e.Verdict = VerdictRequiresHuman
+	e.Sentinel = true
+	e.Holds = Holds([]string{"hold"})
+	e.ManualMerge = true
+	e.ApprovalReleasesFence = true
+	r := RouteHuman(e)
+	if r.Stage != NeedsDecision || !r.ManualMerge || !r.ApprovalReleasesFence {
+		t.Fatalf("route = %+v", r)
+	}
+	got := DecisionComment(r)
+	for _, want := range []string{
+		"Needs a decision, not a merge",
+		"**What to do:**\n\n- a trusted merger approves this head (`abc1234`) with a GitHub **Approve** review",
+		"releases the CI workflow-file fence and settles the reviewer's `requires_human` verdict",
+		"the hive merges the PR once the other gates clear",
+		"a `/hive approve` reply does not release the fence",
+		"\n- resolve the sentinel alert and have a maintainer clear its label",
+		"\n- resolve the reason for `hold` and have a maintainer remove that label",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("releasable-fence DecisionComment missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"merge this PR manually", "does not override", "Needs a manual merge decision"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("releasable-fence DecisionComment says %q:\n%s", unwanted, got)
+		}
+	}
+
+	// Without a requires_human verdict the review only releases the fence.
+	plain := readyEvidence()
+	plain.ManualMerge = true
+	plain.ApprovalReleasesFence = true
+	plain.Cause = CauseDecision
+	plain.CauseReason = "the PR edits CI workflow / action files: awaiting owner approval"
+	if got := DecisionActions(RouteHuman(plain)); !strings.HasPrefix(got, "**What to do:** a trusted merger approves this head") || strings.Contains(got, "requires_human") {
+		t.Fatalf("plain releasable fence actions = %q", got)
+	}
+
+	// ApprovalReleasesFence means nothing without a manual-merge reason.
+	stray := readyEvidence()
+	stray.Sentinel = true
+	stray.ApprovalReleasesFence = true
+	if r := RouteHuman(stray); r.ApprovalReleasesFence || strings.Contains(DecisionActions(r), "workflow-file fence") {
+		t.Fatalf("fence release offered without a fence: %+v", r)
+	}
+
+	// An absolute rule (release off, App lacks workflows, tests removed,
+	// human-merge path) keeps today's text.
+	absolute := e
+	absolute.ApprovalReleasesFence = false
+	r = RouteHuman(absolute)
+	if got := DecisionActions(r); got != "**What to do:** a maintainer must review and merge this PR manually; an approving review or `/hive approve` does not override this lane's manual-merge rule." {
+		t.Fatalf("absolute rule actions = %q", got)
+	}
+	if !strings.Contains(DecisionComment(r), "Needs a manual merge decision") {
+		t.Fatalf("absolute rule header:\n%s", DecisionComment(r))
+	}
+}
+
 // TestEntryCommentedCauses: each distinct cause is remembered per
 // stage+head, a new head or stage starts the list over, and a record from
 // before causes were kept counts every cause as explained.
