@@ -36,6 +36,7 @@ import (
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/review/autoscale"
+	"github.com/hivecommons/hive/pkg/runtimeobs"
 	"github.com/hivecommons/hive/pkg/stageengine"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 	"github.com/hivecommons/hive/pkg/timeline"
@@ -3354,7 +3355,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{"status": "starting"})
 		return
 	}
-	body := map[string]any{"status": "ok"}
+	body := map[string]any{"status": "ok", "runtime": runtimeobs.Take()}
 	if s.deps != nil && s.deps.CruxRuntimeHealth != nil {
 		rt := s.deps.CruxRuntimeHealth()
 		body["crux_runtime"] = rt

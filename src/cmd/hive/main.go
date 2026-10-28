@@ -1196,6 +1196,11 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 	b.ctx, cancel = context.WithCancel(context.Background())
 	b.cleanup.push(func() { cancel() })
 
+	// Runtime observability (#14681): GOMEMLIMIT from the cgroup limit, the
+	// loopback pprof listener and the 60 s `mem:` line. Before tracing so the
+	// first mem line lands even when an exporter stalls.
+	b.startRuntimeObservability()
+
 	// Initialize OpenTelemetry tracing. Off by default: with no otel block
 	// (or otel.enabled=false) this installs a no-op provider with zero export
 	// overhead. Never fatal — a tracing setup error must not stop hive.
@@ -6833,6 +6838,13 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			armWebhookHealthRecheck()
 		case <-b.reviewWake:
 			b.logger.Info("review webhook wake: running an early eval cycle from the cached snapshot")
+			tick(evalSourceCached)
+			armContinuousWake()
+			armWebhookHealthRecheck()
+		case batch := <-b.verdictWakeChan():
+			b.logger.Info("review verdict wake: running an early eval cycle from the cached snapshot",
+				"pr", batch.Reason, "last_pr", batch.LastRe, "verdicts", batch.Count,
+				"coalesced", batch.Coalesced.Round(time.Millisecond).String())
 			tick(evalSourceCached)
 			armContinuousWake()
 			armWebhookHealthRecheck()

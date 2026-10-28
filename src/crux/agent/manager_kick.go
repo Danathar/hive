@@ -111,7 +111,7 @@ func (m *Manager) SendKick(name string, message string) error {
 	return m.SendKickWithSource(name, message, "")
 }
 
-func (m *Manager) SendKickWithSource(name string, message string, source string) error {
+func (m *Manager) SendKickWithSource(name string, message string, source string) (err error) {
 	// Agent-kick span. No-op with zero export cost when tracing is disabled
 	// (the default). SendKick has no context parameter, so this span roots at
 	// Background; it still captures the kick leg of the governor→agent
@@ -120,6 +120,11 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 		attribute.String("agent.name", name))
 	defer span.End()
 
+	// Kick duration/outcome metrics; role stays kickRoleUnknown until the
+	// name resolves to a configured agent (kick_metrics.go).
+	start, role := time.Now(), kickRoleUnknown
+	defer func() { recordKick(role, start, err) }()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -127,6 +132,7 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 	if !ok {
 		return fmt.Errorf("agent %s not found", name)
 	}
+	role = name
 
 	trigger := "send-kick"
 	if strings.TrimSpace(source) != "" {
@@ -1650,8 +1656,20 @@ func ciPollNudgeExemptAgent(agent *AgentProcess) bool {
 		return true
 	}
 	for _, f := range []string{agent.Name, agent.Config.Role} {
-		lane := strings.TrimSpace(f)
-		if strings.EqualFold(lane, "ci-maintainer") || strings.EqualFold(lane, "quality") {
+		if exemptCIPollLane(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// exemptCIPollLane matches a lane name or role exactly, or as a dash/underscore-
+// suffixed variant ("ci-maintainer-2", "quality_full"), so replicas and policy
+// variants of an exempt lane are exempt too.
+func exemptCIPollLane(f string) bool {
+	lane := strings.ToLower(strings.TrimSpace(f))
+	for _, base := range []string{"ci-maintainer", "quality"} {
+		if lane == base || strings.HasPrefix(lane, base+"-") || strings.HasPrefix(lane, base+"_") {
 			return true
 		}
 	}

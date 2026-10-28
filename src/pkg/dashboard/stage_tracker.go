@@ -275,11 +275,20 @@ type StageTrackerItem struct {
 	Finisher       string `json:"finisher,omitempty"`
 	FinisherVerb   string `json:"finisher_verb,omitempty"`
 	FinisherReason string `json:"finisher_reason,omitempty"`
-	// Modifiers are the health and control markers in effect: stalled,
-	// regressed, hold, needs-human, needs-decision (stage/045 on an issue or
-	// stage/085 on a PR carried as a park signal), needs-rebase, blocked,
-	// draft.
+	// Modifiers are the health and control markers in effect and drawn as
+	// pills: stalled, regressed, hold, needs-human, needs-decision
+	// (stage/045 on an issue or stage/085 on a PR carried as a park
+	// signal), needs-rebase, blocked, draft, unauthorized. A merge-gate
+	// marker on a PR that has not reached the gate band is not listed
+	// here; it waits in DeferredModifiers.
 	Modifiers []string `json:"modifiers"`
+	// DeferredModifiers are the merge-gate markers held back while the PR
+	// is still in motion before the gate (needs-human, needs-decision,
+	// sentinel, a merge-time unauthorized step): nothing a person does now
+	// moves the row, so the tracker draws no pill and "Needs attention"
+	// does not count them until the PR reaches stage/080 or later. The
+	// labels themselves are untouched; this is presentation only.
+	DeferredModifiers []string `json:"deferred_modifiers,omitempty"`
 	// RegressedFrom / RegressedTo / RegressedAt / RegressedReason narrate
 	// the unresolved regression behind the `regressed` modifier: the
 	// high-water stage the item fell from, the stage that fall landed on
@@ -338,7 +347,13 @@ type StageTrackerItem struct {
 	// issue at 020 or later (015 is not a gate; the reconciler removes the
 	// label on its next pass, hivecommons/hive#14586). Rendered as a muted
 	// operator tooltip, never as the stage word.
-	StaleLabels []string   `json:"stale_labels,omitempty"`
+	StaleLabels []string `json:"stale_labels,omitempty"`
+	// BlockedOn lists the open GitHub "blocked by" dependencies ("repo#N")
+	// of an issue the scheduler withholds from every kick until they close
+	// (scheduler.partitionBlockedIssues). Without it a sequenced sub-issue
+	// read as plain Actionable nobody was picking up (hivecommons/hive#14765);
+	// the row wears the `blocked` modifier and the caption names the wait.
+	BlockedOn   []string   `json:"blocked_on,omitempty"`
 	NudgeCount  int        `json:"nudge_count,omitempty"`
 	LastNudgeAt *time.Time `json:"last_nudge_at,omitempty"`
 	AdoptedBy   int        `json:"adopted_by,omitempty"`
@@ -406,6 +421,9 @@ type StageTrackerLinkedPR struct {
 	StageSince *time.Time `json:"stage_since,omitempty"`
 	Caption    string     `json:"caption,omitempty"`
 	Modifiers  []string   `json:"modifiers,omitempty"`
+	// DeferredModifiers mirrors the nested PR's own row field: the
+	// merge-gate pills it is not yet drawing.
+	DeferredModifiers []string `json:"deferred_modifiers,omitempty"`
 	// SentinelAlert / SentinelReason mirror the nested PR's own row fields
 	// so a sub-row under an issue names the alert too.
 	SentinelAlert  bool   `json:"sentinel_alert,omitempty"`
@@ -512,6 +530,9 @@ const (
 	// hive's GitHub App lacks the permission for its next step and a
 	// person must take it (hivecommons/hive#14589).
 	modUnauthorized = "unauthorized"
+	// modSentinel names the sentinel chip in DeferredModifiers; the chip
+	// itself is drawn from SentinelAlert, never from Modifiers.
+	modSentinel = "sentinel"
 )
 
 // Lane names.
@@ -732,7 +753,51 @@ func (s *Server) stageTrackerSentinel(verifier *github.ReviewEvidenceVerifier, r
 	return alert, findings, reason
 }
 
-func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Record, hasRec bool, overrides map[string]time.Duration, now time.Time, draft bool) []string {
+// stageTrackerModifierOrder is the modifier precedence the payload carries.
+var stageTrackerModifierOrder = []string{modStalled, modRegressed, modHold, modUnauthorized, modNeedsHuman, modNeedsDecision, modNeedsTriage, modPossibleDupe, modNeedsRebase, modBlocked, modDraft}
+
+// stageTrackerModifier is one health or control marker with its class.
+type stageTrackerModifier struct {
+	Name string
+	// ActionableNow: a person must do something right now for the row to
+	// move, whatever its stage (hold, draft, stalled, regressed, a step
+	// the App may not take that blocks the current stage). False marks a
+	// merge-gate marker — needs-human, needs-decision, a merge-time
+	// unauthorized step — that only becomes actionable once the PR reaches
+	// the gate band; before that the tracker holds it back.
+	ActionableNow bool
+}
+
+// stageTrackerPillsDeferred reports whether a row's merge-gate markers are
+// held back: a PR (or an issue riding its covering PR's stage) that has
+// not reached the merge-gate band yet. The band starts at stage/080 —
+// stagelabels.AwaitingMergeAdmission, the same boundary adoption yields
+// at — and runs through 085/090/095/100. Issues on their own stages keep
+// every pill: a needs-human on an unclaimed issue is a park the person
+// owes now, not a merge-time notice.
+func stageTrackerPillsDeferred(kind string, stageNumber int, mirrored bool) bool {
+	if kind != "pr" && !mirrored {
+		return false
+	}
+	return stageNumber < stagelabels.AwaitingMergeAdmission.Number()
+}
+
+// stageTrackerUnauthorizedActionableNow reports whether the step the App
+// may not take blocks the row where it stands, so a person must act now:
+// held workflow runs mean CI cannot even start, and waiting for the merge
+// gate would waste the whole CI / review cycle. Any other refused step
+// (merge, branch update, …), or a label whose reason no longer names the
+// step, is a merge-time step and waits for the gate.
+func stageTrackerUnauthorizedActionableNow(reason string) bool {
+	base, _ := stagelabels.HumanApprovedReason(strings.TrimSpace(reason))
+	rest, ok := strings.CutPrefix(base, stageengineprstage.StageReasonUnauthorizedPrefix)
+	return ok && strings.TrimSpace(rest) == stageengineprstage.UnauthorizedStepApproveWorkflowRuns
+}
+
+// stageTrackerClassifyModifiers derives the row's markers from its labels,
+// store record and draft flag, each with its class; reason is the lane's
+// stage reason, read for the unauthorized step. Order is the pill priority.
+func stageTrackerClassifyModifiers(labels []string, hiveID string, rec stagelabels.Record, hasRec bool, overrides map[string]time.Duration, now time.Time, draft bool, reason string) []stageTrackerModifier {
 	set := map[string]bool{}
 	for _, l := range labels {
 		switch lower := strings.ToLower(strings.TrimSpace(l)); lower {
@@ -775,13 +840,79 @@ func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Recor
 	if draft {
 		set[modDraft] = true
 	}
-	out := make([]string, 0, len(set))
-	for _, m := range []string{modStalled, modRegressed, modHold, modUnauthorized, modNeedsHuman, modNeedsDecision, modNeedsTriage, modPossibleDupe, modNeedsRebase, modBlocked, modDraft} {
-		if set[m] {
-			out = append(out, m)
+	out := make([]stageTrackerModifier, 0, len(set))
+	for _, m := range stageTrackerModifierOrder {
+		if !set[m] {
+			continue
 		}
+		actionable := true
+		switch m {
+		case modNeedsHuman, modNeedsDecision:
+			actionable = false
+		case modUnauthorized:
+			actionable = stageTrackerUnauthorizedActionableNow(reason)
+		}
+		out = append(out, stageTrackerModifier{Name: m, ActionableNow: actionable})
 	}
 	return out
+}
+
+// stageTrackerBlockedBy marks an open issue the scheduler is deliberately
+// holding back for unresolved GitHub "blocked by" dependencies
+// (hivecommons/hive#14765). The kick list already withholds such issues
+// ("Blocked by open dependencies … do NOT start these"), but the tracker
+// showed them as plain Actionable with reason `actionable`, so sequenced
+// sub-issues of an RFC read as intake starvation. The row gets the same
+// `blocked` modifier the `blocked` label yields, the blocker keys, and a
+// caption clause naming what it waits on. Only the pre-claim stages
+// qualify: once a claim or PR exists the sequencing no longer gates it.
+func stageTrackerBlockedBy(it *StageTrackerItem, blockers []string) {
+	if it == nil || len(blockers) == 0 || it.Stage > trackerNumberPossiblyExists {
+		return
+	}
+	it.BlockedOn = append([]string(nil), blockers...)
+	if !slices.Contains(it.Modifiers, modBlocked) {
+		it.Modifiers = append(it.Modifiers, modBlocked)
+		slices.SortFunc(it.Modifiers, func(a, b string) int {
+			return slices.Index(stageTrackerModifierOrder, a) - slices.Index(stageTrackerModifierOrder, b)
+		})
+	}
+	it.Caption = joinClause(it.Caption, "waiting on "+stageTrackerBlockerList(it.Repo, blockers))
+	it.Actor = "its blockers"
+}
+
+// stageTrackerBlockerList renders blocker keys ("repo#N") for a caption,
+// shortening a same-repo blocker to "#N".
+func stageTrackerBlockerList(repo string, blockers []string) string {
+	parts := make([]string, 0, len(blockers))
+	for _, b := range blockers {
+		b = strings.TrimSpace(b)
+		if r, n, ok := strings.Cut(b, "#"); ok && (r == "" || strings.EqualFold(r, repo) || strings.HasSuffix(strings.ToLower(repo), "/"+strings.ToLower(r))) {
+			b = "#" + n
+		}
+		parts = append(parts, b)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// stageTrackerModifiers splits a row's markers into the pills it draws
+// (shown) and the merge-gate pills it holds back (deferred) until the PR
+// reaches the gate band. Everything actionable now is always shown; a
+// merge-gate marker is shown once stageTrackerPillsDeferred says the row
+// is at or past the gate, or the row is an issue on its own stage.
+func stageTrackerModifiers(labels []string, hiveID string, rec stagelabels.Record, hasRec bool, overrides map[string]time.Duration, now time.Time, draft bool, reason string, kind string, stage stagelabels.Stage, mirrored bool) (shown, deferred []string) {
+	held := stageTrackerPillsDeferred(kind, stage.Number(), mirrored)
+	for _, m := range stageTrackerClassifyModifiers(labels, hiveID, rec, hasRec, overrides, now, draft, reason) {
+		if m.ActionableNow || !held {
+			shown = append(shown, m.Name)
+		} else {
+			deferred = append(deferred, m.Name)
+		}
+	}
+	if shown == nil {
+		shown = []string{}
+	}
+	return shown, deferred
 }
 
 // noVerdictClause is the bare no-verdict clause; stageTrackerCaption swaps
@@ -1286,7 +1417,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		// An issue wearing a PR stage (050+) is riding its covering PR; its
 		// own parking bay 045 is not a mirror.
 		it.Mirrored = it.Kind == "issue" && stage != stagelabels.None && !stage.Applies(stagelabels.IssueItem)
-		it.Modifiers = stageTrackerModifiers(labels, status.HiveID, rec, hasRec, overrides, now, draft)
+		it.Modifiers, it.DeferredModifiers = stageTrackerModifiers(labels, status.HiveID, rec, hasRec, overrides, now, draft, it.Reason, it.Kind, stage, it.Mirrored)
 		// 045/085 have their own chevron word ("Needs human decision"); the
 		// chip only adds information when needs-decision modifies another
 		// stage.
@@ -1311,7 +1442,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		if stage == stagelabels.ReadyForHumanMerge {
 			it.HumanMergeReason, _, it.HumanMergeReasonText = stageTrackerHumanMergeReason(it.Reason)
 		}
-		if slices.Contains(it.Modifiers, modUnauthorized) {
+		if slices.Contains(it.Modifiers, modUnauthorized) || slices.Contains(it.DeferredModifiers, modUnauthorized) {
 			it.UnauthorizedStep, it.Unauthorized = stageTrackerUnauthorized(it.Reason)
 		}
 		it.History = stageTrackerHistory(rec)
@@ -1376,6 +1507,7 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		}
 		finish(&it, issue.Labels, stage, rec, ok, false)
 		stageTrackerSetFinisher(&it, decisions, false)
+		stageTrackerBlockedBy(&it, issue.OpenBlockers())
 		if it.Stage == trackerNumberClaimed {
 			it.ClaimantKind = s.stageTrackerClaimantKind(repoName, issue.Number)
 		}
@@ -1415,6 +1547,13 @@ func (s *Server) buildStageTracker(status *StatusPayload, store *stagelabels.Sto
 		finish(&it, pr.Labels, labelStage(pr.Labels), rec, ok, pr.Draft)
 		stageTrackerSetFinisher(&it, decisions, pr.Draft)
 		it.SentinelAlert, it.SentinelFindings, it.SentinelReason = s.stageTrackerSentinel(evidenceVerifier, repoName, pr.Number, pr.HeadSHA, pr.Labels)
+		// The sentinel chip is a merge-gate pill too (the trusted-author
+		// notice and the real alert alike): sentinel_alert stays truthful
+		// for the gate word and the Decide… preface, but before the gate
+		// the chip is held with the other deferred pills.
+		if it.SentinelAlert && stageTrackerPillsDeferred(it.Kind, it.Stage, it.Mirrored) {
+			it.DeferredModifiers = append([]string{modSentinel}, it.DeferredModifiers...)
+		}
 		it.LinkedIssues = stageTrackerPRLinkedIssues(pr, repoName, status.GitHubBaseURL)
 		add(it)
 	}
@@ -1745,12 +1884,12 @@ func (s *Server) encodeStageTracker(status *StatusPayload, now time.Time, ttl ti
 	hashResp := resp
 	hashResp.GeneratedAt = time.Time{}
 	if err := json.NewEncoder(&hashBuf).Encode(hashResp); err != nil {
-		slogWarnOverviewEncode(err)
+		logOverviewEncodeFailure(err)
 		return stageTrackerCache{}, false
 	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(resp); err != nil {
-		slogWarnOverviewEncode(err)
+		logOverviewEncodeFailure(err)
 		return stageTrackerCache{}, false
 	}
 	return stageTrackerCache{body: buf.Bytes(), etag: webstatic.ETagFor(hashBuf.Bytes()), generatedAt: now}, true
@@ -1827,7 +1966,7 @@ func (s *Server) handleStageTracker(w http.ResponseWriter, r *http.Request) {
 		body = bytes.Replace(body, stageTrackerSourceCache, stageTrackerSourceStale, 1)
 	}
 	if _, err := w.Write(body); err != nil {
-		slogWarnOverviewEncode(err)
+		logOverviewEncodeFailure(err)
 	}
 }
 
@@ -2117,6 +2256,9 @@ func stageTrackerResolveLinkedPRs(items []StageTrackerItem) {
 				lp.Finisher, lp.FinisherVerb, lp.FinisherReason = pr.Finisher, pr.FinisherVerb, pr.FinisherReason
 				if len(pr.Modifiers) > 0 {
 					lp.Modifiers = append([]string(nil), pr.Modifiers...)
+				}
+				if len(pr.DeferredModifiers) > 0 {
+					lp.DeferredModifiers = append([]string(nil), pr.DeferredModifiers...)
 				}
 				if lp.URL == "" {
 					lp.URL = pr.URL
