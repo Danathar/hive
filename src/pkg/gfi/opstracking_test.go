@@ -165,6 +165,54 @@ func TestSweepWithdrawsMislabelledBlockedIssue(t *testing.T) {
 	}
 }
 
+// An issue the hive advertised in this process and that is parked for a
+// person afterwards is withdrawn on the next pass, not skipped as
+// already-selected (projectbluefin/utah-packages#527).
+func TestSweepWithdrawsOwnSelectionThatParks(t *testing.T) {
+	forge := newFakeForge()
+	s := NewSweeper()
+	opts := quietOpts()
+
+	c := good()
+	res := s.Sweep(context.Background(), forge, []Candidate{c}, opts)
+	if len(res.Selected) != 1 || !s.Selected(c.Key()) {
+		t.Fatalf("first pass did not select: %+v", res)
+	}
+
+	// Still eligible on the next pass: left alone, as before.
+	labelled := c
+	labelled.Labels = append([]string{Label, HelpWantedLabel}, c.Labels...)
+	if res := s.Sweep(context.Background(), forge, []Candidate{labelled}, opts); res.Skipped["already-selected"] != 1 || len(res.Withdrawn) != 0 {
+		t.Fatalf("eligible own selection: %+v", res)
+	}
+
+	// The enumeration now reports it parked at 045.
+	parked := labelled
+	parked.Labels = append(append([]string(nil), labelled.Labels...), "stage/045-needs-decision")
+	res = s.Sweep(context.Background(), forge, []Candidate{parked}, opts)
+	if len(res.Withdrawn) != 1 || res.Withdrawn[0] != c.Key() || res.Skipped["already-selected"] != 0 || res.Errors != 0 {
+		t.Fatalf("parked own selection not withdrawn: %+v", res)
+	}
+	if got := strings.Join(forge.removed[c.Key()], ","); got != Label+","+HelpWantedLabel {
+		t.Fatalf("removed %q", got)
+	}
+	if n := forge.commentCount(c.Repo, c.Number); n != 1 {
+		t.Fatalf("comment count %d (the welcome comment must be edited, not a second one added)", n)
+	}
+	if body := forge.comments[c.Key()][0]; !strings.Contains(body, SupersededMarker) || !strings.Contains(body, "`stage/045-needs-decision`") {
+		t.Fatalf("comment %q", body)
+	}
+	if s.Selected(c.Key()) {
+		t.Fatal("withdrawn issue still remembered as selected")
+	}
+
+	// A later pass neither withdraws again nor re-advertises.
+	res = s.Sweep(context.Background(), forge, []Candidate{parked}, opts)
+	if len(res.Withdrawn) != 0 || len(forge.removed[c.Key()]) != 2 || forge.commentCount(c.Repo, c.Number) != 1 {
+		t.Fatalf("second pass %+v removed=%v", res, forge.removed[c.Key()])
+	}
+}
+
 func TestSweepWithdrawPostsCorrectionWhenNoWelcomeComment(t *testing.T) {
 	forge := newFakeForge()
 	s := NewSweeper()
