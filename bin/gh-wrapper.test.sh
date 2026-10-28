@@ -39,9 +39,27 @@ if [[ -n "${MOCK_GH_ARGV_DIR:-}" ]]; then
   mkdir -p "$_d"
   printf '%s\n' "$#" >"${_d}/argc"
   _i=0
+  _prev=""
   for _a in "$@"; do
     printf '%s' "$_a" >"${_d}/arg-${_i}"
     _i=$((_i + 1))
+    # Read a `-F -` body the way gh does, so a second call finds stdin spent.
+    if [[ "$_a" = "-" && ( "$_prev" = "-F" || "$_prev" = "--body-file" ) ]]; then
+      cat >"${_d}/stdin"
+    fi
+    _prev="$_a"
+  done
+fi
+if [[ "${1:-}" = "repo" && "${2:-}" = "view" ]]; then
+  echo "${MOCK_GH_DEFAULT_BRANCH:-}"
+  exit 0
+fi
+if [[ "${MOCK_GH_FAIL_ADD_LABEL:-}" = "true" ]]; then
+  for _a in "$@"; do
+    if [[ "$_a" = "--add-label" ]]; then
+      echo "mock: could not add label: 'contributor/test-contributor' not found" >&2
+      exit 1
+    fi
   done
 fi
 if [[ "${1:-}" = "api" && "${2:-}" = "user" ]]; then
@@ -557,6 +575,7 @@ rm -f "$MISSING_BODY_FILE"
 _capture_run() {
   local stdin_file="$1"
   shift
+  CAPTURE_RC=0
   CAPTURE_SEQ=$((CAPTURE_SEQ + 1))
   CAPTURE_DIR="${WORK_DIR}/argv-${CAPTURE_SEQ}"
   mkdir -p "$CAPTURE_DIR"
@@ -572,9 +591,14 @@ _capture_run() {
     MOCK_GH_LOGIN="test-bot[bot]" \
     GH_TOKEN="test-token-mock" \
     MOCK_GH_ARGV_DIR="$CAPTURE_DIR" \
-    bash "$TEST_WRAPPER" "$@" <"$stdin_file" >/dev/null 2>&1 || true
+    "${CAPTURE_EXTRA_ENV[@]}" \
+    bash "$TEST_WRAPPER" "$@" <"$stdin_file" >/dev/null 2>"${CAPTURE_DIR}/stderr" || CAPTURE_RC=$?
   rm -f "${WORK_DIR}/contributor-marker"
 }
+# Extra `NAME=value` settings for the next _capture_run calls, and the exit
+# status of the last one (0 unless the wrapper refused).
+CAPTURE_EXTRA_ENV=()
+CAPTURE_RC=0
 
 # Print the directory of the recorded `gh <subcmd> <action> ...` invocation.
 # Matching on the first two arguments skips the wrapper's own bookkeeping
@@ -701,6 +725,128 @@ _capture_run /dev/null pr comment 42 --repo test/repo -b'Attached short flag tex
 _expect_injected_body "pr comment -b<text> (attached short form) keeps the text" \
   pr comment 'Attached short flag text.'
 
+# ── Bodies that would post nothing a reader can use (projectbluefin/testsuite) ──
+# #1036/#1054/#1056 opened with the footer alone: the PR-create autoclose step
+# read a `-F -` body from stdin and returned without handing it on, so
+# _inject_identity found stdin empty. #1053 was blanked by the unlabeled retry
+# of an edit whose labeled try had consumed stdin. #908 got a literal
+# "@/tmp/issue_comment_908.txt", #838 the footer alone.
+AUTOCLOSE_TASK="${WORK_DIR}/contributor-task.json"
+printf '%s\n' '{"kind":"issue","repo":"test/repo","number":7}' >"$AUTOCLOSE_TASK"
+CLOSES_BODY_FILE="${WORK_DIR}/closes-body.md"
+printf '%s\n' 'Fix the widget.' '' 'Closes #7' >"$CLOSES_BODY_FILE"
+PLAIN_BODY_FILE="${WORK_DIR}/plain-body.md"
+printf '%s\n' 'Fix the widget on the release branch.' >"$PLAIN_BODY_FILE"
+
+# Assert the last command was refused with reason=<code> and never reached gh
+# as `gh <sub> <act>`.
+_expect_refused() {
+  local desc="$1" code="$2" sub="$3" act="$4"
+  if [[ "$CAPTURE_RC" -eq 0 ]]; then
+    _body_fail "$desc" "the wrapper did not refuse (exit 0)"
+    return 1
+  fi
+  if ! grep -qF -- "reason=${code}" "${CAPTURE_DIR}/stderr"; then
+    _body_fail "$desc" "stderr has no reason=${code}" "stderr: $(cat "${CAPTURE_DIR}/stderr")"
+    return 1
+  fi
+  if _capture_invocation "$sub" "$act" >/dev/null; then
+    _body_fail "$desc" "'gh ${sub} ${act}' still reached gh"
+    return 1
+  fi
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+# Assert every recorded `gh <sub> <act>` call carries `want` in its --body.
+_expect_every_body() {
+  local desc="$1" sub="$2" act="$3" want="$4"
+  local total n d body seen=0
+  total="$(cat "${CAPTURE_DIR}/count" 2>/dev/null || echo 0)"
+  for ((n = 1; n <= total; n++)); do
+    d="${CAPTURE_DIR}/inv-${n}"
+    [[ -f "${d}/arg-1" ]] || continue
+    [[ "$(cat "${d}/arg-0")" == "$sub" && "$(cat "${d}/arg-1")" == "$act" ]] || continue
+    seen=$((seen + 1))
+    if ! body="$(_capture_body "$d")" || ! grep -qF -- "$want" <<<"$body"; then
+      _body_fail "$desc" "call ${n} sent no body with: ${want}" "argv: $(_show_args "$d")"
+      return 1
+    fi
+  done
+  if [[ "$seen" -lt 2 ]]; then
+    _body_fail "$desc" "expected the labeled try and the unlabeled retry, saw ${seen} call(s)"
+    return 1
+  fi
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+CAPTURE_EXTRA_ENV=("HIVE_TASK_FILE=${AUTOCLOSE_TASK}" "MOCK_GH_DEFAULT_BRANCH=main")
+_capture_run "$CLOSES_BODY_FILE" pr create --repo test/repo --title 'Fix' -F -
+_expect_injected_body "pr create -F - whose body already closes the task issue keeps the body" \
+  pr create 'Fix the widget.' 'Closes #7'
+
+_capture_run "$PLAIN_BODY_FILE" pr create --repo test/repo --base release --title 'Fix' -F -
+_expect_injected_body "pr create -F - to a non-default base keeps the body" \
+  pr create 'Fix the widget on the release branch.'
+
+_capture_run /dev/null pr create --repo test/repo --title 'Fix' --body 'Refs #7 — partial: the docs part remains open.'
+body=""
+if inv="$(_capture_invocation pr create)" && body="$(_capture_body "$inv")" && [[ "$body" == *'Refs #7 — partial'* && "$body" != *'Closes #7'* ]]; then
+  echo "PASS: pr create with 'Refs #7 — partial … remains open' gets no Closes line"
+  PASSED=$((PASSED + 1))
+else
+  _body_fail "pr create with a partial Refs line gets no Closes line" "body: ${body:-<none>}"
+fi
+
+_capture_run /dev/null pr create --repo test/repo --title 'Fix' --body 'Refs #7 (reporter confirmation required).'
+_expect_injected_body "pr create with a bare Refs #7 still gets Closes #7 (#10826)" \
+  pr create 'Refs #7 (reporter confirmation required).' 'Closes #7'
+
+# No task file, so the autoclose step adds no Closes line and the create
+# really has no body flag.
+CAPTURE_EXTRA_ENV=("HIVE_TASK_FILE=${WORK_DIR}/no-such-task.json")
+_capture_run /dev/null pr create --repo test/repo --title 'Fix' --fill
+if [[ "$CAPTURE_RC" -eq 0 ]] && _capture_invocation pr create >/dev/null; then
+  echo "PASS: pr create --fill with no body flag is not refused"
+  PASSED=$((PASSED + 1))
+else
+  _body_fail "pr create --fill with no body flag is not refused" "rc=${CAPTURE_RC} stderr: $(cat "${CAPTURE_DIR}/stderr")"
+fi
+CAPTURE_EXTRA_ENV=()
+
+CAPTURE_EXTRA_ENV=("MOCK_GH_FAIL_ADD_LABEL=true")
+_capture_run "$STDIN_BODY_FILE" issue edit 42 --repo test/repo -F -
+_expect_every_body "issue edit -F - sends the body on the labeled try AND the unlabeled retry" \
+  issue edit 'Body piped through stdin.'
+CAPTURE_EXTRA_ENV=()
+
+_capture_run /dev/null issue edit 42 --repo test/repo --body ''
+_expect_refused "issue edit --body '' is refused instead of blanking the issue" blanking_edit issue edit
+
+_capture_run /dev/null issue edit 42 --repo test/repo --body-file /dev/null
+_expect_refused "issue edit --body-file <empty file> is refused" blanking_edit issue edit
+
+_capture_run /dev/null issue comment 42 --repo test/repo --body '@/tmp/issue_comment_908.txt'
+_expect_refused "issue comment --body @<path> is refused, not posted literally" body_file_reference issue comment
+
+_capture_run /dev/null issue comment 42 --repo test/repo
+_expect_refused "issue comment with no body is refused instead of posting the footer alone" empty_body issue comment
+
+_capture_run /dev/null pr comment 42 --repo test/repo --body $'  \n\t '
+_expect_refused "pr comment with a whitespace-only body is refused" empty_body pr comment
+
+_capture_run /dev/null issue create --repo test/repo --title 'Thing'
+_expect_refused "a contributor's issue create with no body is refused" empty_body issue create
+
+_capture_run /dev/null pr review 42 --repo test/repo --approve
+if [[ "$CAPTURE_RC" -eq 0 ]] && ! grep -qF 'reason=empty_body' "${CAPTURE_DIR}/stderr"; then
+  echo "PASS: pr review --approve with no body is not refused"
+  PASSED=$((PASSED + 1))
+else
+  _body_fail "pr review --approve with no body is not refused" "rc=${CAPTURE_RC} stderr: $(cat "${CAPTURE_DIR}/stderr")"
+fi
+
 # hivecommons/hive#12539: the hive id travels in the body as the origin
 # marker, never as a hive/<id> label. The footer still prints the Instance.
 _origin_run() {
@@ -820,10 +966,10 @@ else
   _body_fail "in-body --- rules" "no recorded 'gh issue comment' invocation"
 fi
 
-# No body at all is still the case that MUST add one.
+# No body at all used to get `--body <footer>`, which posted the footer alone
+# (projectbluefin/testsuite#838). It is refused now; see the empty_body cases.
 _capture_run /dev/null pr comment 42 --repo test/repo
-_expect_injected_body "pr comment with no body flag still gets --body <footer>" \
-  pr comment '**SHA:**'
+_expect_refused "pr comment with no body flag is refused, not posted as the footer alone" empty_body pr comment
 
 # An unreadable body file stays the caller's error: the wrapper must not stack
 # a --body on top of it and turn "file not found" into a flag conflict.

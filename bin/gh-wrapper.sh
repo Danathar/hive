@@ -757,14 +757,16 @@ _clanker_pr_create_autoclose() {
     fi
     have_body=true
   fi
+  local default_target=true
   if [[ -n "$base" ]]; then
     local default_branch
     default_branch="$("$REAL_GH" repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
-    [[ -n "$default_branch" && "$base" = "$default_branch" ]] || return 0
+    [[ -n "$default_branch" && "$base" = "$default_branch" ]] || default_target=false
   fi
 
-  local new_body
-  new_body="$(python3 - "$task_file" "$repo" "$body" <<'PY'
+  local new_body="$body"
+  if $default_target; then
+    new_body="$(python3 - "$task_file" "$repo" "$body" <<'PY'
 import json
 import re
 import sys
@@ -794,12 +796,32 @@ closing = re.compile(
 if closing.search(body):
     print(body, end="")
     raise SystemExit
+# A body that says this PR leaves the issue open must not gain a closing line:
+# GitHub would close the issue on merge with the rest of the work undone
+# (projectbluefin/testsuite#1057: "Refs #1023 — partial … remain open", then
+# the appended "Closes #1023"). A bare "Refs #N" still gets one (#10826).
+num = re.escape(str(issue))
+stays_open = re.compile(
+    r"(?im)(?:#" + num + r"\b[^\n]*\b(?:remains?|stays?)\s+open"
+    + r"|\b(?:leaves?|leaving|leave)\s+#" + num + r"\s+open"
+    + r"|\b(?:does\s*n[o']t|do\s+not|not)\s+close\s+#" + num + r"\b"
+    + r"|^[^\n]*\b(?:refs?|references?|part\s+of)\b[^\n]*#" + num
+    + r"\b[^\n]*\b(?:partial(?:ly)?|remains?|remaining|left\s+open|deferred|follow-?up|not\s+(?:yet\s+)?addressed))"
+)
+if stays_open.search(body):
+    print(body, end="")
+    raise SystemExit
 trimmed = body.rstrip(" \t\r\n")
 line = f"Closes #{issue}"
 print((trimmed + "\n\n" + line) if trimmed else line, end="")
 PY
 )"
-  [[ "$new_body" != "$body" ]] || return 0
+  fi
+  # A body read from a file or stdin is always handed on as --body, changed or
+  # not: stdin is spent now, and _inject_identity would read it again, find
+  # nothing and open the PR with the footer alone (projectbluefin/testsuite
+  # #1036, #1054, #1056).
+  [[ "$new_body" != "$body" || -n "$body_file" ]] || return 0
 
   local -a new_args=()
   next=""
@@ -1253,7 +1275,30 @@ _guard_markdown_rules() {
 # does `BODY="$(cat "$BODY_FILE")"`). Reading stdin here is also what makes
 # `-F -` work at all: the body must be consumed exactly once, and the process
 # that would otherwise read it is replaced by that same `exec`.
+# _guard_agent_body refuses a body that would post nothing a reader can use:
+# empty once trimmed (the footer alone would land), or only an `@path` (gh does
+# not expand `@file` for --body, so the literal path is posted —
+# projectbluefin/testsuite#908 got "@/tmp/issue_comment_908.txt"). It runs on
+# the agent's own text, before the footer, so the footer cannot hide it.
+# require_body=false (reviews) lets an empty body through: `gh pr review
+# --approve` needs none.
+_guard_agent_body() {
+  local body="$1" require_body="$2" verb="$3"
+  local trimmed="${body#"${body%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  if [[ -z "$trimmed" ]]; then
+    $require_body || return 0
+    _deny empty_body "gh ${verb}: the body is empty, so only the hive footer would be posted. Write the text, or pass it with --body-file <path>."
+  fi
+  if [[ "$trimmed" =~ ^@[^[:space:]]+$ ]]; then
+    _deny body_file_reference "gh ${verb}: the body is only '${trimmed}'. gh posts that text literally; pass the file with --body-file ${trimmed#@} instead."
+  fi
+}
+
 _inject_identity() {
+  # $1 = require_body: true for issue/PR create and comments, false for reviews.
+  local require_body="${1:-false}"
+  local verb="${subcmd} ${action}"
   local footer
   footer="$(_identity_footer)"
   local new_args=()
@@ -1308,6 +1353,8 @@ _inject_identity() {
       fi
     fi
 
+    _guard_agent_body "$body_val" "$require_body" "$verb"
+
     # Normalized to the separated `--body` form. gh, hive-open-issue and
     # hive-open-pr all accept it, and emitting one shape keeps the six input
     # spellings from multiplying into six output spellings.
@@ -1326,9 +1373,91 @@ ${footer}")
     i=$((i+consumed))
   done
   if ! $body_found; then
+    # No body flag. A comment would post the footer alone. A contributor's
+    # create goes straight to gh, which refuses a body-less create when not
+    # interactive; adding the footer turned that refusal into a footer-only
+    # issue or PR (projectbluefin/testsuite#838). A lane's create still relays
+    # through hive-open-issue / hive-open-pr as before, unless it asked gh to
+    # fill the body itself.
+    if $require_body && { [[ "$action" = "comment" ]] || _contributor_mode; } && ! _args_fill_body; then
+      _deny empty_body "gh ${verb}: no body was given, so only the hive footer would be posted. Pass --body <text> or --body-file <path>."
+    fi
     new_args+=("--body" "${footer}")
   fi
   args=("${new_args[@]}")
+}
+
+# _settle_edit_body reads an edit's body once and refuses one that would
+# blank the issue or PR. A `--body-file -` body is turned into `--body <text>`
+# before the first gh call, because the labeled try below consumes stdin and
+# its unlabeled retry then sent an empty body: projectbluefin/testsuite#1053
+# was blanked that way a second after its author revised it (the injected
+# `contributor/<user>` label did not exist in the repository, so the first
+# call failed). A file body is read once too, so both calls send the same text.
+_settle_edit_body() {
+  local -a out=()
+  local i=0 arg val ref
+  local verb="${subcmd} ${action}"
+  while [ $i -lt ${#args[@]} ]; do
+    arg="${args[$i]}"
+    ref=""
+    case "$arg" in
+      --body-file|-F)
+        if [ $((i+1)) -lt ${#args[@]} ]; then
+          ref="${args[$((i+1))]}"; i=$((i+1))
+        fi ;;
+      --body-file=*) ref="${arg#--body-file=}" ;;
+      -F?*)          ref="${arg#-F}" ;;
+      --body|-b)
+        if [ $((i+1)) -lt ${#args[@]} ]; then
+          val="${args[$((i+1))]}"; i=$((i+1))
+          _guard_edit_body "$val" "$verb"
+          out+=("--body" "$val")
+        else
+          out+=("$arg")
+        fi
+        i=$((i+1)); continue ;;
+      --body=*) val="${arg#--body=}"; _guard_edit_body "$val" "$verb"; out+=("$arg"); i=$((i+1)); continue ;;
+      -b?*)     val="${arg#-b}";      _guard_edit_body "$val" "$verb"; out+=("$arg"); i=$((i+1)); continue ;;
+      *) out+=("$arg"); i=$((i+1)); continue ;;
+    esac
+    if [ "$ref" = "-" ]; then
+      val="$(cat)"
+    elif ! val="$(cat -- "$ref" 2>/dev/null)"; then
+      # Unreadable: let gh report the missing file in its own words.
+      out+=("--body-file" "$ref"); i=$((i+1)); continue
+    fi
+    _guard_edit_body "$val" "$verb"
+    out+=("--body" "$val")
+    i=$((i+1))
+  done
+  args=("${out[@]}")
+}
+
+# _guard_edit_body refuses an edit body that is empty or only an `@path`.
+_guard_edit_body() {
+  local body="$1" verb="$2"
+  local trimmed="${body#"${body%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  if [[ -z "$trimmed" ]]; then
+    _deny blanking_edit "gh ${verb}: the new body is empty and would blank the existing one. Pass the full text with --body or --body-file <path>."
+  fi
+  if [[ "$trimmed" =~ ^@[^[:space:]]+$ ]]; then
+    _deny body_file_reference "gh ${verb}: the body is only '${trimmed}'. gh posts that text literally; pass the file with --body-file ${trimmed#@} instead."
+  fi
+}
+
+# _args_fill_body reports whether gh is asked to build the body itself
+# (`--fill*`, `--template`, `--web`, `--recover`), so a missing body flag is
+# not an empty body.
+_args_fill_body() {
+  local a
+  for a in "${args[@]}"; do
+    case "$a" in
+      --fill|--fill-first|--fill-verbose|-f|--template|--template=*|-T|-T?*|--web|-w|--recover|--recover=*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 if [[ -n "$AGENT_NAME" ]]; then
@@ -1460,7 +1589,7 @@ if [[ -n "$AGENT_NAME" ]]; then
 
   case "$subcmd/$action" in
     issue/create|pr/create)
-      _inject_identity
+      _inject_identity true
       # ── Relay issue creation through the hive (issue-request watcher) ──
       # The direct path rode the agent's shell tool: one GHE secondary-rate-
       # limit stall, network blip, or mangled multiline command and the
@@ -1628,11 +1757,12 @@ if [[ -n "$AGENT_NAME" ]]; then
       # PRs: only the hive's OWN PRs do (#12545) — editing a contributor's PR
       # (review-fix on fix_human_prs, a description touch-up) must not re-route
       # or re-own it.
+      _settle_edit_body
       edit_labels="$LABELS_CSV"
       if [[ "$subcmd" = "pr" ]]; then
         edit_labels="$(_pr_labels_csv)"
         if [[ -z "$edit_labels" ]]; then
-          exec "$REAL_GH" "$@"
+          exec "$REAL_GH" "${args[@]}"
         fi
       fi
       _ensure_labels
@@ -1643,9 +1773,9 @@ if [[ -n "$AGENT_NAME" ]]; then
       # (#4043). Mirror the create arm: try labeled, retry unlabeled on failure.
       # `|| rc=$?` keeps the retry alive under `set -e` (see create arm above).
       rc=0
-      "$REAL_GH" "$@" --add-label "$edit_labels" || rc=$?
+      "$REAL_GH" "${args[@]}" --add-label "$edit_labels" || rc=$?
       if [ $rc -ne 0 ]; then
-        exec "$REAL_GH" "$@"
+        exec "$REAL_GH" "${args[@]}"
       fi
       exit $rc
       ;;
@@ -1683,7 +1813,7 @@ if [[ -n "$AGENT_NAME" ]]; then
       exec "$REAL_GH" "${args[@]}"
       ;;
     issue/comment|pr/comment)
-      _inject_identity
+      _inject_identity true
       _extract_item
       # ── Relay comments through the hive (same rationale as issue/create) ──
       # A lost review/triage comment is a lost work product.
