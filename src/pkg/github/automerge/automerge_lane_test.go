@@ -3,6 +3,8 @@ package automerge
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -167,7 +169,7 @@ func TestLaneSweep_RefusalAndErrorAreSkips(t *testing.T) {
 	}
 }
 
-// AC4: auto-merge off or a held PR never reaches the lane.
+// Auto-merge off never consults the lane.
 func TestLaneSweep_GatesAheadOfTheLane(t *testing.T) {
 	var merged []int
 	held := greenLanePR(7)
@@ -179,10 +181,6 @@ func TestLaneSweep_GatesAheadOfTheLane(t *testing.T) {
 	off := newLaneSweepEngine(api.URL, config.MergeStrategyHiveSerialized, g.gate, Options{RepoAutoMergeEnabled: func(string) bool { return false }})
 	if result, err := off.SweepQueuedAutoMerges(context.Background(), AutoMergeSweepOptions{}); err != nil || len(result.Merged) != 0 {
 		t.Fatalf("auto-merge off: result = %+v, err = %v", result, err)
-	}
-	on := newLaneSweepEngine(api.URL, config.MergeStrategyHiveSerialized, g.gate, Options{})
-	if result, err := on.SweepQueuedAutoMerges(context.Background(), AutoMergeSweepOptions{}); err != nil || len(result.Merged) != 0 {
-		t.Fatalf("held PR: result = %+v, err = %v", result, err)
 	}
 	if len(g.reqs) != 0 || len(merged) != 0 {
 		t.Fatalf("lane requests = %d, merges = %v; want none", len(g.reqs), merged)
@@ -479,5 +477,77 @@ func TestLaneSweep_ContributorLanePrefilterRejectsFrontOnly(t *testing.T) {
 	}
 	if !g.reqs[0].FrontOnly || g.reqs[0].Authorize != nil {
 		t.Fatalf("lane request = %+v", g.reqs[0])
+	}
+}
+
+// #14934: list-response label rejections must still release a serialized
+// front. FrontOnly also ensures a held non-front PR cannot join waiting.
+func TestLaneSweep_HeldQueuedFrontLeavesTheLane(t *testing.T) {
+	for _, label := range []string{"hold", "needs-human", "needs-rebase", "do-not-merge/review"} {
+		for _, self := range []bool{false, true} {
+			for _, strategy := range []string{config.MergeStrategyHiveSerialized, config.MergeStrategyDirect} {
+				for _, outcome := range []string{hgithub.LaneOutcomeLeft, hgithub.LaneOutcomeDeferred} {
+					name := strategy + "/" + outcome + "/queued"
+					if self {
+						name = strategy + "/" + outcome + "/self-authored"
+					}
+					t.Run(label+"/"+name, func(t *testing.T) {
+						var merged []int
+						var api *httptest.Server
+						if self {
+							pr := greenSelfPR(7)
+							pr.extraLabels = []string{label}
+							api = newSelfAuthoredAutoMergeAPI(t, []selfAuthoredPR{pr}, &merged)
+						} else {
+							pr := greenLanePR(7)
+							pr.extraLabels = []string{label}
+							api = newAutoMergeSweepAPI(t, hgithub.AutoMergeQueuedLabel, []sweepPR{pr}, &merged)
+						}
+						defer api.Close()
+						gets := 0
+						counted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							if r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/pulls/7" {
+								gets++
+							}
+							api.Config.Handler.ServeHTTP(w, r)
+						}))
+						defer counted.Close()
+						g := &laneGate{answer: laneAnswer(outcome, "a hold label is present")}
+						c := newLaneSweepEngine(counted.URL, strategy, g.gate, Options{})
+						var result *AutoMergeSweepResult
+						var err error
+						if self {
+							result, err = c.SweepSelfAuthoredAutoMerges(context.Background(), AutoMergeSweepOptions{})
+						} else {
+							result, err = c.SweepQueuedAutoMerges(context.Background(), AutoMergeSweepOptions{})
+						}
+						if err != nil || result.Seen != 1 || result.Skipped != 1 || len(result.Merged) != 0 || len(merged) != 0 {
+							t.Fatalf("result = %+v, err = %v, merges = %v; want one skip", result, err, merged)
+						}
+						wantGets := 0
+						if strategy == config.MergeStrategyHiveSerialized {
+							if !self {
+								wantGets = 1
+							}
+							if len(g.reqs) != 1 {
+								t.Fatalf("lane requests = %+v; want one", g.reqs)
+							}
+							path := hgithub.PRAuditPathQueue
+							if self {
+								path = hgithub.PRAuditPathSweep
+							}
+							if req := g.reqs[0]; !req.FrontOnly || req.Authorize != nil || req.Repo != "acme/widget" || req.Branch != "main" || req.Number != 7 || req.Path != path {
+								t.Fatalf("lane request = %+v; want front-only without authorization", req)
+							}
+						} else if len(g.reqs) != 0 {
+							t.Fatalf("direct lane requests = %+v; want none", g.reqs)
+						}
+						if gets != wantGets {
+							t.Fatalf("PR gets = %d; want %d", gets, wantGets)
+						}
+					})
+				}
+			}
+		}
 	}
 }

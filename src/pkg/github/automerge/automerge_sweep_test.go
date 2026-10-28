@@ -1822,6 +1822,7 @@ func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]i
 					"draft":  pr.draft,
 					"user":   map[string]string{"login": pr.author},
 					"head":   map[string]string{"sha": "sha" + strconv.Itoa(pr.number)},
+					"base":   map[string]string{"ref": "main"},
 					"labels": issueLabels("", pr.extraLabels),
 				})
 			}
@@ -2976,7 +2977,7 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				"mergeable":       pr.mergeableState == "clean",
 				"user":            map[string]string{"login": pr.author},
 				"head":            map[string]any{"sha": headSHA, "repo": map[string]string{"full_name": headRepo}},
-				"base":            map[string]any{"repo": map[string]string{"full_name": "acme/widget"}},
+				"base":            map[string]any{"ref": "main", "repo": map[string]string{"full_name": "acme/widget"}},
 				"labels":          prLabels,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/status") && hasShaNumber(r.URL.Path):
