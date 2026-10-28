@@ -807,6 +807,15 @@ func TestIsBenignMessageForwardMergeGuard(t *testing.T) {
 	}
 }
 
+func TestIsBenignMessageStageHiveHeld(t *testing.T) {
+	if !IsBenignMessage("stage labels: PR waits on the hive past the stage dwell — reviewer lane needs attention") {
+		t.Error("hive-held stage dwell warning not benign")
+	}
+	if IsBenignMessage("stage labels: provisioning failed") {
+		t.Error("stage label provisioning failure wrongly benign")
+	}
+}
+
 func TestIsBenignMessageCopilotModelFallback(t *testing.T) {
 	const msg = "copilot CLI substituted the configured model"
 	if !IsBenignMessage(msg) {

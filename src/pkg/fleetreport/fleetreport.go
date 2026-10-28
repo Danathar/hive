@@ -777,6 +777,16 @@ var benignSubstrings = []string{
 	// That is the merge-safety policy working as designed, re-logged per
 	// merge attempt, not a repeated runtime defect (hivecommons/hive#14727).
 	"forward-merge guard: refusing to squash",
+	// The stage labeller (src/pkg/github/automerge/automerge_stage_labels.go)
+	// warns once per PR per quiet period when a PR waiting on the hive
+	// (review pending, checks running) sits past its stage dwell, and
+	// surfaces the same condition as the dashboard's hive-held count
+	// (hivecommons/hive#12534). The feed keys on the message alone, so a
+	// busy hive whose reviewer lane is backed up has every held PR warn once
+	// and the burst across unrelated PRs reads as one repeated defect — it
+	// is a per-hive operational signal, not a runtime error
+	// (hivecommons/hive#15009).
+	"stage labels: pr waits on the hive past the stage dwell",
 }
 
 // IsBenignMessage reports whether a raw log message is noise the generic
