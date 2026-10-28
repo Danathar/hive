@@ -10861,6 +10861,7 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 		return ri > 0 && rj <= 0
 	})
 
+	scopeReader := reviewScopeLinearReader(cfg, logger)
 	prs := make([]review.PullRequest, 0, len(candidates))
 	for _, pr := range candidates {
 		lane := classify.Classify(github.Issue{Title: pr.Title, Labels: pr.Labels}).Lane
@@ -10908,6 +10909,12 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 			// The compare from the last judged head, for the delta
 			// re-review and its trivial skip (review.delta_rereview).
 			DeltaDiff: reviewDeltaDiffFor(ctx, cfg, ghr, artifact, state, fullRepo, pr.Number, pr.HeadSHA, pr.BodyDigest),
+		}
+		// The linked Linear issue's text for the scope contract, read here
+		// so reviewers never need a Linear token (hivecommons/hive#14906);
+		// only for a PR about to be reviewed at this head.
+		if _, judged := artifact.AggregateForBody(fullRepo, pr.Number, pr.HeadSHA, pr.BodyDigest); !judged && state.PendingSince(fullRepo, pr.Number, pr.HeadSHA).IsZero() {
+			reviewScopeContractFor(ctx, scopeReader, &item, logger)
 		}
 		// Changed paths for the bot-author model route's path exceptions
 		// (review.bot_author_full_review_paths); fetched only for a listed
