@@ -603,6 +603,21 @@ func (s *Sweeper) Sweep(ctx context.Context, forge Forge, candidates []Candidate
 			labelledPerRepo[c.Repo]++
 		}
 		if s.Selected(c.Key()) {
+			// The hive's own advertisement is still checked against what the
+			// issue has become. One that parks for a person, is blocked or
+			// held, or turns out to be an ops checklist after it was selected
+			// is withdrawn, not left inviting newcomers until the process
+			// restarts (projectbluefin/utah-packages#527: invited at 00:38Z,
+			// parked at stage/045 at 00:57Z, still labelled 17 hours later).
+			if d := Score(c, p, now); !d.Eligible && d.AlreadyLabelled && Withdrawable(d.Skip) {
+				res.Skipped[d.Skip]++
+				if err := s.Withdraw(ctx, forge, c, d.Skip, opts); err != nil {
+					res.Errors++
+				} else {
+					res.Withdrawn = append(res.Withdrawn, c.Key())
+				}
+				continue
+			}
 			res.Skipped["already-selected"]++
 			continue
 		}

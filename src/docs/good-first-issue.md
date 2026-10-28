@@ -176,7 +176,9 @@ within a process.
 A labelled issue the scorer now rejects for a *waiting* reason — a
 hard-suppress label, `blocked`, `hold`, an ops-tracking checklist or a
 `recheck-after` deadline — has its advertisement withdrawn on the next
-sweep whoever applied the labels: both `good first issue` and `help wanted`
+sweep whoever applied the labels, the hive itself included (an issue it
+advertised earlier in the same run is re-scored, not skipped as already
+selected): both `good first issue` and `help wanted`
 come off, and the welcome comment is edited in place (or, when the labels
 arrived without one, a single correction is posted):
 
