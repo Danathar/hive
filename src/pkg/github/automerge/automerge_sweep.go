@@ -608,6 +608,16 @@ var mergeQueueRequiredRE = regexp.MustCompile(`(?i)must be made through the merg
 // so a ruleset change is picked up without a restart.
 const mergeQueueBaseRecheck = 30 * time.Minute
 
+// mergeQueueBaseRefreshHold is how long after the last merge-queue refusal
+// the current-base gate keeps from updating behind heads on that base
+// (MergeQueueBases.HoldBaseRefresh). It is longer than mergeQueueBaseRecheck
+// because a hold re-probes nothing: the 30-minute memory had expired between
+// refusals and the gate went back to merging the base into a PR that could
+// only ever merge through the queue. A day bounds how long a removed queue
+// rule goes unnoticed when no head on that base is current to probe it; a
+// restart forgets it at once.
+const mergeQueueBaseRefreshHold = 24 * time.Hour
+
 // mergeMethodFor returns the GitHub merge method the sweep should use for pr.
 // Forward-merge / top-up PRs between release lines must land as true merge
 // commits so the target line keeps the source line's ancestry; everything else
@@ -3141,6 +3151,16 @@ func (c *Engine) noteMergeQueueBase(owner, repo, base string) {
 		return
 	}
 	c.mergeQueueMemory().Note(owner+"/"+repo, base, c.clock())
+}
+
+// mergeQueueBaseHoldsRefresh reports whether the current-base gate must not
+// update a behind head on base because the base refused a direct merge as
+// merge-queue-only within mergeQueueBaseRefreshHold.
+func (c *Engine) mergeQueueBaseHoldsRefresh(owner, repo, base string) bool {
+	if c == nil {
+		return false
+	}
+	return c.mergeQueueMemory().HoldBaseRefresh(owner+"/"+repo, base, c.clock())
 }
 
 // mergeQueueBaseKnown reports whether base refused a direct merge as

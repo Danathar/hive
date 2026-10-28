@@ -35,6 +35,14 @@ func (c *Engine) requireCurrentBaseFor(repo string) bool {
 // merge waits for CI on the new head. holdReason is returned instead when
 // the caller may not update the branch this tick.
 //
+// A base that refused a direct merge as merge-queue-only is not updated
+// (hivecommons/hive#14068): the hive cannot enqueue, so the PR never merges
+// from here, and GitHub's merge queue tests base plus PR itself. Updating
+// only moved the head off the review it was held on, so the PR waited for a
+// fresh review each time the base moved (projectbluefin/finpilot#599). The
+// gate lets the PR through instead, and the sweep holds it at
+// merge-queue-required after the review gate.
+//
 // stop is false when the merge may proceed; otherwise the caller returns the
 // event, reason and error as-is.
 func (c *Engine) currentBaseGate(ctx context.Context, displayRepo, owner, repo string, number int, baseBranch, headSHA string, branchUpdateAllowed bool, holdReason string, fork bool) (AutoMergeSweepEvent, string, bool, error) {
@@ -50,6 +58,10 @@ func (c *Engine) currentBaseGate(ctx context.Context, displayRepo, owner, repo s
 		return AutoMergeSweepEvent{}, autoMergeReasonCurrentBaseCheck, true, err
 	}
 	if cmp.GetBehindBy() <= 0 {
+		return AutoMergeSweepEvent{}, "", false, nil
+	}
+	if c.mergeQueueBaseHoldsRefresh(owner, repo, baseBranch) {
+		c.debug("automerge head is behind a merge-queue-only base; not updating", "repo", displayRepo, "pr", number, "base", baseBranch, "behind_by", cmp.GetBehindBy())
 		return AutoMergeSweepEvent{}, "", false, nil
 	}
 	if !branchUpdateAllowed {
