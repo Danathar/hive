@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/github"
 )
 
 const (
@@ -127,15 +128,18 @@ func (r *prLinkResolver) resolve(ctx context.Context, repo string, number int) *
 	return status
 }
 
-// searchLinkedPR asks GitHub which PR (if any) references this issue. It runs one
+// searchLinkedPR asks GitHub which PR (if any) fixes this issue. It runs one
 // Search.Issues query scoped to the issue's repo, matching PRs that mention the
-// issue number — GitHub indexes the Fixes/Closes/Resolves cross-reference as well
-// as any plain "#N" body/title mention, so the closing PR is included. A merged
-// PR wins over a merely-open one (the fix landed), so results are scanned for a
-// merged hit first, then an open one. When the search yields no merged PR it also
-// reads the issue's timeline, whose cross-referenced events catch a PR that names
-// the issue in its body or a comment. A nil client or empty result is
-// "no linked PR" (nil, nil) — never an error the caller must handle.
+// issue number — GitHub indexes any plain "#N" body/title mention, so each hit
+// is then checked for a closing keyword (Closes/Fixes/Resolves #N) in its
+// title or body; a passing "see also #N" is not a linked PR. A merged PR wins
+// over a merely-open one (the fix landed), so results are scanned for a merged
+// hit first, then an open one. When the search yields no merged PR it also
+// reads the issue's timeline, whose cross-referenced events catch a PR that
+// names the issue only in a PR comment; a timeline PR whose title/body does
+// mention the issue is held to the same closing-keyword rule (prClosesIssue).
+// A nil client or empty result is "no linked PR" (nil, nil) — never an error
+// the caller must handle.
 func searchLinkedPR(ctx context.Context, gc *gh.Client, repo string, number int) (*prLinkStatus, error) {
 	if gc == nil || repo == "" || number <= 0 {
 		return nil, nil
@@ -159,7 +163,7 @@ func searchLinkedPR(ctx context.Context, gc *gh.Client, repo string, number int)
 			if iss == nil || iss.PullRequestLinks == nil {
 				continue // search can return issues too; keep only PRs
 			}
-			if !prReferencesIssue(iss, number) {
+			if !searchHitClosesIssue(iss, repo, number) {
 				continue
 			}
 			st, merged := prLinkCandidate(iss)
@@ -172,13 +176,16 @@ func searchLinkedPR(ctx context.Context, gc *gh.Client, repo string, number int)
 		}
 	}
 
-	// The title/body check above cannot see a PR that names the issue only in
+	// The search above cannot see a PR that names the issue only in
 	// a PR comment (hivecommons/hive#14859). GitHub records such a mention
 	// as a cross-referenced event on the issue's timeline, so one timeline
 	// read covers body and comment references. Commit-message references
 	// arrive as referenced events and are not matched here. A
 	// timeline error keeps whatever the search already found.
 	for _, iss := range crossReferencingPRs(ctx, gc, repo, number) {
+		if !prClosesIssue(iss, repo, number) {
+			continue
+		}
 		st, merged := prLinkCandidate(iss)
 		if merged {
 			return st, nil
@@ -256,11 +263,70 @@ func crossReferencingPRs(ctx context.Context, gc *gh.Client, repo string, number
 // cheap and within a single request.
 const prLinkSearchPerPage = 10
 
-// prReferencesIssue guards against a coincidental number collision: the Search
-// "#N" match is broad, so confirm the PR actually names the issue as a reference
-// (Fixes/Closes/Resolves #N, or a bare #N mention) in its title or body before
-// treating it as the fix-PR. Missing body/title (search omits them on some
-// responses) is treated as a match, since the number qualifier already scoped it.
+// searchHitClosesIssue reports whether a Search.Issues hit should count as
+// the issue's linked PR. The "#N" search qualifier indexes bare mentions, so
+// the hit must name the issue with a closing keyword (Closes/Fixes/Resolves)
+// in its title or body; a passing "see also #N" is not promoted. A hit with
+// no title or body (omitted by the API on some responses) is accepted, since
+// the number qualifier already scoped it.
+func searchHitClosesIssue(iss *gh.Issue, repo string, number int) bool {
+	title, body := iss.GetTitle(), iss.GetBody()
+	if title == "" && body == "" {
+		return true
+	}
+	_, ok := github.FindClosingKeywordReference(title+"\n"+body, repo, repo, number)
+	return ok
+}
+
+// prClosesIssue reports whether a timeline cross-referencing PR should count
+// as the issue's linked PR. A PR whose title/body mentions the issue must name
+// it as a fix (Closes/Fixes/Resolves), so a passing "see also #N" is not
+// promoted. A PR whose title/body does not mention the issue at all reached
+// the timeline through a PR comment (hivecommons/hive#14859), which is the
+// case the timeline read exists for, so it is kept. A source with no title or
+// body (omitted by the API) is accepted, as in searchHitClosesIssue.
+func prClosesIssue(iss *gh.Issue, repo string, number int) bool {
+	title, body := iss.GetTitle(), iss.GetBody()
+	if title == "" && body == "" {
+		return true
+	}
+	text := title + "\n" + body
+	if !prMentionsIssue(text, repo, number) {
+		return true
+	}
+	_, ok := github.FindClosingKeywordReference(text, repo, repo, number)
+	return ok
+}
+
+// prMentionsIssue reports whether text names repo#number in any of the forms
+// GitHub turns into a cross-reference: a bare "#N", "owner/repo#N", or the
+// issue's URL.
+func prMentionsIssue(text, repo string, number int) bool {
+	lower := strings.ToLower(text)
+	for _, form := range []string{
+		strings.ToLower(fmt.Sprintf("%s#%d", repo, number)),
+		strings.ToLower(fmt.Sprintf("github.com/%s/issues/%d", repo, number)),
+	} {
+		for i := strings.Index(lower, form); i >= 0; {
+			end := i + len(form)
+			if end == len(lower) || lower[end] < '0' || lower[end] > '9' {
+				return true
+			}
+			next := strings.Index(lower[end:], form)
+			if next < 0 {
+				break
+			}
+			i = end + next
+		}
+	}
+	return prReferencesIssue(&gh.Issue{Body: &text}, number)
+}
+
+// prReferencesIssue reports whether the PR's title or body names the issue
+// with a bare "#N" mention (any keyword or none). It backs prMentionsIssue,
+// which decides whether a timeline PR reached the issue through its own text
+// or only through a PR comment. Missing body/title (the API omits them on
+// some responses) is treated as a match.
 func prReferencesIssue(iss *gh.Issue, number int) bool {
 	needle := fmt.Sprintf("#%d", number)
 	body := iss.GetBody()
@@ -270,8 +336,8 @@ func prReferencesIssue(iss *gh.Issue, number int) bool {
 	}
 	hay := title + "\n" + body
 	for _, tok := range strings.Fields(hay) {
-		// Trim trailing punctuation so "#123." / "#123," still match.
-		tok = strings.TrimRight(tok, ".,);:")
+		// Trim surrounding punctuation so "#123." / "#123," / "(#123)" still match.
+		tok = strings.TrimRight(strings.TrimLeft(tok, "([<"), ".,);:]>")
 		if tok == needle {
 			return true
 		}
