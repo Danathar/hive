@@ -92,3 +92,45 @@ func TestSyncIssuePRClaimLabelsDefersRateLimitedLinks(t *testing.T) {
 		})
 	}
 }
+
+func TestPRClaimLabelErrorLogLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		level string
+	}{
+		{"primary", &gh.RateLimitError{Response: &http.Response{StatusCode: 403}}, "INFO"},
+		{"wrapped secondary", fmt.Errorf("label: %w", &gh.AbuseRateLimitError{Response: &http.Response{StatusCode: 403}}), "INFO"},
+		{"permission", errors.New("Resource not accessible by integration"), "WARN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			logPRClaimLabelError(logger, "ensuring verified-open label failed", tc.err, "repo", "org/repo", "issue", 7)
+			if !strings.Contains(logs.String(), "level="+tc.level) || !strings.Contains(logs.String(), "issue=7") {
+				t.Fatalf("unexpected log: %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestSyncIssuePRClaimLabelsRateLimitedLabelIsInformational(t *testing.T) {
+	ResetRateLimitPacingForTest()
+	t.Cleanup(ResetRateLimitPacingForTest)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit.","documentation_url":"https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`))
+	}))
+	t.Cleanup(srv.Close)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	client := NewClientForTest(srv.URL, "hivecommons", []string{"hive"}, logger)
+	result := &ActionableResult{}
+	result.Issues.Items = []Issue{{Repo: "hivecommons/hive", Number: 7, Labels: []string{VerifiedOpenLabel}}}
+	SyncIssuePRClaimLabels(context.Background(), client, result, NewClaimLedger("", testLogger()), logger)
+	if !strings.Contains(logs.String(), "level=INFO") || !strings.Contains(logs.String(), "ensuring verified-open label failed") || strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("expected informational label failure: %s", logs.String())
+	}
+}

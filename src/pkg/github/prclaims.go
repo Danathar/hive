@@ -2083,6 +2083,20 @@ func logPRClaimLinkError(logger *slog.Logger, message, repo string, issue, pr in
 	return limited
 }
 
+// logPRClaimLabelError treats GitHub backoff as expected while preserving
+// warnings for permission failures and other reconciliation errors.
+func logPRClaimLabelError(logger *slog.Logger, message string, err error, args ...any) {
+	if logger == nil {
+		return
+	}
+	args = append(args, "error", err)
+	if isRateLimitErr(err) {
+		logger.Info(message, args...)
+	} else {
+		logger.Warn(message, args...)
+	}
+}
+
 // SyncIssuePRClaimLabels mirrors verified PR-claim state onto GitHub labels and
 // the in-memory issue payload. It is best-effort: label failures must not hide
 // actionable issues or fail the enumeration tick.
@@ -2162,7 +2176,7 @@ func SyncIssuePRClaimLabels(ctx context.Context, client *Client, result *Actiona
 		verifiedOpen := issueHasLabel(originalLabels, VerifiedOpenLabel)
 		if verifiedOpen {
 			if err := client.EnsureIssueLabel(ctx, issue.Repo, VerifiedOpenLabel, "6a737d", "Hive verified that a likely/already-done claim did not finish this issue; keep open for more work"); err != nil && logger != nil {
-				logger.Warn("ensuring verified-open label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "ensuring verified-open label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			}
 		}
 		mergedWanted := ok && claim.PRNumber > 0 && claim.MergedPR && !verifiedOpen
@@ -2185,28 +2199,28 @@ func SyncIssuePRClaimLabels(ctx context.Context, client *Client, result *Actiona
 				continue
 			}
 			if err := client.removeLabelObserved(ctx, issue.Repo, issue.Number, name, observedState(issue.UpdatedAt)); err != nil && logger != nil {
-				logger.Warn("removing retired covered-by-pr label failed", "repo", issue.Repo, "issue", issue.Number, "label", name, "error", err)
+				logPRClaimLabelError(logger, "removing retired covered-by-pr label failed", err, "repo", issue.Repo, "issue", issue.Number, "label", name)
 			}
 			issue.Labels = removeIssueLabel(issue.Labels, name)
 		}
 		if partialWanted && !issueHasLabel(originalLabels, PartiallyAddressedLabel) {
 			if err := client.EnsureIssueLabel(ctx, issue.Repo, PartiallyAddressedLabel, PartiallyAddressedLabelColor, PartiallyAddressedLabelDescription); err != nil && logger != nil {
-				logger.Warn("ensuring partially-addressed label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "ensuring partially-addressed label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			} else if err := client.AddLabels(ctx, issue.Repo, issue.Number, []string{PartiallyAddressedLabel}); err != nil && logger != nil {
-				logger.Warn("adding partially-addressed label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "adding partially-addressed label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			}
 		}
 		if likelyWanted {
 			if err := client.EnsureIssueLabel(ctx, issue.Repo, LikelyDoneLabel, LikelyDoneLabelColor, LikelyDoneLabelDescription); err != nil && logger != nil {
-				logger.Warn("ensuring likely-done label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "ensuring likely-done label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			} else if issueHasLabel(originalLabels, LikelyDoneLabel) {
 				// Already carried; re-adding every tick only spends a write.
 			} else if err := client.AddLabels(ctx, issue.Repo, issue.Number, []string{LikelyDoneLabel}); err != nil && logger != nil {
-				logger.Warn("adding likely-done label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "adding likely-done label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			}
 		} else if issueHasLabel(originalLabels, LikelyDoneLabel) {
 			if err := client.RemoveLabel(ctx, issue.Repo, issue.Number, LikelyDoneLabel); err != nil && logger != nil {
-				logger.Warn("removing likely-done label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "removing likely-done label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			}
 			issue.Labels = removeIssueLabel(issue.Labels, LikelyDoneLabel)
 		}
@@ -2221,7 +2235,7 @@ func SyncIssuePRClaimLabels(ctx context.Context, client *Client, result *Actiona
 				prRepo = issue.Repo
 			}
 			if err := client.StageFacts().Uncovered(ctx, client.IssueStageRef(issue.Repo, issue.Number), client.PRStageRef(prRepo, claim.PRNumber)); err != nil && logger != nil {
-				logger.Warn("removing covered-by-pr label failed", "repo", issue.Repo, "issue", issue.Number, "error", err)
+				logPRClaimLabelError(logger, "removing covered-by-pr label failed", err, "repo", issue.Repo, "issue", issue.Number)
 			}
 			issue.Labels = removeCoveredByPRLabel(issue.Labels)
 		}
