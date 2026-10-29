@@ -264,6 +264,12 @@ type PRPassFacts struct {
 	// waited at 072 past the stage dwell and the pass moved it to 085, or
 	// held that escalation against a weak opinion.
 	ForkEscalationReason string
+	// AdoptionRefusedReason is set when the record holds a terminal
+	// refusal of a delegated supersede at this head
+	// (stagelabels.AdoptBlockedSupersedeConflict): the PR keeps its lane's
+	// fixing stage but the reason names the failed replay, not the
+	// generic conflict, so the owner sees why the copy never opened.
+	AdoptionRefusedReason string
 	// Stalled is the pass's dwell verdict (stagelabels.StalledWith over the
 	// store record after this pass's Observe); KindLabels are the
 	// configured author/<kind> names. Both are outputs of the pass the
