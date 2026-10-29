@@ -3,8 +3,10 @@ package dashboard
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hivecommons/hive/crux"
 	"github.com/hivecommons/hive/crux/cruxtest"
@@ -21,7 +23,8 @@ func (kickIoscanLauncher) Run(context.Context, sandbox.LaunchSpec) (sandbox.Resu
 
 func kickIoscanSandboxServer(t *testing.T) *Server {
 	t.Helper()
-	t.Setenv("HIVE_WORK_DIR", t.TempDir())
+	workDir := t.TempDir()
+	t.Setenv("HIVE_WORK_DIR", workDir)
 
 	srv, deps := apiServer(t)
 	enabled := true
@@ -39,9 +42,24 @@ func kickIoscanSandboxServer(t *testing.T) *Server {
 	if err := mgr.Start(context.Background(), "scanner"); err != nil {
 		t.Fatalf("start sandbox agent: %v", err)
 	}
-	// Stop the sandbox agent before t.TempDir cleanup runs; its goroutine
-	// otherwise keeps writing under HIVE_WORK_DIR and RemoveAll races it.
-	t.Cleanup(func() { _ = mgr.Stop("scanner") })
+	// Stop cancels the kick but does not join its final log/history writes.
+	t.Cleanup(func() {
+		_ = mgr.Stop("scanner")
+		proc, err := mgr.GetStatus("scanner")
+		if err != nil || proc.LastKickMessage == "" {
+			return
+		}
+		const archiveTimeout = 5 * time.Second
+		const archivePoll = 10 * time.Millisecond
+		deadline := time.Now().Add(archiveTimeout)
+		for time.Now().Before(deadline) {
+			if data, err := os.ReadFile(crux.SandboxRunHistoryPath(workDir)); err == nil && len(data) > 0 {
+				return
+			}
+			time.Sleep(archivePoll)
+		}
+		t.Error("sandbox kick did not finish archiving before cleanup")
+	})
 	deps.AgentMgr = mgr
 	return srv
 }

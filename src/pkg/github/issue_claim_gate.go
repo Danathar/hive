@@ -16,6 +16,12 @@ import (
 // families are disjoint). A PR's stage is the PR sweep's alone.
 const ClaimBlockReasonPullRequest = "pull request"
 
+// ClaimBlockReasonIssueClosed is the IssueDispatchBlockReason for an issue
+// the forge already reports closed (hivecommons/hive#14814): a closing
+// keyword on a merged PR, or a person, closed it after the snapshot the
+// producer is dispatching from was listed. There is nothing to start.
+const ClaimBlockReasonIssueClosed = "issue closed"
+
 // Prefixes of the IssueClaimBlockReason values that name the label at fault:
 // "never-claim label: Epic" for an umbrella issue
 // (governor.claims.never_claim_labels), "parked: stage/045-needs-decision"
@@ -109,36 +115,85 @@ func (c *Client) issueClaimParkLabel(labels []string) string {
 //     default `epic`): an umbrella issue is the list of work, not the work.
 //
 // Lookup errors are returned so callers cannot mistake unknown labels for
-// permission to claim. Human claims do not use this gate.
+// permission to claim. Human claims do not use this gate. A producer about
+// to start fresh work uses IssueDispatchBlockReason, which adds the open-PR
+// guard (hivecommons/hive#14799).
 func (c *Client) IssueClaimBlockReason(ctx context.Context, repo string, number int) (string, error) {
+	gate, err := c.issueClaimGate(ctx, repo, number)
+	return gate.reason, err
+}
+
+// issueClaimGateResult is what one issue read told the claim gate: the
+// label-based refusal, the labels for the dispatch gate's open-PR step, and
+// whether the forge reports the issue closed.
+type issueClaimGateResult struct {
+	reason string
+	labels []string
+	closed bool
+}
+
+// issueClaimGate reads the issue once and applies every label-based refusal.
+func (c *Client) issueClaimGate(ctx context.Context, repo string, number int) (issueClaimGateResult, error) {
 	if c == nil || c.client == nil {
-		return "", ErrNoGitHubClient
+		return issueClaimGateResult{}, ErrNoGitHubClient
 	}
 	owner, name := c.splitRepo(repo)
 	issue, _, err := c.client.Issues.Get(ctx, owner, name, number)
 	if err != nil {
-		return "", fmt.Errorf("checking issue claim labels: %w", err)
+		return issueClaimGateResult{}, fmt.Errorf("checking issue claim labels: %w", err)
 	}
 	if issue.IsPullRequest() {
-		return ClaimBlockReasonPullRequest, nil
+		return issueClaimGateResult{reason: ClaimBlockReasonPullRequest}, nil
 	}
-	labels := extractLabels(issue.Labels)
-	if c.hasNeedsHumanLabel(labels) {
-		return "needs-human", nil
+	res := issueClaimGateResult{
+		labels: extractLabels(issue.Labels),
+		closed: strings.EqualFold(issue.GetState(), "closed"),
 	}
-	if c.isHeld(labels) {
-		return "hold", nil
+	labels := res.labels
+	switch {
+	case c.hasNeedsHumanLabel(labels):
+		res.reason = "needs-human"
+	case c.isHeld(labels):
+		res.reason = "hold"
+	case hasBlockedLabel(labels):
+		res.reason = blockedClaimReason(issue.GetBody())
 	}
-	if hasBlockedLabel(labels) {
-		return blockedClaimReason(issue.GetBody()), nil
+	if res.reason != "" {
+		return res, nil
 	}
 	if label := c.issueClaimParkLabel(labels); label != "" {
-		return ClaimBlockReasonParkedPrefix + label, nil
+		res.reason = ClaimBlockReasonParkedPrefix + label
+	} else if label := claims.NeverClaimLabel(labels, c.neverClaimLabelSet()); label != "" {
+		res.reason = ClaimBlockReasonNeverClaimPrefix + label
 	}
-	if label := claims.NeverClaimLabel(labels, c.neverClaimLabelSet()); label != "" {
-		return ClaimBlockReasonNeverClaimPrefix + label, nil
+	return res, nil
+}
+
+// IssueDispatchBlockReason is IssueClaimBlockReason for a producer about to
+// START work on an issue — a fresh claim with no PR behind it — plus the
+// open-PR guard (hivecommons/hive#14799): an OPEN pull request already
+// linking the issue with a closing keyword refuses the dispatch
+// (ClaimBlockReasonOpenPRPrefix), labels the issue `has-open-pr` and logs
+// the skip. Renewals, PR-backed start signals and the release tick keep
+// using IssueClaimBlockReason: the agent whose own PR links the issue holds
+// its claim legitimately, and a guard that released it would un-stage the
+// very PR it exists to protect. Off with scanner.skip_issues_with_open_pr:
+// false; a failed listing fails open with a warning.
+func (c *Client) IssueDispatchBlockReason(ctx context.Context, repo string, number int) (string, error) {
+	gate, err := c.issueClaimGate(ctx, repo, number)
+	if err != nil || gate.reason != "" {
+		return gate.reason, err
 	}
-	return "", nil
+	// The same read says whether the issue is still open: a closing keyword
+	// on a PR that merged since the snapshot was listed closes it, and a
+	// closed issue is not work to start (hivecommons/hive#14814).
+	if gate.closed {
+		return ClaimBlockReasonIssueClosed, nil
+	}
+	// Last because it is the only step that costs a listing. The eval
+	// cycle's claim ledger learns of a hand-opened PR one scan late; this
+	// reads the forge now.
+	return c.openPRLinkBlockReason(ctx, repo, number, gate.labels), nil
 }
 
 // issueIsPullRequest reports whether repo#number is a pull request. The

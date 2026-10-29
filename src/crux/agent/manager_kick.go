@@ -144,10 +144,24 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 	}
 
 	if agent.State != StateRunning {
-		if m.deferStartupKickLocked(agent, message, trigger) {
+		if m.sharedPool != nil && agent.State == StateStopped && !agent.Paused && !agent.OperatorStopped {
+			// Re-lock before every return: the deferred Unlock above must
+			// always pair with a held mutex.
+			m.mu.Unlock()
+			err := m.Start(context.Background(), name)
+			m.mu.Lock()
+			if err != nil {
+				return fmt.Errorf("auto-start stopped agent for kick: %w", err)
+			}
+			agent, ok = m.agents[name]
+			if !ok || agent.State != StateRunning {
+				return fmt.Errorf("agent %s failed to enter running state", name)
+			}
+		} else if m.deferStartupKickLocked(agent, message, trigger) {
 			return nil
+		} else {
+			return fmt.Errorf("agent %s cannot be kicked: %s", name, notRunningReason(agent))
 		}
-		return fmt.Errorf("agent %s cannot be kicked: %s", name, notRunningReason(agent))
 	}
 	if m.deferStartupKickLocked(agent, message, trigger) {
 		return nil
@@ -209,7 +223,7 @@ func (m *Manager) SendKickWithSource(name string, message string, source string)
 			return fmt.Errorf("%w: agent %s restarted while the kick was waiting for its input prompt", errKickCancelledByRestart, name)
 		}
 		m.markKickUndeliverableLocked(agent, time.Now(), reason)
-		return kickPromptNotReadyErr(name, reason)
+		return m.kickNotReadyErrorLocked(agent, time.Now(), kickPromptNotReadyErr(name, reason))
 	}
 	m.mu.Lock()
 	agent, ok = m.agents[name]
@@ -292,7 +306,7 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 	if !agent.kickDelivering.CompareAndSwap(false, true) {
 		m.logger.Warn("kick delivery skipped: another kick is already being typed into this pane",
 			"agent", agent.Name, "trigger", trigger)
-		return fmt.Errorf("agent %s kick delivery already in progress", agent.Name)
+		return fmt.Errorf("%w: agent %s kick delivery already in progress", crux.ErrAgentBusy, agent.Name)
 	}
 	defer agent.kickDelivering.Store(false)
 
@@ -311,7 +325,7 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 		if menuFooter != "" {
 			return fmt.Errorf("agent %s pane not at a ready input prompt: %s", agent.Name, reason)
 		}
-		return fmt.Errorf("agent %s pane not at a ready input prompt", agent.Name)
+		return m.kickNotReadyErrorLocked(agent, time.Now(), fmt.Errorf("agent %s pane not at a ready input prompt", agent.Name))
 	}
 
 	// Archive the PREVIOUS kick's scrollback and clear the history before any

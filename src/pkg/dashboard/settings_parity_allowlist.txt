@@ -13,6 +13,8 @@ agent_sandbox.job.volumes[].claim # TODO #11854
 agent_sandbox.job.volumes[].mount_path # TODO #11854
 agent_sandbox.job.volumes[].name # TODO #11854
 agent_sandbox.job.volumes[].read_only # TODO #11854
+agent_sandbox.publish.verify[] # TODO #14999 (policy-file knob; Settings control pending)
+agent_sandbox.publish.verify_timeout_s # TODO #14999 (policy-file knob; Settings control pending)
 agents.<key>.acmm_levels[] # TODO #11854
 agents.<key>.agent_spec # TODO #11854
 agents.<key>.aliases[] # TODO #11854
@@ -115,6 +117,12 @@ agents.<key>.sandbox.job.workspace_claim_mount # TODO #11854
 agents.<key>.sandbox.network_mode # TODO #11854
 agents.<key>.sandbox.runtime # TODO #11854
 agents.<key>.sandbox.timeout_s # TODO #11854
+agents.<key>.sandbox.publish.verify[] # TODO #14999 (policy-file knob; Settings control pending)
+agents.<key>.sandbox.publish.verify_timeout_s # TODO #14999 (policy-file knob; Settings control pending)
+agents.<key>.session_recycle.enabled # TODO #11854
+agents.<key>.session_recycle.max_age # TODO #11854
+agents.<key>.session_recycle.max_rss_mb # TODO #11854
+agents.<key>.session_recycle.min_idle # TODO #11854
 agents.<key>.skills[] # TODO #11854
 agents.<key>.sort_order # TODO #11854
 agents.<key>.stale_timeout # TODO #11854
@@ -140,7 +148,12 @@ agents.<key>.variables.<key>.type # TODO #11854
 agents.<key>.variables.<key>.url # TODO #11854
 agents.<key>.variables.<key>.value # TODO #11854
 agents.github_api_hourly_cap # TODO #11854
+agents.session_recycle.enabled # TODO #11854
+agents.session_recycle.max_age # TODO #11854
+agents.session_recycle.max_rss_mb # TODO #11854
+agents.session_recycle.min_idle # TODO #11854
 auto_merge.credit_issue_authors # merge-time Co-authored-by credit (#14581); yaml-only
+auto_merge.merge_train.enabled # merge-train front selection (#15141); yaml-only
 auto_merge.allow_unprotected_base[] # TODO #11854
 auto_merge.merge_forward_trusted_human[] # TODO #11854
 auto_merge.no_ci_ok[] # TODO #11854
@@ -165,6 +178,7 @@ duplicate_sweep.bot_authors[] # TODO #11854
 evidence.complexity.enabled # TODO #11854
 evidence.complexity.static_analysis # TODO #11854
 github.additional_bot_logins[] # TODO #11854
+github.shared_uid_read_token # shared-UID App read-token opt-in; yaml-only, restart required (#14778)
 good_first_issue.exclude_labels[] # advanced scorer tuning; yaml-only (#12185)
 good_first_issue.repos[] # advanced scorer tuning; yaml-only (#12185)
 governor.first_timer_welcome.enabled # first-time contributor welcome; yaml-only
@@ -182,6 +196,7 @@ governor.claims.contributor_flap_threshold # contributor flap cool-off (#13579);
 governor.claims.contributor_flap_window_s # contributor flap cool-off (#13579); yaml-only
 governor.claims.contributor_flap_cooloff_s # contributor flap cool-off (#13579); yaml-only
 governor.claims.contributor_starvation_s # contributor starvation guard (#13579); yaml-only
+governor.auto_close_superseded # superseded hive-PR auto-close; yaml-only
 governor.cadence_owners.<key> # TODO #11854
 governor.gateways[].api_key_env # TODO #11854
 governor.gateways[].api_key_file # TODO #11854
@@ -468,6 +483,7 @@ search.health.weights.time_to_merge # repo health score (#14638); yaml-only
 search.max_index_bytes_per_repo # portfolio search indexer (#14635); yaml-only
 search.max_memory_bytes # portfolio search indexer (#14635); yaml-only
 search.retention # portfolio search indexer (#14635); yaml-only
+scanner.skip_issues_with_open_pr # open-PR dispatch guard (#14799); yaml-only
 self_experiments.scheduler.enabled # TODO #11854
 self_experiments.scheduler.interval_s # TODO #11854
 self_experiments.scheduler.mode # TODO #11854

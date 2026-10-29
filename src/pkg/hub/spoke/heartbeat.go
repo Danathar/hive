@@ -586,6 +586,10 @@ type UpgradeDrainReport struct {
 	InFlight   []string `json:"in_flight,omitempty"`
 	WaitedS    int      `json:"waited_s"`
 	RemainingS int      `json:"remaining_s"`
+	// Turns carries, for each InFlight agent, how long its current turn has
+	// been running, so the hub can say "reviewer 38m" rather than just
+	// "reviewer". Spokes that predate the field send only InFlight.
+	Turns []UpgradeTurn `json:"turns,omitempty"`
 }
 
 // HeartbeatClusterHealthReport contains cluster node and GPU metrics
@@ -1340,6 +1344,17 @@ type FreshStatusCollector func() *HeartbeatPayload
 type RestartSpokeCallback func()
 type AgentRestartResetCallback func(agent string)
 
+// Values of HeartbeatResponse.Breaker (#15092).
+const (
+	BreakerEngage  = "engage"
+	BreakerRelease = "release"
+)
+
+// BreakerCallback applies a hub-requested whole-hive pause (BreakerEngage) or
+// resume (BreakerRelease) through the fleet breaker — the same mechanism as
+// the dashboard's top-bar ⏸ button.
+type BreakerCallback func(action string)
+
 type UpgradeCallback func(targetSHA string)
 
 func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector, interval time.Duration, logger *slog.Logger, callbacks ...any) {
@@ -1377,6 +1392,7 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 	var onClusterID ClusterIDCallback
 	var onRestartSpoke RestartSpokeCallback
 	var onAgentRestartReset AgentRestartResetCallback
+	var onBreaker BreakerCallback
 	var freshCollect FreshStatusCollector
 	var onUpgradePolicy UpgradePolicyCallback
 	for _, cb := range callbacks {
@@ -1403,6 +1419,8 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 			onRestartSpoke = fn
 		case AgentRestartResetCallback:
 			onAgentRestartReset = fn
+		case BreakerCallback:
+			onBreaker = fn
 		case FreshStatusCollector:
 			freshCollect = fn
 		case UpgradePolicyCallback:
@@ -1426,6 +1444,7 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 			// changes the image tag, which a same-tag re-pull can't do.
 			onSwitchBranch(resp.SwitchToTag)
 		} else if resp.UpgradeTo != "" && onUpgrade != nil {
+			setUpgradeInterrupt(resp.UpgradeInterrupt)
 			onUpgrade(resp.UpgradeTo)
 		}
 		if resp.GitHubAppConfig != nil && onGitHubAppConfig != nil {
@@ -1468,6 +1487,9 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 			for _, name := range resp.ResetAgentRestarts {
 				onAgentRestartReset(name)
 			}
+		}
+		if resp.Breaker != "" && onBreaker != nil {
+			onBreaker(resp.Breaker)
 		}
 	}
 
@@ -2752,11 +2774,14 @@ type GatewayConfigCallback func(cfg *HeartbeatGatewayConfig)
 // It includes version info so the spoke can display hub version on its dashboard
 // and self-upgrade when behind.
 type HeartbeatResponse struct {
-	OK         bool   `json:"ok"`
-	UpgradeTo  string `json:"upgrade_to,omitempty"`
-	HubGitHash string `json:"hub_git_hash,omitempty"`
-	LatestSHA  string `json:"latest_sha,omitempty"`
-	LatestTag  string `json:"latest_tag,omitempty"`
+	OK        bool   `json:"ok"`
+	UpgradeTo string `json:"upgrade_to,omitempty"`
+	// UpgradeInterrupt rides with UpgradeTo when the owner asked the upgrade
+	// to proceed without draining in-flight agent turns (#14950).
+	UpgradeInterrupt bool   `json:"upgrade_interrupt,omitempty"`
+	HubGitHash       string `json:"hub_git_hash,omitempty"`
+	LatestSHA        string `json:"latest_sha,omitempty"`
+	LatestTag        string `json:"latest_tag,omitempty"`
 	// SwitchToTag instructs the spoke to change its own deployment image to
 	// ghcr.io/hivecommons/hive:<SwitchToTag> and restart. Used for branch
 	// switches on clusters the hub can't reach over kubectl — the spoke has
@@ -2770,11 +2795,15 @@ type HeartbeatResponse struct {
 	// so ALL instances reporting as this hive receive it; the spoke's own
 	// uptime guard keeps a freshly restarted process from acting on the same
 	// window twice.
-	RestartSpoke       bool                      `json:"restart_spoke,omitempty"`
-	ResetAgentRestarts []string                  `json:"reset_agent_restarts,omitempty"`
-	GitHubAppConfig    *HeartbeatGitHubAppConfig `json:"github_app_config,omitempty"`
-	HubBanner          *HubBanner                `json:"hub_banner,omitempty"`
-	IsPublic           *bool                     `json:"is_public,omitempty"`
+	RestartSpoke       bool     `json:"restart_spoke,omitempty"`
+	ResetAgentRestarts []string `json:"reset_agent_restarts,omitempty"`
+	// Breaker is a one-shot whole-hive pause/resume (BreakerEngage /
+	// BreakerRelease) an owner requested from the hub's per-hive menu
+	// (#15092); empty means none.
+	Breaker         string                    `json:"breaker,omitempty"`
+	GitHubAppConfig *HeartbeatGitHubAppConfig `json:"github_app_config,omitempty"`
+	HubBanner       *HubBanner                `json:"hub_banner,omitempty"`
+	IsPublic        *bool                     `json:"is_public,omitempty"`
 	// AuthorizedUsers is the hub's authoritative per-hive access list, as
 	// "username:role" entries. The hub can't reach heartbeat-only spokes (e.g.
 	// the heartbeat-only cluster) over kubectl, and those spokes authorize their own device-flow
@@ -2918,6 +2947,14 @@ type HeartbeatUpgradePolicy struct {
 	// it was recorded. Empty when nothing is held or the hub is too old to say.
 	ScheduledHoldReason string `json:"scheduled_hold_reason,omitempty"`
 	ScheduledHoldAt     string `json:"scheduled_hold_at,omitempty"`
+	// NextWindowAt is this hive's OWN next daily/weekly window (RFC3339
+	// UTC), independent of the channel promotion estimate in NextUpdateAt.
+	// Empty for instant/manual policies and for hubs too old to send it.
+	NextWindowAt string `json:"next_window_at,omitempty"`
+	// UpgradeHistory is the hub's record of this hive's recent upgrade
+	// attempts and missed windows, newest last, so the spoke dashboard can
+	// show why a window did not land without asking the hub.
+	UpgradeHistory []UpgradeAttempt `json:"upgrade_history,omitempty"`
 }
 
 // Schedule values carried by HeartbeatUpgradePolicy.Schedule. These mirror
@@ -2997,3 +3034,16 @@ func hubHeartbeatStatusIsDefect(status int) bool {
 	}
 	return status >= http.StatusInternalServerError
 }
+
+// upgradeInterrupt is the latest heartbeat's UpgradeInterrupt flag, read by
+// the UpgradeCallback in cmd/hive to skip its drain (#14950). A package
+// atomic rather than a callback parameter so the long-standing
+// UpgradeCallback signature stays put.
+var upgradeInterrupt atomic.Bool
+
+func setUpgradeInterrupt(v bool) { upgradeInterrupt.Store(v) }
+
+// UpgradeInterruptRequested reports whether the hub's latest upgrade
+// instruction asked the spoke to interrupt in-flight agent turns rather
+// than drain them.
+func UpgradeInterruptRequested() bool { return upgradeInterrupt.Load() }

@@ -68,7 +68,7 @@ func TestReporterTrustUpstreamAcceptance(t *testing.T) {
 				}
 				return tc.source, nil
 			})
-			got := c.EvaluateReporterTrust(context.Background(), "o/r", "Port", "Closes #1\nRefs up/source#613", nil)
+			got := c.EvaluateReporterTrust(context.Background(), "o/r", "Port", "Closes #1\nRefs up/source#613", nil, "")
 			if got.Held != tc.wantHeld {
 				t.Fatalf("Held=%v, want %v: %+v", got.Held, tc.wantHeld, got)
 			}
@@ -76,7 +76,7 @@ func TestReporterTrustUpstreamAcceptance(t *testing.T) {
 				t.Fatalf("missing reporter: %+v", got)
 			}
 			// Omitting the link must not block an otherwise accepted port.
-			without := c.EvaluateReporterTrust(context.Background(), "o/r", "Port", "Closes #1", nil)
+			without := c.EvaluateReporterTrust(context.Background(), "o/r", "Port", "Closes #1", nil, "")
 			if without.Held {
 				t.Fatalf("hive-filed port issue held: %+v", without)
 			}

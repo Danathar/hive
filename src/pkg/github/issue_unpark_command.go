@@ -1111,6 +1111,9 @@ func (c *Client) eligibleUnparkCommand(ctx context.Context, owner, repo string, 
 			}
 			continue
 		}
+		if isHiveSelfDecisionComment(cm.GetBody()) {
+			continue
+		}
 		checked++
 		allowed, err := c.commenterMayUnpark(ctx, owner, repo, safeGetLogin(cm.GetUser()), allowTriage)
 		if err != nil {

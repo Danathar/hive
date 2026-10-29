@@ -85,6 +85,10 @@ type contributorLaneFixture struct {
 	// endpoint reports for sha7 (RFC 3339) and the PR's updated_at; empty
 	// leaves the route unserved and the timestamp omitted.
 	headCommittedAt string
+	// prUpdatedAt, when set, overrides the PR's updated_at (RFC 3339) so a
+	// test can give the head a committer date that disagrees with when
+	// GitHub actually saw it pushed.
+	prUpdatedAt string
 	// headStatus, when set, is the combined-status state and check-run
 	// conclusion reported for sha7; empty means "success".
 	headStatus string
@@ -178,6 +182,9 @@ func newContributorLaneAPI(t *testing.T, fx *contributorLaneFixture) *httptest.S
 			}
 			if fx.headCommittedAt != "" {
 				p["updated_at"] = fx.headCommittedAt
+			}
+			if fx.prUpdatedAt != "" {
+				p["updated_at"] = fx.prUpdatedAt
 			}
 			return p
 		}
@@ -456,6 +463,11 @@ func newContributorLaneEngineRepos(apiURL string, repos []string, policy Contrib
 	}
 	if opts.ContributorSoak == nil {
 		opts.ContributorSoak = NewContributorSoakTracker()
+	}
+	// Every engine otherwise shares the process-wide head tracker, which pins
+	// the first updated_at seen for acme/widget#7@sha7 across tests.
+	if opts.HeadFirstSeen == nil {
+		opts.HeadFirstSeen = NewHeadFirstSeenTracker()
 	}
 	if clock != nil {
 		opts.Now = clock.now
@@ -1274,6 +1286,15 @@ func TestContributorLaneAdmitPathAndRegistryTierHelpers(t *testing.T) {
 	}
 	if got := contributorLaneAdmitPath(contributorClaimMatch{Issue: 42}); got != "claim" {
 		t.Fatalf("admit path = %q, want claim", got)
+	}
+	// A person's Approve outranks the registry tier for that head (#15136)
+	// and the merge comment names who admitted it.
+	operator := contributorClaimMatch{OperatorLogin: "octo", RegistryTier: "trusted"}
+	if got := contributorLaneAdmitPath(operator); got != contributorLaneReasonOperatorApproval || contributorLaneReasonOperatorApproval != "contributor-lane:operator-approval" {
+		t.Fatalf("operator admit path = %q", got)
+	}
+	if c := contributorLaneMergeComment("mallory", operator, 30*time.Minute, ContributorLaneVerdict{}); !strings.Contains(c, "@octo") || !strings.Contains(c, "operator-approval:octo") {
+		t.Fatalf("operator merge comment = %q", c)
 	}
 	if contributorLaneReasonRegistryTrusted != "contributor-lane:registry-trusted" {
 		t.Fatalf("admit reason = %q", contributorLaneReasonRegistryTrusted)

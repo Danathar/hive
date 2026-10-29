@@ -1173,6 +1173,9 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 	for _, warning := range config.WriteSurfaceWarnings(b.cfg) {
 		b.logger.Warn("write surface allowlist", "issue", warning)
 	}
+	for _, warning := range config.ReviewHeadsWarnings(b.cfg) {
+		b.logger.Warn("review heads config", "issue", warning)
+	}
 	startupRepoTargetIssue := config.ValidateRepoTargets(b.cfg)
 	if startupRepoTargetIssue != nil {
 		b.logger.Warn("repo target misconfigured — owner action required",
@@ -1545,6 +1548,18 @@ func (b *boot) wireBootClosures() {
 			// eval-cycle guard.
 			IssueClaimed: func(repo string, number int) (github.IssueClaim, bool) {
 				return getClaimLedger(b.logger).Lookup(repo, number)
+			},
+			// hivecommons/hive#14799: the ledger above is one eval cycle old;
+			// ask the forge directly whether an open PR already links the
+			// issue before the contribute lane dispatches it again.
+			OpenPRLinkingIssue: func(repo string, number int, labels []string) (github.OpenPRLink, bool) {
+				client := b.currentGitHubClient()
+				if client == nil {
+					return github.OpenPRLink{}, false
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), openPRLinkGuardTimeout)
+				defer cancel()
+				return client.OpenPRLinkGuard(ctx, repo, number, labels)
 			},
 			// #7871: and write access for the one verified fact a no_work_needed
 			// verdict produces — the PR/commit that already settled the issue.
@@ -2168,6 +2183,7 @@ func (b *boot) bootAdvisoryWith(deps bootAdvisoryDeps) bool {
 		ACMMLevel:          b.acmmLevel,
 		PRsAllowed:         b.cfg.Project.PRsAllowed(),
 		PolicyDir:          b.policyDirPath,
+		SharedUIDReadToken: b.cfg.GitHub.SharedUIDReadToken,
 		AppAuthoredPRs:     b.cfg.GitHub.AppAuthoredPRsEnabled(),
 		AppBotLogin:        b.cfg.GitHub.BotLogin(),
 		AppBotUserID:       b.appBotUserIDResolver(),
@@ -2326,10 +2342,25 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		b.logger.Warn("cleared invalid inference launch_cmd; inference and gateway backends launch through claude", "agent", name)
 	}
 	rtCfg := cruxconfig.RuntimeConfigFromEnv()
-	b.agentMgr, err = deps.newRuntime(rtCfg,
+	runtimeOptions := []cruxruntime.Option{
 		cruxruntime.WithDefinitions(b.cfg.EnabledAgents()),
 		cruxruntime.WithLogger(b.logger),
-		cruxruntime.WithProject(b.projectCtx))
+		cruxruntime.WithProject(b.projectCtx),
+	}
+	if sharedAgentPoolEnabled() {
+		hubURL := strings.TrimSpace(os.Getenv("HIVE_HUB_URL"))
+		if hubURL == "" {
+			hubURL = b.cfg.Hub.URL
+		}
+		pool, poolErr := cruxruntime.NewSharedSessionPoolClient(hubURL, b.cfg.HiveID, hub.SpokeHeartbeatKey())
+		if poolErr != nil {
+			b.logger.Error("shared agent pool is enabled but cannot be configured", "error", poolErr)
+			deps.exit(1)
+			return
+		}
+		runtimeOptions = append(runtimeOptions, cruxruntime.WithSharedSessionPool(pool))
+	}
+	b.agentMgr, err = deps.newRuntime(rtCfg, runtimeOptions...)
 	if err != nil {
 		b.logger.Error("crux runtime unavailable", "mode", rtCfg.Mode, "error", err)
 		deps.exit(1)
@@ -2688,6 +2719,7 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// A dependency-bot PR parked on a terminal required-check hold is handed
 	// to a person by the governor's dependency-bot sweep (#12379).
 	autoMergeOpts.OnTerminalHold = noteDependencyBotTerminalHold
+	autoMergeOpts.MergeTrainEnabled = func() bool { return b.cfg.AutoMerge.MergeTrain.IsEnabled() }
 	// Intent tier gate (#6258): the human lane only queues PRs that
 	// survive writeMergeEligible's intent check, but this sweep lists
 	// the App's PRs on its own, so it carries the same policy (same
@@ -2715,6 +2747,8 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		return b.cfg != nil && b.cfg.AutoMerge.MergeForwardTrustedHumanFor(repo)
 	}
 	b.requestRelays = newRequestRelaySupervisor(b.ctx, func(ctx context.Context, client *github.Client) <-chan struct{} {
+		laneGate := relayLanePolicyGate(autoMergeOpts)(client)
+		setMergeEligibleLaneGate(laneGate)
 		relaysDone := deps.startRequestRelays(ctx, client, requestRelays{
 			prOpen:    b.agentMgr.AuthorizePROpen,
 			holdLabel: holdLabel,
@@ -2844,6 +2878,7 @@ func (b *boot) bootStateWith(deps bootStateDeps) {
 			b.ghClient.SetRepos(b.cfg.Project.Repos)
 			b.ghClient.SetHoldLabels(b.githubHoldLabels())
 			b.ghClient.SetNeverClaimLabels(b.cfg.Governor.Claims.EffectiveNeverClaimLabels())
+			b.ghClient.SetSkipIssuesWithOpenPR(b.cfg.Scanner.IsSkipIssuesWithOpenPR())
 			b.ghClient.SetSentinelAlertLabel(b.cfg.Sentinel.LabelOrDefault())
 			if len(b.cfg.Governor.Labels.Exempt) > 0 {
 				b.ghClient.SetExemptLabels(b.cfg.Governor.Labels.Exempt)
@@ -3196,6 +3231,7 @@ func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 	b.tokenCollector.SetClaudeSessionsDir(b.cfg.Data.ClaudeSessionsDir)
 	b.tokenCollector.SetCopilotSessionsDir(b.cfg.Data.CopilotSessionsDir)
 	b.tokenCollector.SetBobSessionsDir(b.cfg.Data.BobSessionsDir)
+	b.tokenCollector.SetSandboxRunHistoryPath(crux.SandboxRunHistoryPath(crux.WorkDir()))
 	tokenStop := make(chan struct{})
 	deps.startTokenCollector(b.tokenCollector, tokenStop)
 	b.cleanup.push(func() { close(tokenStop) })
@@ -3369,6 +3405,7 @@ func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 			// so the Overview never shows pre-restart totals as current
 			// (hivecommons/hive#13373); the first enumeration replaces it.
 			cached.MarkAllStale()
+			cached.RestoredAt = time.Now().UTC()
 			b.lastActionable.Store(&cached)
 			if b.sched != nil {
 				b.sched.SetLastActionable(&cached)
@@ -3894,6 +3931,10 @@ func (b *boot) bootDashboardAPI() { b.bootDashboardAPIWith(defaultBootDashboardA
 // injected; see bootDashboardAPIDeps.
 func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 	deps.registerAPI(b.dashSrv, b.dashboardDependencies())
+	// The hive's own unblock (blocked sweep, review-backlog block lift)
+	// re-reads the issue into the cached snapshot and the Activity Monitor
+	// the way an inbound label webhook does (hivecommons/hive#14952).
+	github.SetItemRefreshHook(b.dashSrv.RefreshSelfEditedItem)
 	spekCloneAuth := lazySpektacularCloneAuth(func() pushbroker.TokenMinter {
 		if b.appAuth == nil {
 			return nil
@@ -3934,6 +3975,7 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 	})
 
 	b.dashSrv.SetGitHubAppRequired(b.githubAppRequired)
+	b.dashSrv.SetUpgradeDrainSource(selfUpgradeDrain.Report)
 	// Order matters: SetGitHubAppRequired(false) clears both fields, so the
 	// classified state is applied only after it, and only when a failure was
 	// actually detected.
@@ -5074,7 +5116,12 @@ func (b *boot) bootLaunchWith(deps bootLaunchDeps) {
 	// shutdown the ctx-aware stagger returns immediately instead of leaking a
 	// goroutine parked in a bare time.Sleep.
 	enabledAgents := b.cfg.EnabledAgents()
-	startupAgents := startupLaunchNames(enabledAgents, b.onDemandFromPack)
+	startupAgents := []string{}
+	if sharedAgentPoolEnabled() {
+		b.logger.Info("shared agent pool enabled; persistent agents will start on demand")
+	} else {
+		startupAgents = startupLaunchNames(enabledAgents, b.onDemandFromPack)
+	}
 	b.agentMgr.MarkStartupLaunchQueued(startupAgents)
 	deps.spawn("agent-launch", func() {
 		agentIndex := 0
@@ -5599,7 +5646,8 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				// heartbeat) and withhold new kicks; proceed once the turns end or
 				// hub.upgrade_drain_timeout_s elapses.
 				if b.agentMgr != nil {
-					inFlight, wedged := agentKicksInFlight(b.agentMgr.AllStatuses(), b.startTime, selfUpgradeDrainNow(), func(name string) time.Duration {
+					statuses := b.agentMgr.AllStatuses()
+					inFlight, wedged := agentKicksInFlight(statuses, b.startTime, selfUpgradeDrainNow(), func(name string) time.Duration {
 						if ac, ok := b.cfg.Agents[name]; ok {
 							return ac.EffectiveContinuousTurnCeiling()
 						}
@@ -5615,7 +5663,15 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 					}
 					ignoredWedged := wedgedKickAgents(wedged)
 					drainTimeout := b.cfg.Hub.EffectiveUpgradeDrainTimeout()
+					if spoke.UpgradeInterruptRequested() && drainTimeout > 0 && len(inFlight) > 0 {
+						// The owner chose "Upgrade now (interrupt turns)" on the
+						// hub: cut the drain rather than wait for these turns.
+						b.logger.Warn("self-upgrade: interrupting in-flight agent turns on the owner's request",
+							"target", targetSHA, "in_flight", inFlight)
+						drainTimeout = 0
+					}
 					dec := selfUpgradeDrain.decide(targetSHA, inFlight, drainTimeout, selfUpgradeDrainNow())
+					selfUpgradeDrain.setKickTimes(agentKickTimes(statuses, inFlight))
 					switch {
 					case !dec.Proceed:
 						b.logger.Info("self-upgrade deferred: draining in-flight agent kicks",
@@ -6109,6 +6165,24 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				}
 				b.logger.Info("audit: agent restart counter reset from hub", "agent", name)
 			}),
+			// Whole-hive pause/resume requested from the hub's per-hive menu
+			// (#15092). Same fleet-breaker calls as the dashboard's
+			// /api/breaker/{engage,release}; the run loop's regular persist
+			// makes the result durable.
+			spoke.BreakerCallback(func(action string) {
+				switch action {
+				case spoke.BreakerEngage:
+					paused := b.agentMgr.EngageBreaker()
+					b.dashSrv.AuditLog("hub", "breaker-engage", "count="+strconv.Itoa(len(paused))+", agents="+strings.Join(paused, ","), "")
+					b.logger.Info("audit: fleet breaker engaged from hub", "agents", paused)
+				case spoke.BreakerRelease:
+					resumed := b.agentMgr.ReleaseBreaker(b.ctx)
+					b.dashSrv.AuditLog("hub", "breaker-release", "count="+strconv.Itoa(len(resumed))+", agents="+strings.Join(resumed, ","), "")
+					b.logger.Info("audit: fleet breaker released from hub", "agents", resumed)
+				default:
+					b.logger.Warn("unknown breaker instruction from hub; ignoring", "action", action)
+				}
+			}),
 			spoke.AuthorizedUsersCallback(func(users []string, names map[string]string) {
 				// The hub delivered its authoritative access list. Reconcile our
 				// login allowlist so Manage Access grants take effect on this
@@ -6274,6 +6348,7 @@ func (b *boot) bootHeartbeatWith(deps bootHeartbeatDeps) {
 				}
 				b.ghClient.SetHoldLabels(b.githubHoldLabels())
 				b.ghClient.SetNeverClaimLabels(b.cfg.Governor.Claims.EffectiveNeverClaimLabels())
+				b.ghClient.SetSkipIssuesWithOpenPR(b.cfg.Scanner.IsSkipIssuesWithOpenPR())
 				b.ghClient.SetSentinelAlertLabel(b.cfg.Sentinel.LabelOrDefault())
 				b.ghClient.SetIssueFilter(b.cfg.Project.IssueFilter)
 				syncAutoMergePolicyToGitHubClient(b.cfg, b.ghClient)
@@ -6832,7 +6907,38 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 		}
 	}()
 
+	serveContinuousWake := func() {
+		if deps.newWakeTimer == nil || b.gov == nil || b.ctx.Err() != nil {
+			return
+		}
+		now := wakeNow()
+		next, who := b.gov.NextContinuousKickAt()
+		if _, due := continuousWakeDecision(next, now, lastWake, wakeHold.untilFor(next, who)); due {
+			idleFor := time.Duration(0)
+			if st, ok := b.gov.GetState().Continuous[who]; ok && !st.LastKickEnd.IsZero() {
+				idleFor = now.Sub(st.LastKickEnd).Round(time.Second)
+			}
+			b.logger.Info("continuous re-kick wake: running an early eval cycle",
+				"agent", who, "next_kick", next.UTC().Format(time.RFC3339), "idle_for", idleFor.String(),
+				"was_armed_for", wakeArmedFor.UTC().Format(time.RFC3339))
+			lastWake = now
+			// Keep this cycle lean: planning and delivery without sweeps.
+			b.cfgReloadMu.Lock()
+			b.evalCycles++
+			deps.runEval(b, nil, evalSourceCached)
+			deps.persist(b)
+			b.cfgReloadMu.Unlock()
+			after, afterWho := b.gov.NextContinuousKickAt()
+			if backoff, stalled := wakeHold.observe(next, after, who, afterWho, wakeNow()); stalled {
+				b.logger.Info("continuous re-kick wake: eval cycle left the due re-kick unchanged (agent gated outside the governor); backing off",
+					"agent", who, "next_kick", next.UTC().Format(time.RFC3339), "backoff", backoff.String())
+			}
+		}
+	}
+
 	for {
+		// Serve due kicks between cycles even when other channels stay ready.
+		serveContinuousWake()
 		select {
 		case <-b.ctx.Done():
 			b.logger.Info("shutting down, persisting state")
@@ -6890,24 +6996,7 @@ func (b *boot) runLoopWith(deps runLoopDeps) {
 			b.cfgReloadMu.Unlock()
 			armWebhookHealthRecheck()
 		case <-wakeCh:
-			now := wakeNow()
-			next, who := b.gov.NextContinuousKickAt()
-			if _, due := continuousWakeDecision(next, now, lastWake, wakeHold.untilFor(next, who)); due {
-				idleFor := time.Duration(0)
-				if st, ok := b.gov.GetState().Continuous[who]; ok && !st.LastKickEnd.IsZero() {
-					idleFor = now.Sub(st.LastKickEnd).Round(time.Second)
-				}
-				b.logger.Info("continuous re-kick wake: running an early eval cycle",
-					"agent", who, "next_kick", next.UTC().Format(time.RFC3339), "idle_for", idleFor.String(),
-					"was_armed_for", wakeArmedFor.UTC().Format(time.RFC3339))
-				lastWake = now
-				tick(evalSourceCached)
-				after, afterWho := b.gov.NextContinuousKickAt()
-				if backoff, stalled := wakeHold.observe(next, after, who, afterWho, wakeNow()); stalled {
-					b.logger.Info("continuous re-kick wake: eval cycle left the due re-kick unchanged (agent gated outside the governor); backing off",
-						"agent", who, "next_kick", next.UTC().Format(time.RFC3339), "backoff", backoff.String())
-				}
-			}
+			// The loop-top due check services this timer.
 			armContinuousWake()
 		case <-agentTickCh:
 			b.cfgReloadMu.Lock()
@@ -6975,6 +7064,12 @@ var providerBudgetNotify governor.ProviderBudgetNotifyState
 // provider spend rebuff is latched. Package-level for the same reason as
 // providerBudgetNotify: runEvalCycle has no state of its own.
 var providerBudgetProbe governor.ProviderBudgetProbeState
+
+// governorKickFairness remembers, per agent, how many cycles in a row the
+// governor kick was deferred behind a delivered review-fix kick
+// (hivecommons/hive#15166). Package-level for the same reason as
+// providerBudgetProbe: runEvalCycle has no state of its own.
+var governorKickFairness = newKickLaneFairness()
 
 var evalAPIBudgetCycle atomic.Uint64
 
@@ -7698,6 +7793,10 @@ func runEvalCycle(
 	if !budgetDecision.SkipOptional {
 		applyDuplicatePRGuard(ctx, cfg, ghClient, actionable, logger)
 	}
+	// Every cycle, cached ones included: heal issue stage records the
+	// claim ledger says an open PR covers but the store still holds below
+	// 040 (a claim release written over the cover between reconcile passes).
+	reconcileLedgerCoverRecords(ctx, cfg, ghClient, actionable, logger)
 
 	// PR review queue (#9590): stamp each PR's rank, priority and reasons
 	// onto the snapshot so last-actionable.json carries them next to
@@ -7715,7 +7814,7 @@ func runEvalCycle(
 	// on a copy, and storing it back would overwrite a webhook patch that
 	// landed while the cycle ran.
 	if cachedSnapshot == nil {
-		lastActionable.Store(actionable)
+		publishEnumeratedSnapshot(lastActionable, actionable, logger)
 		if data, err := json.Marshal(actionable); err == nil {
 			atomicWrite(lastActionablePath, data)
 		}
@@ -8065,7 +8164,13 @@ func runEvalCycle(
 	// the swarm's) goes ahead of the governor kick for the same agent, or
 	// the governor kick owns the agent and the fix kick times out every
 	// cycle (hivecommons/hive#13100).
-	messages = orderReviewFixKicksFirst(messages, reviewKickByMessage)
+	for _, agent := range pendingKickAgentsFromMessages(messages) {
+		if governorKickFairness.GovernorFirst(agent) {
+			logger.Warn("governor kick displaced by fix kicks on consecutive cycles; governor kick goes first this cycle",
+				"agent", agent, "displaced_cycles", governorKickFairness.Displaced(agent), "limit", governorKickDisplacementLimit)
+		}
+	}
+	messages = orderReviewFixKicksFirst(messages, reviewKickByMessage, governorKickFairness.GovernorFirst)
 	// Freshness bound before a kick (#13375): a ref older than
 	// github.DecisionFreshnessBound in a cache-served or last-good snapshot
 	// is confirmed with one targeted GET; a stale repo's refs are withheld.
@@ -8502,6 +8607,7 @@ func runEvalCycle(
 	// single-probe rule are the decisions worth testing, and they were
 	// previously unreachable without a tmux session and a live governor.
 	var deliveredReviewKicks []review.DispatchKick
+	var deliveredKicks []scheduler.KickMessage
 	if len(messages) > 0 {
 		// governor.kick wraps the whole dispatch pass; each delivered kick
 		// still gets its own agent.kick child via startKickSpan below.
@@ -8557,8 +8663,9 @@ func runEvalCycle(
 					logUndeliveredReviewKick(logger, dashSrv, k, err)
 				}
 			},
-			onDelivered: func(msg scheduler.KickMessage) {
-				gov.RecordKickForRepo(msg.Agent, msg.Repo)
+			onDelivered: func(msg scheduler.KickMessage, deliveredAt time.Time) {
+				deliveredKicks = append(deliveredKicks, msg)
+				gov.RecordKickForRepoAt(msg.Agent, msg.Repo, deliveredAt)
 				dashSrv.AuditLog("governor", "kick", "trigger=governor-eval", msg.Agent)
 
 				// Record issue-scoped kicks into the lifecycle timeline. Cheap,
@@ -8605,6 +8712,7 @@ func runEvalCycle(
 		kickPassSpan.SetAttributes(attribute.Int("hive.kicks.review_delivered", len(deliveredReviewKicks)))
 		kickPassSpan.End()
 	}
+	governorKickFairness.ObserveCycle(messages, deliveredKicks, reviewKickByMessage)
 	persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 
 	publishFleetReportsWith(ctx, logger, dashSrv, statusPayload.FleetReport, newSelfReportPublishDeps(cfg, ghClient, dashSrv))
@@ -9738,6 +9846,12 @@ const taskListSweepInterval = 15 * time.Minute
 // the same conservative cadence as the task-list sweep.
 const supersessionSweepInterval = 15 * time.Minute
 
+// duplicateFixSweepInterval is the minimum spacing between sweeps that
+// resolve two open PRs fixing the same issue (hivecommons/hive#14799). It
+// reuses the open-PR listing the pre-dispatch guard caches and reads check
+// runs per pair, so it runs on the supersession cadence.
+const duplicateFixSweepInterval = 15 * time.Minute
+
 // sharedCIRerunInterval is the minimum spacing between shared-CI rerun
 // sweeps. Each pass lists recently closed issues per repo and only walks open
 // PRs when a [shared-ci] incident closed inside the lookback window, so it
@@ -9889,6 +10003,7 @@ func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *c
 		opts.HumanMergePaths = func(repo string) []string { return humanMergePathsFor(cfg, repo) }
 		opts.RequireCurrentBase = func(repo string) bool { return cfg.AutoMerge.RequireCurrentBaseFor(repo) }
 		opts.MergeForwardTrustedHuman = func(repo string) bool { return cfg.AutoMerge.MergeForwardTrustedHumanFor(repo) }
+		opts.MergeTrainEnabled = func() bool { return cfg.AutoMerge.MergeTrain.IsEnabled() }
 		opts.TrustedBotAuthors = func() map[string]bool { return cfg.AutoMerge.TrustedBotAuthorSet() }
 	}
 	audit := func(event automerge.AutoMergeSweepEvent) {
@@ -10093,6 +10208,7 @@ func runSupersessionSweepIfDue(ctx context.Context, ghClient *github.Client, cfg
 		MaxActions:          github.DefaultSupersessionSweepMaxActions,
 		CloseContributorPRs: supersessionCfg.CloseContributorPRs,
 		GracePeriod:         supersessionCfg.GracePeriod,
+		AutoCloseSuperseded: func() bool { return cfg == nil || cfg.Governor.AutoCloseSupersededEnabled() },
 		ACMMLevelForRepo: func(repo string) int {
 			if cfg == nil {
 				return 0
@@ -10110,6 +10226,9 @@ func runSupersessionSweepIfDue(ctx context.Context, ghClient *github.Client, cfg
 			}
 			if len(event.ExtraFiles) > 0 {
 				detail += ", extra_files=" + strings.Join(event.ExtraFiles, ";")
+			}
+			if event.Reason != "" {
+				detail += ", reason=" + event.Reason
 			}
 			dashSrv.AuditLogRecord("system", github.SupersessionSweepAuditPrefix+event.Action, detail, "", event.Repo, event.Number)
 		},
@@ -10132,6 +10251,47 @@ func runSupersessionSweepIfDue(ctx context.Context, ghClient *github.Client, cfg
 			"skipped":   strconv.Itoa(result.Skipped),
 		},
 	})
+}
+
+// runDuplicateFixSweepIfDue resolves same-issue duplicate open PRs
+// (hivecommons/hive#14799) at most once per duplicateFixSweepInterval: the
+// earlier green-or-pending PR stays, the later hive PR is closed as
+// duplicate-of:<keeper>, a person's later PR gets the comment only, and the
+// earlier-red-later-green case is parked for the owner. It follows the
+// pre-dispatch guard's switch: scanner.skip_issues_with_open_pr off turns
+// this off too, since both exist to keep one issue on one PR.
+func runDuplicateFixSweepIfDue(ctx context.Context, ghClient *github.Client, cfg *config.Config, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	if cfg != nil && !cfg.Scanner.IsSkipIssuesWithOpenPR() {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < duplicateFixSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepDuplicateFixPRs(ctx, github.DuplicateFixSweepOptions{
+		MaxActions: github.DefaultDuplicateFixSweepMaxActions,
+		Audit: func(event github.DuplicateFixEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, pr=%d, issue=%s#%d, keeper_pr=%d, action=%s, reason=%s",
+				event.Repo, event.Number, event.IssueRepo, event.Issue, event.KeeperPR, event.Action, event.Reason)
+			dashSrv.AuditLogRecord("system", github.DuplicateFixSweepAuditPrefix+event.Action, detail, "", event.Repo, event.Number)
+		},
+	})
+	if err != nil {
+		logger.Warn("duplicate-fix sweep failed", "error", err)
+		return
+	}
+	if result.Pairs > 0 {
+		logger.Info("duplicate-fix sweep complete", "pairs", result.Pairs, "closed", len(result.Closed), "commented", len(result.Commented), "escalated", len(result.Escalated), "skipped", result.Skipped)
+	}
 }
 
 // runSharedCIRerunSweepIfDue re-runs failed jobs on open PRs deferred to a
@@ -10632,6 +10792,26 @@ const issueStageSyncTimeout = 2 * time.Minute
 // applyDuplicatePRGuard filters issues already claimed by an open hive-authored
 // PR out of the actionable set. Failures are logged, never fatal: the guard is
 // a safety net, and a broken net must not take the hive down with it.
+// reconcileLedgerCoverRecords runs github.BackfillCoveredByLedger with the
+// cycle's red+stale valve. It is not an optional step: with webhook-driven
+// cached cycles the reconcile pass (and the stage sweep with it) can be
+// hours apart, and a record at 010 under an open covering PR re-offers the
+// issue to the scanner for all of that time.
+func reconcileLedgerCoverRecords(ctx context.Context, cfg *config.Config, ghClient *github.Client, actionable *github.ActionableResult, logger *slog.Logger) {
+	ledger := getClaimLedger(logger)
+	if ledger == nil || ledger.Len() == 0 || ghClient == nil {
+		return
+	}
+	backfillCtx, cancel := context.WithTimeout(ctx, issueStageSyncTimeout)
+	defer cancel()
+	res := ghClient.BackfillCoveredByLedger(backfillCtx, ledger, claimingPRRedStale(cfg, actionable))
+	if res.Covered+res.Errors > 0 && logger != nil {
+		logger.Info("stage backfill: issue records reconciled with the claim ledger",
+			"checked", res.Checked, "covered", res.Covered, "skipped_red_stale", res.SkippedRedStale,
+			"skipped_not_open", res.SkippedNotOpen, "errors", res.Errors)
+	}
+}
+
 func applyDuplicatePRGuard(
 	ctx context.Context,
 	cfg *config.Config,
@@ -10932,6 +11112,9 @@ func installReviewRelaySettings(client *github.Client, cfg *config.Config, logge
 		func() bool { return cfg.Review.CombinedPerspectives },
 		func() int { return cfg.Review.MaxReviewsPerHead },
 	)
+	// review.require_labels (PR approval allow-list): the relay's half of the
+	// gate, read live so a Features-tab edit applies to the next request.
+	client.SetReviewRequireLabels(func() []string { return cfg.Review.RequireLabels })
 }
 
 // reviewBacklogRouting resolves review.severity / review.backlog and the
@@ -11282,6 +11465,7 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 	prAgents := auditPRAgents(cfg.Project.Org, time.Now().Add(-auditPRAttributionWindow), "")
 	candidates := make([]github.PullRequest, 0, len(actionable.PRs.Items)+len(actionable.PRs.Held))
 	seenPRs := map[string]bool{}
+	labelGated := 0
 	addCandidates := func(items []github.PullRequest) {
 		for _, pr := range items {
 			fullRepo := fullRepoName(pr.Repo, cfg.Project.Org)
@@ -11290,11 +11474,22 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 				continue
 			}
 			seenPRs[key] = true
+			// review.require_labels: an unlabelled PR is never dispatched
+			// to the swarm. The relay refuses it independently.
+			if !cfg.Review.AdmitsPRLabels(pr.Labels) {
+				labelGated++
+				continue
+			}
 			candidates = append(candidates, pr)
 		}
 	}
 	addCandidates(actionable.PRs.Items)
 	addCandidates(actionable.PRs.Held)
+	if labelGated > 0 && logger != nil {
+		logger.Info("review label gate withheld PRs from review dispatch",
+			"withheld", labelGated, "candidates", len(candidates),
+			"require_labels", strings.Join(cfg.Review.NormalizedRequireLabels(), ","))
+	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		ri, rj := candidates[i].ReviewRank, candidates[j].ReviewRank
 		if ri > 0 && rj > 0 && ri != rj {
@@ -11303,6 +11498,7 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 		return ri > 0 && rj <= 0
 	})
 
+	scopeReader := reviewScopeLinearReader(cfg, logger)
 	prs := make([]review.PullRequest, 0, len(candidates))
 	for _, pr := range candidates {
 		lane := classify.Classify(github.Issue{Title: pr.Title, Labels: pr.Labels}).Lane
@@ -11351,6 +11547,12 @@ func planReviewDispatchWith(ctx context.Context, cfg *config.Config, actionable 
 			// re-review, its trivial skip and the hive base-sync carry
 			// (review.delta_rereview).
 			DeltaDiff: reviewDeltaDiffFor(ctx, cfg, ghr, artifact, state, fullRepo, pr.Number, pr.BaseRef, pr.HeadSHA, pr.BodyDigest),
+		}
+		// The linked Linear issue's text for the scope contract, read here
+		// so reviewers never need a Linear token (hivecommons/hive#14906);
+		// only for a PR about to be reviewed at this head.
+		if _, judged := artifact.AggregateForBody(fullRepo, pr.Number, pr.HeadSHA, pr.BodyDigest); !judged && state.PendingSince(fullRepo, pr.Number, pr.HeadSHA).IsZero() {
+			reviewScopeContractFor(ctx, scopeReader, &item, logger)
 		}
 		// Changed paths for the bot-author model route's path exceptions
 		// (review.bot_author_full_review_paths); fetched only for a listed
@@ -11664,14 +11866,21 @@ type reviewFixAuditor interface {
 // not get a bot commit — and silence is the one thing an operator cannot
 // investigate, so each one names the PR, who opened it, and the
 // review.fix_human_prs value at the time (on no longer permits the push:
-// hivecommons/hive#12897). The planner reports each head once, so
-// this does not repeat on every eval cycle.
+// hivecommons/hive#12897). The planner records the exclusion and
+// the withheld fix only on the cycle that first withholds a head (a persisted
+// State.Withheld entry suppresses later cycles), so this does not repeat on
+// every eval cycle.
 func auditWithheldReviewFixes(plan review.DispatchPlan, auditor reviewFixAuditor, logger *slog.Logger) {
 	// One WARN per changes_requested head that ends the cycle without a fix
 	// kick: a PR shown as "Fixing" that nobody is fixing must be loud
 	// (hivecommons/hive#14665).
 	for _, x := range plan.FixExclusions {
-		logger.Warn("review fix dispatch excluded",
+		level := slog.LevelWarn
+		if x.Reason == review.FixDispatchExcludedNotHiveAuthored || x.Reason == review.FixDispatchExcludedNotHiveAuthoredDCO {
+			// Policy skip (the hive never pushes to PRs it did not author), not a fault.
+			level = slog.LevelInfo
+		}
+		logger.Log(context.Background(), level, "review fix dispatch excluded",
 			"repo", x.Repo, "pr", x.Number, "head_sha", x.HeadSHA, "author", x.Author, "reason", x.Reason, "attempts", x.Attempts)
 	}
 	for _, w := range plan.WithheldFixes {

@@ -73,17 +73,12 @@ func TestStageTrackerSectionWiring(t *testing.T) {
 	}
 }
 
-// TestStageTrackerRows executes the pure row renderer under node and checks
-// the unified strip geometry (Open → 010 → 020 → 030 → 040 → 050 → 080 → 100 →
-// merged cap): which segments are done / active / detoured, the tooltip and
-// the chip cap, for issues and PRs alike.
-func TestStageTrackerRows(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not on PATH — Hive activity monitor rows were NOT executed by this run")
-	}
-	html := indexHTML(t)
-	script := strings.Join([]string{
+// stageTrackerRowsPreludeJS lifts everything the pure row renderer needs
+// out of index.html; stageTrackerRowsFixtureJS is the stage table and the
+// row-inspection helpers the row tests share.
+func stageTrackerRowsPreludeJS(t *testing.T, html string) string {
+	t.Helper()
+	return strings.Join([]string{
 		"const window = {};",
 		"function formatDashboardTime(d){return new Date(d).toISOString().slice(11,16)+' UTC';}",
 		"function formatDashboardDate(d){return new Date(d).toISOString().slice(0,10);}",
@@ -104,6 +99,7 @@ func TestStageTrackerRows(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_PRE_MERGE_SOAK"),
 		jsConstLine(t, html, "STAGE_TRACKER_ACTIVE_WORD"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOD_TEXT"),
+		jsConstLine(t, html, "STAGE_TRACKER_DRAFT_TIP"),
 		jsConstLine(t, html, "STAGE_TRACKER_ACTOR"),
 		jsConstLine(t, html, "STAGE_TRACKER_TERMINAL"),
 		stageTrackerSentinelJS(t, html),
@@ -121,11 +117,14 @@ func TestStageTrackerRows(t *testing.T) {
 		"var _stageTrackerFilter = stageTrackerDefaultFilter();",
 		jsFunc(t, html, "stageTrackerWaitSince"),
 		jsFunc(t, html, "stageTrackerLabelFamily"),
-		jsFunc(t, html, "stageTrackerNeedsHumanLabels"),
-		jsFunc(t, html, "stageTrackerLabelNeedsHuman"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_STAGES"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_AUTHOR_STAGES"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_MODS"),
+		jsFunc(t, html, "stageTrackerItemOnHold"),
 		jsFunc(t, html, "stageTrackerItemNeedsHuman"),
 		jsFunc(t, html, "stageTrackerLabelCompare"),
 		jsFunc(t, html, "stageTrackerLabelDialogData"),
+		stageTrackerActedJS(t, html),
 		jsFunc(t, html, "stageTrackerNormalizeFilter"),
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
@@ -138,7 +137,11 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerIcon"),
 		jsFunc(t, html, "stageTrackerPRRef"),
 		jsFunc(t, html, "stageTrackerBaseRefBadge"),
+		jsConstLine(t, html, "STAGE_TRACKER_ACTOR_NONE"),
+		jsConstLine(t, html, "STAGE_TRACKER_NOBODY_LEAD"),
+		jsFunc(t, html, "stageTrackerStageActor"),
 		jsFunc(t, html, "stageTrackerActorKind"),
+		jsFunc(t, html, "stageTrackerActorTip"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOTION_STATIC"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOTION_ACTIVE"),
 		jsConstLine(t, html, "STAGE_TRACKER_MOTION_HUMAN"),
@@ -158,15 +161,21 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerRegressionHandled"),
 		jsFunc(t, html, "stageTrackerRegressionText"),
 		jsFunc(t, html, "stageTrackerStaleLabelsText"),
+		jsFunc(t, html, "stageTrackerHopName"),
+		jsFunc(t, html, "stageTrackerTrailText"),
 		jsFunc(t, html, "stageTrackerTooltip"),
 		jsFunc(t, html, "stageTrackerChipsHtml"),
 		jsFunc(t, html, "stageTrackerHeadColsHtml"),
 		jsFunc(t, html, "stageTrackerSinceHtml"),
 		jsFunc(t, html, "stageTrackerSubRowHtml"),
+		jsFunc(t, html, "stageTrackerLinkedPRItem"),
+		jsFunc(t, html, "stageTrackerLinkedPROpen"),
+		jsFunc(t, html, "stageTrackerNestedOpenPRs"),
 		jsConstLine(t, html, "STAGE_TRACKER_LINKED_TIP"),
 		jsFunc(t, html, "stageTrackerSharedPRs"),
 		jsFunc(t, html, "stageTrackerLinkedTip"),
 		jsConstLine(t, html, "STAGE_TRACKER_LINKED_GLYPH"),
+		jsFunc(t, html, "stageTrackerLinkedDrawnHere"),
 		jsFunc(t, html, "stageTrackerLinkedSorted"),
 		stageTrackerTierJS(t, html),
 		jsFunc(t, html, "stageTrackerSortKey"),
@@ -179,6 +188,10 @@ func TestStageTrackerRows(t *testing.T) {
 		jsConstLine(t, html, "STAGE_TRACKER_OPEN_STALE_DAYS"),
 		jsFunc(t, html, "stageTrackerOpenSince"),
 		jsFunc(t, html, "stageTrackerBlockedTip"),
+		jsFunc(t, html, "stageTrackerBlockedOnPR"),
+		jsConstLine(t, html, "STAGE_TRACKER_BLOCKED_ON_PR_OPEN"),
+		jsConstLine(t, html, "STAGE_TRACKER_BLOCKED_ON_PR_MERGED"),
+		jsConstLine(t, html, "STAGE_TRACKER_BLOCKED_ON_PR_CLOSED"),
 		jsFunc(t, html, "stageTrackerShortAgo"),
 		jsFunc(t, html, "stageTrackerRefOf"),
 		jsFunc(t, html, "stageTrackerRowToolsHtml"),
@@ -188,7 +201,11 @@ func TestStageTrackerRows(t *testing.T) {
 		jsFunc(t, html, "stageTrackerMoveAttrs"),
 		jsFunc(t, html, "stageTrackerNeedsAttention"),
 		jsFunc(t, html, "stageTrackerVisible"),
-	}, "\n") + `
+		stageTrackerCuesJS(t, html),
+	}, "\n")
+}
+
+const stageTrackerRowsFixtureJS = `
 const assert = require('assert');
 const now = Date.parse('2026-01-01T12:00:00Z');
 const stages = [
@@ -206,6 +223,8 @@ const stages = [
   { number: 95, label: 'Pre-merge soak', short: 'Soaking', description: 'Lane admitted; the pre-merge soak window is running before the merge is attempted' },
   { number: 100, label: 'Merge queue', short: 'Merge queue' }, { number: 110, label: 'Merged', short: 'Merged' },
 ];
+// The stage table the tooltip's trail names its hops from (fetchStageTracker fills it live).
+var _stageTracker = { stages };
 // needs-rebase always lands a PR in 070/071/072 (automerge_stage_labels.go), so a
 // fixture pairing it with 050/060 would draw a contradictory row.
 const rebaseCoherent = (it) => { if ((it.modifiers || []).includes('needs-rebase')) assert.ok(![50, 60].includes(Number(it.stage)), 'fixture #' + it.number + ' pairs needs-rebase with stage ' + it.stage); (it.linked_prs || []).forEach(rebaseCoherent); };
@@ -229,6 +248,19 @@ const lead = (row) => text(/<li class="ham-seg ham-head-lead[^"]*">([\s\S]*?)<\/
 const chips = (row) => (row.match(/class="ham-badge /g) || []).length;
 const ctx = { nowMs: now };
 const D = 'done', T = 'todo';
+`
+
+// TestStageTrackerRows executes the pure row renderer under node and checks
+// the unified strip geometry (Open → 010 → 020 → 030 → 040 → 050 → 080 → 100 →
+// merged cap): which segments are done / active / detoured, the tooltip and
+// the chip cap, for issues and PRs alike.
+func TestStageTrackerRows(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH — Hive activity monitor rows were NOT executed by this run")
+	}
+	html := indexHTML(t)
+	script := stageTrackerRowsPreludeJS(t, html) + stageTrackerRowsFixtureJS + `
 
 // Issue claimed 30 min ago: Open + Actionable done, Claimed active, five ahead, cap todo.
 let row = stageTrackerRowHtml({ repo: 'acme/console', number: 7, kind: 'issue', title: 'Fix <login>', url: 'https://x/7', stage: 20, stage_since: new Date(now - 30*60000).toISOString(), caption: 'Claimed by scanner', author: 'alice', author_kind: 'human', author_kind_source: 'label' }, stages, ctx);
@@ -321,6 +353,24 @@ assert.deepStrictEqual(segStates(row), ['active ham-open-blocked ham-open-stale'
 assert.ok(strip(row).includes(' — blocked on acme/api#7 — '), 'a known blocker is named: ' + strip(row));
 assert.strictEqual(stageTrackerBlockedTip({ blocked_on: ['acme/api#7', 'acme/api#8'] }), 'blocked on acme/api#7, acme/api#8');
 assert.strictEqual(stageTrackerBlockedTip({}), 'carries the blocked label');
+// A review-backlog spin-off blocked on a PR (hive:blocked-on marker, hivecommons/hive#14863): the pill names
+// and links the PR, the tooltip says what lifts the block, the row title carries it too.
+const blockedOnPR = { repo: 'hivecommons/hive', number: 14862, url: 'https://github.com/hivecommons/hive/pull/14862', state: 'open' };
+row = stageTrackerRowHtml({ repo: 'hivecommons/hive', number: 14863, kind: 'issue', title: 'Review backlog: a', stage: 0, created_at: new Date(now - 7 * 3600000).toISOString(), labels: ['agent/reviewer', 'blocked'], modifiers: ['blocked'], caption: 'Blocked on PR #14862 — lifts when it merges', blocked_on_pr: blockedOnPR }, stages, ctx);
+assert.strictEqual(openWord(row), 'Open · blocked · since 7h');
+assert.ok(row.includes('<a class="ham-badge ham-badge-mod ham-mod-blocked" href="https://github.com/hivecommons/hive/pull/14862" target="_blank" rel="noopener" title="Blocked on PR hivecommons/hive#14862 (open) — lifts when it merges; re-triage if closed unmerged" aria-label="Blocked on PR hivecommons/hive#14862 (open) — lifts when it merges; re-triage if closed unmerged">blocked on #14862</a>'), 'pill links the blocker: ' + row);
+assert.ok(strip(row).includes(' — blocked on hivecommons/hive#14862 — '), 'chevron names the blocker: ' + strip(row));
+assert.ok(tooltip(row).includes('Blocked on PR hivecommons/hive#14862 (open) — lifts when it merges; re-triage if closed unmerged'), 'row title carries the blocker: ' + tooltip(row));
+assert.ok(tooltip(row).includes('Blocked on PR #14862 — lifts when it merges'), 'caption in the row title: ' + tooltip(row));
+assert.ok(!tooltip(row).includes('No stage recorded yet'), tooltip(row));
+assert.strictEqual(stageTrackerBlockedOnPR({ repo: 'acme/console', blocked_on_pr: { repo: 'acme/api', number: 7, state: 'merged' } }).tip, 'Blocked on PR acme/api#7 (merged) — merged; the blocked sweep lifts the label next');
+assert.strictEqual(stageTrackerBlockedOnPR({ repo: 'acme/console', blocked_on_pr: { repo: 'acme/api', number: 7 } }).short, 'acme/api#7', 'foreign repo keeps owner/repo');
+assert.strictEqual(stageTrackerBlockedOnPR({ repo: 'console', blocked_on_pr: { repo: 'acme/console', number: 7, state: 'closed' } }).short, '#7', 'bare configured name matches its full repo');
+assert.strictEqual(stageTrackerBlockedOnPR({ blocked_on_pr: { repo: 'acme/api', number: 0 } }), null);
+assert.strictEqual(stageTrackerBlockedOnPR({}), null);
+assert.strictEqual(stageTrackerBlockedTip({ blocked_on_pr: blockedOnPR }), 'blocked on hivecommons/hive#14862');
+row = stageTrackerRowHtml({ repo: 'hivecommons/hive', number: 14868, kind: 'issue', title: 'No url', stage: 0, modifiers: ['blocked'], blocked_on_pr: { repo: 'hivecommons/hive', number: 14821 } }, stages, ctx);
+assert.ok(row.includes('<span class="ham-badge ham-badge-mod ham-mod-blocked" title="Blocked on PR hivecommons/hive#14821 — lifts when it merges; re-triage if closed unmerged">blocked on #14821</span>'), 'without a url the pill still names the PR, as a span: ' + row);
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 29, kind: 'issue', title: 'Blocked no since', stage: 0, created_at: new Date(now - 3 * 86400000).toISOString(), modifiers: ['blocked'] }, stages, ctx);
 assert.strictEqual(openWord(row), 'Open · blocked · since 3d', 'created_at fallback in the chevron');
 assert.ok(row.includes('<span class="ham-since">3d</span>'), 'created_at fallback in the since column: ' + row);
@@ -331,6 +381,32 @@ assert.strictEqual(openWord(row), 'Open · hold', 'hold is a human instruction: 
 assert.deepStrictEqual(segStates(row), ['active ham-open-hold', T, T, T, T, T, 'todo cap']);
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 28, kind: 'pr', title: 'Blocked later', stage: 50, modifiers: ['blocked'] }, stages, ctx);
 assert.ok(!row.includes('ham-open-blocked') && !row.includes('Open · blocked'), 'blocked past Open is a chip, not an Open word');
+// A draft PR with no stage (hivecommons/hive#14572): the far-right pill
+// reads "draft" with the explanatory tooltip, the Open word reads "Draft",
+// keeps its age but never tints stale — nothing is stuck, the lanes skip
+// drafts until the author marks it ready.
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 14427, kind: 'pr', title: 'WIP: image scanner', stage: 0, stage_since: new Date(now - 18 * 3600000).toISOString(), labels: ['do-not-merge/work-in-progress'], modifiers: ['draft'] }, stages, ctx);
+assert.strictEqual(openWord(row), 'Draft · since 18h', row);
+assert.deepStrictEqual(segStates(row), ['active ham-open-draft', T, T, T, T, T, 'todo cap'], 'draft: its own class, no hold/blocked class');
+assert.ok(row.includes('ham-mod-draft" title="' + STAGE_TRACKER_DRAFT_TIP + '">draft</span>'), 'draft pill with tooltip: ' + row);
+assert.ok(strip(row).includes(' — ' + STAGE_TRACKER_DRAFT_TIP + ' — open since '), 'chevron tooltip explains the draft: ' + strip(row));
+assert.ok(tooltip(row).includes('Open · draft'), tooltip(row));
+assert.ok(tooltip(row).includes('Flags: draft'), tooltip(row));
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 14428, kind: 'pr', title: 'Old draft', stage: 0, stage_since: new Date(now - 5 * 86400000).toISOString(), modifiers: ['draft'] }, stages, ctx);
+assert.strictEqual(openWord(row), 'Draft · since 5d');
+assert.deepStrictEqual(segStates(row), ['active ham-open-draft', T, T, T, T, T, 'todo cap'], 'a long-lived draft is not stale: it is waiting on its author');
+assert.strictEqual(stageTrackerCurrentStageHtml({ stage: 0, stage_since: new Date(now - 18 * 3600000).toISOString(), modifiers: ['draft'] }, stages, null, now), '<p class="ham-current-stage">Draft · since 18h</p>', 'the compact caption carries it too');
+// Draft plus a human hold: hold leads the pill ("hold +1") and the Open word,
+// and the folded draft still explains itself on hover.
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 31, kind: 'pr', title: 'Held draft', stage: 0, stage_since: new Date(now - 3 * 86400000).toISOString(), labels: ['do-not-merge/hold'], modifiers: ['hold', 'draft'] }, stages, ctx);
+assert.strictEqual(openWord(row), 'Open · hold', 'hold wins the Open word over draft');
+assert.deepStrictEqual(segStates(row), ['active ham-open-hold', T, T, T, T, T, 'todo cap']);
+assert.ok(row.includes('ham-mod-hold" title="' + STAGE_TRACKER_DRAFT_TIP + '">hold +1</span>'), 'hold leads, draft folded: ' + row);
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 32, kind: 'pr', title: 'Still drafting', stage: 50, modifiers: ['draft'] }, stages, ctx);
+assert.ok(!row.includes('ham-open-draft') && !row.includes('>Draft'), 'draft past Open is a chip, not an Open word: ' + row);
+assert.ok(row.includes('ham-mod-draft"'), row);
+assert.strictEqual(stageTrackerHeadline({ stage: 0, modifiers: ['draft'] }), 'Open · draft');
+assert.strictEqual(stageTrackerHeadline({ stage: 0, modifiers: ['hold', 'draft'] }), 'Open · on hold', 'hold leads the headline too');
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 24, kind: 'issue', title: 'Staged', stage: 10, stage_since: new Date(now - 3 * 86400000).toISOString() }, stages, ctx);
 assert.ok(!row.includes('since '), 'a staged item has no Open age');
 assert.strictEqual(stageTrackerCurrentStageHtml({ stage: 0, stage_since: new Date(now - 14 * 3600000).toISOString() }, stages, null, now), '<p class="ham-current-stage">Open · since 14h</p>', 'the compact caption carries it too');
@@ -365,7 +441,7 @@ assert.ok(!stageTrackerRowHtml({ repo: 'acme/console', number: 30, kind: 'pr', t
 // With the PR's stage known the issue strip rides it (merge queue → Merge gate lit, hive move).
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 8, kind: 'issue', stage: 40, linked_prs: [{ number: 102, title: 'Fix it', author_kind: 'human', author: 'bob', stage: 100, stage_since: new Date(now - 7200000).toISOString(), modifiers: ['stalled'], caption: 'Admitted, merging' }] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, D, 'active', 'todo cap']);
-assert.ok(row.includes('<span class="ham-seg-t">Ready for auto merge</span><svg class="ham-ico ham-actor-ico"') && row.includes('aria-label="Next move: hive"'), row);
+assert.ok(row.includes('<span class="ham-seg-t">Merging</span><svg class="ham-ico ham-actor-ico"') && row.includes('aria-label="Next move: hive"'), row);
 assert.ok(row.includes('ham-mod-stalled">stalled</span>') && row.includes('<span class="ham-since ham-stalled">2h</span>'), 'chips + since come from the covering PR: ' + row);
 assert.ok(tooltip(row).includes('Admitted, merging') && tooltip(row).includes('Covering PR: #102'), tooltip(row));
 assert.ok(prCol(row)[0].includes('ham-author-human') && prCol(row)[0].includes('<span class="ham-pr-title">Fix it</span>'), prCol(row)[0]);
@@ -374,11 +450,11 @@ assert.strictEqual(subs(row).length, 0);
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 8, kind: 'issue', stage: 40, linked_prs: [{ number: 102, stage: 100 }, { number: 104 }] }, stages, ctx);
 assert.ok(subs(row)[1].includes('#104') && segStates(subs(row)[1]).every(st => st.startsWith('blank') || st === 'todo' || st === 'todo cap'), 'unknown PR stage: blank lead-in, nothing lit');
 assert.ok(tooltip(row).includes('acme/console'), 'repo lives in the tooltip');
-// Full PR row for 100: Merge gate lit as Ready for auto merge with the hive actor icon.
+// Full PR row for 100: Merge gate lit as Merging with the hive actor icon (#15073 vocabulary).
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 102, kind: 'pr', stage: 100, author: 'hive-bot', author_kind: 'hive' }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, D, 'active', 'todo cap']);
 assert.ok(strip(row).includes('title="Merge queue — admitted, merging · Next move: hive"'), 'chevron tooltip carries 100: ' + row);
-assert.ok(text(row).includes('#102 Ready for auto merge'), text(row));
+assert.ok(text(row).includes('#102 Merging'), text(row));
 // Full PR row for 095: Merge gate lit as Soaking (not a detour), hive actor,
 // chevron tooltip names the real stage and the time left; headline carries it too.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 13020, kind: 'pr', stage: 95, author: 'hive-bot', author_kind: 'hive', soak_remaining_seconds: 17 * 60 + 1 }, stages, ctx);
@@ -391,7 +467,7 @@ assert.strictEqual(stageTrackerHeadline({ stage: 95, kind: 'issue', soak_remaini
 assert.strictEqual(stageTrackerAnchor(95, stages, 'pr'), STAGE_TRACKER_MERGE_COLUMN, '095 anchors on the merge gate column');
 
 // PR returned to contributor: detour badge rides Review; chip cap = author kind + first modifier (+N).
-row = stageTrackerRowHtml({ repo: 'acme/console', number: 102, kind: 'pr', title: 'Fix flaky', stage: 72, lane: 'contributor', tier: 'trusted', author: 'karibhou', author_kind: 'clanker', author_kind_source: 'inferred', modifiers: ['needs-rebase', 'needs-human'], caption: 'Returned to @karibhou', history: [{stage:50},{stage:60},{stage:72}] }, stages, ctx);
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 102, kind: 'pr', title: 'Fix flaky', stage: 72, lane: 'contributor', tier: 'trusted', author: 'karibhou', author_kind: 'clanker', author_kind_source: 'inferred', modifiers: ['needs-rebase', 'needs-human'], caption: 'Returned to @karibhou', history: [{number:50,slug:'review-pending'},{number:60,slug:'reviewed'},{number:72,slug:'returned-to-contributor',from:60}] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, 'active detoured', T, 'todo cap']);
 assert.ok(row.includes('<span class="ham-detour">Returned to contributor</span>'));
 // Invariant: a PR never occupies the issue slot. A PR with no linked issue
@@ -408,7 +484,7 @@ assert.ok(prCol(row)[0].includes('ham-author-ico ham-author-clanker') && prCol(r
 assert.strictEqual(titles(row, 'Fix flaky'), 1, 'title appears once');
 assert.strictEqual(chips(row), 1, 'author kind is an icon, not a chip');
 assert.ok(row.includes('ham-mod-needs-human">needs human +1</span>'), row);
-assert.ok(tooltip(row).includes('Flags: needs-rebase, needs-human') && tooltip(row).includes('Trail: 050 → 060 → 072'), tooltip(row));
+assert.ok(tooltip(row).includes('Flags: needs-rebase, needs-human') && tooltip(row).includes('Trail: CI / Review → Reviewed → Returned to contributor'), tooltip(row));
 
 // PR reviewed (060): Review done, Merge gate lit, no detour.
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 107, kind: 'pr', stage: 60 }, stages, ctx);
@@ -417,7 +493,7 @@ row = stageTrackerRowHtml({ repo: 'acme/console', number: 109, kind: 'pr', stage
 assert.ok(row.includes('<span class="ham-seg-t">Ready for auto merge</span>') && strip(row).includes('title="Awaiting merge admission — not yet admitted — soak 20m left · Next move: hive"'), 'chevron tooltip carries 080: ' + row);
 
 // PR regressed from the queue back to review-pending: Review lit, "Sent back" in the tooltip.
-row = stageTrackerRowHtml({ repo: 'acme/console', number: 103, kind: 'pr', stage: 70, modifiers: ['regressed', 'needs-rebase'], history: [{stage:80},{stage:100},{stage:70}] }, stages, ctx);
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 103, kind: 'pr', stage: 70, modifiers: ['regressed', 'needs-rebase'], history: [{number:80,slug:'awaiting-merge-admission'},{number:100,slug:'merge-queue'},{number:70,slug:'fixing',from:100,regressed:true}] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, 'active detoured', T, 'todo cap']);
 assert.ok(tooltip(row).startsWith('Sent back'));
 assert.ok(row.includes('ham-mod-regressed'), 'regressed outranks needs-rebase for the single chip');
@@ -466,6 +542,15 @@ assert.strictEqual(stageTrackerHeadline({ kind: 'pr', stage: 70, modifiers: ['re
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 356, kind: 'issue', stage: 40, linked_prs: [{ number: 109, author_kind: 'hive', stage: 85 }] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, D, 'active detoured', 'todo cap'], row);
 assert.ok(tooltip(row).includes('Needs a human decision (its PR)'), row);
+// A PR parked at 085 lights the 080 column as a detour; its chevron hover
+// names the parking stage, not the column it rides on — the owner read
+// "Awaiting merge admission … Next move: human" on hivecommons/hive#14821
+// and #14822 while the engine still said 085.
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 14821, kind: 'pr', stage: 85, caption: 'decision requested' }, stages, ctx);
+const chevronTip = (r) => (/<li class="ham-seg active[^"]*"[^>]*title="([^"]*)" aria-current="step"/.exec(r) || [])[1] || '';
+assert.ok(chevronTip(row).startsWith('Needs human decision') && !chevronTip(row).includes('Awaiting merge admission') && !chevronTip(row).includes('not yet admitted') && chevronTip(row).includes('Next move: human'), 'detour chevron names its own stage: ' + chevronTip(row));
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 14830, kind: 'pr', stage: 80, caption: 'CI green' }, stages, ctx);
+assert.ok(chevronTip(row).startsWith('Awaiting merge admission — not yet admitted') && chevronTip(row).includes('Next move: hive'), '080 keeps its own hover: ' + chevronTip(row));
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 107, kind: 'pr', stage: 50, modifiers: ['needs-decision'] }, stages, ctx);
 assert.ok(row.includes('ham-mod-needs-decision">needs human decision</span>') && tooltip(row).includes('Flags: needs human decision'), row);
 // Whose move it is, as an ink-coloured icon after the word: Review = hive,
@@ -476,10 +561,34 @@ row = stageTrackerRowHtml({ repo: 'acme/console', number: 108, kind: 'pr', stage
 assert.ok(row.includes('aria-label="Next move: clanker"') && row.includes('<span class="ham-detour">Returned to contributor</span><svg class="ham-ico ham-actor-ico"'), row);
 // 071 needs-author: a human's red PR rides the Review column as its own
 // detour, the person as the mover.
-row = stageTrackerRowHtml({ repo: 'acme/console', number: 109, kind: 'pr', stage: 71, author: 'sam', author_kind: 'human', history: [{stage:50},{stage:71}] }, stages, ctx);
+row = stageTrackerRowHtml({ repo: 'acme/console', number: 109, kind: 'pr', stage: 71, author: 'sam', author_kind: 'human', history: [{number:50,slug:'review-pending'},{number:71,slug:'needs-author',from:50}] }, stages, ctx);
 assert.deepStrictEqual(segStates(row), [D, D, D, D, 'active detoured', T, 'todo cap']);
 assert.ok(row.includes('aria-label="Next move: human"') && row.includes('<span class="ham-detour">Needs author</span><svg class="ham-ico ham-actor-ico"'), row);
-assert.ok(tooltip(row).includes('Trail: 050 → 071'), tooltip(row));
+assert.ok(tooltip(row).includes('Trail: CI / Review → Needs author'), tooltip(row));
+// The trail names hops from the payload's {number, slug} entries (#14787
+// showed "undefined → undefined → …" when it read a field the server never
+// sent); the last STAGE_TRACKER_TRAIL_HOPS hops only; an unnamed hop is left
+// out rather than printed as "undefined"; the clause is omitted when fewer
+// than two hops can be named.
+const live14787 = { kind: 'pr', number: 14787, stage: 85, modifiers: ['needs-human'], history: [
+  { number: 50, slug: 'review-pending', at: '2026-10-27T21:27:53Z' }, { number: 85, slug: 'needs-decision', from: 50 },
+  { number: 50, slug: 'review-pending', from: 85 }, { number: 71, slug: 'needs-author', from: 50 },
+  { number: 50, slug: 'review-pending', from: 71 }, { number: 71, slug: 'needs-author', from: 50 },
+  { number: 50, slug: 'review-pending', from: 71 }, { number: 85, slug: 'needs-decision', from: 50 }] };
+assert.strictEqual(stageTrackerTrailText(live14787), 'CI / Review → Needs author → CI / Review → Needs human decision');
+assert.ok(!stageTrackerTooltip(live14787, now).includes('undefined'), stageTrackerTooltip(live14787, now));
+assert.strictEqual(stageTrackerTrailText({ history: [{ number: 50 }, { number: 999 }, { number: 85 }] }), 'CI / Review → Needs human decision', 'an unnamed hop is skipped');
+assert.strictEqual(stageTrackerTrailText({ history: [{ number: 50 }, {}, { foo: 1 }] }), '', 'one nameable hop is no trail');
+assert.strictEqual(stageTrackerTrailText({ history: [{ number: 50 }] }), '', 'a single hop is no trail');
+assert.strictEqual(stageTrackerTrailText({ history: [] }), '');
+assert.strictEqual(stageTrackerTrailText({}), '');
+assert.strictEqual(stageTrackerTrailText({ history: [{ number: 0 }, { number: 10 }] }), 'Open → Actionable', '000 reads as Open');
+assert.ok(!stageTrackerTooltip({ kind: 'pr', number: 1, stage: 50, history: [{ number: 999 }, { number: 998 }] }, now).includes('Trail:'), 'no Trail clause when nothing can be named');
+const savedStages = _stageTracker;
+_stageTracker = null;
+assert.strictEqual(stageTrackerTrailText(live14787), 'review-pending → needs-author → review-pending → needs-decision', 'the slug stands in before the stage table loads');
+assert.strictEqual(stageTrackerTrailText({ history: [{ number: 50 }, { number: 85 }] }), '', 'numbers alone, no table, no slug: nothing to name');
+_stageTracker = savedStages;
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 7, kind: 'issue', stage: 40, linked_prs: [{ number: 108, author_kind: 'clanker', stage: 30 }] }, stages, ctx);
 assert.ok(subs(row).length === 0 && strip(row).includes('aria-label="Next move: clanker"') && strip(row).includes('<span class="ham-seg-t">PR in progress</span><svg class="ham-ico ham-actor-ico"'), 'single covering PR: the issue strip lights PR in progress with the PR author as the mover: ' + row);
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 7, kind: 'issue', stage: 40, linked_prs: [{ number: 108, author_kind: 'clanker', stage: 30 }, { number: 109, author_kind: 'hive', stage: 50 }] }, stages, ctx);
@@ -599,7 +708,7 @@ assert.deepStrictEqual(segStates(row), ['active', T, T, T, T, T, 'todo cap']);
 // is what the chevron says, the actor is whose move it is. The active
 // chevron now leads with its stage icon, so the regex skips that svg.
 const prWords = {};
-for (const [st, word, actor] of [[50, 'CI / Review', 'hive'], [60, 'Ready for auto merge', 'hive'], [70, 'Fixing', 'author'], [71, 'Needs author', 'author'], [72, 'Returned to contributor', 'author'], [74, 'Adopted by hive', 'hive'], [80, 'Ready for auto merge', 'hive'], [85, 'Needs human decision', 'human'], [90, 'Ready for human merge', 'human'], [100, 'Ready for auto merge', 'hive']]) {
+for (const [st, word, actor] of [[50, 'CI / Review', 'hive'], [60, 'Awaiting merge gate', 'hive'], [70, 'Fixing', 'author'], [71, 'Needs author', 'author'], [72, 'Returned to contributor', 'author'], [74, 'Adopted by hive', 'hive'], [80, 'Ready for auto merge', 'hive'], [85, 'Needs human decision', 'human'], [90, 'Ready for human merge', 'human'], [100, 'Merging', 'hive']]) {
   const r = stageTrackerRowHtml({ repo: 'acme/console', number: 500 + st, kind: 'pr', stage: st, author_kind: 'clanker' }, stages, ctx);
   const m = /aria-current="step"><svg class="ham-ico ham-active-ico"[^>]*>[\s\S]*?<\/svg><span class="ham-(?:seg-t|detour)">([^<]*)<\/span><svg class="ham-ico ham-actor-ico"[^>]*aria-label="Next move: ([a-z]+)"[^>]*>/.exec(r);
   assert.ok(m, 'stage ' + st + ' has no active word + actor: ' + r);
@@ -610,7 +719,7 @@ for (const [st, word, actor] of [[50, 'CI / Review', 'hive'], [60, 'Ready for au
 // and the next mover for the strip's active segment; it stays empty when no
 // active segment is in range.
 assert.strictEqual(stageTrackerCurrentStageHtml({ repo: 'acme/console', number: 570, kind: 'pr', stage: 70, author_kind: 'clanker' }, stages), '<p class="ham-current-stage">CI / Review · Fixing · Next move: clanker</p>');
-assert.strictEqual(stageTrackerCurrentStageHtml({ repo: 'acme/console', number: 560, kind: 'pr', stage: 60 }, stages), '<p class="ham-current-stage">Ready for auto merge · Next move: hive</p>', 'no detour → column word only');
+assert.strictEqual(stageTrackerCurrentStageHtml({ repo: 'acme/console', number: 560, kind: 'pr', stage: 60 }, stages), '<p class="ham-current-stage">Awaiting merge gate · Next move: hive</p>', 'no detour → column word only');
 assert.strictEqual(stageTrackerCurrentStageHtml({ repo: 'acme/console', number: 570, kind: 'pr', stage: 70, author_kind: 'clanker' }, stages, { from: 500 }), '', 'no caption when the active segment is out of range');
 assert.strictEqual(STAGE_TRACKER_ACTOR[70], 'author', '070 fixing is the author\'s move');
 // Filters.
@@ -676,7 +785,12 @@ assert.ok(/<a class="ham-ref"[^>]*title="[^"]*@ann[^"]*"/.test(row), 'the #N lin
 row = stageTrackerRowHtml(g[1], stages, ctx);
 expectTitles(row, ['a.ham-ref', 'span.ham-title', 'a.ham-pr-ref', 'li.ham-seg'], 'issue with one PR');
 assert.ok(/<a class="ham-pr-ref"[^>]*title="The one PR Author: hive · @hive-bot · linked PR, shown on its issue&#39;s row"/.test(row), 'the PR link also explains the shared row: ' + row);
-assert.ok(/<li class="ham-seg active" data-motion="active" title="Review pending · Next move: hive" aria-current="step">/.test(row), 'active chevron: stage + whose move (hive acting: pulses): ' + row);
+// tracker-cues: with no agent on the item the chevron is static (waiting);
+// the pulse and the "Working now" lead need a worker in ctx.workers.
+assert.ok(/<li class="ham-seg active" title="Review pending · Next move: hive" aria-current="step">/.test(row), 'active chevron: stage + whose move (nobody working: static): ' + row);
+row = stageTrackerRowHtml(g[1], stages, Object.assign({}, ctx, { workers: { 'g/r#21': { agent: 'scout', action: 'agent_comment_created', at: new Date(now - 120000).toISOString() } } }));
+assert.ok(/<li class="ham-seg active" data-motion="active" title="Working now: scout commented · 2m ago — Review pending · Next move: hive" aria-current="step">/.test(row), 'active chevron: working lead + pulse when an agent is on the nested PR: ' + row);
+assert.ok(/class="ham-row cue-working"/.test(row), 'the row carries the working cue: ' + row);
 assert.ok(!/<li class="ham-seg active" data-motion=[^>]*title="Claimed"/.test(stageTrackerRowHtml(g[0], stages, ctx)), 'Claimed is static: no data-motion');
 // Issue with two PRs: #N link + title on the issue line, nothing lit there;
 // each sub-row has its PR link (full PR tooltip) and its active chevron.
@@ -710,7 +824,9 @@ assert.ok(row.includes('ham-finisher-person'), 'an issue riding one PR takes the
 row = stageTrackerRowHtml({ repo: 'acme/console', number: 124, kind: 'issue', stage: 40, finisher: 'person', linked_prs: [{ number: 125, stage: 50, finisher: 'hive' }] }, stages, ctx);
 assert.ok(!row.includes('ham-finisher-person'), 'the PR answer wins once the PR has one: ' + row);
 `
-	cmd := exec.Command(node, "-e", script)
+	// Over stdin: the lifted fixture exceeds Linux's per-argument limit.
+	cmd := exec.Command(node, "-")
+	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node Hive activity monitor fixture failed: %v\n%s", err, out)
 	}
@@ -753,6 +869,7 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsFunc(t, html, "stageTrackerDefaultFilter"),
 		"var _stageTrackerFilter = stageTrackerDefaultFilter();",
 		jsFunc(t, html, "stageTrackerAnchor"),
+		jsFunc(t, html, "stageTrackerLinkedDrawnHere"),
 		jsFunc(t, html, "stageTrackerLinkedSorted"),
 		stageTrackerTierJS(t, html),
 		jsFunc(t, html, "stageTrackerSortKey"),
@@ -763,11 +880,14 @@ func TestStageTrackerFilterSortPage(t *testing.T) {
 		jsFunc(t, html, "stageTrackerNeedsAttention"),
 		jsFunc(t, html, "stageTrackerWaitSince"),
 		jsFunc(t, html, "stageTrackerLabelFamily"),
-		jsFunc(t, html, "stageTrackerNeedsHumanLabels"),
-		jsFunc(t, html, "stageTrackerLabelNeedsHuman"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_STAGES"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_AUTHOR_STAGES"),
+		jsConstLine(t, html, "STAGE_TRACKER_NEEDS_HUMAN_MODS"),
+		jsFunc(t, html, "stageTrackerItemOnHold"),
 		jsFunc(t, html, "stageTrackerItemNeedsHuman"),
 		jsFunc(t, html, "stageTrackerLabelCompare"),
 		jsFunc(t, html, "stageTrackerLabelDialogData"),
+		stageTrackerActedJS(t, html),
 		jsFunc(t, html, "stageTrackerNormalizeFilter"),
 		jsFunc(t, html, "stageTrackerFilterActive"),
 		jsFunc(t, html, "stageTrackerMatches"),
@@ -925,7 +1045,7 @@ assert.deepStrictEqual(fac.chips.map(x => x.label), ['stage/010-actionable', 'st
 assert.deepStrictEqual(fac.chips.find(x => x.label === 'author/clanker').count, 2);
 assert.deepStrictEqual(fac.all.map(x => x.label), fac.chips.map(x => x.label), 'under the limit the dialog list equals the row');
 assert.strictEqual(fac.hidden, 0);
-assert.strictEqual(fac.needsHuman, null, 'no needs-human set in the payload, no synthetic chip');
+assert.deepStrictEqual([fac.needsHuman.count, fac.needsHuman.on, fac.onHold.count, fac.onHold.on], [0, false, 0, false], 'synthetic chips always exist; nothing here is human-gated or held');
 assert.ok(stageTrackerLabelFacets(items.concat([{ kind: 'issue', repo: 'a/b', number: 7, labels: ['solo'] }]), F()).chips.some(x => x.label === 'solo'), 'single-item labels are offered too (no hidden labels)');
 // Over the limit: the row shows the first N in order plus any selected label; all keeps every label and hidden the overflow.
 const wide = items.concat(Array.from({ length: 30 }, (_, i) => ({ kind: 'issue', repo: 'a/b', number: 100 + i, labels: ['zz-' + String(i).padStart(2, '0')] })));
@@ -939,24 +1059,34 @@ let dlg = stageTrackerLabelDialogData(fac, 'ZZ-1');
 assert.deepStrictEqual(dlg.rows.map(x => x.label), ['zz-10', 'zz-11', 'zz-12', 'zz-13', 'zz-14', 'zz-15', 'zz-16', 'zz-17', 'zz-18', 'zz-19', 'zz-29'], 'query is a case-insensitive substring; selected labels stay listed');
 assert.deepStrictEqual([dlg.total, dlg.selected, dlg.query], [40, 1, 'zz-1']);
 
-// Needs human: one synthetic facet over the payload's set; count = distinct items, prefix children match, filter is OR across the set.
-const nh = stageTrackerNeedsHumanLabels({ needs_human_labels: ['stage/045-needs-decision', 'Needs-Human', 'hold', ' stage/071-needs-author '] });
-assert.deepStrictEqual(nh, ['stage/045-needs-decision', 'needs-human', 'hold', 'stage/071-needs-author']);
+// Needs human (hivecommons/hive#15008): stage/modifier predicate shared with the count — labels alone never qualify.
 const parked = items.concat([
-  { kind: 'issue', repo: 'a/b', number: 20, labels: ['stage/045-needs-decision', 'needs-human', 'hold'] },
-  { kind: 'issue', repo: 'a/b', number: 21, labels: ['needs-human/agent-ready'] },
-  { kind: 'pr', repo: 'a/b', number: 22, labels: ['stage/071-needs-author', 'author/human'] },
-  { kind: 'issue', repo: 'a/b', number: 23, labels: ['holder'] },
+  { kind: 'issue', repo: 'a/b', number: 20, stage: 45, modifiers: [], labels: ['stage/045-needs-decision'] },
+  { kind: 'issue', repo: 'a/b', number: 21, stage: 20, modifiers: ['needs-human'], labels: ['needs-human/agent-ready'] },
+  { kind: 'pr', repo: 'a/b', number: 22, stage: 71, author_kind: 'human', modifiers: [], labels: ['stage/071-needs-author', 'author/human'] },
+  { kind: 'pr', repo: 'a/b', number: 23, stage: 71, author_kind: 'clanker', modifiers: [], labels: ['stage/071-needs-author'] },
+  { kind: 'issue', repo: 'a/b', number: 24, stage: 40, modifiers: [], labels: ['needs-signal'] },
+  { kind: 'issue', repo: 'a/b', number: 25, stage: 45, modifiers: ['hold'], labels: ['stage/045-needs-decision', 'hold'] },
+  { kind: 'pr', repo: 'a/b', number: 26, stage: 80, modifiers: ['hold'], labels: ['hold'] },
+  { kind: 'pr', repo: 'a/b', number: 27, stage: 60, modifiers: ['stalled', 'blocked-on-pr'], labels: [] },
+  { kind: 'issue', repo: 'a/b', number: 28, stage: 15, modifiers: [], labels: [] },
+  { kind: 'pr', repo: 'a/b', number: 29, stage: 90, modifiers: [], labels: [] },
+  { kind: 'pr', repo: 'a/b', number: 30, stage: 50, modifiers: ['unauthorized'], labels: [] },
 ]);
-assert.strictEqual(stageTrackerLabelNeedsHuman('needs-human/agent-ready', nh), true);
-assert.strictEqual(stageTrackerLabelNeedsHuman('holder', nh), false, 'prefix match needs the / separator');
-fac = stageTrackerLabelFacets(parked, F(), { needsHumanLabels: nh });
-assert.deepStrictEqual([fac.needsHuman.count, fac.needsHuman.on], [3, false], 'three distinct items, not five label hits');
-assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true }), Object.assign({ needsHumanLabels: nh }, ctx))), [20, 21, 22]);
-assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true, labels: ['author/human'] }), Object.assign({ needsHumanLabels: nh }, ctx))), [22], 'needs-human ANDs with label chips');
+assert.strictEqual(stageTrackerItemNeedsHuman(parked.find(x => x.number === 24)), false, '040 "PR in progress" needs no human (#14976)');
+assert.strictEqual(stageTrackerItemNeedsHuman(parked.find(x => x.number === 23)), false, '071 with a clanker author is the bot\'s turn');
+assert.strictEqual(stageTrackerItemNeedsHuman(parked.find(x => x.number === 25)), false, 'hold wins: a held row is paused, not waiting');
+assert.strictEqual(stageTrackerItemOnHold(parked.find(x => x.number === 25)), true);
+fac = stageTrackerLabelFacets(parked, F());
+assert.deepStrictEqual([fac.needsHuman.count, fac.needsHuman.on, fac.onHold.count, fac.onHold.on], [6, false, 2, false]);
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true }), ctx)), [20, 21, 22, 28, 29, 30], 'filter and chip count agree');
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ onHold: true }), ctx)), [25, 26]);
+assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true, labels: ['author/human'] }), ctx)), [22], 'needs-human ANDs with label chips');
 assert.strictEqual(stageTrackerFilterActive(F({ needsHuman: true })), true);
+assert.strictEqual(stageTrackerFilterActive(F({ onHold: true })), true);
 assert.strictEqual(stageTrackerNormalizeFilter({ needsHuman: 'yes' }).needsHuman, true);
-assert.deepStrictEqual(nums(stageTrackerVisible(parked, F({ needsHuman: true }), ctx)), [], 'without a set nothing can need a human');
+assert.strictEqual(stageTrackerNormalizeFilter({ onHold: 1 }).onHold, true);
+assert.strictEqual(stageTrackerLabelDialogData(stageTrackerLabelFacets(parked, F({ needsHuman: true, onHold: true }))).selected, 2);
 `
 	cmd := exec.Command(node, "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {

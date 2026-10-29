@@ -7,6 +7,7 @@ import (
 
 	"github.com/hivecommons/hive/crux"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 	"github.com/hivecommons/hive/pkg/nous"
 	"github.com/hivecommons/hive/pkg/tracing"
@@ -194,6 +195,9 @@ type UpgradeDrainReport struct {
 	InFlight   []string `json:"in_flight,omitempty"`
 	WaitedS    int      `json:"waited_s"`
 	RemainingS int      `json:"remaining_s"`
+	// Turns mirrors spoke.UpgradeDrainReport.Turns: per-agent turn elapsed
+	// for the InFlight agents. Absent from older spokes.
+	Turns []spoke.UpgradeTurn `json:"turns,omitempty"`
 }
 
 // HeartbeatClusterHealthReport contains cluster node and GPU metrics
@@ -445,14 +449,21 @@ type HeartbeatGatewayConfig struct {
 }
 
 type HeartbeatResponse struct {
-	OK                  bool                      `json:"ok"`
-	UpgradeTo           string                    `json:"upgrade_to,omitempty"`
-	HubGitHash          string                    `json:"hub_git_hash,omitempty"`
-	LatestSHA           string                    `json:"latest_sha,omitempty"`
-	LatestTag           string                    `json:"latest_tag,omitempty"`
-	SwitchToTag         string                    `json:"switch_to_tag,omitempty"`
-	RestartSpoke        bool                      `json:"restart_spoke,omitempty"`
-	ResetAgentRestarts  []string                  `json:"reset_agent_restarts,omitempty"`
+	OK        bool   `json:"ok"`
+	UpgradeTo string `json:"upgrade_to,omitempty"`
+	// UpgradeInterrupt rides with UpgradeTo when the owner asked the upgrade
+	// to proceed without draining in-flight agent turns (#14950). The spoke
+	// skips its drain for this instruction only.
+	UpgradeInterrupt   bool     `json:"upgrade_interrupt,omitempty"`
+	HubGitHash         string   `json:"hub_git_hash,omitempty"`
+	LatestSHA          string   `json:"latest_sha,omitempty"`
+	LatestTag          string   `json:"latest_tag,omitempty"`
+	SwitchToTag        string   `json:"switch_to_tag,omitempty"`
+	RestartSpoke       bool     `json:"restart_spoke,omitempty"`
+	ResetAgentRestarts []string `json:"reset_agent_restarts,omitempty"`
+	// Breaker is a one-shot fleet-breaker instruction ("engage"/"release")
+	// queued from the hub's per-hive menu (#15092); empty means none.
+	Breaker             string                    `json:"breaker,omitempty"`
 	GitHubAppConfig     *HeartbeatGitHubAppConfig `json:"github_app_config,omitempty"`
 	HubBanner           *HubBanner                `json:"hub_banner,omitempty"`
 	IsPublic            *bool                     `json:"is_public,omitempty"`
@@ -542,6 +553,13 @@ type HeartbeatUpgradePolicy struct {
 	// instead of only showing the previous upgrade.
 	ScheduledHoldReason string `json:"scheduled_hold_reason,omitempty"`
 	ScheduledHoldAt     string `json:"scheduled_hold_at,omitempty"`
+	// NextWindowAt is this hive's OWN next daily/weekly window (RFC3339
+	// UTC), sent regardless of channel so a :stable hive can show when it
+	// will next be considered rather than only the channel's promotion ETA.
+	NextWindowAt string `json:"next_window_at,omitempty"`
+	// UpgradeHistory is the hub's persisted record of this hive's recent
+	// upgrade attempts and missed windows, newest last (#14856).
+	UpgradeHistory []spoke.UpgradeAttempt `json:"upgrade_history,omitempty"`
 }
 
 type TaskStatusPayload struct {

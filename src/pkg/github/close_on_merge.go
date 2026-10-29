@@ -54,6 +54,13 @@ type CloseOnMergeOptions struct {
 	MergedAfter time.Time
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// OnlyPRRepo/OnlyPRNumber, when OnlyPRNumber is set, restrict the ledger
+	// sweep to the claims one pull request makes: the webhook path, which
+	// closes a just-merged PR's issues on the delivery instead of waiting for
+	// the reconcile pass (whose sweep a cached cycle skips). OnlyPRRepo is
+	// matched by bare repository name; empty matches any.
+	OnlyPRRepo   string
+	OnlyPRNumber int
 	// LabelDriven reports a repo that opted in to label-driven triage; the
 	// backfill posts no "What to reply" notice there when it reclassifies a
 	// dedupe checklist as needs-decision. nil means no repo opts in.
@@ -75,6 +82,25 @@ func (o CloseOnMergeOptions) now() time.Time {
 
 func (o CloseOnMergeOptions) onGitHub(repo string) bool {
 	return o.RepoOnGitHub == nil || o.RepoOnGitHub(repo)
+}
+
+// wantsPR reports whether the OnlyPR filter admits a claim by (repo, number).
+func (o CloseOnMergeOptions) wantsPR(repo string, number int) bool {
+	if o.OnlyPRNumber <= 0 {
+		return true
+	}
+	if number != o.OnlyPRNumber {
+		return false
+	}
+	return o.OnlyPRRepo == "" || strings.EqualFold(bareRepo(o.OnlyPRRepo), bareRepo(repo))
+}
+
+// bareRepo strips an owner/ prefix.
+func bareRepo(repo string) string {
+	if i := strings.LastIndex(repo, "/"); i >= 0 {
+		return repo[i+1:]
+	}
+	return repo
 }
 
 func (o CloseOnMergeOptions) recheckAfter() time.Duration {
@@ -202,13 +228,13 @@ func (c *Client) CloseOnMergeLedgerSweep(ctx context.Context, ledger *ClaimLedge
 	openIssueListFailed := map[string]bool{}
 	eligibleByRepo := map[string]int{}
 	for _, claim := range claims {
-		if !candidate(claim) || claim.ReopenedAfterMerge() || !claim.MergedAt.IsZero() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
+		if !candidate(claim) || !opts.wantsPR(claim.PRRepo, claim.PRNumber) || claim.ReopenedAfterMerge() || !claim.MergedAt.IsZero() || closeOnMergeClaimSettled(claim, now, recheck) || (!opts.MergedAfter.IsZero() && closeOnMergeClaimMergedAt(claim).Before(opts.MergedAfter)) {
 			continue
 		}
 		eligibleByRepo[c.closeOnMergeRepoKey(claim.Repo)]++
 	}
 	for _, claim := range claims {
-		if !candidate(claim) {
+		if !candidate(claim) || !opts.wantsPR(claim.PRRepo, claim.PRNumber) {
 			continue
 		}
 		if !opts.onGitHub(claim.Repo) || (claim.PRRepo != "" && !opts.onGitHub(claim.PRRepo)) {
@@ -404,6 +430,9 @@ func (c *Client) CloseOnMergeBackfill(ctx context.Context, opts CloseOnMergeOpti
 }
 
 func closeOnMergeBackfillCandidate(issue *gh.Issue) bool {
+	if _, tracking := isTrackingIssue(issue); tracking {
+		return false
+	}
 	labels := issueLabelNames(issue.Labels)
 	return HasCoveredByPRLabel(labels) ||
 		labelPresent(labels, LikelyDoneLabel) ||
@@ -574,8 +603,15 @@ func (c *Client) closeIssueForMergedPRClaimWithIssue(ctx context.Context, issueR
 	}
 	author := safeGetLogin(pr.GetUser())
 	if !opts.Identity.Matches(author) && (opts.TrustedAuthor == nil || !opts.TrustedAuthor(prRepo, author)) {
-		res.Action, res.Reason = CloseOnMergeSkipped, "untrusted_author"
-		return res
+		// Merging is the hive's acceptance of an external contributor's PR.
+		// List/cache entries can omit merged_by; resolve the terminal actor
+		// before rejecting it, especially on non-default release branches
+		// where GitHub does not apply closing keywords itself (#15148).
+		owner, repoName := c.splitRepo(prRepo)
+		if !opts.Identity.Matches(c.prTerminalMergedBy(ctx, owner, repoName, pr)) {
+			res.Action, res.Reason = CloseOnMergeSkipped, "untrusted_author"
+			return res
+		}
 	}
 	if !claimMetadata && !closeOnMergePRClaimsIssue(pr, prRepo, issueRepo, issueNumber) {
 		res.Action, res.Reason = CloseOnMergeSkipped, "no_closing_or_claim_metadata"
@@ -624,6 +660,17 @@ func (c *Client) closeIssueForMergedPRClaimWithIssue(ctx context.Context, issueR
 	}
 	if !strings.EqualFold(issue.GetState(), "open") {
 		res.Action, res.Reason = CloseOnMergeAlreadyDone, "issue_not_open"
+		return res
+	}
+	if why, ok := isTrackingIssue(issue); ok {
+		// A tracking/archive issue (hivecommons/hive#14613) is never
+		// "fixed" by a merge: the keyword that claimed it is ignored. A
+		// verdict, not a failed step, so INFO; Skipped settles the claim so
+		// the sweep stops re-reading it.
+		res.Action, res.Reason = CloseOnMergeSkipped, "tracking_issue"
+		if opts.Logger != nil {
+			opts.Logger.Info("close-on-merge: claimed issue is a tracking/archive issue; leaving it open", "repo", issueRepo, "issue", issueNumber, "pr", pr.GetNumber(), "why", why)
+		}
 		return res
 	}
 	closedMarker, reopenedMarker := c.closeOnMergeMarkers(ctx, owner, repoName, issueNumber, pr.GetNumber())

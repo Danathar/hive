@@ -497,7 +497,7 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	vars = append(vars, m.experimentEnvPairs(agent)...)
 	// GIT_SSL_CAINFO only — NOT SSL_CERT_FILE (that breaks Copilot API TLS)
 	vars = append(vars, agentEnvPair{"GIT_SSL_CAINFO", proxyCACertPath, false})
-	if agent.UID > 0 {
+	if m.agentTokenCacheEnabled(agent) {
 		vars = append(vars, agentEnvPair{"HIVE_AGENT_TOKEN_CACHE", crux.AgentTokenCachePath(crux.DefaultAgentTokenCacheDir, agent.Name), false})
 	}
 	if agent.UID > 0 {

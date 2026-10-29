@@ -29,6 +29,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	}
 	s.deps = deps
 	s.loadSidebarFromDisk()
+	s.mergedLedger()
 	s.registerContributeRoutes()
 	// Issue claims (hivecommons/hive#8380). Routes register unconditionally;
 	// handlers answer "not enabled" when deps.IssueClaims is nil.
@@ -172,6 +173,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/repo-cost", s.handleRepoCost)
 	// #12128: per-issue/PR/head-SHA launch attribution over the same collector.
 	s.mux.HandleFunc("GET /api/launch-cost", s.handleLaunchCost)
+	s.mux.HandleFunc("GET /api/launch-cost/history", s.handleLaunchCostHistory)
 	s.mux.HandleFunc("GET /api/cost/history", s.handleCostHistory)
 	// #4298: "for every recent reset, how much of the budget had been used".
 	s.mux.HandleFunc("GET /api/budget/history", s.handleBudgetHistory)
@@ -350,10 +352,13 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/repos/merge-strategy", s.handleRepoMergeStrategySet)
 	s.mux.HandleFunc("GET /api/repos/merge-lane", s.handleRepoMergeLaneGet)
 	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/hold-permission", s.handleRepoHoldPermission)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/hold", s.handleRepoItemHold)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/issues/{number}/release", s.handleRepoIssueRelease)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/decision", s.handleRepoItemDecision)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/decide-delegated", s.handleRepoItemDecideDelegated)
+	// Owner row actions are wrapped so the ledger behind the activity
+	// monitor's ✓ badge remembers them (operator_actions.go).
+	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/items/{number}", s.handleRepoItemDetail)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/hold", s.recordOperatorAction(s.handleRepoItemHold))
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/decision", s.recordOperatorAction(s.handleRepoItemDecision))
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/decide-delegated", s.recordOperatorAction(s.handleRepoItemDecideDelegated))
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/issues/{number}/release", s.recordOperatorAction(s.handleRepoIssueRelease))
 	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/items/{number}/decide-delegated", s.handleRepoItemDecideDelegatedStatus)
 
 	s.mux.HandleFunc("GET /api/acmm/evaluation", s.handleACMMEvaluation)
@@ -523,7 +528,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// review stage (unreviewed … approved) with reviewers, severity counts,
 	// loop counter and next action. Read-only; paged like /api/review/queue.
 	s.mux.HandleFunc("GET /api/review/pipeline", s.handleReviewPipeline)
-	s.mux.HandleFunc("POST /api/review/pipeline/{owner}/{repo}/{number}/send-to-human", s.handleReviewPipelineSendToHuman)
+	s.mux.HandleFunc("POST /api/review/pipeline/{owner}/{repo}/{number}/send-to-human", s.recordOperatorAction(s.handleReviewPipelineSendToHuman))
 	// Review evidence (#11061): the per-PR evidence bundle as sealed on disk,
 	// or zipped with the artifacts it references; owner/merger only.
 	s.mux.HandleFunc("GET /api/review/evidence", s.handleReviewEvidence)
@@ -552,7 +557,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// Admin MCP diagnostic reads (#11943, api_diag.go).
 	s.registerDiagRoutes()
 	// Activity monitor row menu: Accept triage (api_repo_item_accept_triage.go).
-	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/accept-triage", s.handleRepoItemAcceptTriage)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{repo}/items/{number}/accept-triage", s.recordOperatorAction(s.handleRepoItemAcceptTriage))
 }
 
 var (

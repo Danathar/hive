@@ -31,6 +31,7 @@ import (
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/github/automerge"
 	"github.com/hivecommons/hive/pkg/hiveadvisor"
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/knowledge"
@@ -121,6 +122,12 @@ type Server struct {
 	// stageStore is the stage-label memory /api/stage-tracker reads; nil
 	// means the process-wide stagelabels.Shared(). Tests inject one.
 	stageStore *stagelabels.Store
+	// presenceLookup overrides the contribute hub as the tracker's author
+	// presence source for 072 rows (stage_tracker_adoption.go); tests only.
+	presenceLookup func(login string) (automerge.ContributorPresence, bool)
+	// sweepState overrides the automerge lanes' live sweep state for the
+	// tracker's merge-gate rows (stage_tracker_merge_gate.go); tests only.
+	sweepState func() automerge.SweepState
 	// stageTrackerCache is the last /api/stage-tracker payload built from
 	// the status snapshot, served until its TTL lapses (stage_tracker.go).
 	stageTrackerCache   stageTrackerCache
@@ -166,6 +173,10 @@ type Server struct {
 	actionsJWKSUntil       time.Time
 	actionsJWKSLastRefetch time.Time
 	actionsJWKSKeys        map[string]interface{}
+	// merged is the persistent record of merged PRs behind the tracker's
+	// "Merged" chip (merged_ledger.go); built lazily by mergedLedger.
+	merged     *MergedLedger
+	mergedOnce sync.Once
 
 	// startedAt marks process start, used by /api/livez to bound the
 	// startup-grace window before the first heartbeat has to have succeeded.
@@ -200,6 +211,10 @@ type Server struct {
 	// delegatedJobs tracks "Let hive decide" jobs by repo#number
 	// (api_repo_item_decide_delegated.go).
 	delegatedJobs delegatedDecisionJobs
+	// operatorActionStore is the owner row-action ledger behind the
+	// activity monitor's ✓ badge (operator_actions.go), opened on first use.
+	operatorActionStore *operatorActionStore
+	operatorActionsOnce sync.Once
 	// acmmLinearBaseURL overrides the Linear GraphQL endpoint the ACMM
 	// "Open Issue" path posts issueCreate to. Empty = production; tests
 	// point it at an httptest server.
@@ -405,6 +420,10 @@ type Server struct {
 	// one, or forever on a spoke the hub does not manage. Guarded by versionMu.
 	hubUpgradePolicy   *spoke.HeartbeatUpgradePolicy
 	hubUpgradePolicyAt time.Time
+	// upgradeDrain reports the live self-upgrade drain latch (cmd/hive's
+	// selfUpgradeDrain) so /api/status can show the countdown and the agents
+	// holding it (#14856). Guarded by versionMu; nil when not installed.
+	upgradeDrain upgradeDrainSource
 	// hubPushedDashboardURL is the vanity dashboard URL the hub last delivered
 	// on a heartbeat (#7451). Non-empty means the hub owns hub.dashboard_url:
 	// an operator edit would be reverted by the next push, and until then a
@@ -577,8 +596,14 @@ type StatusPayload struct {
 	// last-good open totals after a failed reconcile (#13376). The Overview
 	// says "stale since <t>" instead of showing zeros. Empty when fresh.
 	StaleSince string `json:"staleSince,omitempty"`
-	Timestamp  string `json:"timestamp"`
-	TimeZone   string `json:"timeZone,omitempty"`
+	// RestartRefresh is set while StaleSince points at the snapshot this
+	// process restored from disk at startup, before its first enumeration
+	// completed. The Overview then says "refreshing after restart · N/M
+	// repos scanned · showing snapshot from <t>" instead of "stale since
+	// <previous process's time>". Nil once a fresh enumeration publishes.
+	RestartRefresh *FrontendRestartRefresh `json:"restartRefresh,omitempty"`
+	Timestamp      string                  `json:"timestamp"`
+	TimeZone       string                  `json:"timeZone,omitempty"`
 	// StatusSeq is a monotonic publish sequence (#4348): the frontend drops
 	// any status payload whose seq is older than the last one it rendered,
 	// so a stale in-flight poll/SSE response can never repaint over a newer
@@ -931,12 +956,24 @@ type FrontendAgent struct {
 	ProxyViolations        int    `json:"proxyViolations"`
 	OnDemand               bool   `json:"onDemand,omitempty"`
 	Sandboxed              bool   `json:"sandboxed,omitempty"`
-	LastError              string `json:"lastError,omitempty"`
-	StallNudges            int    `json:"stallNudges,omitempty"`
-	StallRecoveries        int    `json:"stallRecoveries,omitempty"`
-	ActionNudges           int    `json:"actionNudges,omitempty"`
-	TransientNudges        int    `json:"transientNudges,omitempty"`
-	CIPollNudges           int    `json:"ciPollNudges,omitempty"`
+	// SandboxRun is the last sandboxed run and the health verdict derived
+	// from it (sandbox_health.go). Present only for sandboxed agents; the
+	// SPA reads health from here instead of State, which is "idle" between
+	// kicks for an agent that has no session to be down.
+	SandboxRun      *FrontendSandboxRun `json:"sandboxRun,omitempty"`
+	LastError       string              `json:"lastError,omitempty"`
+	StallNudges     int                 `json:"stallNudges,omitempty"`
+	StallRecoveries int                 `json:"stallRecoveries,omitempty"`
+	ActionNudges    int                 `json:"actionNudges,omitempty"`
+	TransientNudges int                 `json:"transientNudges,omitempty"`
+	// SessionRssMb is the resident memory of the agent's CLI process tree
+	// (MiB) and SessionAge how long the current CLI session has been up,
+	// both sampled on the health tick (#14842). SessionRecycles counts
+	// RSS/age-budget recycles since boot.
+	SessionRssMb    int    `json:"sessionRssMb,omitempty"`
+	SessionAge      string `json:"sessionAge,omitempty"`
+	SessionRecycles int    `json:"sessionRecycles,omitempty"`
+	CIPollNudges    int    `json:"ciPollNudges,omitempty"`
 	// LastAction is the last issue or PR the agent acted on through the hive
 	// (#10925); see FrontendAgentLastAction.
 	LastAction *FrontendAgentLastAction `json:"lastAction,omitempty"`
@@ -1162,6 +1199,20 @@ type FrontendSession struct {
 	Messages   int    `json:"messages"`
 	LastActive string `json:"lastActive,omitempty"`
 	Estimated  bool   `json:"estimated,omitempty"`
+}
+
+// FrontendRestartRefresh describes the post-restart window in which the
+// Overview serves the snapshot restored from disk (FrontendStatus.RestartRefresh).
+type FrontendRestartRefresh struct {
+	// RestoredAt (RFC 3339) is when this process read the snapshot back.
+	RestoredAt string `json:"restoredAt"`
+	// SnapshotAt (RFC 3339) is when the restored snapshot was last read
+	// from GitHub by the previous process.
+	SnapshotAt string `json:"snapshotAt,omitempty"`
+	// ReposScanned is how many unpaused configured repos already have a
+	// fresh read this process; ReposTotal is the unpaused configured count.
+	ReposScanned int `json:"reposScanned"`
+	ReposTotal   int `json:"reposTotal"`
 }
 
 type FrontendRepo struct {
@@ -3840,13 +3891,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		statusJSONResponse(w, r, map[string]string{"status": "initializing"})
 		return
 	}
-	snapshot := s.statusWithOverviewBands(s.status, time.Now().UTC())
+	now := time.Now().UTC()
+	status := s.status
+	snapshot := s.statusWithOverviewBands(status, now)
 	s.statusMu.RUnlock()
 	payload := statusWithWebhooks{StatusPayload: snapshot, Webhooks: github.WebhookHealthSnapshot()}
 	if s.deps != nil && s.deps.EvalLoop != nil {
 		loop := s.deps.EvalLoop()
 		payload.EvalLoopStatus = &loop
 	}
+	payload.UpgradeProgress = s.upgradeProgress(status, now)
 	statusJSONResponse(w, r, filterStatusPayload(&payload, r.URL.Query().Get("fields"), r.URL.Query().Get("omit")))
 }
 
@@ -3857,6 +3911,11 @@ type statusWithWebhooks struct {
 	*StatusPayload
 	Webhooks github.WebhookHealth `json:"webhooks"`
 	*EvalLoopStatus
+	// UpgradeProgress is the spoke's view of the scheduled-upgrade state
+	// machine (scheduled / draining / pulling / … / missed) with the drain
+	// countdown, derived at serve time (#14856). Absent on a hive the hub
+	// does not manage and that has no upgrade in flight.
+	UpgradeProgress *spoke.UpgradeProgress `json:"upgradeProgress,omitempty"`
 }
 
 func (s *Server) handleStatusSummary(w http.ResponseWriter, r *http.Request) {

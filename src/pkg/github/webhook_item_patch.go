@@ -82,6 +82,9 @@ func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, blockedBy in
 	if c.isExempt(labels) {
 		return sidelined("filtered", "Exempt label")
 	}
+	if _, tracking := isTrackingIssue(issue); tracking {
+		return sidelined("filtered", trackingFilterReason)
+	}
 	if hasBlockedLabel(labels) {
 		row := c.repoWorkIssue(repo, issue, labels, "filtered", blockedFilterReason(issue.GetBody()))
 		setBlockedRowFacts(&row, issue.GetBody(), blockedBy)
@@ -97,8 +100,13 @@ func (c *Client) classifyWebhookIssue(repo string, issue *gh.Issue, blockedBy in
 	if ra, ok := issueFilter.(ReporterAdmitter); ok && ra.ReporterTrustEnabled() && authorIsHuman {
 		if !ra.AdmitsReporter(labels, author, issue.GetAuthorAssociation()) {
 			// The full pass parks the issue with a label write; a display
-			// read must not. Leave placement to the reconcile pass.
-			return WebhookItemPatch{Bucket: WebhookBucketUnknown}
+			// read must not. Placement of a listed row is left to the
+			// reconcile pass, but the row the pass would list (the
+			// reporter_triage bucket) rides along so a brand-new issue
+			// is visible from its `opened` delivery rather than from the
+			// next enumeration (hivecommons/hive#15094).
+			row := c.workIssue(repo, issue, labels, workBucketReporterTriage, reporterTriageAwaitingReason)
+			return WebhookItemPatch{Bucket: WebhookBucketUnknown, WorkIssue: &row}
 		}
 	}
 	if !issueFilter.Admits(labels) {
@@ -130,7 +138,7 @@ func (c *Client) classifyWebhookPR(repo string, pr *gh.PullRequest, labels []str
 	owner, repoName := c.splitRepo(repo)
 	attrMeta, hasAttr := ParseAttributionTrailer(pr.GetBody())
 	runKey, planRef := ParseRunTrailers(pr.GetBody())
-	scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef)
+	scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef, pr.GetHead().GetRef(), c.linearScopeTeams(owner+"/"+repoName))
 	author := safeGetLogin(pr.GetUser())
 	headRef, headRepo, fromFork := prHeadOrigin(pr)
 	reqLogins, reqTeams := prRequestedReviews(pr)
@@ -224,6 +232,12 @@ func (r *ActionableResult) Clone() *ActionableResult {
 		out.ItemPatches = make(map[string]ItemPatchMeta, len(r.ItemPatches))
 		for k, v := range r.ItemPatches {
 			out.ItemPatches[k] = v
+		}
+	}
+	if r.WebhookPatches != nil {
+		out.WebhookPatches = make(map[string]WebhookItemSnapshot, len(r.WebhookPatches))
+		for k, v := range r.WebhookPatches {
+			out.WebhookPatches[k] = v
 		}
 	}
 	if r.TotalByRepo != nil {
@@ -344,9 +358,106 @@ func (r *ActionableResult) recordItemPatch(snap WebhookItemSnapshot) {
 	}
 	// A removed item keeps the record too: it is the audit trail of which
 	// delivery took the row out, and the monotonic check for a late read.
-	r.ItemPatches[ItemPatchKey(snap.Repo, snap.Number, snap.IsPR)] = ItemPatchMeta{
+	key := ItemPatchKey(snap.Repo, snap.Number, snap.IsPR)
+	r.ItemPatches[key] = ItemPatchMeta{
 		FetchedAt: snap.FetchedAt, UpdatedAt: snap.UpdatedAt, DeliveryID: snap.DeliveryID, HeadSHA: snap.HeadSHA,
 	}
+	if r.WebhookPatches == nil {
+		r.WebhookPatches = map[string]WebhookItemSnapshot{}
+	}
+	if _, held := r.WebhookPatches[key]; !held && len(r.WebhookPatches) >= maxRememberedWebhookPatches {
+		r.evictOldestWebhookPatch()
+	}
+	r.WebhookPatches[key] = snap
+}
+
+// maxRememberedWebhookPatches bounds WebhookPatches; the oldest read goes
+// first. Far above what one reconcile interval sees on any tracked set.
+const maxRememberedWebhookPatches = 4096
+
+func (r *ActionableResult) evictOldestWebhookPatch() {
+	oldestKey := ""
+	var oldest time.Time
+	for k, v := range r.WebhookPatches {
+		if oldestKey == "" || v.FetchedAt.Before(oldest) {
+			oldestKey, oldest = k, v.FetchedAt
+		}
+	}
+	if oldestKey != "" {
+		delete(r.WebhookPatches, oldestKey)
+	}
+}
+
+// ReplayWebhookPatches carries the webhook re-reads prev received after the
+// receiver's enumeration started (snap.FetchedAt after r.GeneratedAt) onto
+// the receiver, and returns how many changed it. A read is replayed only
+// when the receiver lists the item with an older (or no) updated_at — the
+// enumeration's own copy is never moved backwards — and a closed read only
+// when the item is still listed. It also hands every newer remembered read
+// to the receiver, so a later pass can replay the same way. The governor
+// calls it before publishing a reconcile pass's result in place of the
+// patched snapshot it replaces (hivecommons/hive#14952: #14863 stayed `blocked`
+// 40 minutes after the hive itself removed the label).
+func (r *ActionableResult) ReplayWebhookPatches(prev *ActionableResult) int {
+	if r == nil || prev == nil || prev == r || len(prev.WebhookPatches) == 0 {
+		return 0
+	}
+	keys := make([]string, 0, len(prev.WebhookPatches))
+	for k := range prev.WebhookPatches {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	applied := 0
+	for _, k := range keys {
+		snap := prev.WebhookPatches[k]
+		if snap.FetchedAt.IsZero() || !snap.FetchedAt.After(r.GeneratedAt) {
+			continue
+		}
+		held, listed := r.listedUpdatedAt(snap.Repo, snap.Number, snap.IsPR)
+		if !listed || (!held.IsZero() && !snap.UpdatedAt.IsZero() && !held.Before(snap.UpdatedAt)) {
+			continue
+		}
+		if r.ApplyWebhookItem(snap) {
+			applied++
+		}
+	}
+	return applied
+}
+
+// listedUpdatedAt reports whether the result lists an item anywhere
+// (actionable, held, drafts, attributed or a work-detail bucket) and the
+// updated_at of that copy (zero when the list has none).
+func (r *ActionableResult) listedUpdatedAt(repo string, number int, isPR bool) (time.Time, bool) {
+	if isPR {
+		for _, list := range [][]PullRequest{r.PRs.Items, r.PRs.Held, r.PRs.StaleDrafts, r.PRs.Attributed} {
+			for _, pr := range list {
+				if sameItem(pr.Repo, pr.Number, repo, number) {
+					return pr.UpdatedAt, true
+				}
+			}
+		}
+		for _, d := range r.WorkDetailsByRepo {
+			for _, w := range d.PRs {
+				if sameItem(w.Repo, w.Number, repo, number) {
+					return w.UpdatedAt, true
+				}
+			}
+		}
+		return time.Time{}, false
+	}
+	for _, issue := range r.Issues.Items {
+		if sameItem(issue.Repo, issue.Number, repo, number) {
+			return issue.UpdatedAt, true
+		}
+	}
+	for _, d := range r.WorkDetailsByRepo {
+		for _, w := range d.Issues {
+			if sameItem(w.Repo, w.Number, repo, number) {
+				return w.UpdatedAt, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func (r *ActionableResult) applyWebhookItem(snap WebhookItemSnapshot) bool {
@@ -399,7 +510,23 @@ func (r *ActionableResult) applyWebhookItem(snap WebhookItemSnapshot) bool {
 		}
 	default:
 		if !wasListed {
-			return false
+			// Unknown bucket, never listed: an `opened` delivery for an
+			// item the single read could not place. It is still an open
+			// item the hive is responsible for, so it enters the sidelined
+			// set with whatever row the classifier could offer rather than
+			// staying invisible until the next enumeration
+			// (hivecommons/hive#15094).
+			switch {
+			case !snap.IsPR && p.WorkIssue != nil:
+				r.addWorkIssue(repoKey, *p.WorkIssue)
+			case snap.IsPR && p.WorkPR != nil:
+				r.addWorkPR(repoKey, *p.WorkPR)
+			default:
+				return false
+			}
+			r.adjustRepoCount(repoKey, snap.IsPR, 1)
+			r.recount()
+			return true
 		}
 		// Unknown bucket: keep the row where it was, with fresh fields.
 		return r.restoreUnknown(snap, prev)

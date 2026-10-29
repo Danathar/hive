@@ -57,6 +57,11 @@ type stageAPI struct {
 	// extra handles routes beyond labels/comments (returns true when it
 	// served the request); the adoption tests use it for refs and pulls.
 	extra func(w http.ResponseWriter, r *http.Request) bool
+	// issueComments / issueEvents are what GET /issues/N/comments and
+	// /issues/N/events answer: the hold-provenance read a held PR takes
+	// (hivecommons/hive#15020). Unlisted PRs answer empty lists.
+	issueComments map[int][]map[string]any
+	issueEvents   map[int][]map[string]any
 }
 
 type stageCommitFixture struct {
@@ -64,6 +69,9 @@ type stageCommitFixture struct {
 	authorLogin string
 	authorName  string
 	authorEmail string
+	// parents overrides the default single parent "p"; two entries make
+	// the commit a merge (served as c<i>, so "c0" names the first commit).
+	parents []string
 }
 
 func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
@@ -131,6 +139,20 @@ func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
 				out = append(out, map[string]any{"filename": f, "status": "modified"})
 			}
 			_ = json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/issues/") && strings.HasSuffix(path, "/comments"):
+			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/issues/"), "/comments"))
+			out := api.issueComments[n]
+			if out == nil {
+				out = []map[string]any{}
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/issues/") && strings.HasSuffix(path, "/events"):
+			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/issues/"), "/events"))
+			out := api.issueEvents[n]
+			if out == nil {
+				out = []map[string]any{}
+			}
+			_ = json.NewEncoder(w).Encode(out)
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/acme/widget/pulls/") && strings.HasSuffix(path, "/commits"):
 			n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/acme/widget/pulls/"), "/commits"))
 			api.commitReads++
@@ -141,7 +163,14 @@ func newStageAPI(t *testing.T, api *stageAPI) *httptest.Server {
 					if c.authorLogin != "" {
 						author = map[string]string{"login": c.authorLogin}
 					}
-					out = append(out, map[string]any{"sha": fmt.Sprintf("c%d", i), "author": author, "committer": author, "commit": map[string]any{"message": c.message, "author": map[string]any{"name": c.authorName, "email": c.authorEmail}, "committer": map[string]any{"name": c.authorName, "email": c.authorEmail}}, "parents": []map[string]string{{"sha": "p"}}})
+					parents := []map[string]string{{"sha": "p"}}
+					if len(c.parents) > 0 {
+						parents = parents[:0]
+						for _, p := range c.parents {
+							parents = append(parents, map[string]string{"sha": p})
+						}
+					}
+					out = append(out, map[string]any{"sha": fmt.Sprintf("c%d", i), "author": author, "committer": author, "commit": map[string]any{"message": c.message, "author": map[string]any{"name": c.authorName, "email": c.authorEmail}, "committer": map[string]any{"name": c.authorName, "email": c.authorEmail}}, "parents": parents})
 				}
 			} else {
 				for i, msg := range api.commits[n] {

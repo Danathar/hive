@@ -723,6 +723,14 @@ var benignSubstrings = []string{
 	// manager retries itself after a cooldown.
 	"cached; suppressing repeated fetches",
 	"token validation rate-limited by github; relaunching after cooldown",
+	// Request watchers log a policy denial (e.g. repo not allowlisted) as an
+	// expected outcome, not a runtime error.
+	"request watcher: denied (policy)",
+	// A reviewer's abbreviated verdict head that prefixes neither the dispatch
+	// head nor the PR's current head names an older revision; the relay keeps
+	// it as written on purpose (pkg/github/review_verdict_relay.go), so it is
+	// an expected outcome of a push landing mid-review, not a runtime defect.
+	"abbreviated verdict head is not the pr's current head; recorded as written",
 	// ReconcileSeededDefaults (pkg/policies/seed_reconcile.go) warns once per
 	// policy template whose on-disk copy diverges from the embedded default
 	// with no seed-manifest record, already deduped per path per process
@@ -772,11 +780,55 @@ var benignSubstrings = []string{
 	// That is the merge-safety policy working as designed, re-logged per
 	// merge attempt, not a repeated runtime defect (hivecommons/hive#14727).
 	"forward-merge guard: refusing to squash",
+	// The stage labeller (src/pkg/github/automerge/automerge_stage_labels.go)
+	// warns once per PR per quiet period when a PR waiting on the hive
+	// (review pending, checks running) sits past its stage dwell, and
+	// surfaces the same condition as the dashboard's hive-held count
+	// (hivecommons/hive#12534). The feed keys on the message alone, so a
+	// busy hive whose reviewer lane is backed up has every held PR warn once
+	// and the burst across unrelated PRs reads as one repeated defect — it
+	// is a per-hive operational signal, not a runtime error
+	// (hivecommons/hive#15009).
+	"stage labels: pr waits on the hive past the stage dwell",
+}
+
+// rateLimitSubstrings are lower-case fragments that mark a GitHub rate-limit
+// refusal or the hive's own pacing shedding a request while the caution
+// window is engaged (see IsGitHubRateLimited). One rate-limit episode makes
+// every caller log its own WARN — check runs, statuses, permissions, repo
+// enumeration, advisories — and each distinct message used to cross the
+// repeat threshold as its own unclassified_error_repeated issue
+// (hivecommons/hive#15106). The condition is self-limiting: the client
+// backs off and the callers retry on their next tick.
+var rateLimitSubstrings = []string{
+	"api secondary rate limit exceeded",
+	"exceeded a secondary rate limit",
+	"api rate limit exceeded",
+	"api rate limit of",
+	"not making remote request",
+	"429 too many requests",
+	"github pacing: request shed",
+	"github pacing: slot would miss request deadline",
+	"rate-limit caution window is engaged",
+}
+
+// IsGitHubRateLimited reports whether s (a log message or an error string)
+// is a GitHub rate-limit refusal or a pacing shed. The generic repeated-error
+// feed treats such lines as benign; the WARN itself stays in local logs.
+func IsGitHubRateLimited(s string) bool {
+	m := strings.ToLower(s)
+	for _, sub := range rateLimitSubstrings {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsBenignMessage reports whether a raw log message is noise the generic
 // repeated-error feed must not report: the read/keepalive i/o timeout rule
-// above applied to the whole line, every benignSubstrings entry, and the
+// above applied to the whole line, GitHub rate-limit and pacing refusals
+// (IsGitHubRateLimited), every benignSubstrings entry, and the
 // exact-message exclusions matched in the function body below.
 func IsBenignMessage(msg string) bool {
 	m := strings.ToLower(msg)
@@ -809,7 +861,7 @@ func IsBenignMessage(msg string) bool {
 		"[contribute-ws] refusing task: daily rate limit reached":
 		return true
 	}
-	if benignIOTimeout(m, m) {
+	if benignIOTimeout(m, m) || IsGitHubRateLimited(m) {
 		return true
 	}
 	for _, s := range benignSubstrings {

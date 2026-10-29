@@ -201,7 +201,11 @@
           "AfterUnregistered": "",
           "InPlace": null,
           "StrictAttribution": null,
-          "AutoMerge": null
+          "AutoMerge": null,
+          "MaintainerPolicy": "",
+          "Supersede": {
+            "CloseFirst": null
+          }
         },
         "Stalled": {
           "RequireQuiet": null
@@ -388,6 +392,7 @@
       "pr_autoclose": true,
       "queue_health": {}
     },
+    "auto_close_superseded": true,
     "project_observability": {},
     "work_source": {
       "type": "",
@@ -743,7 +748,8 @@
     "bot_takeover": {},
     "trusted_authors": {},
     "contributor_lane": {},
-    "contributor_tier": {}
+    "contributor_tier": {},
+    "merge_train": {}
   },
   "decisions": {
     "delegate": {}
@@ -756,6 +762,7 @@
   "supersession_sweep": {},
   "shared_ci_rerun": {},
   "search": {},
+  "scanner": {},
   "upstream_watch": {},
   "convergence": {},
   "sla": {

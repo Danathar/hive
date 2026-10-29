@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,8 +161,12 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"stagePresenceWindow": cfg.Governor.Labels.Stage.PresenceWindow,
 		// governor.labels.stage.adoption.enabled / contributor_grace_*: the
 		// stage-074 adoption of red contributor PRs.
-		"stageAdoptionEnabled":     cfg.Governor.Labels.Stage.Adoption.IsEnabled(),
-		"stageStalledRequireQuiet": cfg.Governor.Labels.Stage.Stalled.IsRequireQuiet(),
+		"stageAdoptionEnabled": cfg.Governor.Labels.Stage.Adoption.IsEnabled(),
+		// governor.labels.stage.adoption.maintainer_policy: adopt | ask |
+		// never, what adoption does when the author maintains the
+		// repository (hivecommons/hive#14524).
+		"stageAdoptionMaintainerPolicy": cfg.Governor.Labels.Stage.Adoption.EffectiveMaintainerPolicy(),
+		"stageStalledRequireQuiet":      cfg.Governor.Labels.Stage.Stalled.IsRequireQuiet(),
 		// governor.labels.stage.engine.mode: the ADR-0025 central stage
 		// engine's rollout switch (off | shadow | enforce).
 		"stageEngineMode":   cfg.Governor.Labels.Stage.Engine.EffectiveMode().String(),
@@ -794,9 +799,11 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 		StagePresenceWindow *string `json:"stage_presence_window"`
 		// Stage-074 adoption: governor.labels.stage.adoption.enabled and
 		// governor.labels.stage.contributor_grace_online / _offline.
-		StageAdoptionEnabled *bool   `json:"stage_adoption_enabled"`
-		StageGraceOnline     *string `json:"stage_grace_online"`
-		StageGraceOffline    *string `json:"stage_grace_offline"`
+		StageAdoptionEnabled *bool `json:"stage_adoption_enabled"`
+		// governor.labels.stage.adoption.maintainer_policy (adopt | ask | never).
+		StageAdoptionMaintainerPolicy *string `json:"stage_adoption_maintainer_policy"`
+		StageGraceOnline              *string `json:"stage_grace_online"`
+		StageGraceOffline             *string `json:"stage_grace_offline"`
 		// governor.labels.stage.stalled.require_quiet (hivecommons/hive#12534).
 		StageStalledRequireQuiet *bool `json:"stage_stalled_require_quiet"`
 		// governor.labels.stage.engine.mode (ADR-0025): off | shadow | enforce.
@@ -923,6 +930,12 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.StageAdoptionMaintainerPolicy != nil {
+		if v := strings.ToLower(strings.TrimSpace(*body.StageAdoptionMaintainerPolicy)); v != "" && !slices.Contains(config.AdoptionMaintainerPolicies, v) {
+			jsonError(w, "stage_adoption_maintainer_policy must be one of "+strings.Join(config.AdoptionMaintainerPolicies, ", "), http.StatusBadRequest)
+			return
+		}
+	}
 
 	if body.Labels != nil {
 		filtered := make([]string, 0, len(*body.Labels))
@@ -1008,6 +1021,9 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 	if body.StageAdoptionEnabled != nil {
 		v := *body.StageAdoptionEnabled
 		s.deps.Config.Governor.Labels.Stage.Adoption.Enabled = &v
+	}
+	if body.StageAdoptionMaintainerPolicy != nil {
+		s.deps.Config.Governor.Labels.Stage.Adoption.MaintainerPolicy = strings.ToLower(strings.TrimSpace(*body.StageAdoptionMaintainerPolicy))
 	}
 	if body.StageGraceOnline != nil {
 		s.deps.Config.Governor.Labels.Stage.ContributorGraceOnline = strings.TrimSpace(*body.StageGraceOnline)
@@ -2693,7 +2709,8 @@ func (s *Server) handleGovernorAddAgent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if body.Backend == "" {
+	backendPicked := body.Backend != ""
+	if !backendPicked {
 		body.Backend = "claude"
 	}
 	// Reject an unsupported backend before the agent is created, rather than
@@ -2707,6 +2724,15 @@ func (s *Server) handleGovernorAddAgent(w http.ResponseWriter, r *http.Request) 
 		Backend: body.Backend,
 		Model:   body.Model,
 		Enabled: true,
+	}
+	// A backend the operator named is their pick, like every other dashboard
+	// backend write: the pack apply on each restart must not move it, and it
+	// counts when the pack decides which gateway the hive is on (#14678).
+	if backendPicked {
+		agentCfg.BackendOwner = config.FieldOwnerOperator
+	}
+	if body.Model != "" {
+		agentCfg.ModelOwner = config.FieldOwnerOperator
 	}
 	// An explicit re-add is the operator changing their mind, and it is the
 	// only signal that lifts a deletion tombstone. Without this the agent

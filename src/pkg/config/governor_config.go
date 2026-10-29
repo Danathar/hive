@@ -130,6 +130,10 @@ type GovernorConfig struct {
 	// hive retires it. See AdvisoryConfig.
 	Advisory AdvisoryConfig `yaml:"advisory,omitempty" json:"advisory,omitempty"`
 
+	// AutoCloseSuperseded closes only hive-authored PRs superseded by a
+	// different merged PR. A person's PR still needs their decision.
+	AutoCloseSuperseded *bool `yaml:"auto_close_superseded,omitempty" json:"auto_close_superseded,omitempty"`
+
 	// ProjectObservability configures what the telemetry and operations agents
 	// recommend for the MANAGED PROJECT. It is deliberately separate from
 	// Config.OTel/Tracing, which export Hive's own telemetry.
@@ -498,7 +502,37 @@ type StageAdoptionConfig struct {
 	// on the adopted head, reviewer verdict, DCO, diff fences, soak), without
 	// requiring the original author's trust tier. nil = true. Off, an
 	// adopted PR by an untrusted contributor waits for a human /lgtm.
-	AutoMerge *bool `yaml:"auto_merge,omitempty"`
+	AutoMerge        *bool                        `yaml:"auto_merge,omitempty"`
+	MaintainerPolicy string                       `yaml:"maintainer_policy,omitempty"`
+	Supersede        StageAdoptionSupersedeConfig `yaml:"supersede,omitempty"`
+}
+
+// StageAdoptionSupersedeConfig tunes the hive-authored adoption copy.
+type StageAdoptionSupersedeConfig struct {
+	CloseFirst *bool `yaml:"close_first,omitempty"`
+}
+
+func (c StageAdoptionSupersedeConfig) CloseFirstEnabled() bool {
+	return c.CloseFirst == nil || *c.CloseFirst
+}
+
+const (
+	AdoptionMaintainerPolicyAdopt   = "adopt"
+	AdoptionMaintainerPolicyAsk     = "ask"
+	AdoptionMaintainerPolicyNever   = "never"
+	DefaultAdoptionMaintainerPolicy = AdoptionMaintainerPolicyAdopt
+)
+
+var AdoptionMaintainerPolicies = []string{AdoptionMaintainerPolicyAdopt, AdoptionMaintainerPolicyAsk, AdoptionMaintainerPolicyNever}
+
+func (c StageAdoptionConfig) EffectiveMaintainerPolicy() string {
+	v := strings.ToLower(strings.TrimSpace(c.MaintainerPolicy))
+	for _, p := range AdoptionMaintainerPolicies {
+		if v == p {
+			return p
+		}
+	}
+	return DefaultAdoptionMaintainerPolicy
 }
 
 // IsEnabled reports whether adoption runs (default on).

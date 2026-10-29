@@ -39,7 +39,8 @@ import (
 var ErrNoGitHubClient = errors.New("no github client configured (hive is running without GitHub credentials)")
 
 type Client struct {
-	client *gh.Client
+	client      *gh.Client
+	linearTeams map[string][]string
 	// foldedTrackers records issues that finding folds landed on (#11587).
 	foldedTrackers foldedTrackerSet
 	// commentBudget caps automated comments per issue per day (#12733).
@@ -97,8 +98,12 @@ type Client struct {
 	// the config (nil = package default; see SetNeverClaimLabels).
 	neverClaimMu     sync.RWMutex
 	neverClaimLabels []string
-	sentinelMu       sync.RWMutex
-	sentinelLabel    string
+	// openPRLinkState backs the pre-dispatch open-PR guard and the
+	// duplicate-fix resolver (open_pr_links.go); built lazily.
+	openPRLinkOnce  sync.Once
+	openPRLinkState *openPRLinkCache
+	sentinelMu      sync.RWMutex
+	sentinelLabel   string
 	// issueFilter is the operator's project.issue_filter (require_labels
 	// allow-list) gating which issues become actionable at all. The exclude
 	// polarity is NOT here — it is exemptLabels above (governor.labels.exempt,
@@ -119,6 +124,10 @@ type Client struct {
 	// per-issue opt-in markers activate the gate.
 	reporterConfirmationMu      sync.RWMutex
 	reporterConfirmationEnabled func() bool
+	// supersededAutoClosePolicy gates the hive-authored superseded PR
+	// auto-close (pr_superseded_hive_autoclose.go); nil means on.
+	supersededAutoCloseMu     sync.Mutex
+	supersededAutoClosePolicy SupersededAutoClosePolicy
 	// autoMergeLabel is the configured merger-queue label. Guarded because
 	// config reload re-applies it while request handlers read it.
 	autoMergeLabelMu sync.RWMutex
@@ -210,6 +219,11 @@ type Client struct {
 	// carries no live marker: the 🔒 comment is budgeted and can be
 	// suppressed, and a claim the ledger holds must still read as a claim.
 	issueClaimLedger func(repo string, number int) (issueclaim.Claim, bool)
+	// prClaimLookup resolves the duplicate-PR claim ledger's record for an
+	// issue (SetPRClaimLookup). An out-of-cycle fact on an issue the ledger
+	// knows an open PR covers re-derives under that PR (stage_facts_sink.go,
+	// enrichCoveringPR) instead of falling to 010/020 until the next sweep.
+	prClaimLookup func(repo string, number int) (IssueClaim, bool)
 	// issueClaimLedgerHive is the hive= this hub writes on its own markers;
 	// a live forge marker carrying it while the ledger holds nothing is a
 	// marker the hub already released (hivecommons/hive#13579).
@@ -256,6 +270,10 @@ type Client struct {
 	// a negative value disables the backstop.
 	combinedPerspectivesFn func() bool
 	maxReviewsPerHeadFn    func() int
+	// reviewRequireLabelsFn returns review.require_labels, read live so a
+	// Features-tab edit gates the next relay request without a rebuild. nil
+	// or empty means the gate is off.
+	reviewRequireLabelsFn func() []string
 	// prAuthz gates PR-open requests from the request-file watcher against the
 	// per-agent ACMM write-policy + forge-resistance. nil fails closed. Set by
 	// StartPRRequestWatcher.
@@ -1193,6 +1211,12 @@ type ActionableResult struct {
 	// StaleSince is the time the stale share of the result was last fetched
 	// for real: the data is current as of then. Zero when nothing is stale.
 	StaleSince time.Time `json:"stale_since,omitzero"`
+	// RestoredAt is when this process read the snapshot back from disk at
+	// startup (cmd/hive bootCollectors). Set only on that restored copy, so
+	// the dashboard can say "refreshing after restart" with the process's
+	// own clock instead of "stale since <previous pod's time>"; the first
+	// enumeration replaces the snapshot and the marker with it.
+	RestoredAt time.Time `json:"restored_at,omitzero"`
 	// ItemPatches records, per item, when its copy was last read from GitHub
 	// and (for a webhook-driven upsert) from which delivery, so an
 	// irreversible action can bound its staleness and an operator can audit
@@ -1211,6 +1235,14 @@ type ActionableResult struct {
 	// against each repo's max_open_held_prs cap (StampOpenHeldPRs,
 	// hivecommons/hive#13645). Absent for repos without a cap.
 	OpenHeldPRs map[string]OpenHeldPRs `json:"open_held_prs,omitempty"`
+	// WebhookPatches remembers the re-reads ApplyWebhookItem applied, keyed
+	// like ItemPatches, so a reconcile pass that started before them can
+	// replay them onto its result before publishing
+	// (ReplayWebhookPatches). Without it a self-initiated unblock, re-read
+	// into the cached snapshot while an enumeration was already listing, was
+	// overwritten by that enumeration's pre-unblock copy and the row showed
+	// `blocked` until the next pass. Process-local: never serialised.
+	WebhookPatches map[string]WebhookItemSnapshot `json:"-"`
 }
 
 // ItemPatchMeta is the audit record of one webhook-driven upsert.
@@ -1859,6 +1891,16 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			details = append(details, c.workIssue(repo, issue, labels, "filtered", "Exempt label"))
 			continue
 		}
+		// A tracking/archive issue (hive/tracking label, hive:tracking
+		// marker or "Keep this issue open" in the body) is not work: it
+		// never becomes actionable, is never offered or advertised, and
+		// CloseIssue refuses it (hivecommons/hive#14613).
+		if _, tracking := isTrackingIssue(issue); tracking {
+			breakdown.Filtered++
+			breakdown.Tracking++
+			details = append(details, c.workIssue(repo, issue, labels, "filtered", trackingFilterReason))
+			continue
+		}
 		// Blocked on an unmerged PR (hivecommons/hive#13093): out of the
 		// actionable set until ReconcileBlockedIssues lifts the label. The
 		// reason names the PR when the body carries the blocked-on marker,
@@ -1906,7 +1948,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time, re
 			if !ra.AdmitsReporter(labels, safeGetLogin(issue.GetUser()), issue.GetAuthorAssociation()) {
 				c.markReporterTrustAwaiting(ctx, repo, issue, labels, ra, reporterTrustWaitBudget)
 				breakdown.ReporterTriage++
-				details = append(details, c.workIssue(repo, issue, labels, workBucketReporterTriage, "Awaiting maintainer triage label"))
+				details = append(details, c.workIssue(repo, issue, labels, workBucketReporterTriage, reporterTriageAwaitingReason))
 				continue
 			}
 			labels = c.clearReporterTrustAwaiting(ctx, repo, issue, labels, ra)
@@ -2029,7 +2071,7 @@ func prRequestedReviews(pr *gh.PullRequest) (logins, teams []string) {
 	return logins, teams
 }
 
-func reviewScopeContract(title, body, defaultRepo, runKey, planRef string) string {
+func reviewScopeContract(title, body, defaultRepo, runKey, planRef, headRef string, teamKeys []string) string {
 	refs := ParseClaimedIssues(title+"\n"+body, defaultRepo)
 	if len(refs) > 0 {
 		ref := refs[0]
@@ -2043,6 +2085,59 @@ func reviewScopeContract(title, body, defaultRepo, runKey, planRef string) strin
 			return fmt.Sprintf("lease task Hive-Run %s / Hive-Plan %s", strings.TrimSpace(runKey), strings.TrimSpace(planRef))
 		}
 		return fmt.Sprintf("lease task Hive-Run %s", strings.TrimSpace(runKey))
+	}
+	return linearScopeContract(title, body, headRef, teamKeys)
+}
+
+// SetLinearScopeTeams maps configured Linear teams to their repositories.
+func (c *Client) SetLinearScopeTeams(teams []config.LinearTeamSourceConfig) {
+	mapped := make(map[string][]string)
+	for _, team := range teams {
+		for _, repo := range append([]string{team.Repo}, linearProjectRepos(team.Projects)...) {
+			if repo != "" && team.Key != "" {
+				mapped[strings.ToLower(repo)] = append(mapped[strings.ToLower(repo)], strings.ToUpper(team.Key))
+			}
+		}
+	}
+	c.reposMu.Lock()
+	c.linearTeams = mapped
+	c.reposMu.Unlock()
+}
+
+func linearProjectRepos(projects []config.LinearProjectSourceConfig) []string {
+	var repos []string
+	for _, project := range projects {
+		repos = append(repos, project.Repo)
+	}
+	return repos
+}
+
+func (c *Client) linearScopeTeams(repo string) []string {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	return append([]string(nil), c.linearTeams[strings.ToLower(repo)]...)
+}
+
+var linearBodyScope = regexp.MustCompile(`(?i)\b(?:fixes|closes|part of)\s+([a-z][a-z0-9]*-[0-9]+)\b`)
+var linearTitleScope = regexp.MustCompile(`(?i)^\s*\[([a-z][a-z0-9]*-[0-9]+)\]`)
+var linearBranchScope = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])([a-z][a-z0-9]*-[0-9]+)(?:$|[^a-z0-9])`)
+
+func linearScopeContract(title, body, headRef string, keys []string) string {
+	for _, source := range []struct {
+		pattern *regexp.Regexp
+		text    string
+	}{
+		{linearBodyScope, body}, {linearTitleScope, title}, {linearBranchScope, headRef},
+	} {
+		for _, match := range source.pattern.FindAllStringSubmatch(source.text, -1) {
+			id := strings.ToUpper(match[1])
+			key := id[:strings.LastIndexByte(id, '-')]
+			for _, allowed := range keys {
+				if strings.EqualFold(key, allowed) {
+					return "linked Linear issue " + id
+				}
+			}
+		}
 	}
 	return ""
 }
@@ -2080,7 +2175,8 @@ func (c *Client) fetchPRsWithDetails(ctx context.Context, repo string, clankerBu
 		labels = c.clearReleasedReporterTrustNeedsHuman(ctx, repo, pr.GetNumber(), labels)
 		attrMeta, hasAttr := ParseAttributionTrailer(pr.GetBody())
 		runKey, planRef := ParseRunTrailers(pr.GetBody())
-		scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef)
+		headRef, _, _ := prHeadOrigin(pr)
+		scopeContract := reviewScopeContract(pr.GetTitle(), pr.GetBody(), owner+"/"+repoName, runKey, planRef, headRef, c.linearScopeTeams(owner+"/"+repoName))
 
 		if c.isHeld(labels) {
 			breakdown.Hold++
@@ -4742,6 +4838,10 @@ type RepoIssueBreakdown struct {
 	// blocker (`blocked` label, hivecommons/hive#13093). Counted inside
 	// Filtered; named so the repo card can say why.
 	Blocked int `json:"blocked,omitempty"`
+	// Tracking counts open tracking/archive issues (`hive/tracking` label,
+	// `<!-- hive:tracking -->` marker or "Keep this issue open" in the
+	// body, hivecommons/hive#14613). Counted inside Filtered.
+	Tracking int `json:"tracking,omitempty"`
 	// ReporterTriage counts open issues from reporters the hive does not
 	// trust that are waiting for a maintainer's triage label (#9665). Kept
 	// apart from Filtered so the repo card can say "N awaiting reporter

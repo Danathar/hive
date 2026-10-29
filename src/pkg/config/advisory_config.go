@@ -124,6 +124,10 @@ func (a AdvisoryConfig) PRAutoCloseEnabled() bool {
 	return a.PRAutoClose == nil || *a.PRAutoClose
 }
 
+func (g GovernorConfig) AutoCloseSupersededEnabled() bool {
+	return g.AutoCloseSuperseded == nil || *g.AutoCloseSuperseded
+}
+
 // Bounds for AdvisoryConfig.UpdateIntervalS. Exported because the dashboard
 // PUT validates against them and pkg/hub pins the invariant that its
 // advisory-staleness threshold exceeds the maximum allowed posting cadence

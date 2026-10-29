@@ -1303,6 +1303,9 @@ const RELAY_CAPABILITIES = ['quota_preflight_v1', 'standby_v1', 'run-stage', 'fi
 //             fix is DEFERRED and runs before the next `ready`.
 // A fix never replaces currentTask: the primary lease stays owned and renewed.
 const FIX_PR_KIND = 'fix-pr';
+// Every follow-up commit must be signed off or the PR bounces to no-dco
+// (hivecommons/hive#14605).
+const FIX_PR_SIGNOFF_REQUIREMENT = 'REQUIRED: every follow-up commit MUST carry a Signed-off-by trailer — commit with `git commit -s`, and run `git rebase --signoff` before pushing if any new commit lacks one.';
 const FIX_PR_MAX_PARALLEL = Math.max(0, Math.min(16, Number(process.env.HIVE_MAX_PARALLEL_FIXES || 1) || 0));
 const FIX_PR_DONE_MARKER = 'HIVE_FIX_PR_DONE';
 const FIX_PR_FAILED_MARKER = 'HIVE_FIX_PR_FAILED';
@@ -1498,6 +1501,12 @@ function hubRegistryURLFor(hiveURL) {
 // (vanity hosts). Returns the registry's dashboardUrl as a wss:// contribute
 // URL, or null when the registry does not know the hive or lists the same
 // host we just failed on (so the retry would be identical).
+//
+// Only an https dashboardUrl under the hub's own spoke domain is followed.
+// dashboardUrl is reported by each spoke in its heartbeat, so the registry can
+// list any host; the relay dials the result with the contributor's token and
+// runs whatever that host hands it, which must stay with hosts the hub fronts.
+// Entries elsewhere are skipped, never redialed.
 function currentHiveURLFromRegistry(hiveURL, registry) {
   let u;
   try { u = new URL(String(hiveURL || '').trim()); } catch (_) { return null; }
@@ -1508,10 +1517,12 @@ function currentHiveURLFromRegistry(hiveURL, registry) {
     if (!h || typeof h !== 'object' || typeof h.dashboardUrl !== 'string') continue;
     let d;
     try { d = new URL(h.dashboardUrl); } catch (_) { continue; }
-    const dHost = d.hostname.toLowerCase();
+    const dHost = d.hostname.toLowerCase().replace(/\.$/, '');
     if (h.id !== label && dHost.split('.')[0] !== label) continue;
+    if (d.protocol !== 'https:' || !dHost.endsWith('.' + DEFAULT_HUB_SPOKE_DOMAIN)) continue;
     if (dHost === host) return null;
-    d.protocol = d.protocol === 'http:' ? 'ws:' : 'wss:';
+    d.hostname = dHost;
+    d.protocol = 'wss:';
     d.pathname = '/contribute';
     d.search = '';
     d.hash = '';
@@ -2800,6 +2811,9 @@ function writeRelayPidFile() {
       pid: process.pid,
       started_at: relayStartedAt,
       session: relaySession,
+      // The tmux session the relay drives, so `just contribute-stop` can end
+      // it with the relay it stops (hivecommons/hive#14833).
+      agent_session: (process.env.HIVE_AGENT_SESSION || '').trim() || undefined,
       env_file: CONTRIBUTOR_ENV_FILE,
       container_runtime: (process.env.HIVE_CONTAINER_RUNTIME || '').trim() || undefined,
       container_name: (process.env.HIVE_CONTAINER_NAME || '').trim() || undefined,
@@ -4614,7 +4628,9 @@ function headlessProgressTick(task) {
 const WORKSPACE_DIR_VARIABLE = /\$\{?HIVE_WORKSPACE_DIR\}?/g;
 function resolveTaskPrompt(task) {
   const prompt = task.prompt || `Work on ${task.kind} ${taskDisplay(task)}: ${task.title || ''}`;
-  return prompt.replace(WORKSPACE_DIR_VARIABLE, TASK_WORKSPACE_DIR);
+  const resolved = prompt.replace(WORKSPACE_DIR_VARIABLE, TASK_WORKSPACE_DIR);
+  if (task.kind !== FIX_PR_KIND) return resolved;
+  return `${resolved}\n\n${FIX_PR_SIGNOFF_REQUIREMENT}`;
 }
 
 // installRepoToolchain runs bin/repo-toolchain.sh against the task's checkout
@@ -4971,10 +4987,11 @@ function runHeadlessTask(task) {
         const quota = wasTimedOut || spawnError ? null : headlessQuotaExhaustion(diagnostic, BACKEND);
         if (quota) {
           enterQuotaHold(quota);
-          failCurrentTask(reason, { permanent: false, kind: 'environment', skipReady: true });
+          failCurrentTask(reason, { permanent: false, kind: 'environment', skipReady: true, outputTail: outTail });
           return;
         }
         failCurrentTask(reason, {
+          outputTail: outTail,
           permanent: false,
           kind: BACKEND === 'pi' ? 'environment' : undefined,
         });
@@ -4982,8 +4999,6 @@ function runHeadlessTask(task) {
       return;
     }
     finish(() => {
-      setPiInvocationState('succeeded');
-      console.log(`Headless task ${task.task_id} completed (exit 0)`);
       const prFinding = resolveTaskPR(outScan, {
         repo: task.repo,
         taskId: task.task_id,
@@ -4997,6 +5012,17 @@ function runHeadlessTask(task) {
       // does; see resolveTaskPR.
       const noWork = prFinding.suppressesVerdict ? null : detectNoWorkVerdict(outTail);
       if (noWork) console.log(`Detected ${noWork.verdict} verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
+      // #14940: exit 0 only means the CLI exited cleanly. A verdict about
+      // its broken runtime must be failed just as it is in finishCurrentTask.
+      if (noWork && noWork.environmentFailure) {
+        const reason = `agent reported an environment failure: ${noWork.reason || '(no reason given)'}`;
+        setPiInvocationState('failed');
+        writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, task_gen: task.task_gen, result: 'failed', reason });
+        failCurrentTask(reason, { kind: 'environment', skipCLI: true, outputTail: outTail });
+        return;
+      }
+      setPiInvocationState('succeeded');
+      console.log(`Headless task ${task.task_id} completed (exit 0)`);
       writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, task_gen: task.task_gen, result: 'completed', pr_url: prURL });
       // #7924: the label goes on with the task credential, so it must be
       // applied BEFORE stopAgentForTaskExit drops it below.
@@ -6446,6 +6472,39 @@ function isPersonBlockedReason(reason) {
   reason = String(reason || '').trim();
   return !!reason && BLOCKED_ON_PERSON_RE.test(reason) && !BLOCKED_ON_ITEM_RE.test(reason);
 }
+
+// ENVIRONMENT_FAILURE_REASON_PATTERNS (hivecommons/hive#14832): a verdict whose
+// reason says the agent's OWN runtime cannot run commands at all. On Ubuntu's
+// AppArmor user-namespace restriction, Claude's native sandbox started, then
+// every Bash call failed (`apply-seccomp: write /proc/self/setgroups ...`), and
+// the agent printed `HIVE_VERDICT: complete — environment failure: Bash tool
+// broken ...`. Booked as complete, the hub counted it as a finished task and
+// the relay took the next issue to drop it the same way. Such a verdict — under
+// any token except wrong_base — is read as blocked on this contributor's own
+// environment and handed back as an `environment` task failure (see
+// finishCurrentTask), never labelled and never booked as completed.
+//
+// Kept deliberately narrow: each entry names the runtime itself being broken,
+// not a repository problem the agent could legitimately report. A verdict
+// backed by a PR this task opened is unaffected — a confirmed PR suppresses the
+// verdict before it is acted on.
+const ENVIRONMENT_FAILURE_REASON_PATTERNS = [
+  String.raw`\benvironment(?:al)?\s+(?:failure|failed|is broken|broken)\b`,
+  String.raw`\bbroken\s+(?:environment|sandbox)\b`,
+  String.raw`\b(?:bash|shell)\s+tool\b.{0,40}\b(?:broken|unusable|unavailable)\b`,
+  String.raw`\bsandbox\b.{0,40}\b(?:is |was )?(?:broken|unusable)\b`,
+  String.raw`\bevery\s+(?:shell\s+|bash\s+)?command\b.{0,60}\bfail(?:s|ed|ing)?\b`,
+  String.raw`\bapply-seccomp\b`,
+  String.raw`/proc/self/setgroups\b`,
+];
+const ENVIRONMENT_FAILURE_REASON_RE = new RegExp(ENVIRONMENT_FAILURE_REASON_PATTERNS.join('|'), 'i');
+
+// isEnvironmentFailureReason says whether a verdict's reason reports the
+// agent's own runtime as unable to run commands.
+function isEnvironmentFailureReason(reason) {
+  reason = String(reason || '').trim();
+  return !!reason && ENVIRONMENT_FAILURE_REASON_RE.test(reason);
+}
 const NO_WORK_NEEDS_DECISION_REASON_RE = /^(?:decision|needs[_ -]?decision|maintainer[_ -]?decision)\s*[:—–-]\s*/i;
 const NATURAL_NEEDS_DECISION_REASON_RE = /(?:maintainer|design|policy|approval|\/approve).{0,80}(?:decision|approval|\/approve)|(?:decision|approval).{0,80}maintainer/i;
 const ALREADY_DONE_REASON_KIND = 'already_done';
@@ -6575,6 +6634,7 @@ function withoutPaneIndex(v) {
   const out = { verdict: v.verdict, reason: v.reason, line: v.line };
   if (v.needsDecision) out.needsDecision = true;
   if (v.toolingFailure) out.toolingFailure = true;
+  if (v.environmentFailure) out.environmentFailure = true;
   if (v.targetBranch) out.targetBranch = v.targetBranch;
   return out;
 }
@@ -6628,9 +6688,19 @@ function detectHiveVerdicts(lines, wanted) {
     // hivecommons/hive#11775: a blocked verdict about the contributor's own
     // push/token/credential failure is demoted — the issue is not blocked on
     // anything outside the repo and must not be labelled as such.
-    const toolingFailure = verdict === HIVE_VERDICT_BLOCKED && isToolingFailureBlockedReason(reason);
+    // hivecommons/hive#14832: a verdict saying the agent's own runtime is
+    // broken is blocked on this contributor's environment, whatever token
+    // the agent chose — most often `complete`, which the hub would otherwise
+    // count as a finished task.
+    let environmentFailure = false;
+    if (verdict !== HIVE_VERDICT_WRONG_BASE && isEnvironmentFailureReason(reason)) {
+      verdict = HIVE_VERDICT_BLOCKED;
+      needsDecision = false;
+      environmentFailure = true;
+    }
+    const toolingFailure = verdict === HIVE_VERDICT_BLOCKED && (environmentFailure || isToolingFailureBlockedReason(reason));
     const targetBranch = verdict === HIVE_VERDICT_WRONG_BASE ? wrongBaseTarget(reason) : undefined;
-    found.push({ verdict, reason, line: lines[i], index: i, needsDecision, toolingFailure, targetBranch });
+    found.push({ verdict, reason, line: lines[i], index: i, needsDecision, toolingFailure, environmentFailure, targetBranch });
   }
   return found;
 }
@@ -6639,9 +6709,10 @@ function detectHiveVerdicts(lines, wanted) {
 // no_work_needed, blocked, and wrong_base. Returns null when no marker is
 // found — the hub then treats the completion exactly as an idle one.
 function detectNoWorkVerdict(lines) {
-  return detectHiveVerdict(lines, [
-    HIVE_VERDICT_NO_WORK, HIVE_VERDICT_BLOCKED, HIVE_VERDICT_WRONG_BASE,
-  ]);
+  // Classify every token before filtering: a `complete` about a broken
+  // environment is rewritten to `blocked` by detectHiveVerdicts (#14940).
+  const verdict = detectHiveVerdicts(lines, HIVE_VERDICT_TOKENS).find(isNoWorkVerdict);
+  return verdict ? withoutPaneIndex(verdict) : null;
 }
 
 // detectCompletionVerdict reports whether the agent SAID it finished (#5376).
@@ -7955,6 +8026,11 @@ function restartBackoffMs(attempt) {
 // the pane — it quit and relaunched the CLI itself, or the CLI is already gone.
 // The credential is still dropped; only the quit/relaunch is skipped, so a
 // relaunch already in flight is not nested inside another one.
+//
+// opts.outputTail is the caller's already-captured (and redacted) output lines.
+// Only headless callers pass it: they have no pane of their own, and any tmux
+// session that happens to share TMUX_SESSION's name on the host belongs to
+// someone else, so when it is supplied it is used instead of a pane capture.
 function failCurrentTask(reason, opts) {
   if (!currentTask) return;
   const permanent = !!(opts && opts.permanent);
@@ -7964,7 +8040,9 @@ function failCurrentTask(reason, opts) {
   // Captured BEFORE the agent is stopped: the pane text is the evidence the
   // hub and the operator read to understand the failure, and quitLiveCLI()
   // followed by a relaunch overwrites it with launch chrome.
-  const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
+  const tmuxLines = (opts && Array.isArray(opts.outputTail))
+    ? opts.outputTail
+    : captureTmuxLines(TMUX_TAIL_LINES);
   // Cause B (#5353): the hub is about to release this issue and offer it to
   // someone else. Stop the agent and drop its token FIRST, so the report and
   // the reality agree at the instant the hub acts on it.
@@ -8121,7 +8199,7 @@ function markIssueLabel(task, reason, label, description, issueTag) {
 }
 
 function markIssueBlocked(task, reason) {
-  if (isToolingFailureBlockedReason(reason)) {
+  if (isToolingFailureBlockedReason(reason) || isEnvironmentFailureReason(reason)) {
     console.log(`Task ${task && task.task_id ? task.task_id : '(unknown)'}: blocked verdict describes this contributor's own tooling (${String(reason).trim().slice(0, 160)}) — not applying the '${BLOCKED_WORKFLOW_LABEL}' label; the hub re-offers the issue on the short cooldown (hivecommons/hive#11775)`);
     return;
   }
@@ -8174,6 +8252,15 @@ function markIssueAlreadyDone(task, reason) {
 
 function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork, unaddressedNotes = [] }) {
   if (!currentTask) return;
+  // hivecommons/hive#14832: the agent ended the task because its own runtime
+  // cannot run commands. That is not a completion: hand it back as an
+  // `environment` failure so the hub books outcome=failed and keeps this
+  // contributor off the issue, instead of counting a finished task.
+  if (noWork && noWork.environmentFailure) {
+    console.warn(`Task ${currentTask.task_id}: the agent's HIVE_VERDICT reports a broken environment (${String(noWork.reason || '').slice(0, 160)}) — reporting the task failed [environment] instead of complete (hivecommons/hive#14832)`);
+    failCurrentTask(`agent reported an environment failure: ${noWork.reason || '(no reason given)'}`, { kind: 'environment' });
+    return;
+  }
   // #7879: the PR comment must go out BEFORE stopAgentForTaskExit drops the
   // task credential below — it is posted with the same token the agent used.
   if (prURL && unaddressedNotes.length) postUnaddressedNotesComment(prURL, unaddressedNotes);
@@ -10275,6 +10362,8 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     isToolingFailureBlockedReason,
     isPersonBlockedReason,
     NEEDS_HUMAN_LABEL,
+    isEnvironmentFailureReason,
+    ENVIRONMENT_FAILURE_REASON_PATTERNS,
     verdictWireFields,
     alreadyDoneVerdictFields,
     markIssueBlocked,
