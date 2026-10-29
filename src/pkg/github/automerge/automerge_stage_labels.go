@@ -100,15 +100,17 @@ type StageLabelPolicy struct {
 	// the copy merges.
 	AdoptSupersedeCloseFirst bool
 	// DCORequired resolves the per-repo `governor.labels.stage.dco.required`
-	// override for "owner/repo"; ok false means "detect" (a DCO context in
-	// the branch's required checks or on the head). nil = always detect.
-	DCORequired func(display string) (required, ok bool)
-	// SquashOnly reports whether "owner/repo" forbids merge commits
+	// override for "owner/repo" (stageRepoFullName, never the display name);
+	// ok false means "detect" (a DCO context in the branch's required checks
+	// or on the head). nil = always detect.
+	DCORequired func(repo string) (required, ok bool)
+	// SquashOnly reports whether "owner/repo" (stageRepoFullName) forbids
+	// merge commits
 	// (auto_merge.squash_only). Where it does not, a role/trusted head
 	// mixing contributor and self-signed hive commits is merged with a
 	// merge commit (`merge-method/merge`) rather than parked on
 	// hive-signoff-attribution. nil = merge commits allowed everywhere.
-	SquashOnly func(display string) bool
+	SquashOnly func(repo string) bool
 	// HiveID is this hive's id; hive/<HiveID> on a PR the App did not author
 	// is a stray the reconciler removes (hivecommons/hive#12545), and the
 	// `<!-- hive:origin hive=<id> -->` marker naming it marks a PR as
@@ -694,11 +696,24 @@ func (c *Engine) noteStageDCOGate(owner, repo string, number int, head string, r
 	})
 }
 
+// stageRepoFullName is obs's repository as "owner/repo", the form per-repo
+// policy lists are keyed on (the dashboard stores auto_merge.squash_only that
+// way). Display is the sweep's display name, which is the bare repo name in a
+// single-org hive, so matching policy on it missed every owner/repo entry:
+// squash_only never applied and projectbluefin/utah#1005 was elected a merge
+// commit its repository refuses.
+func stageRepoFullName(obs stageObservation) string {
+	if obs.Owner != "" && obs.Repo != "" {
+		return obs.Owner + "/" + obs.Repo
+	}
+	return obs.Display
+}
+
 // dcoRequired reports whether a missing sign-off may route obs to 072: the
 // per-repo override when configured, else the detected gate for this head.
 func dcoRequired(policy StageLabelPolicy, obs stageObservation) bool {
 	if policy.DCORequired != nil {
-		if required, ok := policy.DCORequired(obs.Display); ok {
+		if required, ok := policy.DCORequired(stageRepoFullName(obs)); ok {
 			return required
 		}
 	}
@@ -986,7 +1001,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 				// 2026-10-20, hivecommons/pluk#315).
 				hiveCaused := signoffHiveCaused(stats, prevRec, hadPrev, obs.HeadSHA)
 				approved := obs.Detail.HumanApprover != "" && obs.Detail.HumanApprovalHead == obs.HeadSHA
-				election := mergeCommitElection(stats, role, approved, policy, obs.Display)
+				election := mergeCommitElection(stats, role, approved, policy, stageRepoFullName(obs))
 				_, mergersConfigured := c.isTrustedMerger("")
 				if election.Refused == mergeCommitRefusedRole && hiveCaused && mergersConfigured && obs.HeadSHA != "" && !(obs.Detail.ReviewsKnown && obs.Detail.Reviews == 0) {
 					// No lane asked for the approval on this head yet:
@@ -994,7 +1009,7 @@ func (c *Engine) ApplyStageLabels(ctx context.Context) (StageLabelResult, error)
 					// maintainer already approved.
 					if login, ok := c.latestTrustedHumanApproval(ctx, obs.Owner, obs.Repo, obs.Number, obs.HeadSHA); ok {
 						obs.Detail.HumanApprover, obs.Detail.HumanApprovalHead = login, obs.HeadSHA
-						election = mergeCommitElection(stats, role, true, policy, obs.Display)
+						election = mergeCommitElection(stats, role, true, policy, stageRepoFullName(obs))
 					}
 				}
 				obs.Detail.MergeCommit, obs.Detail.MergeCommitRefused = election.Elected, election.Refused
