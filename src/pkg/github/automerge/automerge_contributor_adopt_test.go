@@ -1182,10 +1182,8 @@ func hiveUnsignedFixture() []stageCommitFixture {
 	}
 }
 
-// The App's REST token cannot rewrite a fork branch, so an in-place adoption
-// whose only unsigned commits are the hive's still re-homes, with the
-// commits re-signed, rather than holding at 074 for a rewrite nobody runs.
-func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureOnForkRehomesResigned(t *testing.T) {
+// A DCO repair never copies fork code into the base repository's trusted CI.
+func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureOnForkRefusesRehome(t *testing.T) {
 	p := adoptPolicy()
 	p.AdoptInPlace = true
 	p.DCORequired = func(string) (bool, bool) { return true, true }
@@ -1203,21 +1201,11 @@ func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureOnForkRehomesResigned(t *test
 	h.api.reset()
 	h.clock.advance(time.Minute)
 	h.observe(adoptPR(7, "c1", "stage/074-adopted-by-hive", "role/contributor", "author/clanker", stagelabels.NoDCOLabel), "check-failing:DCO")
-	if len(h.adopt.newCommits) != 2 {
-		t.Fatalf("re-signed commits=%v", h.adopt.newCommits)
+	if len(h.adopt.newCommits) != 0 || len(h.adopt.pulls) != 0 || len(h.adopt.prEdits) != 0 {
+		t.Fatalf("fork must not be copied: commits=%v pulls=%v edits=%v", h.adopt.newCommits, h.adopt.pulls, h.adopt.prEdits)
 	}
-	msg, _ := h.adopt.newCommits[1]["message"].(string)
-	if !strings.Contains(msg, "fix: unsigned hive fixer") || !signedOffByRE.MatchString(msg) {
-		t.Fatalf("hive commit not re-signed: %q", msg)
-	}
-	if got := h.adopt.refs["refs/heads/hive/adopt-7"]; got != "signed2" {
-		t.Fatalf("rehome branch sha=%q, want the re-signed tip; refs=%v", got, h.adopt.refs)
-	}
-	if len(h.adopt.pulls) != 1 || len(h.adopt.prEdits) != 1 {
-		t.Fatalf("fork head should re-home: pulls=%v edits=%v", h.adopt.pulls, h.adopt.prEdits)
-	}
-	if rec, _ := h.e.stageStoreOrShared().Get(key); rec.AdoptedInPlace() || rec.AdoptReason != AdoptReasonDCORehome {
-		t.Fatalf("record should be a dco-rehome supersession: %+v", rec)
+	if rec, _ := h.e.stageStoreOrShared().Get(key); !rec.AdoptedInPlace() || rec.AdoptEscalatedReason != stagelabels.LaneReasonAdoptionStalledPrefix+adoptStallForkRehomeRefused {
+		t.Fatalf("fork should remain in place with a human decision: %+v", rec)
 	}
 }
 
@@ -1322,15 +1310,16 @@ func TestDCORehomeReplaysMergeCommitWithMappedParents(t *testing.T) {
 	defer done()
 	h.adopt.allowMaintainerEdits(7, true)
 	fixture := hiveUnsignedFixture()
+	fixture[0].message = "feat: unsigned contributor"
 	fixture = append(fixture, stageCommitFixture{message: "Merge branch 'v5' into fix/widget", authorLogin: testHiveAppBotLogin, authorName: "hive[bot]", authorEmail: "12345+hive[bot]@users.noreply.github.com", parents: []string{"c1", "base"}})
 	h.api.commitDetails = map[int][]stageCommitFixture{7: fixture}
-	h.observe(adoptPR(7, "c2"), "check-failing:DCO")
+	h.observe(basePR(7, "c2"), "check-failing:DCO")
 	key := stageKey("acme", "widget", 7)
 	h.e.stageStoreOrShared().MarkAdoptedInPlace(key, "c2", AdoptReasonOffline, h.clock.at)
 
 	h.api.reset()
 	h.clock.advance(time.Minute)
-	h.observe(adoptPR(7, "c2", "stage/074-adopted-by-hive", "role/contributor", "author/clanker", stagelabels.NoDCOLabel), "check-failing:DCO")
+	h.observe(basePR(7, "c2", "stage/074-adopted-by-hive", "role/contributor", "author/clanker", stagelabels.NoDCOLabel), "check-failing:DCO")
 	if len(h.adopt.newCommits) != 3 {
 		t.Fatalf("replayed commits=%v", h.adopt.newCommits)
 	}

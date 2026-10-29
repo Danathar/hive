@@ -314,8 +314,8 @@ func TestPRDeriverPassHoldsEscalationAgainstWeakOpinion(t *testing.T) {
 
 	// Only a weak opinion is held: an owned one past the merge gate (the
 	// lane admitted the head and is soaking it) is the lane's to state, and
-	// a weak 085 (a requires_human verdict on an author no lane vouches
-	// for, hivecommons/hive#13115) keeps its own reason.
+	// an adopted original's weak requires_human opinion now yields to 074,
+	// but a real adoption escalation must still park it at 085.
 	soaking := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Reason: contributorLaneReasonSoaking, Detail: approved}}
 	weakHuman := []stageObservation{{Owner: "acme", Repo: "widgets", Number: 9, Author: "relay", HeadSHA: "sha", Lane: stageLaneContributor, Reason: "untrusted-author-role", Detail: stageDetail{VerdictKnown: true, Verdict: ContributorLaneVerdict{Configured: true, Verdict: "requires_human"}}}}
 	for _, tc := range []struct {
@@ -336,6 +336,13 @@ func TestPRDeriverPassHoldsEscalationAgainstWeakOpinion(t *testing.T) {
 		want := stageengine.PRDeriver().Derive(plain)
 		f := factsFrom(tc.list)
 		f.PR.Pass = &stageengine.PRPassFacts{AuthorKind: authorkind.Clanker, AdoptionLive: true, EscalationReason: stalled}
+		if !owned {
+			got := stageengine.PRDeriver().Derive(f)
+			if want.Stage != stagelabels.AdoptedByHive || got.Stage != stagelabels.NeedsDecision || got.Reason != stalled {
+				t.Errorf("%s: adopted verdict must yield to its escalation: plain=%+v escalated=%+v", tc.name, want, got)
+			}
+			continue
+		}
 		if got := stageengine.PRDeriver().Derive(f); got.Stage != want.Stage || got.Reason != want.Reason || got.Reason == stalled {
 			t.Errorf("%s: escalation overrode the opinion: derived %+v, want %+v", tc.name, got, want)
 		}

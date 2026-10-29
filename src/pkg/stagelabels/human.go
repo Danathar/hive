@@ -599,7 +599,7 @@ func DecisionActions(r Route) string {
 			if reason == "" {
 				reason = "its own gate"
 			}
-			steps = append(steps, "the hive set `hold` itself for "+reason+"; **Release** it (dashboard row menu → Release hold, or remove the `hold` label) and the lane merges on its next pass once the other gates are clear, or **keep** it until a maintainer has reviewed the issue's reporter; `/hive approve` does not remove it")
+			steps = append(steps, "The hive set `hold` itself for "+reason+". **Release** it (dashboard row menu → Release hold, or remove the `hold` label) and the lane merges on its next pass once the other gates are clear, or **keep** it until a maintainer has reviewed the issue's reporter; `/hive approve` does not remove it")
 			continue
 		}
 		steps = append(steps, "resolve the reason for `"+h+"` and have a maintainer remove that label (`/hive approve` does not remove it)")

@@ -32,7 +32,7 @@ func TestScopeContractLinearFetchFailedNamesIdentifier(t *testing.T) {
 	section := scopeContractSection(PullRequest{ScopeContract: "linked Linear issue ONB-3872"})
 	for _, want := range []string{
 		"Contract: linked Linear issue ONB-3872.",
-		"read that issue with `gh issue view`",
+		"read that issue and its comments with `gh issue view <n> --comments`",
 		"The text of Linear issue ONB-3872 could not be fetched",
 	} {
 		if !strings.Contains(section, want) {
