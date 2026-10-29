@@ -126,7 +126,7 @@ func TestStageTrackerMergeSoundWiring(t *testing.T) {
 		`window.AudioContext || window.webkitAudioContext`,
 		`if (ctx.state === 'running') return stageTrackerScheduleVoices(ctx, voice, count, gain, startOffsetS);`,
 		`stageTrackerResumeContext(ctx, STAGE_TRACKER_AUTO_RESUME_MS).then(`,
-		`() => stageTrackerSoundPrime());`,
+		`() => stageTrackerSoundHeldNotice(true));`,
 		`high.type = 'highpass';`,
 		`data[i] = snap + sizzle * env;`,
 		`ctx.createBufferSource()`,
@@ -186,6 +186,9 @@ assert.deepStrictEqual(stageTrackerNewlyMerged(stageTrackerMergeState(first), st
 // A PR that vanishes WITHOUT a recently_merged entry was closed, not merged.
 const closed = { items: [P(2, 80), P(3, 100)], recently_merged: [] };
 assert.deepStrictEqual(stageTrackerNewlyMerged(stageTrackerMergeState(first), stageTrackerMergeState(closed)), []);
+// The ledger's merged.recent settles a vanished PR the same way (a merge by a person or another bot).
+const ledger = { items: [P(2, 80)], merged: { all_time: 1, recent: [{ repo: 'b', number: 3, merged_by: 'someone' }] } };
+assert.deepStrictEqual(stageTrackerNewlyMerged(stageTrackerMergeState(first), stageTrackerMergeState(ledger)), ['a/b/pr#3']);
 // Repo scoping: same number in another repo is a different PR.
 assert.deepStrictEqual(stageTrackerNewlyMerged({ 'a/b/pr#5': false }, { 'c/d/pr#5': true }), []);
 assert.deepStrictEqual(stageTrackerMergeState(null), {});
@@ -504,6 +507,7 @@ func TestStageTrackerSoundSelection(t *testing.T) {
 		"function stageTrackerZapVoice(ctx, out, at) { out.voices.push('zap'); }",
 		"function stageTrackerBuzzVoice(ctx, out, at) { out.voices.push('buzz'); }",
 		"function stageTrackerSoundPrime() {}",
+		"function stageTrackerSoundHeldNotice() {} function stageTrackerSoundHeldClear() {}",
 		"function stageTrackerSoundSyncButton() {}",
 		"function stageTrackerRenderSettings() {}",
 		"function stageTrackerPlayTest() {}",

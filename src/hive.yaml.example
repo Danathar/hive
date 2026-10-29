@@ -646,6 +646,10 @@ governor:
       #   after_offline: 15m            # default 15m; registered relay offline, measured from the later
       #                                 # of its last heartbeat and the first stage/072 nudge
       #   after_unregistered: 15m       # default 15m; no contributor profile, wait after the nudge with no new head
+      #   supersede:
+      #     close_first: true           # default true; close the original (hive/superseded, one note naming the
+      #                                 # copy) in the pass that opens the copy; reopened if the copy fails.
+      #                                 # false: original stays stage/074 and closes when the copy merges
 
   # Optional: read actionable work from Linear instead of GitHub Issues.
   # Secrets should come from env interpolation, not literal values.
@@ -1064,6 +1068,10 @@ github:
   #   oidc:
   #     enabled: false
   #     audience: hive-prod
+  # Opt in on shared-UID deployments (e.g. OpenShift restricted-v2).
+  # Gives agents read-only App caches; agents can read each other's caches.
+  # Writes still use the relays. Requires App auth; default false. Restart to apply.
+  # shared_uid_read_token: true
   # agent_reserve_floor: 400              # Keep this many core requests reserved for daemon scan/merge paths.
 
   # Shared GitHub App/PAT core API budget floors. When remaining core quota

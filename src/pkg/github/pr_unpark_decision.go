@@ -9,6 +9,7 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 	"github.com/hivecommons/hive/pkg/authorkind"
+	"github.com/hivecommons/hive/pkg/delegatedecision"
 	"github.com/hivecommons/hive/pkg/escalation"
 	"github.com/hivecommons/hive/pkg/review"
 	"github.com/hivecommons/hive/pkg/stageengine"
@@ -73,6 +74,19 @@ func (c *Client) tryUnparkPullRequest(ctx context.Context, displayRepo, owner, r
 	selfAuthored := c.isHiveAccount(pr.GetUser()) || labelPresent(issueLabelNames(pr.Labels), authorkind.Hive.Label())
 
 	reply := ""
+	if closer, closeRequested := supersessionCloseDecision(command); closeRequested {
+		reply, handled, err := c.closeSupersededPRDecision(ctx, displayRepo, owner, repo, pr, actor, closer)
+		if err != nil {
+			return false, err
+		}
+		if handled {
+			if err := c.postUnparkReply(ctx, owner, repo, number, candidate.GetID(), reply); err != nil {
+				return false, err
+			}
+			result.Replies++
+			return true, nil
+		}
+	}
 	switch {
 	case command.Kind == unparkCommandDecision && selfAuthored && head != "":
 		mode := prDecisionModeFor(command)
@@ -125,6 +139,17 @@ func (c *Client) tryUnparkPullRequest(ctx context.Context, displayRepo, owner, r
 		result.Replies++
 	}
 	return true, nil
+}
+
+// isHiveSelfDecisionComment reports a `/hive decision` the hive itself
+// wrote as the owner's delegate (pkg/delegatedecision.CommentBody stamps
+// the marker). Whoever's login it was posted under — the App, a PAT, the
+// owner's own token — it is the hive recording its decision, never a
+// reviewer asking for changes; reading it as one made the delegate block
+// the very PR it meant to advance (hivecommons/hive#14822: every sweep
+// `contributor-lane:changes-requested` on the PR carrying the fix).
+func isHiveSelfDecisionComment(body string) bool {
+	return delegatedecision.IsDelegatedComment(body)
 }
 
 // prDecisionMode is what a `/hive decision` on a PR asks for.
@@ -223,7 +248,7 @@ func (c *Client) reconcileAnsweredPRDecision(ctx context.Context, displayRepo, o
 	var cmd unparkCommand
 	for i := len(comments) - 1; i >= 0; i-- {
 		cm := comments[i]
-		if cm == nil || replies[cm.GetID()] == nil || !c.isHumanAuthor(cm.GetUser()) {
+		if cm == nil || replies[cm.GetID()] == nil || !c.isHumanAuthor(cm.GetUser()) || isHiveSelfDecisionComment(cm.GetBody()) {
 			continue
 		}
 		parsed, ok := parseUnparkCommand(cm.GetBody())
@@ -523,6 +548,7 @@ func renderPRHelpReply(selfAuthored bool, head string) string {
 	} else {
 		b.WriteString("- Leave a **changes requested** review and the author is nudged with your text; the hive does not push to a PR it did not open.\n")
 	}
+	b.WriteString("- For a superseded PR, reply `/hive decision reject` or `/hive decision close superseded by #N` to close it.\n")
 	fmt.Fprintf(&b, "\nSee <%s>.", maintainerCommandsDocURL)
 	return b.String()
 }

@@ -39,7 +39,7 @@ WORKDIR /src
 COPY src/go.mod src/go.sum src/go.work src/go.work.sum ./
 COPY src/crux/go.mod src/crux/go.sum ./crux/
 RUN --mount=type=cache,id=hive-go-mod,target=/go/pkg/mod \
-    go mod download
+    for i in 1 2 3; do go mod download && break; [ "$i" = 3 ] && exit 1; sleep $((i * 2)); done
 
 # Layer 2: copy source and build (re-runs on any source change)
 COPY .git /repo/.git
@@ -246,9 +246,9 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     chmod +x /usr/local/bin/ttyd
 
 # --- Layer 2b: GitHub CLI (off-PATH — only snapshot publisher uses it) ---
-ARG GH_VERSION=2.103.0
-ARG GH_SHA256_AMD64=fdd768eb70f6409f80fcfa9f3a1c0adf0fc98d827ab3ce0bed2ac22762c5d786
-ARG GH_SHA256_ARM64=7f322df34e624d14f5ec0c4acb121fd6dfa14392fdbbd1066aa8e0a05ac3721e
+ARG GH_VERSION=2.103.3
+ARG GH_SHA256_AMD64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64) GH_ARCH=amd64; GH_SHA256="$GH_SHA256_AMD64" ;; \
@@ -301,8 +301,10 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
 # SDK nests as its own dependency is never executed (its native binary would
 # reject the proxy CA). Tolerant of failure like the copilot layer: discovery
 # falls back to the raw HTTP probe when the SDK is absent.
+# Bound this optional install so a stalled registry download cannot consume
+# the overlayfs exec guard's entire job timeout before it runs its assertion.
 ARG COPILOT_SDK_VERSION=1.0.8
-RUN npm install -g --ignore-scripts --no-fund --no-audit \
+RUN timeout 120s npm install -g --ignore-scripts --no-fund --no-audit \
     "@github/copilot-sdk@${COPILOT_SDK_VERSION}" && npm cache clean --force || \
     echo "WARN: GitHub Copilot SDK install failed — skipping"
 

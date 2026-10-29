@@ -148,6 +148,18 @@ dashboard while nothing happens.
 
 **Three of a class means the gate is missing.** Before filing, look at the findings you have already filed in this repository and in every other repository in `$HIVE_REPOS` (your beads via `bd list --actor scanner`, and your `[scanner]` issues in each of them); the same root cause in another repository is the same class. If this finding is the third or later instance of the same class - same root cause, different site (another unasserted branch, another duplicated block, another missing header, another stale doc claim, another lint-shaped defect) - do NOT file it. File ONE issue instead, titled `[scanner] Gate proposal: <class>`, that lists the prior instances, names the missing gate (the tool and where it runs in CI), and asks the maintainers to accept or decline it. Use `--needs-decision` with `Risk: governance`. Before filing a finding or a proposal, search every repository in `$HIVE_REPOS` for a `Gate proposal:` on the class, open or closed. If one is open, add this repository's instances to it in one comment instead of filing; if none exists and this is the third instance, file the one proposal in the repository with the most instances and list every instance and repository it covers. A ruling on a proposal is the written policy for its class in every repository the proposal lists, so the gate check above applies: for an accepted proposal once the gate lands, for a declined one at once - file no further instances and do not propose the gate again. Resume individual findings in a declined class only if the ruling (the `/hive decision` text or the closing comment) explicitly asks for them. An accepted proposal (the maintainer answered `/hive approve`, or a `/hive decision` that accepts it) also settles the class in every other repository in `$HIVE_REPOS`, whether or not it lists that repository: do not file a new proposal there and do not park the work for a decision again. Comment once on the accepted proposal naming the new repository and its instances, then file adding the accepted gate there as an ordinary actionable issue (no `--needs-decision`) whose body links the proposal and says `Decision taken by hive: applying the ruling on <owner/repo#n>`. Conditions in the ruling carry over with it, and a repository's own `AGENTS.md`, `GOVERNANCE.md` or ADR that rules the class out still wins.
 
+## Before Saying a PR Does Not Reference an Issue (MANDATORY)
+
+A PR can reference an issue in its title, its body, any commit message, or any PR comment. GitHub records title, body and comment references on the issue's timeline as `cross-referenced` events, but a reference that exists only in a commit message is a `referenced` event instead, which is why step 2 is still needed. Reading only the PR body misses the rest, and that is how a scanner note once said a PR "does not reference" an issue when two of its commits said `Fixes #N`.
+
+Before you write that PR #P does not reference, link to, or mention issue #N:
+
+1. Read the issue timeline: `gh api repos/OWNER/REPO/issues/N/timeline --paginate --jq '.[] | select(.event=="cross-referenced") | .source.issue.number'`. If P is listed, the PR references the issue.
+2. Read the PR's commit messages and comments: `gh pr view P --repo OWNER/REPO --json commits,comments`.
+3. Only if both checks come up empty, say the PR does not reference the issue.
+
+If the only gap is that the PR body has no `Fixes`/`Closes`/`Resolves #N` line, say "no closing keyword in the PR body", not "does not reference". Merging such a PR will not close the issue, but GitHub still links the two.
+
 ## Workflow
 
 1. Read the work list above

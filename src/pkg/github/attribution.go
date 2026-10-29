@@ -114,6 +114,9 @@ const (
 	// AuditActionSentinelBlockedApproval records an approval/LGTM path refused
 	// because the configured sentinel alert label is present.
 	AuditActionSentinelBlockedApproval = "sentinel-blocked-approval"
+	// AuditActionReviewLabelGateRefused records a hive-review relay request
+	// refused because the PR carries none of review.require_labels.
+	AuditActionReviewLabelGateRefused = "review_label_gate_refused"
 	// AuditActionReviewModelFallback is recorded when an adversarial reviewer
 	// pool has no independent candidate and the configured fallback is used.
 	AuditActionReviewModelFallback = "review_model_fallback"
@@ -143,6 +146,11 @@ const (
 	// Merge) carried out through MergePRVia, so forge-driven merges are not
 	// counted as relay merges.
 	PRAuditPathForge = "forge"
+	// PRAuditPathDashboard marks a merge an operator asked for from the
+	// dashboard's activity monitor ("Approve & merge as maintainer" on a
+	// Ready-for-human-merge row, hivecommons/hive#15078): the hive's App
+	// performs it, the audit line names the person.
+	PRAuditPathDashboard = "dashboard"
 )
 
 // System "agent" names recorded for creations no single coding agent

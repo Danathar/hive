@@ -7,6 +7,11 @@ import (
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
+// SupersessionPendingLabel records the sweep's unresolved supersession park.
+// It is independent of CI/head state and is removed when the cause clears.
+const SupersessionPendingLabel = "hive/supersession-pending"
+const ReasonSupersessionPending = "supersession-decision-pending"
+
 // Lane reasons are shared by the producers and the stage classifier.
 const (
 	ReviewGateOutcomeAwaiting              = "awaiting-review-approval"
@@ -35,6 +40,9 @@ const (
 	ContributorLaneReasonClaimUnverified   = "contributor-lane:claim-unverified"
 	ContributorLaneReasonFilesEvidence     = "contributor-lane:files-evidence"
 	ContributorLaneReasonNoAppBotLogin     = "contributor-lane:no-app-bot-login"
+	// ContributorLaneReasonOperatorApproval is the admit reason when a
+	// person's Approve admitted the head (hivecommons/hive#15136).
+	ContributorLaneReasonOperatorApproval  = "contributor-lane:operator-approval"
 	ContributorLaneReasonNoAuthor          = "contributor-lane:no-author"
 	ContributorLaneReasonNoClaim           = "contributor-lane:no-claim"
 	ContributorLaneReasonNoLinkedIssue     = "contributor-lane:no-linked-issue"

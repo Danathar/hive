@@ -81,7 +81,7 @@ The root [`Justfile`](Justfile) exposes the public contributor relay workflow. R
 | `just contribute-watch` | Watches and steers a running contributor with a read-only session mirror, relay log, interactive attach, quota controls and confirmed Stop. No dashboard credentials required; quitting leaves the contributor running. |
 | `just contribute-hives [args]` | Manages the named hive profiles in `${HOME}/.config/hive/profiles.yml` — `list` (the default), `add`, `use`, `rename`, `remove`. A thin alias for `hivectl hives` that uses the same checkout-local bootstrap and skew refusal as `contribute-tui`; see [src/docs/hivectl.md](src/docs/hivectl.md#hives--named-profiles-for-the-hives-you-contribute-to). |
 | `just contribute-browse` | Discovers available public hive projects. |
-| `just contribute-stop` | Stops a background contributor relay if one is running. |
+| `just contribute-stop` | Stops a background contributor relay if one is running: `hive-contributor-*` containers and the local-mode relay recorded in `~/.config/hive/contributor-relay.pid`. |
 | `just contribute-k8s [namespace] [outfile] [image_tag]` | Emits Kubernetes manifests for a headless contributor workload. It writes to stdout or the requested file; it does not apply the manifest. |
 | `just hive-api <endpoint>` | Calls a hub API endpoint, defaulting to `/status`, using the configured hive URL. |
 | `just hive-api-docs` | Opens the hub API documentation in a browser. |

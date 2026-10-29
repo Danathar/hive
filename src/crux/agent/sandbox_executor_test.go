@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/hivecommons/hive/crux"
 	"github.com/hivecommons/hive/crux/config"
+	"github.com/hivecommons/hive/crux/outputschema"
 	"github.com/hivecommons/hive/crux/pushbroker"
 	"github.com/hivecommons/hive/crux/sandbox"
 )
@@ -314,17 +316,11 @@ func TestManagerSandboxPauseCancelsRunningKick(t *testing.T) {
 	if err := m.Pause("scanner", "test", "pause while running"); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "sandbox agent to stay paused after cancellation", func() bool {
 		m.mu.RLock()
-		done := m.agents["scanner"].cancel == nil && m.agents["scanner"].State == StatePaused
-		m.mu.RUnlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("sandbox agent did not stay paused after cancellation: %+v", m.AllStatuses()["scanner"])
+		defer m.mu.RUnlock()
+		return m.agents["scanner"].cancel == nil && m.agents["scanner"].State == StatePaused
+	})
 }
 
 func TestManagerSandboxResumeWhileCancelDrainsReturnsIdle(t *testing.T) {
@@ -348,17 +344,11 @@ func TestManagerSandboxResumeWhileCancelDrainsReturnsIdle(t *testing.T) {
 	if err := m.Resume(context.Background(), "scanner", "test", "resume immediately"); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "sandbox agent to return idle after resumed cancellation", func() bool {
 		m.mu.RLock()
-		done := m.agents["scanner"].cancel == nil && m.agents["scanner"].State == StateIdle
-		m.mu.RUnlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("sandbox agent did not return idle after resumed cancellation: %+v", m.AllStatuses()["scanner"])
+		defer m.mu.RUnlock()
+		return m.agents["scanner"].cancel == nil && m.agents["scanner"].State == StateIdle
+	})
 }
 
 func TestManagerSandboxRunningSkippedByTmuxCrashDetector(t *testing.T) {
@@ -385,17 +375,11 @@ func TestManagerSandboxRunningSkippedByTmuxCrashDetector(t *testing.T) {
 	if err := m.Pause("scanner", "test", "cleanup"); err != nil {
 		t.Fatalf("Pause cleanup: %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "sandbox cleanup to finish", func() bool {
 		m.mu.RLock()
-		done := m.agents["scanner"].cancel == nil
-		m.mu.RUnlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("sandbox cleanup did not finish")
+		defer m.mu.RUnlock()
+		return m.agents["scanner"].cancel == nil
+	})
 }
 
 func TestManagerSandboxDoesNotPushWhenModeCannotPush(t *testing.T) {
@@ -417,17 +401,10 @@ func TestManagerSandboxDoesNotPushWhenModeCannotPush(t *testing.T) {
 	if err := m.SendKick("scanner", "fix"); err != nil {
 		t.Fatalf("SendKick: %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if got := m.AllStatuses()["scanner"].State; got == StateIdle {
-			if runner.pushed || pr.called {
-				t.Fatalf("non-push mode pushed=%v pr=%v", runner.pushed, pr.called)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitFor(t, "sandbox agent to complete", func() bool { return m.AllStatuses()["scanner"].State == StateIdle })
+	if runner.pushed || pr.called {
+		t.Fatalf("non-push mode pushed=%v pr=%v", runner.pushed, pr.called)
 	}
-	t.Fatalf("sandbox agent did not complete: %+v", m.AllStatuses()["scanner"])
 }
 
 func TestAgentSandboxConfigGating(t *testing.T) {
@@ -456,3 +433,101 @@ func quietTestLogger() *slog.Logger {
 }
 
 var _ pushbroker.TokenMinter = sandboxFakeMinter{}
+
+// sandboxReportLauncher lets a test pick the agent-report.json the sandbox
+// leaves behind and the exit code the launcher reports, so the publish gate
+// can be exercised on every input it reads.
+type sandboxReportLauncher struct {
+	report   string
+	exitCode int
+}
+
+func (l sandboxReportLauncher) Run(_ context.Context, spec sandbox.LaunchSpec) (sandbox.Result, error) {
+	if l.report != "" {
+		dir := filepath.Join(spec.Workspace, ".hive")
+		if err := os.MkdirAll(dir, 0o770); err != nil {
+			return sandbox.Result{}, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "agent-report.json"), []byte(l.report), 0o660); err != nil {
+			return sandbox.Result{}, err
+		}
+	}
+	return sandbox.Result{Stdout: "done\n", ExitCode: l.exitCode}, nil
+}
+
+// A commit is not a success signal. When the agent's report says the run
+// failed (or the sandbox exited non-zero) hive must keep the branch local
+// and open no PR — the a1 deps run that opened a PR after its RPM install
+// 401'd is the case this guards against.
+func TestSandboxExecutorPublishGate(t *testing.T) {
+	const okReport = `{"lane":"deps","kind":"fix","findings":[],"prs_opened":[],"beads_filed":[],"summary":"bumped"%s}`
+	tests := []struct {
+		name       string
+		report     string
+		exitCode   int
+		commits    int
+		wantPR     bool
+		wantReason string
+		wantStatus outputschema.RunStatus
+	}{
+		{name: "success status publishes", report: fmt.Sprintf(okReport, `,"status":"success"`), commits: 1, wantPR: true, wantStatus: outputschema.StatusSuccess},
+		{name: "unspecified status publishes", report: fmt.Sprintf(okReport, ""), commits: 1, wantPR: true},
+		{name: "no report publishes", commits: 1, wantPR: true},
+		{name: "failed status withholds", report: fmt.Sprintf(okReport, `,"status":"failed"`), commits: 1, wantReason: "agent report status=failed: bumped", wantStatus: outputschema.StatusFailed},
+		{name: "blocked status withholds", report: fmt.Sprintf(okReport, `,"status":"blocked"`), commits: 1, wantReason: "agent report status=blocked", wantStatus: outputschema.StatusBlocked},
+		{name: "malformed report still carries status", report: `{"status":"failed","summary":"rpm install 401"}`, commits: 1, wantReason: "agent report status=failed", wantStatus: outputschema.StatusFailed},
+		{name: "non-zero exit withholds", report: fmt.Sprintf(okReport, ""), exitCode: 3, commits: 1, wantReason: "sandbox exited 3"},
+		{name: "failed status without commits reports failure", report: fmt.Sprintf(okReport, `,"status":"failed"`), wantReason: "agent report status=failed", wantStatus: outputschema.StatusFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &sandboxFakeRunner{commits: tt.commits}
+			pr := &sandboxFakePR{}
+			exec := &SandboxExecutor{
+				Runner:      runner,
+				Launcher:    sandboxReportLauncher{report: tt.report, exitCode: tt.exitCode},
+				PRClient:    pr,
+				PushEnabled: true,
+				Minter:      sandboxFakeMinter{},
+			}
+			res, err := exec.Run(context.Background(), SandboxKickSpec{
+				Agent: "deps", AgentConfig: configSnapshot{Backend: "claude"}, Message: "bump",
+				Org: "kubestellar", Repo: "hive", WorkspaceDir: t.TempDir(), Image: "agent-image",
+			})
+			if res.ReportStatus != tt.wantStatus {
+				t.Errorf("ReportStatus = %q, want %q", res.ReportStatus, tt.wantStatus)
+			}
+			if tt.wantReason == "" {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if !runner.pushed || !pr.called {
+					t.Fatalf("pushed=%v pr.called=%v, want both true", runner.pushed, pr.called)
+				}
+				if res.PRWithheld != "" {
+					t.Fatalf("PRWithheld = %q, want empty", res.PRWithheld)
+				}
+				return
+			}
+			if !errors.Is(err, ErrSandboxRunReportedFailure) {
+				t.Fatalf("Run error = %v, want ErrSandboxRunReportedFailure", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantReason) {
+				t.Errorf("error %q does not name reason %q", err, tt.wantReason)
+			}
+			if runner.pushed || pr.called {
+				t.Fatalf("pushed=%v pr.called=%v after a reported failure", runner.pushed, pr.called)
+			}
+			if tt.commits > 0 {
+				if !strings.Contains(res.PRWithheld, tt.wantReason) {
+					t.Errorf("PRWithheld = %q, want it to contain %q", res.PRWithheld, tt.wantReason)
+				}
+				if !strings.Contains(err.Error(), "1 commit(s) not pushed, no PR opened") {
+					t.Errorf("error %q should say the commits were not pushed", err)
+				}
+			} else if res.PRWithheld != "" {
+				t.Errorf("PRWithheld = %q with no commits, want empty", res.PRWithheld)
+			}
+		})
+	}
+}

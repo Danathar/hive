@@ -12,19 +12,26 @@ import (
 func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type plain Config
 	node := cloneYAMLNode(value)
+	var recycle SessionRecycleConfig
 	if agents := mappingValueNode(&node, "agents"); agents != nil && agents.Kind == yaml.MappingNode {
-		for i := 0; i < len(agents.Content)-1; i += 2 {
-			if agents.Content[i].Value != "github_api_hourly_cap" {
-				continue
+		for i := 0; i < len(agents.Content)-1; {
+			switch agents.Content[i].Value {
+			case "github_api_hourly_cap":
+				var cap int
+				if err := agents.Content[i+1].Decode(&cap); err != nil {
+					return fmt.Errorf("agents.github_api_hourly_cap: %w", err)
+				}
+				c.AgentsGitHubAPIHourlyCap = cap
+				c.AgentsGitHubAPIHourlyCapSet = true
+				agents.Content = append(agents.Content[:i], agents.Content[i+2:]...)
+			case "session_recycle":
+				if err := agents.Content[i+1].Decode(&recycle); err != nil {
+					return fmt.Errorf("agents.session_recycle: %w", err)
+				}
+				agents.Content = append(agents.Content[:i], agents.Content[i+2:]...)
+			default:
+				i += 2
 			}
-			var cap int
-			if err := agents.Content[i+1].Decode(&cap); err != nil {
-				return fmt.Errorf("agents.github_api_hourly_cap: %w", err)
-			}
-			c.AgentsGitHubAPIHourlyCap = cap
-			c.AgentsGitHubAPIHourlyCapSet = true
-			agents.Content = append(agents.Content[:i], agents.Content[i+2:]...)
-			break
 		}
 	}
 	var decoded plain
@@ -35,11 +42,12 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	*c = Config(decoded)
 	c.AgentsGitHubAPIHourlyCap = cap
 	c.AgentsGitHubAPIHourlyCapSet = capSet
+	c.AgentsSessionRecycle = recycle
 	return nil
 }
 
 func marshalConfigYAMLWithAgentCap(c Config, out any) (any, error) {
-	if !c.AgentsGitHubAPIHourlyCapSet {
+	if !c.AgentsGitHubAPIHourlyCapSet && c.AgentsSessionRecycle.IsZero() {
 		return out, nil
 	}
 	var node yaml.Node
@@ -55,11 +63,20 @@ func marshalConfigYAMLWithAgentCap(c Config, out any) (any, error) {
 		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "agents"}, &yaml.Node{Kind: yaml.MappingNode})
 		agents = root.Content[len(root.Content)-1]
 	}
-	if agents.Kind == yaml.MappingNode {
+	if c.AgentsGitHubAPIHourlyCapSet && agents.Kind == yaml.MappingNode {
 		agents.Content = append([]*yaml.Node{
 			{Kind: yaml.ScalarNode, Value: "github_api_hourly_cap"},
 			{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(c.AgentsGitHubAPIHourlyCap)},
 		}, agents.Content...)
+	}
+	if !c.AgentsSessionRecycle.IsZero() && agents.Kind == yaml.MappingNode {
+		var recycleNode yaml.Node
+		if err := recycleNode.Encode(c.AgentsSessionRecycle); err != nil {
+			return nil, err
+		}
+		agents.Content = append(agents.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "session_recycle"},
+			&recycleNode)
 	}
 	return &node, nil
 }

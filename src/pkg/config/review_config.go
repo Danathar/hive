@@ -359,7 +359,8 @@ type ReviewConfig struct {
 	// author, writes it. Like HumanDecisionLabel the labels are never created:
 	// a repo that does not already have them is skipped. Off by default: a
 	// label on every PR is churn a repo must ask for.
-	PriorityLabels bool `yaml:"priority_labels,omitempty" json:"priority_labels,omitempty"`
+	PriorityLabels bool     `yaml:"priority_labels,omitempty" json:"priority_labels,omitempty"`
+	RequireLabels  []string `yaml:"require_labels,omitempty" json:"require_labels,omitempty"`
 	// VerdictLabels mirrors the review swarm's state for each PR's current
 	// head onto exactly one label (hivecommons/hive#13833): reviewing while
 	// the head's review is pending, then the settled verdict. Independent of
@@ -585,7 +586,16 @@ type AutoMergeConfig struct {
 	// the PRs external clankers open, which bypass the hive's own
 	// open-time attribution. nil/unset means ON; `credit_issue_authors:
 	// false` sends the merge with GitHub's default message as before.
-	CreditIssueAuthors *bool `yaml:"credit_issue_authors,omitempty" json:"credit_issue_authors,omitempty"`
+	CreditIssueAuthors *bool                     `yaml:"credit_issue_authors,omitempty" json:"credit_issue_authors,omitempty"`
+	MergeTrain         MergeTrainAutoMergeConfig `yaml:"merge_train,omitempty" json:"merge_train,omitempty"`
+}
+
+type MergeTrainAutoMergeConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+func (m MergeTrainAutoMergeConfig) IsEnabled() bool {
+	return m.Enabled == nil || *m.Enabled
 }
 
 // CreditIssueAuthorsEnabled reports the auto_merge.credit_issue_authors

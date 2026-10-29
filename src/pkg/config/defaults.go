@@ -476,6 +476,10 @@ func (c *Config) applyDefaults() {
 		on := true
 		c.Governor.Advisory.PRAutoClose = &on
 	}
+	if c.Governor.AutoCloseSuperseded == nil {
+		on := true
+		c.Governor.AutoCloseSuperseded = &on
+	}
 
 	if c.Knowledge.Enabled {
 		if c.Knowledge.Engine == "" {

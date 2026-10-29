@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
+	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/delegatedecision"
 	"github.com/hivecommons/hive/pkg/effects"
 	hgithub "github.com/hivecommons/hive/pkg/github"
@@ -97,6 +98,9 @@ const (
 	AdoptReasonOffline      = "contributor-offline"
 	AdoptReasonUnregistered = "contributor-unregistered"
 	AdoptReasonGrace        = "grace-elapsed"
+	// AdoptReasonOperator is an owner-delegate's `adoption/supersede`
+	// request: no nudge or grace, the operator asked (hivecommons/hive#15135).
+	AdoptReasonOperator = "operator-asked"
 	// AdoptReasonDCORehome marks a second takeover: an in-place adoption
 	// whose head stayed DCO-red with unsigned commits the hive cannot
 	// rewrite on the contributor branch, re-homed onto hive/adopt-<n>.
@@ -219,6 +223,8 @@ func adoptReasonText(reason string, grace time.Duration, online bool, wait adopt
 		return "your hive has been offline since the nudge"
 	case AdoptReasonUnregistered:
 		return "no hive of yours is registered here and nothing moved after the nudge"
+	case AdoptReasonOperator:
+		return "a maintainer asked the hive to take it over"
 	case AdoptReasonSignoffRehome:
 		return "the hive's fix on this branch cannot carry a sign-off the squash merge accepts (the hive signs as the App, the squash lands as you)"
 	case AdoptReasonRebaseRehome:
@@ -309,14 +315,33 @@ func adoptionNeedsDCORehome(obs stageObservation, canPushInPlace bool) bool {
 	return adoptionDCORepairMode(obs, canPushInPlace) == stagelabels.AdoptModeSupersede
 }
 
+// adoptionDCORepairMode decides how a DCO-red head gets its sign-off:
+// AdoptModeInPlace rewrites the hive's own unsigned commits on the PR
+// branch, which the stage pass can only do through the git-data API of the
+// base repository — a fork branch is pushable by an agent's git but not by
+// the App's REST token, so a fork head re-homes (AdoptModeSupersede) even
+// when every unsigned commit is the hive's (hivecommons/hive#14666).
 func adoptionDCORepairMode(obs stageObservation, canPushInPlace bool) string {
 	if obs.Detail.DCO != stagelabels.DCONo || obs.Detail.DCOUnsigned <= 0 {
 		return ""
 	}
-	if canPushInPlace && obs.Detail.DCOUnsignedHive == obs.Detail.DCOUnsigned && obs.Detail.DCOUnsignedOther == 0 {
+	if canPushInPlace && headInBaseRepo(obs) && obs.Detail.DCOUnsignedHive == obs.Detail.DCOUnsigned && obs.Detail.DCOUnsignedOther == 0 {
 		return stagelabels.AdoptModeInPlace
 	}
 	return stagelabels.AdoptModeSupersede
+}
+
+// headInBaseRepo reports whether the PR head lives in the base repository
+// (not a fork), where the App's git-data API can rewrite it.
+func headInBaseRepo(obs stageObservation) bool {
+	return obs.HeadRepo != "" && strings.EqualFold(obs.HeadRepo, obs.Owner+"/"+obs.Repo)
+}
+
+// adoptedHeadNeedsDCORepair decides, for an in-place-adopted PR, whether the
+// unsigned commits are the hive's own on a base-repo branch it rewrites in
+// place with its sign-off.
+func adoptedHeadNeedsDCORepair(obs stageObservation, rec stagelabels.Record, canPushInPlace bool) bool {
+	return adoptedHeadDCORed(obs, rec) && adoptionDCORepairMode(obs, canPushInPlace) == stagelabels.AdoptModeInPlace
 }
 
 // adoptedHeadDCORed reports whether an in-place-adopted PR's head carries
@@ -427,6 +452,8 @@ func adoptionBodyCause(reason string, wait adoptionWait) string {
 		return "adopted in place, re-homed because a review finding on the adopted head sat unaddressed past the stage dwell"
 	case AdoptReasonDCORehome:
 		return "adopted in place, re-homed for DCO repair"
+	case AdoptReasonOperator:
+		return "adopted at a maintainer's request"
 	}
 	switch {
 	case wait.red && len(wait.asks) > 0:
@@ -700,10 +727,10 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 	}
 	requested := hasLabel(obs.Labels, delegatedecision.LabelAdoptSupersede)
 	due, reason := adoptionDue(rec, obs.HeadSHA, policy, now, presence, hasPresence)
-	if requested && obs.HeadSHA != "" && !(rec.Adopted(obs.HeadSHA) && rec.AdoptedBy > 0) {
+	if requested && obs.HeadSHA != "" && !(rec.Adopted(obs.HeadSHA) && rec.AdoptedBy > 0 && !rec.AdoptionCopyFailed()) {
 		// An explicit owner-delegate decision bypasses the nudge/grace and
 		// re-homes a stalled in-place adoption through the same supersede path.
-		due, reason = true, AdoptReasonOffline
+		due, reason = true, AdoptReasonOperator
 	}
 	if !due {
 		return 0, nil
@@ -716,10 +743,21 @@ func (c *Engine) adoptContributorPR(ctx context.Context, store *stagelabels.Stor
 		c.info("stage labels: adoption due but blocked by label", "repo", obs.Display, "pr", obs.Number, "label", l)
 		return 0, nil
 	}
-	if maintainer, err := c.authorMaintainsRepo(ctx, obs, now); maintainer || err != nil {
-		c.info("stage labels: adoption due but the author maintains the repository; not adopting", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "deferred", err != nil)
+	if c.adoptionRefusedByAdmission(store, key, obs, requested, now) {
 		return 0, nil
 	}
+	if held, deferred := c.maintainerHoldsAdoption(ctx, obs, policy, requested, now); held || deferred {
+		if held && !deferred {
+			// Recorded so the activity monitor says why (hivecommons/hive#14524):
+			// under ask the row offers Adopt, under never it names the policy.
+			store.NoteAdoptionBlocked(key, obs.HeadSHA, stagelabels.AdoptBlockedAuthorMaintainer, now)
+			c.info("stage labels: adoption due but the author maintains the repository; not adopting", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "policy", policy.maintainerPolicy(), "deferred", false)
+		} else {
+			c.info("stage labels: adoption due but the author's repository permission is unreadable; deferred", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "policy", policy.maintainerPolicy())
+		}
+		return 0, nil
+	}
+	store.ClearAdoptionBlocked(key)
 	fence, err := c.adoptionDiffRefusal(ctx, obs)
 	if fence != "" && (err != nil || adoptionFenceDefers(fence)) {
 		// The fence could not judge this head (it moved, or its file list
@@ -806,13 +844,12 @@ func delegatedAdoptionAttempted(before, after stagelabels.Record) bool {
 }
 
 func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record, policy StageLabelPolicy, reason string, grace time.Duration, online bool, dcoRehome bool, now time.Time) (int, error) {
-	maintainer, err := c.authorMaintainsRepo(ctx, obs, now)
-	if err != nil {
+	if maintainer, deferred := c.maintainerReleasesAdoption(ctx, obs, policy, now); deferred {
 		return 0, nil
-	}
-	if maintainer {
-		// Backstop for every re-home path (dco-rehome, in-place-stalled):
-		// a maintainer's PR is never closed in favour of a hive copy.
+	} else if maintainer {
+		// Backstop for every re-home path (dco-rehome, in-place-stalled)
+		// under maintainer_policy: never — a maintainer's PR is never
+		// closed in favour of a hive copy.
 		c.info("stage labels: not superseding a repository maintainer's PR; adoption released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "reason", reason)
 		return c.releaseMaintainerAdoption(ctx, store, key, obs, rec.AdoptedBy)
 	}
@@ -875,6 +912,8 @@ func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Stor
 		return effects.Result{Provenance: tip}, nil
 	})
 	if err != nil {
+		// Close-first (hivecommons/hive#15135) orders push → copy → close,
+		// so a failed push leaves the original open; nothing to reopen.
 		c.warn("stage labels: adoption failed to push branch", "repo", obs.Display, "pr", number, "branch", branch, "error", err)
 		return 0, err
 	}
@@ -904,6 +943,11 @@ func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Stor
 	store.MarkAdopted(key, obs.HeadSHA, superseding, now)
 	c.info("stage labels: contributor PR adopted", "repo", obs.Display, "pr", number, "head", obs.HeadSHA, "superseded_by", superseding, "branch", branch, "fence", rec.AdoptDiffFence)
 
+	if policy.AdoptSupersedeCloseFirst {
+		// hivecommons/hive#15135: one PR per issue — the original closes
+		// now, with the note naming the copy, not when the copy merges.
+		return c.closeSupersededOriginalFirst(ctx, store, key, obs, policy, superseding, reason, rec.AdoptDiffFence, now)
+	}
 	body := AdoptionComment(obs, policy.HiveID, superseding, reason, grace, online)
 	if dcoRehome {
 		body = AdoptionDCORehomeComment(obs, policy.HiveID, superseding)
@@ -922,12 +966,15 @@ func (c *Engine) supersedeAdoptedPR(ctx context.Context, store *stagelabels.Stor
 	return 1, nil
 }
 
-// resignAdoptionCommits replays the contributor's commits as a linear chain
-// with the App's Signed-off-by added where missing (the API equivalent of
+// resignAdoptionCommits replays the PR's commits with the App's
+// Signed-off-by added where missing (the API equivalent of
 // `git rebase --signoff`), keeping each commit's tree, author and message,
-// and returns the new tip. It returns "" when the commits cannot be replayed
-// without changing content (a merge commit, or no commits), so the caller
-// keeps the contributor head.
+// and returns the new tip. Parents inside the PR map to their rewritten
+// counterparts, so a base-sync merge commit (which the DCO checks exempt and
+// hivecommons/hive#14500's recovery adds) replays with its tree and both
+// parents rather than refusing the rewrite (hivecommons/hive#14666). It
+// returns "" when the listing does not end at the observed head or a parent
+// cannot be resolved, so the caller keeps the unsigned head.
 func (c *Engine) resignAdoptionCommits(ctx context.Context, obs stageObservation) (string, error) {
 	opts := &gh.ListOptions{PerPage: 100}
 	var all []*gh.RepositoryCommit
@@ -945,30 +992,107 @@ func (c *Engine) resignAdoptionCommits(ctx context.Context, obs stageObservation
 	if len(all) == 0 || all[len(all)-1].GetSHA() != obs.HeadSHA {
 		return "", nil
 	}
+	inPR := make(map[string]bool, len(all))
 	for _, rc := range all {
-		if len(rc.Parents) != 1 {
+		if rc == nil || len(rc.Parents) == 0 || rc.GetSHA() == "" {
 			return "", nil
 		}
+		inPR[rc.GetSHA()] = true
 	}
 	trailer := hgithub.BotSignedOffByTrailer(c.transport.AppBotLogin())
-	parent := all[0].Parents[0].GetSHA()
+	rewritten := make(map[string]string, len(all))
 	for _, rc := range all {
+		parents := make([]*gh.Commit, 0, len(rc.Parents))
+		for _, p := range rc.Parents {
+			sha := p.GetSHA()
+			if inPR[sha] {
+				// The listing is oldest-first; a parent inside the PR
+				// that is not rewritten yet means the order is not
+				// topological and the replay would detach it.
+				mapped, ok := rewritten[sha]
+				if !ok {
+					return "", nil
+				}
+				sha = mapped
+			}
+			parents = append(parents, &gh.Commit{SHA: gh.Ptr(sha)})
+		}
 		msg := rc.GetCommit().GetMessage()
-		if !signedOffByRE.MatchString(msg) {
+		if len(rc.Parents) == 1 && !signedOffByRE.MatchString(msg) {
 			msg = strings.TrimRight(msg, "\n") + "\n\n" + trailer + "\n"
 		}
 		created, _, err := c.gh.Git.CreateCommit(hgithub.WithRESTCaller(ctx, "hive:automerge_sweep"), obs.Owner, obs.Repo, &gh.Commit{
 			Message: gh.Ptr(msg),
 			Tree:    &gh.Tree{SHA: gh.Ptr(rc.GetCommit().GetTree().GetSHA())},
-			Parents: []*gh.Commit{{SHA: gh.Ptr(parent)}},
+			Parents: parents,
 			Author:  rc.GetCommit().GetAuthor(),
 		}, nil)
 		if err != nil {
 			return "", fmt.Errorf("re-signing %s: %w", shortSHA(rc.GetSHA()), err)
 		}
-		parent = created.GetSHA()
+		rewritten[rc.GetSHA()] = created.GetSHA()
 	}
-	return parent, nil
+	return rewritten[obs.HeadSHA], nil
+}
+
+// adoptionDCORepaired is the reason logged and recorded when the hive
+// rewrote its own unsigned commits in place with its sign-off.
+const adoptionDCORepaired = "dco-rehomed"
+
+// repairAdoptedDCOInPlace rewrites the unsigned hive commits of an
+// in-place-adopted base-repo head with the App's Signed-off-by and
+// force-updates the PR branch to the new tip — once per head, with the ref
+// re-read first so a push that raced the rewrite is not overwritten
+// (hivecommons/hive#14666). The next sweep re-reads the new head's commits
+// and the DCO gate clears. Returns 0: a branch push is not a comment, so
+// nothing is added to the caller's count.
+func (c *Engine) repairAdoptedDCOInPlace(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record) (int, error) {
+	if rec.DCORepairAttempted(obs.HeadSHA) {
+		return 0, nil
+	}
+	if obs.HeadRef == "" {
+		c.warn("stage labels: in-place DCO repair skipped, head ref unknown", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA)
+		return 0, nil
+	}
+	store.MarkDCORepair(key, obs.HeadSHA)
+	c.info("stage labels: re-signing hive commits on adopted PR in place", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "branch", obs.HeadRef, "unsigned_hive", obs.Detail.DCOUnsignedHive, "reason", adoptionDCORepaired)
+	ref := "refs/heads/" + obs.HeadRef
+	var tip string
+	_, err := effects.Execute(ctx, c.mutation, effects.Claim{
+		Repo: obs.Owner + "/" + obs.Repo, Kind: effects.KindBranchPush, Target: obs.HeadRef, Actor: "stage_labels",
+		Inputs: map[string]string{"pr": strconv.Itoa(obs.Number), "head_sha": obs.HeadSHA, "dco_repair": "true"},
+	}, func(ctx context.Context) (effects.Result, error) {
+		current, _, apiErr := c.gh.Git.GetRef(ctx, obs.Owner, obs.Repo, ref)
+		if apiErr != nil {
+			return effects.Result{}, effects.NotApplied(apiErr)
+		}
+		if got := current.GetObject().GetSHA(); got != obs.HeadSHA {
+			return effects.Result{}, effects.NotApplied(fmt.Errorf("head moved to %s before the rewrite; re-evaluating", shortSHA(got)))
+		}
+		signed, signErr := c.resignAdoptionCommits(ctx, obs)
+		if signErr != nil {
+			return effects.Result{}, effects.NotApplied(signErr)
+		}
+		if signed == "" {
+			return effects.Result{}, effects.NotApplied(fmt.Errorf("commits of %s cannot be replayed with sign-off", shortSHA(obs.HeadSHA)))
+		}
+		if _, _, apiErr := c.gh.Git.UpdateRef(ctx, obs.Owner, obs.Repo, &gh.Reference{
+			Ref:    gh.Ptr(ref),
+			Object: &gh.GitObject{SHA: gh.Ptr(signed)},
+		}, true); apiErr != nil {
+			return effects.Result{}, effects.NotApplied(apiErr)
+		}
+		tip = signed
+		return effects.Result{Provenance: signed}, nil
+	})
+	if err != nil {
+		c.warn("stage labels: in-place DCO repair failed; branch keeps the unsigned head", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "branch", obs.HeadRef, "error", err)
+		return 0, err
+	}
+	store.MarkHivePushedHead(key, tip)
+	c.info("stage labels: adopted PR re-signed in place", "repo", obs.Display, "pr", obs.Number, "head", obs.HeadSHA, "new_head", tip, "branch", obs.HeadRef, "reason", adoptionDCORepaired)
+	// A branch push, not a comment: nothing to add to the caller's count.
+	return 0, nil
 }
 
 // settleAdoption polls the superseding App PR for a PR in stage 074 (at
@@ -979,19 +1103,20 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 	if !ok {
 		return 0, nil
 	}
-	maintainer, err := c.authorMaintainsRepo(ctx, obs, now)
-	if err != nil {
+	if maintainer, deferred := c.maintainerReleasesAdoption(ctx, obs, policy, now); deferred {
 		// No evidence either way: neither re-home nor release this pass.
 		return 0, nil
-	}
-	if maintainer {
-		// Supersede adoption taken before this rule, or before the
-		// author's permission was raised: hand the PR back.
+	} else if maintainer {
+		// maintainer_policy: never — a supersede adoption taken before the
+		// rule, or before the author's permission was raised, is handed back.
 		c.info("stage labels: adoption of a repository maintainer's PR released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author, "superseded_by", rec.AdoptedBy)
 		return c.releaseMaintainerAdoption(ctx, store, key, obs, rec.AdoptedBy)
 	}
 	if adoptedHeadDCORed(obs, rec) {
 		canPushInPlace := c.canPushToPRBranch(ctx, obs)
+		if adoptedHeadNeedsDCORepair(obs, rec, canPushInPlace) {
+			return c.repairAdoptedDCOInPlace(ctx, store, key, obs, rec)
+		}
 		if adoptedHeadNeedsDCORehome(obs, rec, canPushInPlace) {
 			fence, err := c.adoptionDiffRefusal(ctx, obs)
 			if fence != "" && (err != nil || adoptionFenceDefers(fence)) {
@@ -1031,7 +1156,7 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 	if rec.AdoptedBy <= 0 {
 		return 0, nil
 	}
-	return c.settleSuperseder(ctx, store, key, obs, rec, now)
+	return c.settleSuperseder(ctx, store, key, obs, rec, policy, now)
 }
 
 // settleSuperseder polls the superseding App PR recorded on an adoption (at
@@ -1041,8 +1166,10 @@ func (c *Engine) settleAdoption(ctx context.Context, store *stagelabels.Store, k
 // derives while the superseder is on record: a `needs-human` label (085) or
 // a contributor push after the adoption (072) used to stop the poll, and the
 // original stayed open with "closed automatically once #N merges" on it.
-func (c *Engine) settleSuperseder(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record, now time.Time) (int, error) {
-	if obs.Merged || !rec.SupersederPollDue(now, adoptCheckInterval) {
+// A copy closed unmerged is an orphaned adoption (hivecommons/hive#15052):
+// recoverOrphanedAdoption re-adopts, reverts, or parks it.
+func (c *Engine) settleSuperseder(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, rec stagelabels.Record, policy StageLabelPolicy, now time.Time) (int, error) {
+	if obs.Merged || rec.AdoptionChildClosedTwice() || rec.AdoptionCopyFailed() || !rec.SupersederPollDue(now, adoptCheckInterval) {
 		return 0, nil
 	}
 	store.MarkAdoptChecked(key, now)
@@ -1055,8 +1182,7 @@ func (c *Engine) settleSuperseder(ctx context.Context, store *stagelabels.Store,
 	case sup.GetMerged():
 		return c.closeSupersededOriginal(ctx, store, key, obs, rec, sup, now)
 	case strings.EqualFold(sup.GetState(), "closed"):
-		c.warn("stage labels: adoption superseder closed unmerged; returning PR to the contributor", "repo", obs.Display, "pr", obs.Number, "superseded_by", rec.AdoptedBy)
-		store.ClearAdoption(key)
+		return c.recoverOrphanedAdoption(ctx, store, key, obs, rec, policy, now)
 	}
 	return 0, nil
 }
@@ -1174,6 +1300,56 @@ func (c *Engine) authorMaintainsRepo(ctx context.Context, obs stageObservation, 
 	c.maintainerPerm[key] = maintainerPermEntry{maintainer: maintainer, at: now}
 	c.maintainerPermMu.Unlock()
 	return maintainer, nil
+}
+
+// maintainerPolicy resolves the policy's maintainer rule ("" = adopt).
+func (p StageLabelPolicy) maintainerPolicy() string {
+	switch strings.ToLower(strings.TrimSpace(p.AdoptionMaintainerPolicy)) {
+	case config.AdoptionMaintainerPolicyAsk:
+		return config.AdoptionMaintainerPolicyAsk
+	case config.AdoptionMaintainerPolicyNever:
+		return config.AdoptionMaintainerPolicyNever
+	}
+	return config.AdoptionMaintainerPolicyAdopt
+}
+
+// maintainerHoldsAdoption applies governor.labels.stage.adoption.maintainer_policy
+// to an adoption that is due (hivecommons/hive#14524). adopt: the author's
+// role is not read and never holds (a clanker PR whose hive disconnected
+// is adoptable whoever its author is). never: a maintainer's PR is held
+// outright. ask: held until a person asks for it — the owner's Adopt
+// (the adoption/supersede request label, `requested`) lifts the hold.
+// deferred is true when the role could not be read; the caller then
+// neither adopts nor records anything.
+func (c *Engine) maintainerHoldsAdoption(ctx context.Context, obs stageObservation, policy StageLabelPolicy, requested bool, now time.Time) (held, deferred bool) {
+	switch policy.maintainerPolicy() {
+	case config.AdoptionMaintainerPolicyAdopt:
+		return false, false
+	case config.AdoptionMaintainerPolicyAsk:
+		if requested {
+			return false, false
+		}
+	}
+	maintainer, err := c.authorMaintainsRepo(ctx, obs, now)
+	if err != nil {
+		return false, true
+	}
+	return maintainer, false
+}
+
+// maintainerReleasesAdoption is the settle-side twin: only under
+// maintainer_policy: never does an existing adoption of a maintainer's PR
+// get released (or a re-home refused). Under adopt and ask the adoption
+// stands — under ask it was a person's decision.
+func (c *Engine) maintainerReleasesAdoption(ctx context.Context, obs stageObservation, policy StageLabelPolicy, now time.Time) (maintainer, deferred bool) {
+	if policy.maintainerPolicy() != config.AdoptionMaintainerPolicyNever {
+		return false, false
+	}
+	m, err := c.authorMaintainsRepo(ctx, obs, now)
+	if err != nil {
+		return false, true
+	}
+	return m, false
 }
 
 // AdoptionMaintainerSupersederMarker is stamped on the note that closes the
@@ -1321,14 +1497,13 @@ func (c *Engine) baseSyncTouchesWorkflows(ctx context.Context, obs stageObservat
 // Returns the number of comments posted.
 func (c *Engine) settleInPlaceAdoption(ctx context.Context, store *stagelabels.Store, key string, obs stageObservation, prev stagelabels.Record, policy StageLabelPolicy, now time.Time) (int, error) {
 	if prev.AdoptedInPlace() {
-		maintainer, err := c.authorMaintainsRepo(ctx, obs, now)
-		if err != nil {
+		if maintainer, deferred := c.maintainerReleasesAdoption(ctx, obs, policy, now); deferred {
 			// No evidence either way: keep the adoption as it is.
 			return 0, nil
-		}
-		if maintainer {
-			// Taken over before this rule, or before the author's permission
-			// was raised: hand the PR back rather than keep or re-home it.
+		} else if maintainer {
+			// maintainer_policy: never — taken over before the rule, or
+			// before the author's permission was raised: hand the PR back
+			// rather than keep or re-home it.
 			c.info("stage labels: in-place adoption of a repository maintainer's PR released", "repo", obs.Display, "pr", obs.Number, "author", obs.Author)
 			return c.releaseMaintainerAdoption(ctx, store, key, obs, prev.AdoptedBy)
 		}
@@ -1632,6 +1807,9 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 			n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
 			return esc, n, err
 		}
+		if rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionChildClosedTwice || rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionCopyFailed || (rehomeReason == "" && adoptionStalledReason(obs, rec, policy, now) != "") {
+			return adoptionEscape{Escalated: true, Reason: rec.AdoptEscalatedReason}, 0, nil
+		}
 		stalled := ""
 		if rehomeReason == "" {
 			stalled = adoptionStalledReason(obs, rec, policy, now)
@@ -1656,7 +1834,7 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 		// Read the author's permission before the attempt is recorded: an
 		// unreadable answer leaves the in-place adoption untouched, and a
 		// maintainer's adoption is released by settleInPlaceAdoption.
-		if maintainer, err := c.authorMaintainsRepo(ctx, obs, now); maintainer || err != nil {
+		if maintainer, deferred := c.maintainerReleasesAdoption(ctx, obs, policy, now); maintainer || deferred {
 			return adoptionEscape{}, 0, nil
 		}
 		// Re-read the current diff before copying a head. A concurrent push

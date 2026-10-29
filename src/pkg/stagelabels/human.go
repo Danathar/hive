@@ -109,6 +109,10 @@ type Evidence struct {
 	// Holds lists the decision-class modifier labels present, lower-cased
 	// (see HoldLabels).
 	Holds []string
+	// Hold is who set the `hold` label and why, when the pass could read
+	// it (hivecommons/hive#15020); the 085 reason then names them instead
+	// of the bare "the `hold` label is set".
+	Hold *HoldProvenance
 	// Cause is why the lane handed off; CauseTrust is the only one that can
 	// end at 090.
 	Cause HumanCause
@@ -227,6 +231,9 @@ type Route struct {
 	// HumanApprover is the trusted merger whose approval on Head settled
 	// the requires_human verdict / manual-merge rule ("" when none).
 	HumanApprover string
+	// Hold carries the `hold` provenance into the 085 comment so it can
+	// name who set the hold and offer release / keep (hivecommons/hive#15020).
+	Hold *HoldProvenance
 }
 
 // Lane-vocabulary reasons RouteHuman emits for the fixing stages.
@@ -320,6 +327,10 @@ func RouteHuman(e Evidence) Route {
 		decide = append(decide, "a sentinel alert is open on this PR")
 	}
 	for _, h := range e.Holds {
+		if h == "hold" && e.Hold.Clause() != "" {
+			decide = append(decide, e.Hold.Clause())
+			continue
+		}
 		decide = append(decide, "the `"+h+"` label is set")
 	}
 	manualMergeApproved := e.Cause == CauseDecision && e.ManualMergeRule && approver != "" && strings.TrimSpace(e.CauseReason) != "" && len(decide) == 0
@@ -330,7 +341,7 @@ func RouteHuman(e Evidence) Route {
 	}
 	if len(decide) > 0 {
 		return Route{Stage: NeedsDecision, Reasons: decide, Summary: summary, Head: e.Head, SelfAuthored: e.SelfAuthored, Verdict: e.Verdict,
-			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, ManualMerge: e.ManualMerge, ApprovalReleasesFence: e.ManualMerge && e.ApprovalReleasesFence, HumanApprover: approver}
+			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, ManualMerge: e.ManualMerge, ApprovalReleasesFence: e.ManualMerge && e.ApprovalReleasesFence, HumanApprover: approver, Hold: e.Hold}
 	}
 	var wait []string
 	switch {
@@ -583,6 +594,14 @@ func DecisionActions(r Route) string {
 		steps = append(steps, "resolve the sentinel alert and have a maintainer clear its label")
 	}
 	for _, h := range r.Holds {
+		if h == "hold" && r.Hold.SelfImposed() {
+			reason := strings.TrimSpace(r.Hold.Reason)
+			if reason == "" {
+				reason = "its own gate"
+			}
+			steps = append(steps, "the hive set `hold` itself for "+reason+"; **Release** it (dashboard row menu → Release hold, or remove the `hold` label) and the lane merges on its next pass once the other gates are clear, or **keep** it until a maintainer has reviewed the issue's reporter; `/hive approve` does not remove it")
+			continue
+		}
 		steps = append(steps, "resolve the reason for `"+h+"` and have a maintainer remove that label (`/hive approve` does not remove it)")
 	}
 	if len(steps) == 0 {

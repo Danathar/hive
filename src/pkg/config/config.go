@@ -150,7 +150,8 @@ type Config struct {
 	SharedCIRerun SharedCIRerunConfig `yaml:"shared_ci_rerun,omitempty" json:"shared_ci_rerun,omitempty"`
 	// Search controls the portfolio search indexer (hivecommons/hive#14635).
 	// Default off.
-	Search SearchConfig `yaml:"search,omitempty" json:"search,omitempty"`
+	Search  SearchConfig  `yaml:"search,omitempty" json:"search,omitempty"`
+	Scanner ScannerConfig `yaml:"scanner,omitempty" json:"scanner,omitempty"`
 	// UpstreamWatch declares per-repo upstreams and filters for the fork
 	// upstream watch (hivecommons/hive#9966). Default off.
 	UpstreamWatch UpstreamWatchConfig `yaml:"upstream_watch,omitempty" json:"upstream_watch,omitempty"`
@@ -387,6 +388,10 @@ func (c *Config) EnabledAgents() map[string]AgentConfig {
 	result := make(map[string]AgentConfig)
 	for name, agent := range c.Agents {
 		if agent.Enabled {
+			if agent.SessionRecycle == nil && !c.AgentsSessionRecycle.IsZero() {
+				fleet := c.AgentsSessionRecycle
+				agent.SessionRecycle = &fleet
+			}
 			result[name] = agent
 		}
 	}

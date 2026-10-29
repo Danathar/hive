@@ -260,6 +260,8 @@ type AgentProcess struct {
 	KickRefusalReason string
 	LaunchedMode      AgentMode
 	HasLaunched       bool
+	poolLeaseID       string
+	poolLeaseCancel   context.CancelFunc
 	baseConfig        config.AgentConfig
 	agentSpecPrompt   string
 	tmuxSession       string
@@ -379,6 +381,12 @@ type AgentProcess struct {
 	lastInferKickVisible    string    // stall watchdog: visible pane text just after kick delivery
 	stallNudgeSent          bool      // stall watchdog: at most one nudge per kick
 	lastSessionStallRestart time.Time // session-liveness: last restart for a hung Copilot session
+	// SessionRSSMB is the last sampled RSS of the CLI process tree (MiB);
+	// SessionRecycles counts #14842 policy recycles; lastSessionRecycle
+	// enforces the per-agent backoff after one.
+	SessionRSSMB       int
+	SessionRecycles    int
+	lastSessionRecycle time.Time
 	// busyNoActivityRestartAt is when busyNoActivityStall last restarted this
 	// agent, and busyNoActivityRestarts how many times it has in the current
 	// episode. Both survive the restart's busy-visibility reset and clear on
@@ -453,6 +461,12 @@ type AgentProcess struct {
 	// (#14550), refreshed at each record collection. Zero while the check is
 	// off. Guarded by m.mu; see repeat_failure_status.go.
 	RepeatFailure RepeatFailureStatus
+	// SandboxLastRun is the outcome of this agent's most recent sandboxed
+	// kick (podman or Job runtime). Sandboxed agents sit in StateIdle between
+	// kicks with no session to probe, so health and the activity summary are
+	// read from here. Restored from the sandbox run file on Start. Guarded by
+	// m.mu; see manager_sandbox.go.
+	SandboxLastRun *crux.SandboxRun
 	// sandboxResumeAfterCancel is set when an operator resumes a paused
 	// sandbox agent while the canceled sandbox goroutine is still draining.
 	// The completion handler then turns the expected cancellation into Idle
@@ -575,10 +589,16 @@ type Manager struct {
 	copilotAuthTokenRejected bool
 	claudeAuthToken          string
 	uidMap                   *UIDMap
+	sharedPool               SharedSessionPool
 	uidMapPath               string
 	appAuth                  AppTokenMinter
 	appNotInstalledWarned    sync.Map        // agent name -> struct{}: not-installed mint failure already logged
 	agentMint                AgentMintIssuer // optional, opt-in mint credential (nil ⇒ off)
+
+	// sharedPoolRenewInterval overrides the lease watcher tick (zero means
+	// defaultSharedPoolRenewInterval). Set before any watcher starts; it is
+	// per-manager so tests can tick fast without racing other tests' watchers.
+	sharedPoolRenewInterval time.Duration
 
 	// bobAPIKeyResolver resolves the IBM bobshell API key at LAUNCH time (not
 	// boot), so a key an operator adds via a Secret/PVC file or the config UI
@@ -759,10 +779,12 @@ type Manager struct {
 	// launcher; tests inject a fake through setSandboxJobLauncherFactoryForTest.
 	sandboxJobLauncherFactory func(config.SandboxJobConfig) sandbox.Launcher
 	sandboxRunner             sandboxCommandRunner
-	sandboxPushMinter         pushbroker.TokenMinter
-	sandboxPRClient           PRCreator
-	sandboxMutation           effects.Boundary
-	sandboxAuditCallback      atomic.Pointer[func(agent, action, detail string)]
+	// sandboxRunPersister overrides persistSandboxRun in tests.
+	sandboxRunPersister  func(workDir string, entry SandboxRunHistoryEntry) error
+	sandboxPushMinter    pushbroker.TokenMinter
+	sandboxPRClient      PRCreator
+	sandboxMutation      effects.Boundary
+	sandboxAuditCallback atomic.Pointer[func(agent, action, detail string)]
 
 	// terminal is the nil-safe pane/tmux boundary. Nil means use the real tmux
 	// implementation, preserving zero-value Manager behavior in tests.
@@ -807,6 +829,7 @@ type ManagerOption func(*managerOptions)
 type managerOptions struct {
 	uidMapPath    string
 	uidMapPathSet bool
+	sharedPool    SharedSessionPool
 }
 
 // WithUIDMapPath points a manager at a specific persisted UID map. Production
@@ -816,6 +839,13 @@ func WithUIDMapPath(path string) ManagerOption {
 		opts.uidMapPath = path
 		opts.uidMapPathSet = true
 	}
+}
+
+// WithSharedSessionPool opts a manager into a Hub-coordinated live CLI slot.
+// Every Hive retains separate sessions and tenant data; the lease only limits
+// how many CLI sessions across the participating Hives remain live.
+func WithSharedSessionPool(pool SharedSessionPool) ManagerOption {
+	return func(opts *managerOptions) { opts.sharedPool = pool }
 }
 
 func (m *Manager) effectiveUIDMapPath() string {
@@ -841,10 +871,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 }
 
 func NewManagerWithOptions(agents map[string]config.AgentConfig, logger *slog.Logger, project ProjectContext, options ...ManagerOption) *Manager {
-	workDir := os.Getenv("HIVE_WORK_DIR")
-	if workDir == "" {
-		workDir = "/data/agents"
-	}
+	workDir := crux.WorkDir()
 	var opts managerOptions
 	for _, option := range options {
 		if option != nil {
@@ -892,7 +919,9 @@ func NewManagerWithOptions(agents map[string]config.AgentConfig, logger *slog.Lo
 		}
 	}
 	if uidMap == nil {
-		logger.Info("no UID map found, agents will share dev UID", "path", loadUIDMapPath)
+		logger.Info("no UID map found, agents will share dev UID", "path", loadUIDMapPath,
+			"shared_uid_read_token", project.SharedUIDReadToken,
+			"cross_agent_read_isolation", false)
 	}
 
 	kickLogDir, kickLogRetention, kickLogMaxBytes := kickLogSettingsFromEnv()
@@ -908,6 +937,7 @@ func NewManagerWithOptions(agents map[string]config.AgentConfig, logger *slog.Lo
 		copilotAuthTokenSource:        copilotTokenSource,
 		claudeAuthToken:               claudeToken,
 		uidMap:                        uidMap,
+		sharedPool:                    opts.sharedPool,
 		uidMapPath:                    selectedUIDMapPath,
 		kickLogDir:                    kickLogDir,
 		kickLogRetention:              kickLogRetention,
@@ -1028,6 +1058,13 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		agent.HasLaunched = true
 		agent.LaunchedMode = m.agentMode(agent)
 		agent.startupLaunchQueued = false
+		if agent.SandboxLastRun == nil {
+			if run, err := loadSandboxRun(m.workDir, name); err != nil {
+				m.logger.Warn("sandbox last run not restored", "name", name, "error", err)
+			} else if run != nil {
+				agent.SandboxLastRun = run
+			}
+		}
 		m.logger.Info("audit: sandbox agent ready", "name", name)
 		m.mu.Unlock()
 		return nil
@@ -1161,22 +1198,62 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	//
 	// The remaining subprocess sends below are the actual tmux launch boundary;
 	// Bob's shared-home/file probes have already run lock-free above.
+	m.mu.RLock()
+	leaseID := agent.poolLeaseID
+	hasLeaseWatcher := agent.poolLeaseCancel != nil
+	m.mu.RUnlock()
+	if m.sharedPool != nil && leaseID == "" {
+		var err error
+		leaseID, err = m.sharedPool.Acquire(ctx, name)
+		if err != nil {
+			return fmt.Errorf("acquire shared CLI session slot: %w", err)
+		}
+	}
+	launchSucceeded := false
+	defer func() {
+		if leaseID != "" && !launchSucceeded {
+			m.releaseSharedPoolLease(name, leaseID)
+		}
+	}()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Re-verify under the re-acquired lock: while m.mu was released for Phase 2,
 	// a concurrent Stop/Remove could have deleted this agent from the map or a
-	// racing path could have started it. The launching guard prevents a second
-	// concurrent Start of THIS agent, but not a Stop/delete, so re-check both
-	// before mutating launch state. (agent still points at the same struct; the
-	// map re-lookup is what detects a delete.)
+	// racing path could have started it.
 	if cur, ok := m.agents[name]; !ok || cur != agent {
 		return fmt.Errorf("agent %s removed during launch", name)
 	}
 	if agent.State == StateRunning {
-		// Another path won the launch race while we were unlocked; nothing to do.
+		if leaseID != "" {
+			agent.poolLeaseID = leaseID
+			launchSucceeded = true
+			if !hasLeaseWatcher {
+				m.startSharedPoolLeaseWatcherLocked(agent, name, leaseID)
+			}
+		}
 		return nil
 	}
-	return m.launchInTmux(ctx, agent)
+	if agent.OperatorStopped {
+		return fmt.Errorf("agent %s was stopped during launch", name)
+	}
+	agent.poolLeaseID = leaseID
+	err := m.launchInTmux(ctx, agent)
+	if err == nil && leaseID != "" {
+		launchSucceeded = true
+		if !hasLeaseWatcher {
+			m.startSharedPoolLeaseWatcherLocked(agent, name, leaseID)
+		}
+	}
+	return err
+}
+
+func (m *Manager) startSharedPoolLeaseWatcherLocked(agent *AgentProcess, name, leaseID string) {
+	if agent.poolLeaseCancel == nil {
+		leaseCtx, cancel := context.WithCancel(context.Background())
+		agent.poolLeaseCancel = cancel
+		go m.watchSharedPoolLease(leaseCtx, name, leaseID)
+	}
 }
 
 // kickOutcomePollEvery throttles the post-kick turn-ended check to one visible
@@ -1275,10 +1352,9 @@ func (m *Manager) waitForInputPromptForAgentReason(agent *AgentProcess, abort fu
 
 func (m *Manager) Stop(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	agent, ok := m.agents[name]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("agent %s not found", name)
 	}
 
@@ -1286,25 +1362,25 @@ func (m *Manager) Stop(name string) error {
 	if agent.State == StateStopped {
 		agent.OperatorStopped = true
 	}
-	if agent.State != StateRunning {
-		return nil
+	leaseID := agent.poolLeaseID
+	if agent.State == StateRunning {
+		if agent.cancel != nil {
+			agent.cancel()
+		}
+		m.tmuxSendKeysForAgent(agent, "C-c", "")
+		agent.State = StateStopped
+		agent.OperatorStopped = true
+		m.logger.Info("audit: agent stopped", "name", name)
+		m.audit(AuditAgentStopped, name, auditFields(
+			"outcome", "success",
+			"backend", agent.effectiveBackend(),
+			"model", agent.effectiveModel(),
+		))
 	}
-
-	if agent.cancel != nil {
-		agent.cancel()
+	m.mu.Unlock()
+	if leaseID != "" {
+		m.evictSharedPoolSession(name, leaseID)
 	}
-
-	m.tmuxSendKeysForAgent(agent, "C-c", "")
-
-	agent.State = StateStopped
-	agent.OperatorStopped = true
-	m.logger.Info("audit: agent stopped", "name", name)
-	m.audit(AuditAgentStopped, name, auditFields(
-		"outcome", "success",
-		"backend", agent.effectiveBackend(),
-		"model", agent.effectiveModel(),
-	))
-
 	return nil
 }
 

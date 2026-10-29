@@ -1800,6 +1800,25 @@ type selfAuthoredPR struct {
 	// okToTestWorkflowStatus is the status GET /contents/.github/workflows/hive-ok-to-test.yml
 	// answers with (0 = 404).
 	okToTestWorkflowStatus int
+	// files is GET /pulls/{n}/files; unset is one file no other PR touches.
+	files []string
+	// createdAt, when set, is the PR's created_at (the merge train's age order).
+	createdAt string
+	// filesFetches, when set, counts GET /pulls/{n}/files calls.
+	filesFetches *int
+}
+
+// prFilesResponse renders a fake GET /pulls/{n}/files payload; no files means
+// one path unique to the PR, so the merge train never groups it.
+func prFilesResponse(number int, files []string) []map[string]any {
+	if len(files) == 0 {
+		files = []string{"pr" + strconv.Itoa(number) + ".go"}
+	}
+	out := make([]map[string]any, 0, len(files))
+	for _, f := range files {
+		out = append(out, map[string]any{"filename": f, "status": "modified"})
+	}
+	return out
 }
 
 func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]int, getCounts ...*map[int]int) *httptest.Server {
@@ -1817,7 +1836,7 @@ func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]i
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widget/pulls":
 			var out []map[string]any
 			for _, pr := range prs {
-				out = append(out, map[string]any{
+				item := map[string]any{
 					"number": pr.number,
 					"state":  "open",
 					"draft":  pr.draft,
@@ -1825,13 +1844,24 @@ func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]i
 					"head":   map[string]string{"sha": "sha" + strconv.Itoa(pr.number)},
 					"base":   map[string]string{"ref": "main"},
 					"labels": issueLabels("", pr.extraLabels),
-				})
+				}
+				if pr.createdAt != "" {
+					item["created_at"] = pr.createdAt
+				}
+				out = append(out, item)
 			}
 			json.NewEncoder(w).Encode(out)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/pulls/") && strings.HasSuffix(r.URL.Path, "/reviews"):
 			// The self lane reads reviews on every pass for a trusted
 			// human's changes_requested (hivecommons/hive#13041).
 			json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/pulls/") && strings.HasSuffix(r.URL.Path, "/files"):
+			number := pathNumber(t, r.URL.Path, "/repos/acme/widget/pulls/", "/files")
+			pr := byNumber[number]
+			if pr.filesFetches != nil {
+				(*pr.filesFetches)++
+			}
+			json.NewEncoder(w).Encode(prFilesResponse(number, pr.files))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/pulls/"):
 			number := pathNumber(t, r.URL.Path, "/repos/acme/widget/pulls/", "")
 			pr := byNumber[number]
@@ -2955,6 +2985,8 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				"commit_id": reviewCommitID,
 				"user":      map[string]string{"login": reviewAuthor},
 			}})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/pulls/") && strings.HasSuffix(r.URL.Path, "/files"):
+			json.NewEncoder(w).Encode(prFilesResponse(pathNumber(t, r.URL.Path, "/repos/acme/widget/pulls/", "/files"), nil))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/pulls/"):
 			number := pathNumber(t, r.URL.Path, "/repos/acme/widget/pulls/", "")
 			pr := byNumber[number]
@@ -3230,5 +3262,97 @@ func TestWarnRequiredChecksMismatchOnce(t *testing.T) {
 	}
 	if !strings.Contains(out, "using=actual") || !strings.Contains(out, "build-gate") {
 		t.Fatalf("warn log missing fields: %s", out)
+	}
+}
+
+// supersededCloserSpy wraps the sweep's transport with the optional
+// CloseSupersededHivePRIfEligible hook (hivecommons/hive#14965): the
+// self-authored lane asks it on a conflicting PR before any verdict or
+// gate is read.
+type supersededCloserSpy struct {
+	Transport
+	calls  []int
+	result hgithub.HiveSupersededClose
+}
+
+func (s *supersededCloserSpy) CloseSupersededHivePRIfEligible(_ context.Context, _ string, pr *gh.PullRequest) (hgithub.HiveSupersededClose, error) {
+	s.calls = append(s.calls, pr.GetNumber())
+	return s.result, nil
+}
+
+func TestSweepSelfAuthoredConflictingPRClosedAsSuperseded(t *testing.T) {
+	var merged []int
+	var updates int
+	api := newSelfAuthoredAutoMergeAPI(t, []selfAuthoredPR{{
+		number:         14965,
+		author:         testHiveAppBotLogin,
+		mergeableState: "dirty",
+		updateCount:    &updates,
+	}}, &merged)
+	defer api.Close()
+
+	c := newAutoMergeSweepClient(api.URL)
+	spy := &supersededCloserSpy{Transport: c.transport, result: hgithub.HiveSupersededClose{Closed: true, Superseded: true, CloserPR: 14957, Issue: 14952}}
+	c.transport = spy
+	event, reason, err := c.trySweepSelfAuthoredPR(context.Background(), "widget", "acme", "widget", 14965, true)
+	if err != nil {
+		t.Fatalf("trySweepSelfAuthoredPR: %v", err)
+	}
+	if reason != autoMergeReasonClosedSuperseded || event.BranchUpdated {
+		t.Fatalf("reason=%q event=%+v, want %q", reason, event, autoMergeReasonClosedSuperseded)
+	}
+	if len(spy.calls) != 1 || spy.calls[0] != 14965 {
+		t.Fatalf("closer calls = %v, want [14965]", spy.calls)
+	}
+	if updates != 0 || len(merged) != 0 {
+		t.Fatalf("closed PR must not be updated or merged: updates=%d merged=%v", updates, merged)
+	}
+}
+
+func TestSweepSelfAuthoredConflictingPRKeptWhenNotSuperseded(t *testing.T) {
+	var merged []int
+	var updates int
+	api := newSelfAuthoredAutoMergeAPI(t, []selfAuthoredPR{{
+		number:         15,
+		author:         testHiveAppBotLogin,
+		mergeableState: "dirty",
+		updateCount:    &updates,
+	}}, &merged)
+	defer api.Close()
+
+	c := newAutoMergeSweepClient(api.URL)
+	spy := &supersededCloserSpy{Transport: c.transport, result: hgithub.HiveSupersededClose{Verdict: "keep", Reason: "not-superseded"}}
+	c.transport = spy
+	_, reason, err := c.trySweepSelfAuthoredPR(context.Background(), "widget", "acme", "widget", 15, true)
+	if err != nil {
+		t.Fatalf("trySweepSelfAuthoredPR: %v", err)
+	}
+	if reason == autoMergeReasonClosedSuperseded {
+		t.Fatalf("a conflicting PR the rule keeps must fall through to the lane's own reason, got %q", reason)
+	}
+	if len(spy.calls) != 1 {
+		t.Fatalf("closer calls = %v, want one", spy.calls)
+	}
+}
+
+func TestSweepSelfAuthoredCleanPRDoesNotAskSupersededCloser(t *testing.T) {
+	var merged []int
+	var updates int
+	api := newSelfAuthoredAutoMergeAPI(t, []selfAuthoredPR{{
+		number:         16,
+		author:         testHiveAppBotLogin,
+		mergeableState: "behind",
+		updateCount:    &updates,
+	}}, &merged)
+	defer api.Close()
+
+	c := newAutoMergeSweepClient(api.URL)
+	spy := &supersededCloserSpy{Transport: c.transport, result: hgithub.HiveSupersededClose{Closed: true}}
+	c.transport = spy
+	if _, _, err := c.trySweepSelfAuthoredPR(context.Background(), "widget", "acme", "widget", 16, true); err != nil {
+		t.Fatalf("trySweepSelfAuthoredPR: %v", err)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("closer must only be asked on a conflicting head, calls=%v", spy.calls)
 	}
 }

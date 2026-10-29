@@ -17,6 +17,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
+	"github.com/hivecommons/hive/pkg/github"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -175,6 +176,18 @@ type AuditLog struct {
 	owner         bool
 	leaseReleased bool
 	stopLease     chan struct{}
+	// onPRMerged, when set, is called (outside the lock) with each pr_merged
+	// entry the log accepts — the first record of a PR's merge, the
+	// duplicates having been dropped by notePRThroughput. The merged ledger
+	// (merged_ledger.go) is its consumer.
+	onPRMerged func(AuditEntry)
+}
+
+// SetPRMergedHook installs the pr_merged observer; nil removes it.
+func (a *AuditLog) SetPRMergedHook(fn func(AuditEntry)) {
+	a.mu.Lock()
+	a.onPRMerged = fn
+	a.mu.Unlock()
 }
 
 func newAuditLog() *AuditLog {
@@ -263,12 +276,11 @@ func (a *AuditLog) logRecordAt(timestamp, user, action, detail, agent, repo stri
 	}
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if len(a.ring) >= auditRingCap {
 		a.ring = a.ring[1:]
 	}
 	if prThroughputActions[entry.Action] && !a.notePRThroughput(entry) && prThroughputTerminalAction(entry.Action) {
+		a.mu.Unlock()
 		return
 	}
 	a.ring = append(a.ring, entry)
@@ -281,6 +293,11 @@ func (a *AuditLog) logRecordAt(timestamp, user, action, detail, agent, repo stri
 				slog.Error("audit log write failed", "error", err)
 			}
 		}
+	}
+	onMerged := a.onPRMerged
+	a.mu.Unlock()
+	if onMerged != nil && entry.Action == github.AuditActionPRMerged {
+		onMerged(entry)
 	}
 }
 

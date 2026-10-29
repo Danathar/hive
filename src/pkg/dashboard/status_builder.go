@@ -451,6 +451,7 @@ func BuildFrontendStatus(
 		Repos:                 repos,
 		OverviewKPIIncomplete: overviewKPIIncomplete(cfg, actionable) || overviewStaleSince(repos) != "",
 		StaleSince:            earliestRFC3339(staleSinceRFC3339(actionable), overviewStaleSince(repos)),
+		RestartRefresh:        restartRefreshInfo(actionable, repos),
 		Beads:                 BuildBeadsFromConfig(beadStores, cfg),
 		Planning:              BuildPlanning(beadStores, architectPausedFromStatuses(agentStatuses), detectACMMLevel(cfg)),
 		Health:                health,
@@ -1166,6 +1167,16 @@ func buildAgentsWithHidden(statuses map[string]*crux.Process, cfg *config.Config
 		}
 
 		agentCfg := proc.Config
+		var sandboxRun *FrontendSandboxRun
+		if agentCfg.SandboxEnabled(cfg.AgentSandbox) {
+			sr := sandboxRunHealth(proc, cadenceValue, agentCfg.OnDemand || onDemandSet[name], time.Now())
+			sandboxRun = &sr
+			// A sandboxed agent has no pane; after a pod roll its output ring
+			// is empty too, so the persisted run summary is the activity.
+			if detailSummary == "" && sr.Summary != "" {
+				detailSummary = sr.Summary
+			}
+		}
 		continuousModes := cfg.ContinuousModes(name)
 		continuousNow := agentCfg.ContinuousInMode(currentMode, modeCadence)
 		continuousBlocked := continuousState.Blocked
@@ -1189,6 +1200,7 @@ func buildAgentsWithHidden(statuses map[string]*crux.Process, cfg *config.Config
 			ReplicaCount:    agentCfg.ReplicaCount,
 			OnDemand:        agentCfg.OnDemand,
 			Sandboxed:       agentCfg.SandboxEnabled(cfg.AgentSandbox),
+			SandboxRun:      sandboxRun,
 			Session:         name,
 			State:           string(proc.State),
 			Starting:        proc.Starting && proc.State != crux.StateRunning,
@@ -1243,6 +1255,9 @@ func buildAgentsWithHidden(statuses map[string]*crux.Process, cfg *config.Config
 			LoginURL:               proc.LoginURL,
 			StallNudges:            proc.StallNudges,
 			StallRecoveries:        proc.StallRecoveries,
+			SessionRssMb:           proc.SessionRSSMB,
+			SessionAge:             formatSessionAge(proc.StartedAt, time.Now()),
+			SessionRecycles:        proc.SessionRecycles,
 			ActionNudges:           proc.ActionNudges,
 			// #4697: transient-API-error retry nudges, surfaced beside the
 			// other two nudge counters.
@@ -2350,6 +2365,34 @@ func resolveAgentModels(sessions []tokens.SessionSummary) map[string]string {
 type forgeOpenCounter interface {
 	Open(repo string) (forgestate.OpenCounts, bool)
 	OpenItems(repo string) (forgestate.Snapshot, bool)
+}
+
+// restartRefreshInfo reports the post-restart window: the published
+// snapshot is the one this process restored from disk (RestoredAt set,
+// cmd/hive bootCollectors) and is still marked stale because no
+// enumeration has replaced it. Nil otherwise, including once the first
+// enumeration publishes a fresh result (which carries no RestoredAt), so
+// the Overview's "refreshing after restart" wording clears with the stale
+// badge. The repo tally counts unpaused configured repos whose counts are
+// not stale, so the banner can say "N/M repos scanned".
+func restartRefreshInfo(actionable *github.ActionableResult, repos []FrontendRepo) *FrontendRestartRefresh {
+	if actionable == nil || !actionable.Stale() || actionable.RestoredAt.IsZero() {
+		return nil
+	}
+	out := &FrontendRestartRefresh{RestoredAt: actionable.RestoredAt.UTC().Format(time.RFC3339)}
+	if !actionable.GeneratedAt.IsZero() {
+		out.SnapshotAt = actionable.GeneratedAt.UTC().Format(time.RFC3339)
+	}
+	for _, r := range repos {
+		if r.Paused {
+			continue
+		}
+		out.ReposTotal++
+		if !r.CountsStale {
+			out.ReposScanned++
+		}
+	}
+	return out
 }
 
 // overviewStaleSince is the earliest countsStaleSince over repos, or "" when
@@ -3544,4 +3587,20 @@ func apiBudgetFromRateLimits(rateLimits map[string]any) map[string]any {
 		return budget
 	}
 	return map[string]any{"mode": "normal", "skipped_steps": []string{}}
+}
+
+// formatSessionAge renders how long the agent's current CLI session has
+// been up (#14842); "" when the launch time is unknown.
+func formatSessionAge(startedAt *time.Time, now time.Time) string {
+	if startedAt == nil || startedAt.IsZero() {
+		return ""
+	}
+	age := now.Sub(*startedAt)
+	if age < 0 {
+		age = 0
+	}
+	if age < time.Minute {
+		return age.Round(time.Second).String()
+	}
+	return age.Round(time.Minute).String()
 }

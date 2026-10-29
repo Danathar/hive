@@ -86,6 +86,20 @@ type Record struct {
 	SupersededBy   int       `json:"superseded_by,omitempty"`
 	SupersededAt   time.Time `json:"superseded_at,omitempty"`
 	SupersededOpen bool      `json:"superseded_open,omitempty"`
+	// SupersededClosedFirst is true while the original was closed at
+	// adoption time, before its copy merged (close-first supersession,
+	// hivecommons/hive#15135). The reconciler keeps polling the copy
+	// (CloseFirstPollDue): merged clears the flag and the record reads as
+	// an ordinary supersession; closed unmerged, red across two heads, or a
+	// branch that cannot be pushed reopens the original
+	// (MarkAdoptionReopened). AdoptCopyRedHeads are the copy heads seen red
+	// so far; AdoptReopenedAt / AdoptReopenedFrom record the last reopen
+	// and the copy that failed, so one original is reopened at most once
+	// per AdoptionReopenWindow.
+	SupersededClosedFirst bool      `json:"superseded_closed_first,omitempty"`
+	AdoptCopyRedHeads     []string  `json:"adopt_copy_red_heads,omitempty"`
+	AdoptReopenedAt       time.Time `json:"adopt_reopened_at,omitempty"`
+	AdoptReopenedFrom     int       `json:"adopt_reopened_from,omitempty"`
 	// SupersederMergedNotedHead is the original's head for which the
 	// "superseder merged but this PR has moved on" note was posted, so a
 	// diverged original is told once per head rather than every poll.
@@ -189,6 +203,35 @@ type Record struct {
 	// reasons were kept; AdoptionEscalationNoted reads it as noted for any.
 	AdoptEscalationNotedHead    string   `json:"adopt_escalation_noted_head,omitempty"`
 	AdoptEscalationNotedReasons []string `json:"adopt_escalation_noted_reasons,omitempty"`
+	// Hold is who set the `hold` label the item wears and why, read by the
+	// stage-label pass from the label event and the hive's notice comment
+	// (hivecommons/hive#15020); nil when the item is not held or nothing
+	// about the hold could be read.
+	Hold *HoldProvenance `json:"hold,omitempty"`
+	// AdoptBlockedHead / AdoptBlockedBy / AdoptBlockedAt record that
+	// adoption came due at this head and the engine held it for a reason a
+	// person must settle (AdoptBlockedAuthorMaintainer: the author
+	// maintains the repository under maintainer_policy: ask —
+	// hivecommons/hive#14524). The activity monitor reads it to say why a
+	// nudged PR is not adopted and to offer Adopt; adoption or a new nudge
+	// head clears it.
+	AdoptBlockedHead string    `json:"adopt_blocked_head,omitempty"`
+	AdoptBlockedBy   string    `json:"adopt_blocked_by,omitempty"`
+	AdoptBlockedAt   time.Time `json:"adopt_blocked_at,omitempty"`
+	// AdmittedHead / AdmittedBy / AdmittedAt record a person's trust
+	// override for one head (hivecommons/hive#15136): an owner or trusted
+	// merger approved the PR from the dashboard (or `/hive decision
+	// approve`), so for THAT head the contributor lane treats the author
+	// as trusted and the adoption engine does not take the PR over.
+	// AdmittedBy is "operator-approval:<login>". A new head drops it:
+	// the person approved what they read, not what came after.
+	AdmittedHead string    `json:"admitted_head,omitempty"`
+	AdmittedBy   string    `json:"admitted_by,omitempty"`
+	AdmittedAt   time.Time `json:"admitted_at,omitempty"`
+	// DCORepairHead is the in-place-adopted head whose unsigned hive
+	// commits the hive last rewrote with its sign-off on the contributor
+	// branch (hivecommons/hive#14666); one attempt per head.
+	DCORepairHead string `json:"dco_repair_head,omitempty"`
 	// AdoptRecoveryAttempt is the "<head>@<base tip>" pair the hive last
 	// tried to recover a stale-red in-place adoption on (update-branch or a
 	// re-run of the failed jobs, hivecommons/hive#14500); one attempt per
@@ -197,6 +240,21 @@ type Record struct {
 	// update-branch commits forever; both reset with the adoption.
 	AdoptRecoveryAttempt string `json:"adopt_recovery_attempt,omitempty"`
 	AdoptRecoveryCount   int    `json:"adopt_recovery_count,omitempty"`
+	// AdoptOrphanedBy / AdoptOrphanedAt / AdoptOrphanCount record that a
+	// supersede-mode adoption's hive copy was closed without merging
+	// (hivecommons/hive#15052: the duplicate-fix sweep closed #14977 under
+	// #14947). The reconciler re-adopts from the same head; the count and
+	// time let it stop when the fresh copy is closed again within
+	// AdoptionOrphanLoopWindow (reason LaneReasonAdoptionChildClosedTwice).
+	// All three reset with the adoption.
+	AdoptOrphanedBy  int       `json:"adopt_orphaned_by,omitempty"`
+	AdoptOrphanedAt  time.Time `json:"adopt_orphaned_at,omitempty"`
+	AdoptOrphanCount int       `json:"adopt_orphan_count,omitempty"`
+	// AdoptMarkerScanHead is the head at which the reconciler last read the
+	// PR's comments for an adoption marker the store no longer carries (a
+	// record that forgot its adoption, or a store rebuilt from scratch);
+	// one read per head.
+	AdoptMarkerScanHead string `json:"adopt_marker_scan_head,omitempty"`
 	// MergeCommitNotedHead is the head the `merge-method/merge` note was
 	// posted for, so the lane explains the merge method once per head.
 	MergeCommitNotedHead string `json:"merge_commit_noted_head,omitempty"`
@@ -1027,6 +1085,12 @@ func (s *Store) MarkForkRehomeRefused(key, head string) {
 	s.dirty = true
 }
 
+// DCORepairAttempted reports whether the in-place sign-off rewrite already
+// ran for head.
+func (r Record) DCORepairAttempted(head string) bool {
+	return head != "" && r.DCORepairHead == head
+}
+
 // AdoptionRecoveryKey is the "<head>@<base>" pair AdoptRecoveryAttempt stores.
 func AdoptionRecoveryKey(head, base string) string { return head + "@" + base }
 
@@ -1070,6 +1134,7 @@ func (s *Store) MarkAdoptedInPlace(key, head, reason string, now time.Time) {
 	}
 	r.AdoptedHead, r.AdoptedBy, r.AdoptedAt, r.AdoptCheckedAt = head, 0, now, now
 	r.AdoptMode, r.AdoptReason = AdoptModeInPlace, reason
+	r.AdoptBlockedHead, r.AdoptBlockedBy, r.AdoptBlockedAt = "", "", time.Time{}
 	r.AdoptedHeadAt = now
 	s.items[key] = r
 	s.dirty = true
@@ -1163,8 +1228,160 @@ func (s *Store) MarkAdopted(key, head string, by int, now time.Time) {
 	}
 	r.AdoptedHead, r.AdoptedBy, r.AdoptedAt, r.AdoptCheckedAt = head, by, now, now
 	r.AdoptMode = AdoptModeSupersede
+	r.AdoptBlockedHead, r.AdoptBlockedBy, r.AdoptBlockedAt = "", "", time.Time{}
 	s.items[key] = r
 	s.dirty = true
+}
+
+// AdoptBlockedAuthorMaintainer is the AdoptBlockedBy reason for a due
+// adoption held under governor.labels.stage.adoption.maintainer_policy: ask.
+const AdoptBlockedAuthorMaintainer = "author-is-maintainer"
+
+// NoteAdoptionBlocked records that adoption is due at head but held for
+// reason; the first sighting's time is kept while head and reason hold.
+func (s *Store) NoteAdoptionBlocked(key, head, reason string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || reason == "" {
+		return
+	}
+	if r.AdoptBlockedHead == head && r.AdoptBlockedBy == reason {
+		return
+	}
+	r.AdoptBlockedHead, r.AdoptBlockedBy, r.AdoptBlockedAt = head, reason, now
+	s.items[key] = r
+	s.dirty = true
+}
+
+// AdoptionOrphanLoopWindow is how soon after one orphan recovery a second
+// closed copy counts as a loop: the PR then parks at 085 with
+// LaneReasonAdoptionChildClosedTwice instead of a third copy being opened.
+const AdoptionOrphanLoopWindow = time.Hour
+
+// LaneReasonAdoptionChildClosedTwice is the 085 reason for an adopted PR
+// whose hive copy was closed unmerged twice within AdoptionOrphanLoopWindow:
+// something keeps closing the copy and a person must say what.
+const LaneReasonAdoptionChildClosedTwice = "adoption-child-closed-twice"
+
+// NoteAdoptionOrphaned records that superseding PR `by` was closed without
+// merging while the adoption stood (hivecommons/hive#15052).
+func (s *Store) NoteAdoptionOrphaned(key string, by int, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || by <= 0 {
+		return
+	}
+	r.AdoptOrphanedBy, r.AdoptOrphanedAt = by, now
+	r.AdoptOrphanCount++
+	s.items[key] = r
+	s.dirty = true
+}
+
+// AdoptionOrphanedWithin reports whether an orphan was recorded less than
+// window before now: a second closed copy inside it is a loop.
+func (r Record) AdoptionOrphanedWithin(now time.Time, window time.Duration) bool {
+	return r.AdoptOrphanCount > 0 && !r.AdoptOrphanedAt.IsZero() && now.Sub(r.AdoptOrphanedAt) < window
+}
+
+// AdoptionChildClosedTwice reports the loop-guard park: the adoption stands
+// on record, escalated at its head for LaneReasonAdoptionChildClosedTwice.
+func (r Record) AdoptionChildClosedTwice() bool {
+	return r.AdoptEscalatedReason == LaneReasonAdoptionChildClosedTwice && r.AdoptEscalatedHead != "" && r.AdoptEscalatedHead == r.AdoptedHead
+}
+
+// MarkAdoptMarkerScanned records that the PR's comments were read for an
+// adoption marker at head.
+func (s *Store) MarkAdoptMarkerScanned(key, head string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || r.AdoptMarkerScanHead == head {
+		return
+	}
+	r.AdoptMarkerScanHead = head
+	s.items[key] = r
+	s.dirty = true
+}
+
+// ClearAdoptionBlocked forgets a held adoption (it went ahead, or the
+// policy no longer holds it).
+func (s *Store) ClearAdoptionBlocked(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || r.AdoptBlockedHead == "" && r.AdoptBlockedBy == "" {
+		return
+	}
+	r.AdoptBlockedHead, r.AdoptBlockedBy, r.AdoptBlockedAt = "", "", time.Time{}
+	s.items[key] = r
+	s.dirty = true
+}
+
+// AdoptionBlocked reports the reason a due adoption at head is held, or "".
+func (r Record) AdoptionBlocked(head string) string {
+	if head == "" || r.AdoptBlockedHead != head || r.Adopted(head) {
+		return ""
+	}
+	return r.AdoptBlockedBy
+}
+
+// AdoptBlockedOperatorAdmission is the AdoptBlockedBy reason for a due
+// adoption the engine refused because a person admitted the head
+// (Record.Admission): their approval said "merge this as-is", so the hive
+// does not take the PR over (hivecommons/hive#15136).
+const AdoptBlockedOperatorAdmission = "operator-admission"
+
+// AdmittedByOperatorApprovalPrefix prefixes AdmittedBy when the admission
+// came from a person's Approve: "operator-approval:octocat".
+const AdmittedByOperatorApprovalPrefix = "operator-approval:"
+
+// OperatorApprovalAdmission is the AdmittedBy value for login's Approve.
+func OperatorApprovalAdmission(login string) string {
+	login = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(login), "@"))
+	if login == "" {
+		return ""
+	}
+	return AdmittedByOperatorApprovalPrefix + login
+}
+
+// AdmissionLogin returns the person behind an AdmittedBy value ("" when it
+// is not an operator approval).
+func AdmissionLogin(admittedBy string) string {
+	if !strings.HasPrefix(admittedBy, AdmittedByOperatorApprovalPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(admittedBy, AdmittedByOperatorApprovalPrefix)
+}
+
+// NoteAdmission records that `by` admitted head on an existing record
+// (hivecommons/hive#15136). It returns true when the record changed.
+func (s *Store) NoteAdmission(key, head, by string, now time.Time) bool {
+	head, by = strings.TrimSpace(head), strings.TrimSpace(by)
+	if head == "" || by == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || (r.AdmittedHead == head && r.AdmittedBy == by) {
+		return false
+	}
+	r.AdmittedHead, r.AdmittedBy, r.AdmittedAt = head, by, now
+	s.items[key] = r
+	s.dirty = true
+	return true
+}
+
+// Admission reports who admitted head ("" when nobody did, or the admission
+// is for another head).
+func (r Record) Admission(head string) string {
+	head = strings.TrimSpace(head)
+	if head == "" || r.AdmittedHead != head {
+		return ""
+	}
+	return r.AdmittedBy
 }
 
 // NoteAdoptReason records why the current adoption happened (the marker's
@@ -1226,6 +1443,21 @@ func (s *Store) MarkAdoptionEscalationNoted(key, head, reason string) {
 		r.AdoptEscalationNotedHead, r.AdoptEscalationNotedReasons = head, nil
 	}
 	r.AdoptEscalationNotedReasons = append(slices.Clone(r.AdoptEscalationNotedReasons), reason)
+	s.items[key] = r
+	s.dirty = true
+}
+
+// MarkDCORepair records one in-place sign-off rewrite attempt for head.
+// Recorded before the API call, as every adoption path does, so a refused
+// rewrite is not retried each sweep.
+func (s *Store) MarkDCORepair(key, head string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || head == "" || r.DCORepairHead == head {
+		return
+	}
+	r.DCORepairHead = head
 	s.items[key] = r
 	s.dirty = true
 }
@@ -1306,7 +1538,9 @@ func (s *Store) ClearAdoption(key string) {
 	r.AdoptedHeadAt, r.AdoptEscalatedHead, r.AdoptEscalatedReason, r.AdoptEscalationNotedHead = time.Time{}, "", "", ""
 	r.AdoptEscalationNotedReasons = nil
 	r.AdoptRecoveryAttempt, r.AdoptRecoveryCount = "", 0
+	r.AdoptOrphanedBy, r.AdoptOrphanedAt, r.AdoptOrphanCount = 0, time.Time{}, 0
 	r.SupersededBy, r.SupersededAt, r.SupersededOpen, r.SupersederMergedNotedHead = 0, time.Time{}, false, ""
+	r.SupersededClosedFirst, r.AdoptCopyRedHeads, r.AdoptReopenedFrom = false, nil, 0
 	s.items[key] = r
 	s.dirty = true
 }
@@ -1348,9 +1582,122 @@ func (s *Store) MarkSupersederMergedNoted(key, head string) {
 }
 
 // Superseded reports whether the adoption's superseding PR merged and the
-// original was told: the row is finished whatever its labels say.
+// original was told — or, under close-first supersession, the original was
+// closed in favour of a copy still in flight: the row is finished whatever
+// its labels say.
 func (r Record) Superseded() bool {
 	return r.SupersededBy > 0
+}
+
+// AdoptionReopenWindow is how long after a reopen-on-failure the same
+// original is not reopened again (hivecommons/hive#15135): a copy that
+// keeps failing must not flip the original closed/open every sweep.
+const AdoptionReopenWindow = 24 * time.Hour
+
+// LaneReasonAdoptionCopyFailed is the 085 reason for an original the hive
+// reopened because its close-first copy was closed unmerged, stayed red
+// across two heads, or could not be pushed: a person must decide.
+const LaneReasonAdoptionCopyFailed = "adoption-copy-failed"
+
+// MarkSupersededClosedFirst records that the original was closed as soon
+// as superseding PR `by` existed (close-first supersession). The copy is
+// still polled; see CloseFirstPollDue. open is true when GitHub refused
+// the close and the original stays open with the note.
+func (s *Store) MarkSupersededClosedFirst(key string, by int, open bool, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || by <= 0 {
+		return
+	}
+	if r.SupersededBy != by {
+		r.SupersededAt = now
+	}
+	r.SupersededBy, r.SupersededOpen, r.SupersededClosedFirst = by, open, true
+	r.AdoptCopyRedHeads = nil
+	s.items[key] = r
+	s.dirty = true
+}
+
+// MarkCloseFirstSettled ends the polling of a close-first supersession:
+// the copy merged (the record reads as an ordinary finished supersession)
+// or the reopen guard left the original closed for a person.
+func (s *Store) MarkCloseFirstSettled(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || !r.SupersededClosedFirst {
+		return
+	}
+	r.SupersededClosedFirst, r.AdoptCopyRedHeads = false, nil
+	s.items[key] = r
+	s.dirty = true
+}
+
+// NoteAdoptCopyRedHead records that the copy's required checks were red at
+// head and returns how many distinct red heads the copy has shown.
+func (s *Store) NoteAdoptCopyRedHead(key, head string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok {
+		return 0
+	}
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return len(r.AdoptCopyRedHeads)
+	}
+	for _, h := range r.AdoptCopyRedHeads {
+		if h == head {
+			return len(r.AdoptCopyRedHeads)
+		}
+	}
+	r.AdoptCopyRedHeads = append(r.AdoptCopyRedHeads, head)
+	s.items[key] = r
+	s.dirty = true
+	return len(r.AdoptCopyRedHeads)
+}
+
+// MarkAdoptionReopened records that the original was reopened because copy
+// `from` failed: the supersession is forgotten, the adoption record stays
+// (one attempt per head) and the reopen time starts AdoptionReopenWindow.
+// The caller parks the head with MarkAdoptionEscalated.
+func (s *Store) MarkAdoptionReopened(key string, from int, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok {
+		return
+	}
+	r.SupersededBy, r.SupersededAt, r.SupersededOpen, r.SupersededClosedFirst = 0, time.Time{}, false, false
+	r.AdoptCopyRedHeads = nil
+	r.AdoptReopenedAt, r.AdoptReopenedFrom = now, from
+	r.AdoptCheckedAt = now
+	s.items[key] = r
+	s.dirty = true
+}
+
+// AdoptionCopyFailed reports whether the record's current copy is the one
+// whose failure reopened the original (hivecommons/hive#15135): the copy is
+// not polled again and the row reads "copy failed" until a person acts.
+func (r Record) AdoptionCopyFailed() bool {
+	return r.AdoptedBy > 0 && r.AdoptReopenedFrom == r.AdoptedBy && r.AdoptEscalatedReason == LaneReasonAdoptionCopyFailed
+}
+
+// AdoptionReopenedWithin reports whether the original was reopened for a
+// failed copy less than window before now.
+func (r Record) AdoptionReopenedWithin(now time.Time, window time.Duration) bool {
+	return !r.AdoptReopenedAt.IsZero() && now.Sub(r.AdoptReopenedAt) < window
+}
+
+// CloseFirstPollDue reports whether a close-first supersession's copy
+// should be polled: the original is closed in its favour, the copy has not
+// merged, and the last poll is older than interval.
+func (r Record) CloseFirstPollDue(now time.Time, interval time.Duration) bool {
+	if !r.SupersededClosedFirst || r.AdoptedBy <= 0 || r.SupersededBy != r.AdoptedBy {
+		return false
+	}
+	return r.AdoptCheckedAt.IsZero() || now.Sub(r.AdoptCheckedAt) >= interval
 }
 
 // SupersederPollDue reports whether a supersede-mode adoption with a
@@ -1450,6 +1797,29 @@ func (s *Store) NoteAuthor(key, login string) {
 	s.items[key] = r
 	s.dirty = true
 }
+
+// NoteHold records the hold provenance on an existing record; a nil
+// provenance clears it (the item is no longer held, or the hold is now
+// somebody else's).
+func (s *Store) NoteHold(key string, hold *HoldProvenance) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.items[key]
+	if !ok || r.Hold.Equal(hold) {
+		return
+	}
+	if hold == nil {
+		r.Hold = nil
+	} else {
+		cp := *hold
+		r.Hold = &cp
+	}
+	s.items[key] = r
+	s.dirty = true
+}
+
+// ClearHold drops the hold provenance from an existing record.
+func (s *Store) ClearHold(key string) { s.NoteHold(key, nil) }
 
 // NoteDCO caches the commit check for head on an existing record:
 // unsignedHive is the App-linked share of the unsigned commits, the rest

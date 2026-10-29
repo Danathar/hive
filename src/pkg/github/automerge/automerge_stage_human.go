@@ -144,6 +144,7 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		Verdict:          humanVerdict(contributorVerdict),
 		Conflict:         humanConflictReasons[obs.Reason] || hasLabelFold(obs.Labels, "needs-rebase"),
 		Holds:            stagelabels.Holds(obs.Labels),
+		Hold:             obs.Hold,
 		Cause:            cause,
 		CauseReason:      decisionCauseFor(obs.Reason, workflowManual),
 		DecisionQuestion: strings.TrimSpace(contributorVerdict.DecisionQuestion),
