@@ -280,7 +280,10 @@ the typed forbidden error `ErrOwnerUnverified`.
   `governor.logging.max_age_days`, `governor.logging.max_backups`,
   `governor.logging.compress`, `governor.logging.kick_log_source`,
   `governor.logging.read_scan_max_mb`, `agents.*.backend`, `agents.*.model`,
-  `agents.*.enabled`, `agents.*.paused`
+  `agents.*.enabled`, `agents.*.paused`, and the per-repository merge policy:
+  `auto_merge.squash_only[*]`, `auto_merge.require_current_base[*]` and
+  `auto_merge.human_merge_paths.*[*]` (the path globs listed under each
+  `owner/repo`). A `*` segment is one map key and `[*]` any list index.
 - Environment names: `HIVE_CONFIG`, `HIVE_ADMIN_MCP_ENABLE_WRITES`,
   `HIVE_ADMIN_MCP_PENDING_FILE`, `HOME`, `HOSTNAME`, `LANG`, `PATH`, `TZ`,
   `KUBERNETES_SERVICE_HOST`, `KUBERNETES_SERVICE_PORT`
