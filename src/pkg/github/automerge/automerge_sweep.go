@@ -1090,6 +1090,13 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 			stage := func(reason string, merged bool, err error) {
 				c.recordStage(stageLaneSelf, repo, owner, repoName, pr, reason, merged, err)
 			}
+			if _, held := train.duplicateOf(number); held {
+				result.Skipped++
+				repoSkipped++
+				repoSkipReasons[autoMergeReasonMergeTrainDuplicate]++
+				stage(c.mergeTrainDuplicateSkip(train, number), false, nil)
+				continue
+			}
 			if train.isSibling(number) {
 				result.Skipped++
 				repoSkipped++
@@ -1319,6 +1326,11 @@ func (c *Engine) SweepTrustedAuthorAutoMerges(ctx context.Context, opts AutoMerg
 			stage := func(reason string, merged bool, err error) {
 				c.recordStage(stageLaneTrusted, displayRepo, owner, repoName, pr, reason, merged, err)
 			}
+			if _, held := train.duplicateOf(number); held {
+				result.Skipped++
+				stage(c.mergeTrainDuplicateSkip(train, number), false, nil)
+				continue
+			}
 			if train.isSibling(number) {
 				result.Skipped++
 				stage(c.mergeTrainSkip(train, number), false, nil)
@@ -1535,7 +1547,7 @@ func (c *Engine) StartSelfAuthoredAutoMergeSweep(ctx context.Context, maxMerges 
 		defer close(done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		c.sweepClock.armFloor(c.now().Add(interval))
+		c.sweepClock.armFloorEvery(c.now(), interval)
 		// cautionTick is non-zero while the ticker is running at the caution
 		// floor instead of the adaptive interval.
 		var cautionTick time.Duration
@@ -1558,7 +1570,7 @@ func (c *Engine) StartSelfAuthoredAutoMergeSweep(ctx context.Context, maxMerges 
 				if cautionTick != 0 {
 					tick = cautionTick
 				}
-				c.sweepClock.armFloor(c.now().Add(tick))
+				c.sweepClock.armFloorEvery(c.now(), tick)
 				if gate.skip {
 					continue
 				}
@@ -1568,7 +1580,7 @@ func (c *Engine) StartSelfAuthoredAutoMergeSweep(ctx context.Context, maxMerges 
 				}
 				if next, changed := nextSelfAuthoredSweepInterval(repos, interval, result); changed {
 					t.Reset(next)
-					c.sweepClock.armFloor(c.now().Add(next))
+					c.sweepClock.armFloorEvery(c.now(), next)
 					c.info("self-authored automerge sweep interval adjusted",
 						"previous_interval", interval,
 						"next_interval", next,
