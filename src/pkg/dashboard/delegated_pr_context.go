@@ -71,7 +71,11 @@ func delegatedCompetingNumbers(items []StageTrackerItem, repo string, pr *gh.Pul
 func (s *Server) gatherDelegatedPRContext(ctx context.Context, repo string, pr *gh.PullRequest, in *delegatedecision.Input) error {
 	owner, name, _ := strings.Cut(repo, "/")
 	now := time.Now().UTC()
-	if !in.HiveAuthored {
+	in.HumanAuthor = s.delegatedHumanAuthor(in.Labels)
+	in.OwnerAuthor = s.isAuthorizedUserLogin(in.Author)
+	// A person's PR is never a contributor with an expected connected hive;
+	// "offline" has no meaning for it (hivecommons/hive#15202).
+	if !in.HiveAuthored && !in.PersonAuthored() {
 		window := config.DefaultPresenceWindow
 		if s.deps.Config != nil {
 			window = s.deps.Config.Governor.Labels.Stage.EffectivePresenceWindow()
@@ -132,6 +136,50 @@ type delegatedActivity struct {
 // Only the author's own activity proves presence: bot nudges and other people's
 // reviews must not keep an absent contributor online. Read every page before
 // declaring absence; API failures abort gathering rather than authorizing adoption.
+// delegatedHumanAuthor reads the author-kind label (author/human by default,
+// renamed via governor.labels.author) from the PR's labels. hive beats
+// clanker beats human when labels disagree, as in pkg/authorkind.
+func (s *Server) delegatedHumanAuthor(labels []string) bool {
+	human, clanker, hive := authorKindLabelPfx+authorKindHuman, authorKindLabelPfx+authorKindClanker, authorKindLabelPfx+authorKindHive
+	if s != nil && s.deps != nil && s.deps.Config != nil {
+		a := s.deps.Config.Governor.Labels.Author
+		if strings.TrimSpace(a.Human) != "" {
+			human = a.Human
+		}
+		if strings.TrimSpace(a.Clanker) != "" {
+			clanker = a.Clanker
+		}
+		if strings.TrimSpace(a.Hive) != "" {
+			hive = a.Hive
+		}
+	}
+	isHuman := false
+	for _, l := range labels {
+		switch l = strings.TrimSpace(l); {
+		case strings.EqualFold(l, hive), strings.EqualFold(l, clanker):
+			return false
+		case strings.EqualFold(l, human):
+			isHuman = true
+		}
+	}
+	return isHuman
+}
+
+// isAuthorizedUserLogin: login is one of this hive's dashboard.authorized_users.
+func (s *Server) isAuthorizedUserLogin(login string) bool {
+	login = strings.TrimSpace(strings.TrimPrefix(login, "@"))
+	if login == "" || s == nil || s.deps == nil || s.deps.Config == nil {
+		return false
+	}
+	for _, entry := range s.deps.Config.Dashboard.AuthorizedUsers {
+		name, _ := dashboardAuthorizedUserEntry(entry)
+		if name != "" && strings.EqualFold(name, login) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) delegatedContributorOnline(ctx context.Context, owner, repo string, pr *gh.PullRequest, cutoff time.Time) (bool, error) {
 	author := pr.GetUser().GetLogin()
 	// Unknown identity is not evidence of absence.
