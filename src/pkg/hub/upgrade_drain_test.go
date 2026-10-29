@@ -59,10 +59,12 @@ func TestEvaluateOrphanedUpgradeHonoursDrainDeadline(t *testing.T) {
 		name      string
 		drainLeft time.Duration
 		want      bool
+		old       bool
 	}{
-		{"no drain reported is orphaned", 0, true},
-		{"drain deadline in the future is left alone", 10 * time.Minute, false},
-		{"drain deadline elapsed is orphaned", -time.Minute, true},
+		{"no drain reported may be an older spoke draining silently", 0, false, false},
+		{"no drain reported beyond the silent drain window is orphaned", 0, true, true},
+		{"drain deadline in the future is left alone", 10 * time.Minute, false, false},
+		{"drain deadline elapsed is orphaned", -time.Minute, true, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,6 +77,9 @@ func TestEvaluateOrphanedUpgradeHonoursDrainDeadline(t *testing.T) {
 			}
 			if tc.drainLeft != 0 {
 				entry.UpgradeDrainUntil = now.Add(tc.drainLeft)
+			}
+			if tc.old {
+				entry.UpgradeStartedAt = now.Add(-silentDrainClearAfter - time.Minute)
 			}
 			if got := evaluateOrphanedUpgrade(entry, now, "").orphaned; got != tc.want {
 				t.Fatalf("orphaned = %v, want %v", got, tc.want)

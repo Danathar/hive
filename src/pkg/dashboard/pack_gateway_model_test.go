@@ -424,8 +424,8 @@ func TestApplyPackFollowsUnownedGatewayBackends(t *testing.T) {
 		t.Errorf("reviewer backend=%q model=%q, want litellm with no model", got.Backend, got.Model)
 	}
 	for _, name := range []string{"scanner", "quality", "guide"} {
-		if got := srv.deps.Config.Agents[name]; got.Backend != "litellm" || got.BackendOwner != "" {
-			t.Errorf("%s backend=%q owner=%q, want its unowned litellm left as is", name, got.Backend, got.BackendOwner)
+		if got := srv.deps.Config.Agents[name]; got.Backend != "litellm" || got.BackendOwner != config.FieldOwnerOperator {
+			t.Errorf("%s backend=%q owner=%q, want the hand-set litellm preserved as operator-owned", name, got.Backend, got.BackendOwner)
 		}
 	}
 }

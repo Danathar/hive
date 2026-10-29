@@ -152,8 +152,9 @@ func IsHiveSelfReport(body string) bool {
 
 // reporterTrustRationale collects the issues whose REPORTER this gate judges:
 // what the PR declares it closes (Fixes/Closes/Resolves keywords) and the
-// request's own declared issue list. Bare mentions are deliberately left
-// out: "Refs #15009 (closed by #15017)" cites a sibling PR, and a reporter
+// request's own declared issue list, plus explicit foreign-source references
+// for ports. Local bare mentions are deliberately left out:
+// "Refs #15009 (closed by #15017)" cites a sibling PR, and a reporter
 // found that way is somebody else's PR author, not the person who asked for
 // this change (hivecommons/hive#15020 held for the author of a sibling PR).
 func reporterTrustRationale(repo, title, body string, declared []int) []ClaimedRef {
@@ -161,6 +162,14 @@ func reporterTrustRationale(repo, title, body string, declared []int) []ClaimedR
 	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
 		seen[fmt.Sprintf("%s#%d", ref.Repo, ref.Issue)] = true
+	}
+	for _, ref := range ParseReferencedIssues(title+"\n"+body, repo) {
+		key := fmt.Sprintf("%s#%d", ref.Repo, ref.Issue)
+		if strings.EqualFold(ref.Repo, repo) || seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, ref)
 	}
 	for _, n := range declared {
 		if n <= 0 {
@@ -203,8 +212,8 @@ func (c *Client) hiveAuthoredLogin(login string) bool {
 // maintainer's issue is still delivering the stranger's. Holding is the safe
 // direction; a maintainer who disagrees removes the label.
 //
-// Only linked ISSUES are judged: a cited number that resolves to a pull
-// request decides nothing (its author is not a reporter). Issues the hive or
+// Local pull requests decide nothing (their authors are not reporters).
+// Foreign port sources require trust or verified upstream acceptance. Issues the hive or
 // a bot filed, and hive self-reports, are skipped — #5117 owns those. An
 // issue that cannot be read decides nothing, for the reason
 // pr_self_authorization.go gives: a hold nobody can explain is a hold people
@@ -233,7 +242,9 @@ func (c *Client) EvaluateReporterTrust(ctx context.Context, repo, title, body st
 				"repo", ref.Repo, "issue", ref.Issue, "error", err.Error())
 			continue
 		}
-		if issue.IsPullRequest() {
+		localOwner, localName := splitRepoRef(repo, c.org)
+		local := strings.EqualFold(owner+"/"+name, localOwner+"/"+localName)
+		if local && issue.IsPullRequest() {
 			c.logger.Debug("reporter-trust gate: cited number is a pull request, not an issue; it decides nothing",
 				"repo", ref.Repo, "number", ref.Issue)
 			continue
@@ -245,8 +256,6 @@ func (c *Client) EvaluateReporterTrust(ctx context.Context, repo, title, body st
 		}
 		login := strings.TrimSpace(issue.GetUser().GetLogin())
 		association := strings.TrimSpace(issue.GetAuthorAssociation())
-		localOwner, localName := splitRepoRef(repo, c.org)
-		local := strings.EqualFold(owner+"/"+name, localOwner+"/"+localName)
 		trustedAssociation := association
 		if !local {
 			// GitHub associations describe the cited repository, not this hive.

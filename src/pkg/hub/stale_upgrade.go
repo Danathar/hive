@@ -250,9 +250,11 @@ func evaluateOrphanedUpgrade(entry *RegistryEntry, now time.Time, latestSHA stri
 	// deadline and rolls. A genuine orphan is re-armed by that same recovery
 	// path at staleUpgradeTimeout regardless of this sweep, so the hold costs
 	// only a longer "Upgrading" spinner before the retry budget is spent.
-	if hold, reason := silentDrainUpgradeHold(entry.UpgradeDrain, zeroStart, ev.elapsed); hold {
-		ev.reason = reason
-		return ev
+	if entry.UpgradeDrainUntil.IsZero() {
+		if hold, reason := silentDrainUpgradeHold(entry.UpgradeDrain, zeroStart, ev.elapsed); hold {
+			ev.reason = reason
+			return ev
+		}
 	}
 
 	ev.orphaned = true

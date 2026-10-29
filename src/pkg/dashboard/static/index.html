@@ -39450,10 +39450,10 @@ function burnAreaChart() {
       window._lastRuns = dashboardRunsFromStatus(data);
       const prevWorkers = window._lastStatus && typeof stageTrackerWorkers === 'function' ? JSON.stringify(stageTrackerWorkers(window._lastStatus)) : '';
       window._lastStatus = data;
+      applyDashboardFeatureVisibility();
       // The tracker's hop cue reads which agent is on which item from this
       // payload; redraw the rows when that set changes (no extra fetch).
       if (typeof stageTrackerWorkers === 'function' && JSON.stringify(stageTrackerWorkers(data)) !== prevWorkers && typeof renderStageTracker === 'function') renderStageTracker();
-      applyDashboardFeatureVisibility();
       if (typeof refreshThroughputSLA === 'function') refreshThroughputSLA();
       if (window._acmmOverride) {
         if (data.acmmLevel === window._acmmOverride.level) {
