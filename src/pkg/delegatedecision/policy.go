@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/hivecommons/hive/pkg/blocker"
 )
 
 // PolicyName is the policy identifier the audit marker carries.
@@ -264,9 +266,11 @@ var (
 	ratchetRE    = regexp.MustCompile(`(?i)\b(actionlint|ratchet|duplication (?:gate|threshold|check)|link[- ]?checker|allow-?list|lint gate|hygiene gate|shellcheck|yamllint|markdownlint)\b`)
 	proposalRE   = regexp.MustCompile(`(?i)\bacceptance criteria\b`)
 	hivePolicyRE = regexp.MustCompile(`(?i)\b(hive\.ya?ml|governance|security posture|hive (?:settings?|config(?:uration)?|policy|policies)|branch protection|CODEOWNERS|required checks?|autonomy level|acmm level)\b`)
-	// capabilityGapRE matches a blocker no direction decision can clear: the
-	// GitHub App lacks a permission (for example `workflows`).
-	capabilityGapRE = regexp.MustCompile(`(?i)\b(?:app(?: token)?|installation|github app)\b[^\n]{0,80}\b(?:cannot|can't|lacks?|no|without|missing)\b[^\n]{0,60}\b(?:workflows?|permissions?)\b|\bno [\x60]?workflows[\x60]? permission\b`)
+	// appPermissionRE preserves the park for App permissions that have no
+	// specific capability kind in the blocker ledger, and for free-text
+	// workflow headlines ("the App cannot push workflows") that name no
+	// permission or path shape the ledger's workflows rule recognises.
+	appPermissionRE = regexp.MustCompile(`(?i)\b(?:app(?: token)?|installation|github app)\b[^\n]{0,80}\b(?:cannot|can't|lacks?|missing|without|no)\b[^\n]{0,60}\b(?:workflows?|permissions?)\b`)
 	duplicateOfRE   = regexp.MustCompile(`(?i)\bduplicate of #(\d+)`)
 	blockedOnPRRE   = regexp.MustCompile(`(?i)\b(review backlog|blocked on (?:its|their|the) PR)\b`)
 )
@@ -339,10 +343,16 @@ func HivePolicyChange(in Input) bool {
 }
 
 // CapabilityGap reports a needs-human whose blocker is a missing GitHub App
-// capability rather than an open question.
+// capability rather than an open question. Shared ledger inference handles
+// known capability kinds; a generic App-permission guard keeps other missing
+// permissions parked. Human-only blockers are handled by the ledger.
 func CapabilityGap(in Input) bool {
-	return capabilityGapRE.MatchString(in.headline()) ||
-		in.Kind == KindIssue && capabilityGapRE.MatchString(firstLines(in.Body, 12))
+	isCapability := func(text string) bool {
+		k, ok := blocker.Infer(text)
+		return ok && k.IsCapability() || appPermissionRE.MatchString(text)
+	}
+	return isCapability(in.headline()) ||
+		in.Kind == KindIssue && isCapability(firstLines(in.Body, 12))
 }
 
 // OwnerOnly reports a secrets / PAT / org-permission item.
