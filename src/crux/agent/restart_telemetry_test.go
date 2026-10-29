@@ -149,3 +149,55 @@ func TestCompactPaneTailRedactsSecrets(t *testing.T) {
 		t.Fatalf("compactPaneTail dropped non-secret lines: %q", tail)
 	}
 }
+
+func TestRestartStormPauseDiagnosticsCarryWindowSummary(t *testing.T) {
+	m := NewManager(map[string]config.AgentConfig{"scanner": {Backend: "claude"}}, slog.Default(), ProjectContext{})
+	now := time.Now()
+	var events []RestartEvent
+	for i := 0; i < restartStormPauseAfter; i++ {
+		events = append(events, RestartEvent{At: now.Add(-time.Duration(i) * time.Minute), Reason: "crashed agent recovery"})
+	}
+	events = append(events, RestartEvent{At: now.Add(-3 * time.Hour), Reason: "too old"})
+	m.SeedRestartTelemetry("scanner", len(events), events, "crashed agent recovery")
+	m.mu.Lock()
+	m.agents["scanner"].LastError = "bare shell prompt"
+	m.mu.Unlock()
+
+	plan := m.planAutomaticRestart("scanner", "crashed agent recovery", "agent CLI crashed or tmux session disappeared", now)
+	if plan.pauseReason == "" {
+		t.Fatalf("plan = %+v, want pause", plan)
+	}
+	want := "restart-storm: agent CLI crashed or tmux session disappeared\n" +
+		"10 restarts in the last 1h0m0s (pause at 10)\n" +
+		"- crashed agent recovery x10\n" +
+		"last error: bare shell prompt"
+	if plan.pauseDiagnostics != want {
+		t.Fatalf("pauseDiagnostics = %q, want %q", plan.pauseDiagnostics, want)
+	}
+}
+
+func TestRestartStormPauseDiagnosticsSkipLastErrorWhenItIsTheCause(t *testing.T) {
+	m := NewManager(map[string]config.AgentConfig{"scanner": {Backend: "claude"}}, slog.Default(), ProjectContext{})
+	now := time.Now()
+	var events []RestartEvent
+	for i := 0; i < restartStormPauseAfter; i++ {
+		events = append(events, RestartEvent{At: now.Add(-time.Duration(i) * time.Minute), Reason: "credential refresh"})
+	}
+	m.SeedRestartTelemetry("scanner", len(events), events, "credential refresh")
+	m.mu.Lock()
+	m.agents["scanner"].LastError = "  token expired  "
+	m.mu.Unlock()
+
+	// Callers such as the credential path pass agent.LastError as the detail,
+	// so the pause reason and the last error are the same text.
+	plan := m.planAutomaticRestart("scanner", "credential refresh", m.agents["scanner"].LastError, now)
+	if plan.pauseReason == "" {
+		t.Fatalf("plan = %+v, want pause", plan)
+	}
+	if strings.Contains(plan.pauseDiagnostics, "last error:") {
+		t.Fatalf("pauseDiagnostics = %q, want no duplicated last error line", plan.pauseDiagnostics)
+	}
+	if !strings.HasPrefix(plan.pauseDiagnostics, "restart-storm: token expired\n") {
+		t.Fatalf("pauseDiagnostics = %q, want restart-storm cause first", plan.pauseDiagnostics)
+	}
+}
