@@ -1807,7 +1807,7 @@ func (c *Engine) escapeStalledAdoption(ctx context.Context, store *stagelabels.S
 			n, err := c.postAdoptionEscalationNote(ctx, store, key, obs, adoptionWorkflowRefusedReason, AdoptionWorkflowRefusedComment(obs), "stage labels: workflow-path refusal note failed")
 			return esc, n, err
 		}
-		if rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionChildClosedTwice || rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionCopyFailed || (rehomeReason == "" && adoptionStalledReason(obs, rec, policy, now) != "") {
+		if rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionChildClosedTwice || rec.AdoptEscalatedReason == stagelabels.LaneReasonAdoptionCopyFailed {
 			return adoptionEscape{Escalated: true, Reason: rec.AdoptEscalatedReason}, 0, nil
 		}
 		stalled := ""
