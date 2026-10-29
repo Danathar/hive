@@ -2385,8 +2385,10 @@ func (h *ContributeWSHub) SetContributorTrustTier(contributorID, tier string) {
 		return
 	}
 	version := 0
+	var history []ContributorTierChange
 	if p := findContributor(contributorID); p != nil {
 		version = p.Version
+		history = append([]ContributorTierChange(nil), p.TierHistory...)
 	}
 	h.mu.RLock()
 	var targets []*ContributorConnection
@@ -2403,6 +2405,9 @@ func (h *ContributeWSHub) SetContributorTrustTier(contributorID, tier string) {
 		c.mu.Lock()
 		if c.profile != nil {
 			c.profile.TrustTier = tier
+			if history != nil {
+				c.profile.TierHistory = history
+			}
 			if version != 0 {
 				c.profile.Version = version
 			}
@@ -3534,6 +3539,7 @@ func cloneContributorProfileForSave(p *ContributorProfile) *ContributorProfile {
 		v := *p.CurrentTask
 		cp.CurrentTask = &v
 	}
+	cp.TierHistory = append([]ContributorTierChange(nil), p.TierHistory...)
 	cp.LabelInterests = append([]string(nil), p.LabelInterests...)
 	cp.AgentRoleGrants = append([]string(nil), p.AgentRoleGrants...)
 	cp.Specializations = append([]string(nil), p.Specializations...)
@@ -3547,6 +3553,7 @@ func refreshConnectionContributorProfile(dst, saved *ContributorProfile) {
 		return
 	}
 	dst.TrustTier = saved.TrustTier
+	dst.TierHistory = append([]ContributorTierChange(nil), saved.TierHistory...)
 	dst.TasksCompleted = saved.TasksCompleted
 	dst.TasksWithPR = saved.TasksWithPR
 	dst.TasksFailed = saved.TasksFailed
@@ -4659,6 +4666,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			promotedModel := s.contributor.model
 			promotedEffort := s.contributor.reasoningEffort
 			countCompletion := !isEvidenceLessCompletion(verifiedPR, verdict, msg.CompletionSignal)
+			var promotion ContributorTierChange
 			promotedUser, promoted, saveErr := saveConnectionContributorProfile(s.contributor, func(p *ContributorProfile) bool {
 				if countCompletion {
 					p.TasksCompleted++
@@ -4681,9 +4689,12 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 				// Completion is self-reported, so counting bare task_complete
 				// messages — or unverified PR URLs — would hand out contents:write
 				// and pulls:write for work that was never shown to exist.
-				if p.TrustTier == "newcomer" && p.TasksWithPR >= contributorAutoPromoteAt {
-					p.TrustTier = "contributor"
-					return true
+				if p.TrustTier == contributorTierNewcomer && p.TasksWithPR >= contributorAutoPromoteAt {
+					ch, changed := applyContributorTierChange(p, contributorTierContributor, tierChangeByAutoPromotion,
+						fmt.Sprintf("%d verified PR tasks reached the auto-promotion threshold (%d)", p.TasksWithPR, contributorAutoPromoteAt),
+						tierChangeSourceAutoPromotion, time.Now())
+					promotion = ch
+					return changed
 				}
 				return false
 			})
@@ -4697,7 +4708,8 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			// Read-only signalling — it changes no control behaviour and is
 			// emitted only on the real newcomer -> contributor transition.
 			if promoted {
-				h.logger.Info("[contribute-ws] auto-promoted", "username", promotedUser)
+				h.logger.Info("[contribute-ws] auto-promoted", "username", promotedUser, "tier", promotion.Tier, "prev", promotion.Prev, "reason", promotion.Reason)
+				h.auditTierChange(promotedUser, promotion)
 				h.addActivity(promotedUser, "promoted", "contributor", promotedCLI, promotedModel, promotedEffort, "contributor")
 			}
 		} else {
