@@ -17492,9 +17492,12 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     var _stageTrackerDecisionPop = null;
     // Pure: the row's decision — the item's own, else (an issue listing a
     // parked PR) the first nested PR's, as the item the actions act on.
+    // An issue row drawn through its one covering PR (via_pr) carries the
+    // PR's decision_needed under the issue's number: key it on the PR, or
+    // the popover looks up the issue, finds no decision and never opens.
     function stageTrackerDecisionOf(item) {
       if (!item) return null;
-      if (item.decision_needed && item.decision_needed.question) return { key: stageTrackerItemKey(item), item };
+      if (item.decision_needed && item.decision_needed.question && !item.via_pr) return { key: stageTrackerItemKey(item), item };
       if (item.kind !== 'issue') return null;
       // Two or more nested PRs each asking: the issue's chevron has no one
       // decision to show — each sub-row's own chevron opens its PR's.
