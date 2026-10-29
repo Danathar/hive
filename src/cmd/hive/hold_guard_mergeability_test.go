@@ -361,3 +361,39 @@ func TestMaintainHeldPRMergeabilityStopsOnWorkflowPermissionRefusal(t *testing.T
 		})
 	}
 }
+
+// A held fork PR whose author allows maintainer edits is still refused when
+// the base changed workflow files: the fork is a repository the App is not
+// installed on. The guard stops with the fork reason after one attempt, and
+// its note does not ask for the workflows permission
+// (projectbluefin/utah#1001).
+func TestMaintainHeldPRMergeabilityStopsOnForkWorkflowRefusal(t *testing.T) {
+	store := newTestHoldGuardStore(t)
+	fake := &holdGuardServer{
+		workflowRefused: true,
+		commits:         map[int][]map[string]any{7: {ghCommit("c1", "strategist-bot", "docs: plan")}},
+	}
+	client := newHoldGuardClient(t, fake)
+	cfg := escalationTestConfig()
+	store.Snapshot("acme/widgets", 7, "c1", nil)
+
+	held := heldPRsActionable(github.PullRequest{Repo: "widgets", Number: 7, HeadSHA: "c1", MergeableState: "behind", FromFork: true, MaintainerCanModify: true})
+	for i := 0; i < 3; i++ {
+		_ = enforceHoldGuard(context.Background(), cfg, client, client, held, discardLogger())
+	}
+
+	fake.mu.Lock()
+	calls := fake.updateBranchCalls[7]
+	comments := append([]string(nil), fake.comments...)
+	fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("update-branch calls for a refused fork head = %d, want 1", calls)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0], "in a fork") || strings.Contains(comments[0], "permission") {
+		t.Fatalf("notices = %q, want one fork note that names no permission", comments)
+	}
+	rec, ok := store.Recorded("acme/widgets", 7)
+	if !ok || rec.UpdateStoppedReason != holdguard.UpdateStopForkWorkflowUpdate {
+		t.Fatalf("snapshot = %+v ok=%v, want an update stop for %q", rec, ok, holdguard.UpdateStopForkWorkflowUpdate)
+	}
+}

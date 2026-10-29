@@ -67,7 +67,10 @@ func (c *Engine) currentBaseGate(ctx context.Context, displayRepo, owner, repo s
 	if !branchUpdateAllowed {
 		return AutoMergeSweepEvent{}, holdReason, true, nil
 	}
-	c.info("automerge head is behind the current base; updating before merge", "repo", displayRepo, "pr", number, "base", baseBranch, "behind_by", cmp.GetBehindBy())
-	event, reason, err := c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, currentBaseUpdateReason, fork)
+	baseSHA := cmp.GetBaseCommit().GetSHA()
+	if !c.branchUpdateWorkflowRefused(owner, repo, number, headSHA, baseSHA) {
+		c.info("automerge head is behind the current base; updating before merge", "repo", displayRepo, "pr", number, "base", baseBranch, "behind_by", cmp.GetBehindBy())
+	}
+	event, reason, err := c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, baseSHA, currentBaseUpdateReason, fork)
 	return event, reason, true, err
 }

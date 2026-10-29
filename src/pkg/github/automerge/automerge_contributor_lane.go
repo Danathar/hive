@@ -1392,7 +1392,7 @@ func (c *Engine) evaluateContributorLanePR(ctx context.Context, displayRepo, own
 		if relay {
 			return eval, "behind", nil
 		}
-		_, reason, err := c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "behind", c.isForkPR(pr))
+		_, reason, err := c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, pr.GetBase().GetSHA(), "behind", c.isForkPR(pr))
 		return eval, reason, err
 	}
 	if mergeableState == "dirty" || mergeableState == "conflicting" {
@@ -1552,7 +1552,7 @@ func (c *Engine) trySweepContributorLanePR(ctx context.Context, displayRepo, own
 	})
 	if err != nil {
 		if requiredChecksExpectedMergeError(err) {
-			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected", c.isForkPR(eval.pr))
+			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, eval.pr.GetBase().GetSHA(), "required-checks-expected", c.isForkPR(eval.pr))
 		}
 		if reason := c.workflowFenceMergeUnauthorized(ctx, displayRepo, owner, repo, eval, err); reason != "" {
 			return AutoMergeSweepEvent{}, reason, nil

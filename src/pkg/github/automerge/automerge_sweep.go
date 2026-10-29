@@ -1290,7 +1290,7 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 				"updated_branches", result.UpdatedBranches,
 				"skipped", repoSkipped,
 			}
-			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", autoMergeReasonForkNotEditable, autoMergeReasonWorkflowPermission, "not-mergeable", autoMergeReasonClosedSuperseded, autoMergeReasonMergeQueueRequired, autoMergeReasonMergeRefusedReview, autoMergeReasonMergeRefusedMethod, autoMergeReasonMergeTrainQueued}
+			skipReasonOrder := []string{"label:hold", "label:needs-human", "label:needs-rebase", "held", "exempt-label", "draft", "closed", "not-app-authored", "missing-head-sha", "updated-branch", autoMergeReasonBehindBudgetExhausted, "conflicting", autoMergeReasonForkNotEditable, autoMergeReasonWorkflowPermission, autoMergeReasonForkWorkflowUpdate, "not-mergeable", autoMergeReasonClosedSuperseded, autoMergeReasonMergeQueueRequired, autoMergeReasonMergeRefusedReview, autoMergeReasonMergeRefusedMethod, autoMergeReasonMergeTrainQueued}
 			if sentinelLabel := c.sentinelLabelName(); sentinelLabel != "" {
 				skipReasonOrder = append([]string{sentinelLabel}, skipReasonOrder...)
 			}
@@ -1868,7 +1868,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 			// state and not author work (hivecommons/hive#12607).
 			return AutoMergeSweepEvent{}, autoMergeReasonBehindBudgetExhausted, nil
 		}
-		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "behind", c.isForkPR(pr))
+		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, pr.GetBase().GetSHA(), "behind", c.isForkPR(pr))
 	}
 	if (mergeableState == "dirty" || mergeableState == "conflicting") && !laneBehind {
 		return reject("conflicting")
@@ -2039,7 +2039,7 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 			if !branchUpdateAllowed {
 				return AutoMergeSweepEvent{}, "check-pending", nil
 			}
-			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, "required-checks-expected", c.isForkPR(pr))
+			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, evaluatedHeadSHA, pr.GetBase().GetSHA(), "required-checks-expected", c.isForkPR(pr))
 		}
 		if refused := c.refusedMerge(attempt, err); refused != "" {
 			return AutoMergeSweepEvent{}, refused, nil
@@ -2487,7 +2487,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 		if headSHA == "" {
 			return AutoMergeSweepEvent{}, "missing-head-sha", nil
 		}
-		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "behind", c.isForkPR(pr))
+		return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, pr.GetBase().GetSHA(), "behind", c.isForkPR(pr))
 	}
 	if mergeableState == "dirty" || mergeableState == "conflicting" {
 		return c.mergeForwardOrConflict(ctx, displayRepo, owner, repo, pr, number)
@@ -2580,7 +2580,7 @@ func (c *Engine) trySweepTrustedAuthorPR(ctx context.Context, displayRepo, owner
 	})
 	if err != nil {
 		if requiredChecksExpectedMergeError(err) {
-			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, "required-checks-expected", c.isForkPR(pr))
+			return c.updateBranchAndSkip(ctx, displayRepo, owner, repo, number, headSHA, pr.GetBase().GetSHA(), "required-checks-expected", c.isForkPR(pr))
 		}
 		if refused := c.refusedMerge(attempt, err); refused != "" {
 			return AutoMergeSweepEvent{}, refused, nil
@@ -2639,7 +2639,16 @@ func (c *Engine) isForkPR(pr *gh.PullRequest) bool {
 	return headRepo != "" && baseRepo != "" && !strings.EqualFold(headRepo, baseRepo)
 }
 
-func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, repo string, number int, headSHA, reason string, fork bool) (AutoMergeSweepEvent, string, error) {
+// updateBranchAndSkip brings a behind head up to date with its base and
+// skips the merge this tick. baseSHA is the base commit the caller saw (the
+// PR's base.sha, or the compared base tip); with headSHA it keys the memo of a
+// workflow-file refusal, so a head GitHub refused to update is not sent again
+// every tick (projectbluefin/utah#1001) until the head or the base moves.
+func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, repo string, number int, headSHA, baseSHA, reason string, fork bool) (AutoMergeSweepEvent, string, error) {
+	if c.branchUpdateWorkflowRefused(owner, repo, number, headSHA, baseSHA) {
+		c.debug("automerge update-branch not retried: GitHub refused it for this head and base", "repo", displayRepo, "pr", number, "head", headSHA, "base", baseSHA)
+		return AutoMergeSweepEvent{}, branchUpdateWorkflowRefusalReason(fork), nil
+	}
 	if err := c.executeUpdateBranchEffect(ctx, owner, repo, number, headSHA, reason); err != nil {
 		switch classifyUpdateBranchError(err, fork) {
 		case updateBranchUpToDate:
@@ -2647,8 +2656,13 @@ func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, re
 		case updateBranchForkNotEditable:
 			c.info("automerge update-branch skipped: fork head not editable by the app", "repo", displayRepo, "pr", number, "reason", reason)
 			return AutoMergeSweepEvent{}, autoMergeReasonForkNotEditable, nil
+		case updateBranchForkWorkflowUpdate:
+			c.markBranchUpdateWorkflowRefused(owner, repo, number, headSHA, baseSHA)
+			c.info("automerge update-branch refused: the base changed workflow files and the head is in a fork the app cannot push them to", "repo", displayRepo, "pr", number, "reason", reason)
+			return AutoMergeSweepEvent{}, autoMergeReasonForkWorkflowUpdate, nil
 		case updateBranchWorkflowPermission:
-			c.info("automerge update-branch refused: the base changed workflow files and the app lacks the workflows permission", "repo", displayRepo, "pr", number, "reason", reason)
+			c.markBranchUpdateWorkflowRefused(owner, repo, number, headSHA, baseSHA)
+			c.info("automerge update-branch refused: the base changed workflow files and the app token lacks the workflows permission", "repo", displayRepo, "pr", number, "reason", reason)
 			return AutoMergeSweepEvent{}, autoMergeReasonWorkflowPermission, nil
 		case updateBranchConflict:
 			return AutoMergeSweepEvent{}, "conflicting", nil
@@ -2659,8 +2673,43 @@ func (c *Engine) updateBranchAndSkip(ctx context.Context, displayRepo, owner, re
 	return AutoMergeSweepEvent{Repo: displayRepo, Number: number, HeadSHA: headSHA, BranchUpdated: true}, "check-pending", nil
 }
 
+// branchUpdateWorkflowRefusalReason is the lane reason for a workflow-file
+// refusal of update-branch: a fork head is out of the App's reach whatever it
+// is granted, a same-repo head lacked the workflows permission.
+func branchUpdateWorkflowRefusalReason(fork bool) string {
+	if fork {
+		return autoMergeReasonForkWorkflowUpdate
+	}
+	return autoMergeReasonWorkflowPermission
+}
+
+// branchUpdateWorkflowRefusedKey namespaces, in heldRunApprovals, GitHub's
+// workflow-file refusal of update-branch for one head on one base, as
+// mergeForwardWorkflowRefusedKey does for the merge-forward.
+func branchUpdateWorkflowRefusedKey(prKey, headSHA, baseSHA string) string {
+	return prKey + "@" + headSHA + "#update-branch-workflow-refused@" + baseSHA
+}
+
+func (c *Engine) branchUpdateWorkflowRefused(owner, repo string, number int, headSHA, baseSHA string) bool {
+	if strings.TrimSpace(headSHA) == "" {
+		return false
+	}
+	key := branchUpdateWorkflowRefusedKey(c.evaluatedHeadKey(owner, repo, number), headSHA, baseSHA)
+	c.heldRunApprovalsMu.Lock()
+	defer c.heldRunApprovalsMu.Unlock()
+	return c.heldRunApprovals[key]
+}
+
+func (c *Engine) markBranchUpdateWorkflowRefused(owner, repo string, number int, headSHA, baseSHA string) {
+	if strings.TrimSpace(headSHA) == "" {
+		return
+	}
+	c.markMergeForwardOnce(branchUpdateWorkflowRefusedKey(c.evaluatedHeadKey(owner, repo, number), headSHA, baseSHA))
+}
+
 const (
 	autoMergeReasonForkNotEditable    = prstage.AutoMergeReasonForkNotEditable
+	autoMergeReasonForkWorkflowUpdate = prstage.AutoMergeReasonForkWorkflowUpdate
 	autoMergeReasonWorkflowPermission = prstage.AutoMergeReasonWorkflowPermission
 )
 
@@ -2672,6 +2721,7 @@ const (
 	updateBranchUpToDate           = hgithub.BranchUpdateUpToDate
 	updateBranchForkNotEditable    = hgithub.BranchUpdateForkNotEditable
 	updateBranchWorkflowPermission = hgithub.BranchUpdateWorkflowPermission
+	updateBranchForkWorkflowUpdate = hgithub.BranchUpdateForkWorkflowUpdate
 )
 
 // classifyUpdateBranchError is hgithub.ClassifyBranchUpdateError, shared

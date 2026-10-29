@@ -18,14 +18,17 @@ const (
 	BranchUpdateUpToDate
 	BranchUpdateForkNotEditable
 	BranchUpdateWorkflowPermission
+	BranchUpdateForkWorkflowUpdate
 )
 
 // ClassifyBranchUpdateError separates the update-branch failures GitHub
 // reports with overlapping statuses: 422 covers conflicts and an already
 // current branch, while a 422 naming maintainer edits (or a 403 on a fork PR)
-// means the app cannot write to the fork head. A 403 refusing to update a
-// workflow file means the base changed .github/workflows/ and the App lacks the
-// workflows permission, on a fork or not: no retry with the same token can
+// means the app cannot write to the fork head. A refusal to update a workflow
+// file means the base changed .github/workflows/: on a same-repo branch the
+// token lacked the workflows permission, while a fork head is a repository the
+// App is not installed on, so no grant on the base repository lets it push
+// there (projectbluefin/utah#1001). Either way no retry with the same token can
 // succeed, so a person must update the branch. Any other 403 on a same-repo
 // branch is a plain permission or rate-limit failure. An unrecognised 422
 // stays a conflict.
@@ -34,11 +37,15 @@ func ClassifyBranchUpdateError(err error, fork bool) BranchUpdateFailure {
 	if !errors.As(err, &ghErr) || ghErr.Response == nil {
 		return BranchUpdateOther
 	}
-	if IsWorkflowPermissionRefusal(err) {
+	status := ghErr.Response.StatusCode
+	if (status == http.StatusForbidden || status == http.StatusUnprocessableEntity) && WorkflowPermissionRefusalPattern.MatchString(ghErr.Message) {
+		if fork {
+			return BranchUpdateForkWorkflowUpdate
+		}
 		return BranchUpdateWorkflowPermission
 	}
 	msg := strings.ToLower(ghErr.Message)
-	switch ghErr.Response.StatusCode {
+	switch status {
 	case http.StatusForbidden:
 		if fork {
 			return BranchUpdateForkNotEditable
