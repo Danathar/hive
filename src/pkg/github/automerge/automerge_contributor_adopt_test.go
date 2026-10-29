@@ -1204,8 +1204,8 @@ func TestAlreadyAdoptedInPlaceAppAuthoredDCOFailureOnForkRefusesRehome(t *testin
 	if len(h.adopt.newCommits) != 0 || len(h.adopt.pulls) != 0 || len(h.adopt.prEdits) != 0 {
 		t.Fatalf("fork must not be copied: commits=%v pulls=%v edits=%v", h.adopt.newCommits, h.adopt.pulls, h.adopt.prEdits)
 	}
-	if rec, _ := h.e.stageStoreOrShared().Get(key); !rec.AdoptedInPlace() || rec.AdoptEscalatedReason != stagelabels.LaneReasonAdoptionStalledPrefix+adoptStallForkRehomeRefused {
-		t.Fatalf("fork should remain in place with a human decision: %+v", rec)
+	if rec, _ := h.e.stageStoreOrShared().Get(key); !rec.AdoptedInPlace() || rec.AdoptedBy != 0 {
+		t.Fatalf("fork should remain in place during its fix window: %+v", rec)
 	}
 }
 

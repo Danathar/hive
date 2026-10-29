@@ -210,8 +210,8 @@ The keys the agent runtime owns — the part of Hive being carved out as **Crux*
 
 | Struct | Embedded in | YAML keys (unchanged position) |
 |---|---|---|
-| `AgentRuntimeConfig` (`pkg/config/agent_config.go`) | `Config` | `agents` (including the `agents.github_api_hourly_cap` scalar and the `agents.session_recycle` block), `backends`, `providers`, `tool_approval`, `agent_sandbox`, `turn`, `repeat_failure` |
-| `AgentRuntimeGovernorConfig` (`pkg/config/agent_config.go`) | `GovernorConfig` | `governor.watchdog`, `governor.litellm`, `governor.vllm`, `governor.llm-d`, `governor.bob`, `governor.trajectory`, `governor.kick_limits`, `governor.gateways`, `governor.rotation`, `governor.provider_budget` |
+| `AgentRuntimeConfig` (`crux/config/agent_config.go`, aliased by `pkg/config`) | `Config` | `agents` (including the `agents.github_api_hourly_cap` scalar and the `agents.session_recycle` block), `backends`, `providers`, `tool_approval`, `agent_sandbox`, `turn`, `repeat_failure` |
+| `AgentRuntimeGovernorConfig` (`crux/config/agent_config.go`, aliased by `pkg/config`) | `GovernorConfig` | `governor.watchdog`, `governor.litellm`, `governor.vllm`, `governor.llm-d`, `governor.bob`, `governor.trajectory`, `governor.kick_limits`, `governor.gateways`, `governor.rotation`, `governor.provider_budget` |
 
 Go callers keep reading `cfg.Agents`, `cfg.Governor.Gateways` and so on through field promotion; only composite literals name the embedded struct (`config.Config{AgentRuntimeConfig: config.AgentRuntimeConfig{Agents: …}}`). `pkg/config/testdata/agent_runtime_golden.{yaml,json}` pins the parse of a representative file so the boundary cannot drift the schema.
 
