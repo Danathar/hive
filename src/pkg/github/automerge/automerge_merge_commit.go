@@ -69,8 +69,9 @@ type mergeCommitDecision struct {
 // this head (approvedHead), so the hive will merge it at all; every commit
 // signed (a missing sign-off is the DCO lane's problem, not a merge
 // method's); contributor commits alongside the hive's (mixed authorship);
-// and a repo whose policy allows merge commits.
-func mergeCommitElection(stats dcoStats, role stagelabels.Role, approvedHead bool, policy StageLabelPolicy, display string) mergeCommitDecision {
+// and a repo whose policy allows merge commits. repo is "owner/repo"
+// (stageRepoFullName), the form auto_merge.squash_only lists.
+func mergeCommitElection(stats dcoStats, role stagelabels.Role, approvedHead bool, policy StageLabelPolicy, repo string) mergeCommitDecision {
 	if stats.squashUnsafeHive <= 0 {
 		return mergeCommitDecision{}
 	}
@@ -81,7 +82,7 @@ func mergeCommitElection(stats dcoStats, role stagelabels.Role, approvedHead boo
 		return mergeCommitDecision{Refused: mergeCommitRefusedUnsigned}
 	case stats.total <= stats.squashUnsafeHive:
 		return mergeCommitDecision{Refused: mergeCommitRefusedHiveOnly}
-	case policy.SquashOnly != nil && policy.SquashOnly(display):
+	case policy.SquashOnly != nil && policy.SquashOnly(repo):
 		return mergeCommitDecision{Refused: mergeCommitRefusedSquashOnly}
 	case role != stagelabels.RoleTrusted && !approvedHead:
 		return mergeCommitDecision{Refused: mergeCommitRefusedRole}
