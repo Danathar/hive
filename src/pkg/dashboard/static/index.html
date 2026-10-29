@@ -19497,12 +19497,14 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       const fmtAt = at => { if (!at) return ''; const d = new Date(at); const sameDay = stageTrackerLocalMidnight(at) === stageTrackerLocalMidnight(nowMs); const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; return sameDay ? hm : `${typeof formatDashboardDate === 'function' ? formatDashboardDate(d, { month: 'short', day: 'numeric' }) : d.toISOString().slice(5, 10)} ${hm}`; };
       const rows = (txt.recent || []).map(e => {
         const meta = [esc(stageTrackerMergedByText(e.merged_by)), e.lane ? esc(e.lane) : '', e.at ? fmtAt(e.at) : ''].filter(Boolean).join(' · ');
-        const num = e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">#${esc(e.number)}</a>` : `#${esc(e.number)}`;
-        return `<li><span class="ham-merged-num" title="${esc(e.repo)}#${esc(e.number)}">${num}</span><span class="ham-merged-title" title="${esc(e.title || '')}">${esc(e.title || e.repo)}</span><span class="ham-merged-meta">${meta}</span></li>`;
+        // Numbers and counts go through String(): esc() drops non-strings.
+        const n = esc(String(e.number || ''));
+        const num = e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">#${n}</a>` : `#${n}`;
+        return `<li><span class="ham-merged-num" title="${esc(String(e.repo || ''))}#${n}">${num}</span><span class="ham-merged-title" title="${esc(e.title || '')}">${esc(e.title || e.repo)}</span><span class="ham-merged-meta">${meta}</span></li>`;
       }).join('');
-      const head = `<div class="ham-merged-pop-head"><span>Recent merges</span><span class="ham-merged-pop-sum">${esc(txt.today)} today · ${esc(txt.week)} this week · ${esc(txt.total30d)} in 30 days</span></div>`;
+      const head = `<div class="ham-merged-pop-head"><span>Recent merges</span><span class="ham-merged-pop-sum">${esc(String(txt.today))} today · ${esc(String(txt.week))} this week · ${esc(String(txt.total30d))} in 30 days</span></div>`;
       const body = rows ? `<ol class="ham-merged-list">${rows}</ol>` : `<div class="ham-empty">No merges recorded yet.</div>`;
-      const foot = `<div class="ham-merged-pop-foot">${esc(txt.count)} all time${txt.tz ? ' · days roll at midnight ' + esc(txt.tz) : ''}. Every pull request the hive tracked that reached merged — by the hive, a person or another bot.</div>`;
+      const foot = `<div class="ham-merged-pop-foot">${esc(String(txt.count))} all time${txt.tz ? ' · days roll at midnight ' + esc(txt.tz) : ''}. Every pull request the hive tracked that reached merged — by the hive, a person or another bot.</div>`;
       return head + body + foot;
     }
     var _stageTrackerMerged = { server: null, local: {} };
@@ -19825,12 +19827,26 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
     }
     // Pure: the banner's text pieces — "#15067 merged", the title, and
     // "(lane, 17:42)".
+    // Pure: the banner's PR number as a string — the number field, else the
+    // nested pr record, else the GitHub URL, else the PR key. '' when none
+    // (so the head never reads a bare "#"). esc() drops non-strings, which
+    // is how a numeric field once rendered as "# merged".
+    function stageTrackerMergeBannerNumber(b) {
+      if (!b) return '';
+      const n = Number(b.number) || Number(b.pr_number) || Number(b.pr && b.pr.number) || 0;
+      if (n > 0) return String(n);
+      const u = String(b.url || (b.pr && b.pr.url) || '').match(/\/pull\/(\d+)/);
+      if (u) return u[1];
+      const k = String(b.key || '').match(/\/pr#(\d+)$/);
+      return k && Number(k[1]) > 0 ? k[1] : '';
+    }
     function stageTrackerMergeBannerText(b, nowMs) {
       const d = new Date(b.at || nowMs);
       const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
       const who = stageTrackerMergedByText(b.merged_by);
       const paren = [b.lane || '', who, hm].filter(Boolean).join(', ');
-      return { head: `#${b.number} merged${b.preview ? ' (test)' : ''}`, text: `${b.title || b.repo || ''}${paren ? ' (' + paren + ')' : ''}`.trim() };
+      const num = stageTrackerMergeBannerNumber(b);
+      return { number: num, head: `${num ? '#' + num + ' ' : ''}merged${b.preview ? ' (test)' : ''}`, text: `${b.title || b.repo || ''}${paren ? ' (' + paren + ')' : ''}`.trim() };
     }
     // Stateful: a persistent banner, bottom right, for one merge — stays
     // until dismissed or STAGE_TRACKER_MERGE_BANNER_MS, stacked when
@@ -19841,14 +19857,15 @@ next kick: ${agentCollapsedTimestampDetail(nextMs, a && (a.nextKickAt || a.nextK
       if (!box) { box = document.createElement('div'); box.id = 'merge-banners'; box.className = 'merge-banners'; box.setAttribute('aria-live', 'polite'); document.body.appendChild(box); }
       const recent = ((_stageTrackerMerged.server && _stageTrackerMerged.server.recent) || []).find(e => stageTrackerMergedIdent(e.repo, e.number) === stageTrackerMergedIdent(b.repo, b.number));
       const info = Object.assign({ title: _stageTrackerPRTitle[b.key] || '', merged_by: '', lane: '', url: '' }, recent || {}, b);
+      const num = stageTrackerMergeBannerNumber(info);
       // A live merge the ledger has not listed yet still links: the key carries owner/name.
-      if (!info.url && info.repo && info.repo.indexOf('/') > 0 && Number(info.number) > 0 && !info.preview) info.url = `https://github.com/${info.repo}/pull/${info.number}`;
+      if (!info.url && info.repo && info.repo.indexOf('/') > 0 && num && !info.preview) info.url = `https://github.com/${info.repo}/pull/${num}`;
       const t = stageTrackerMergeBannerText(info, Date.now());
       const el = document.createElement('div');
       el.className = 'merge-banner';
       el.setAttribute('role', 'status');
       if (b.rowKey) el.setAttribute('data-ham-row', b.rowKey);
-      el.innerHTML = `<span class="merge-banner-ico" aria-hidden="true">✓</span><div class="merge-banner-body"><div class="merge-banner-head"><span class="merge-banner-num">#${esc(info.number)}</span> merged${info.preview ? ' <span class="text-muted">(test)</span>' : ''}</div><div class="merge-banner-text" title="${esc(t.text)}">${esc(t.text)}</div><div class="merge-banner-links">${b.rowKey ? `<button type="button" data-action="hamBannerShowRow" data-arg0="${esc(b.rowKey)}" data-stop="1">Show row</button>` : ''}${info.url ? `<a href="${esc(info.url)}" target="_blank" rel="noopener">Open on GitHub</a>` : ''}<button type="button" data-action="hamMergedOpen" data-stop="1">All merges</button></div></div><button type="button" class="merge-banner-close" data-action="hamBannerDismiss" data-arg-types="t" data-stop="1" aria-label="Dismiss">×</button>`;
+      el.innerHTML = `<span class="merge-banner-ico" aria-hidden="true">✓</span><div class="merge-banner-body"><div class="merge-banner-head">${num ? `<span class="merge-banner-num">#${esc(num)}</span> ` : ''}merged${info.preview ? ' <span class="text-muted">(test)</span>' : ''}</div><div class="merge-banner-text" title="${esc(t.text)}">${esc(t.text)}</div><div class="merge-banner-links">${b.rowKey ? `<button type="button" data-action="hamBannerShowRow" data-arg0="${esc(b.rowKey)}" data-stop="1">Show row</button>` : ''}${info.url ? `<a href="${esc(info.url)}" target="_blank" rel="noopener">Open on GitHub</a>` : ''}<button type="button" data-action="hamMergedOpen" data-stop="1">All merges</button></div></div><button type="button" class="merge-banner-close" data-action="hamBannerDismiss" data-arg-types="t" data-stop="1" aria-label="Dismiss">×</button>`;
       box.appendChild(el);
       while (box.children.length > STAGE_TRACKER_MERGE_BANNER_MAX) box.children[0].remove();
       el._timer = setTimeout(() => stageTrackerMergeBannerDismiss(el), STAGE_TRACKER_MERGE_BANNER_MS);
