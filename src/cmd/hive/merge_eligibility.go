@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -202,7 +203,7 @@ func contributorLaneVerdictFunc(cfg *config.Config, logger *slog.Logger) automer
 		}
 		artifact, err := review.LoadArtifact("")
 		if err != nil {
-			if logger != nil {
+			if logger != nil && !errors.Is(err, os.ErrNotExist) {
 				logger.Warn("contributor-lane verdict gate: review-verdicts.json unavailable; failing closed", "error", err)
 			}
 			return automerge.ContributorLaneVerdict{Configured: true}
