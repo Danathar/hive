@@ -1456,6 +1456,7 @@ The plain-words comment the delegate posts has four lines — **Hive decided** (
 
 | Token | Plain words | Detail |
 |---|---|---|
+| `capability-gap` | the GitHub App lacks a permission; deciding cannot clear it | The blocker is a missing GitHub App permission (for example `workflows`). Approving a direction would only re-apply needs-human, so the park stays until the owner grants the permission or a person applies the change. |
 | `ci-ratchet` | a CI hygiene gate, landed as a ratchet | A new CI hygiene gate lands as a ratchet: it records today's baseline and fails only on increases, so existing work is never blocked. |
 | `contributor-offline` | the author's hive hasn't been connected since the nudge | The PR's author has been offline since the hive nudged them, so the hive takes the work over instead of waiting. |
 | `dedupe` | an older issue already tracks this | An older issue already tracks the same work; one thread keeps it moving. |
@@ -1500,6 +1501,10 @@ The plain-words comment the delegate posts has four lines — **Hive decided** (
 | Token | Plain words | Detail |
 |---|---|---|
 | `adoption-disabled` | adoption is switched off on this hive | Stage adoption is disabled on this hive (governor.labels.stage.adoption), so a request to take a PR over is never carried out. |
+| `adoption-executing` | the adoption engine is carrying it out | The decision is recorded and the adoption engine picks it up on its next stage pass (a few minutes): it pushes the commits to a hive branch and opens the hive's copy. Nothing to do yet. |
+| `adoption-stalled:contributor-lane:workflow-path`, `capability:workflows-permission`, `contributor-lane:workflow-path`, `workflow-path` | the PR edits .github/workflows; the hive's App lacks the `workflows` permission, so it cannot adopt it | The PR changes files under .github/workflows. The hive's GitHub App has no `workflows` permission, so the adoption fence refuses to publish those edits from the hive. Grant the App the `workflows` permission and re-run the decision, or have a person rebase and merge it on GitHub, or close it as superseded. |
+| `adoption-undone` | the hive's copy was closed without merging and the adoption was undone | The hive opened its copy, but the copy was closed without merging and a fresh one could not be opened, so the adoption was undone and the PR is back in its normal flow. Re-run the decision to adopt it again, or act on GitHub. |
+| `author-association`, `contributor-lane:author-association`, `human-merge`, `ready-for-human-merge`, `untrusted-author` | no merge lane vouches for this PR's author; a maintainer merges | The PR is ready, but its author is not a collaborator and holds no trusted or merger tier, so no merge lane vouches for them and the hive never merges it unattended. A maintainer merges it (Approve & merge as maintainer, or Approve — let hive merge), or trusts the author under 👥 Contributors. |
 | `author-online` | the author's hive is connected, so hive won't take the PR over | Adoption is for authors whose hive has gone offline; this author's hive is connected, so the hive leaves the PR with them. |
 | `behind` | the branch is behind the base branch | The branch is behind the base branch and must be updated before it can merge. |
 | `changes-requested`, `changes_requested`, `contributor-lane:changes-requested`, `human-changes-requested`, `request_changes`, `reviewer-verdict:request_changes` | a reviewer asked for changes; a new commit is needed | A reviewer asked for changes on this branch. Approving cannot override that: only a new commit, or a maintainer merging by hand, moves it. |
