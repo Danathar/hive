@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -144,5 +146,35 @@ func TestIsClientHangup(t *testing.T) {
 	}
 	if isClientHangup(errors.New("tls: failed to verify certificate")) {
 		t.Fatal("certificate errors must stay WARN")
+	}
+}
+
+func TestLogTimeoutBoundsWarnBursts(t *testing.T) {
+	var buf bytes.Buffer
+	p := &GitHubProxy{logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	const msg = "copilot sniff: upstream response read timed out"
+	err := &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}
+	for i := 0; i < 24; i++ {
+		p.logTimeout(msg, err, "agent", "a")
+	}
+	if got := strings.Count(buf.String(), "level=WARN"); got != 1 {
+		t.Fatalf("WARN lines = %d, want 1", got)
+	}
+	if got := strings.Count(buf.String(), msg); got != 24 {
+		t.Fatalf("timeouts must stay observable; lines = %d, want 24", got)
+	}
+}
+
+func TestLogTimeoutNonTimeoutDoesNotConsumeWarnWindow(t *testing.T) {
+	var buf bytes.Buffer
+	p := &GitHubProxy{logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	const msg = "copilot sniff: upstream response read timed out"
+	p.logTimeout(msg, io.EOF, "agent", "a")
+	if buf.Len() != 0 {
+		t.Fatalf("non-timeout error must log nothing, got %q", buf.String())
+	}
+	p.logTimeout(msg, &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}, "agent", "a")
+	if got := strings.Count(buf.String(), "level=WARN"); got != 1 {
+		t.Fatalf("first real timeout after a hangup must WARN; WARN lines = %d, want 1", got)
 	}
 }
