@@ -350,6 +350,8 @@ func maintainHeldPRMergeability(
 			switch github.ClassifyBranchUpdateError(err, pr.FromFork) {
 			case github.BranchUpdateWorkflowPermission:
 				stopHeldPRUpdate(ctx, writer, store, repo, pr, holdguard.UpdateStopWorkflowPermission, err, logger)
+			case github.BranchUpdateForkWorkflowUpdate:
+				stopHeldPRUpdate(ctx, writer, store, repo, pr, holdguard.UpdateStopForkWorkflowUpdate, err, logger)
 			case github.BranchUpdateForkNotEditable:
 				stopHeldPRUpdate(ctx, writer, store, repo, pr, holdguard.UpdateStopForkNotEditable, err, logger)
 			case github.BranchUpdateUpToDate:

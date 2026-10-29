@@ -272,8 +272,14 @@ func TestTrustAndDecisionCauseProse(t *testing.T) {
 	if got := decisionCause(contributorLaneReasonWorkflowPath); !strings.Contains(got, "workflow") {
 		t.Fatalf("workflow = %q", got)
 	}
-	if got := decisionCause(autoMergeReasonWorkflowPermission); !strings.Contains(got, "Workflows permission") || !strings.Contains(got, "A person must") {
+	if got := decisionCause(autoMergeReasonWorkflowPermission); !strings.Contains(got, "Workflows permission") || !strings.Contains(got, "A person must") || !strings.Contains(got, "if the installation lacks it") {
 		t.Fatalf("workflow permission = %q", got)
+	}
+	// A fork head is out of the App's reach whatever it is granted: the cause
+	// names who can update it and never asks for the workflows permission
+	// (projectbluefin/utah#1001).
+	if got := decisionCause(autoMergeReasonForkWorkflowUpdate); !strings.Contains(got, "in a fork") || !strings.Contains(got, "`gh pr update-branch`") || !strings.Contains(got, "Allow edits by maintainers") || strings.Contains(got, "Workflows: write") || strings.Contains(got, "permission") {
+		t.Fatalf("fork workflow update = %q", got)
 	}
 	if got := decisionCause(workflowApprovalRequiredPrefix + "ci/build"); !strings.Contains(got, "Hive posted `/ok-to-test`") {
 		t.Fatalf("workflow approval = %q", got)

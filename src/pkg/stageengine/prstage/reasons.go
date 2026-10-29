@@ -19,6 +19,7 @@ const (
 	ReviewGateOutcomeNoBundle              = "no-review-bundle"
 	AutoMergeReasonBehindBudgetExhausted   = "behind-update-budget-exhausted"
 	AutoMergeReasonForkNotEditable         = "fork-not-editable"
+	AutoMergeReasonForkWorkflowUpdate      = "fork-workflow-update"
 	AutoMergeReasonHumanChangesRequested   = "human-changes-requested"
 	AutoMergeReasonHumanMergePath          = "human-merge-path"
 	AutoMergeReasonHumanMergePathEvidence  = "human-merge-path-evidence"

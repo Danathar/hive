@@ -131,6 +131,7 @@ func TestUpdateStoppedCommentBodySaysWhyAndWhatToDo(t *testing.T) {
 	}{
 		{UpdateStopWorkflowPermission, []string{"`.github/workflows/`", "use **Update branch**"}},
 		{UpdateStopForkNotEditable, []string{"\"Allow edits by maintainers\" is off", "ask the author to merge the base branch in"}},
+		{UpdateStopForkWorkflowUpdate, []string{"`.github/workflows/`", "the branch is in a fork", "ask the author to merge the base branch in"}},
 		{UpdateStopNotLanded, []string{"had not moved 30 minutes later", "use **Update branch**"}},
 		{UpdateStopUpToDate, []string{"GitHub did not complete the update.", "use **Update branch**"}},
 	} {
@@ -141,5 +142,14 @@ func TestUpdateStoppedCommentBodySaysWhyAndWhatToDo(t *testing.T) {
 				t.Errorf("UpdateStoppedCommentBody(%q) lacks %q:\n%s", tc.reason, w, body)
 			}
 		}
+	}
+}
+
+// A fork head is out of the App's reach whatever it is granted, so the fork
+// note never sends a person after the workflows permission
+// (projectbluefin/utah#1001).
+func TestUpdateStoppedCommentBodyForkWorkflowNamesNoGrant(t *testing.T) {
+	if body := UpdateStoppedCommentBody(UpdateStopForkWorkflowUpdate); strings.Contains(body, "permission") {
+		t.Fatalf("fork workflow note mentions a permission:\n%s", body)
 	}
 }

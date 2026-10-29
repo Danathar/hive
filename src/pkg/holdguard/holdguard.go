@@ -378,10 +378,11 @@ func (s *Store) MarkConflictNoted(repo string, number int) {
 }
 
 // Reasons the guard stops keeping a held PR mergeable for a head and base.
-// The first two match the automerge sweep's reasons for the same refusals.
+// The first three match the automerge sweep's reasons for the same refusals.
 const (
 	UpdateStopWorkflowPermission = "workflow-permission"
 	UpdateStopForkNotEditable    = "fork-not-editable"
+	UpdateStopForkWorkflowUpdate = "fork-workflow-update"
 	UpdateStopConflict           = "conflict"
 	UpdateStopUpToDate           = "up-to-date"
 	UpdateStopNotLanded          = "update-not-landed"
@@ -753,7 +754,10 @@ func UpdateStoppedCommentBody(reason string) string {
 	action := "use **Update branch** on this PR, or merge the base branch in by hand."
 	switch reason {
 	case UpdateStopWorkflowPermission:
-		why = "GitHub refused the update because the base branch changed files under `.github/workflows/` and the Hive app does not have the workflows permission."
+		why = "GitHub refused the update because the base branch changed files under `.github/workflows/` and the token Hive used does not have the workflows permission."
+	case UpdateStopForkWorkflowUpdate:
+		why = "GitHub refused the update because the base branch changed files under `.github/workflows/` and the branch is in a fork, where the Hive app cannot push workflow files."
+		action = "ask the author to merge the base branch in, or use **Update branch** on this PR (a maintainer can when \"Allow edits by maintainers\" is on)."
 	case UpdateStopForkNotEditable:
 		why = "The branch is in a fork the Hive app cannot push to (\"Allow edits by maintainers\" is off, or GitHub refused the push)."
 		action = "ask the author to merge the base branch in, or use **Update branch** on this PR if GitHub offers it."
