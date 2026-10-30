@@ -395,17 +395,17 @@ func mergeTrainEtaBasis(aheadN int, headState string, headLeft, own, tick time.D
 		parts = append(parts, strconv.Itoa(aheadN)+" ahead")
 	}
 	if aheadN > 0 && headState == mergeTrainHeadSoaking && headLeft > 0 {
-		parts = append(parts, "head soaking "+shortDuration(headLeft))
+		parts = append(parts, "head soaking "+mergeTrainShortDuration(headLeft))
 	} else if aheadN > 0 && headState == mergeTrainHeadMerging {
 		parts = append(parts, "head merging")
 	}
 	if own > 0 {
-		parts = append(parts, "own soak "+shortDuration(own))
+		parts = append(parts, "own soak "+mergeTrainShortDuration(own))
 	}
 	if sweeping {
 		parts = append(parts, "sweep running")
 	} else if tick > 0 {
-		parts = append(parts, "next sweep in "+shortDuration(tick))
+		parts = append(parts, "next sweep in "+mergeTrainShortDuration(tick))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -444,7 +444,7 @@ func mergeTrainHeadState(head *StageTrackerItem, now time.Time) (state, reason s
 			left = head.Soak.Until.Sub(now)
 		}
 		if left > 0 {
-			return mergeTrainHeadSoaking, "soaking, " + shortDuration(left) + " left", left, true
+			return mergeTrainHeadSoaking, "soaking, " + mergeTrainShortDuration(left) + " left", left, true
 		}
 		return mergeTrainHeadSoaking, "soaked; hive merges it on its next sweep", 0, true
 	case trackerNumberReviewed, trackerNumberReviewPending:
@@ -457,7 +457,7 @@ func mergeTrainHeadState(head *StageTrackerItem, now time.Time) (state, reason s
 	}
 	if head.Soak != nil && head.Soak.Until.After(now) {
 		left := head.Soak.Until.Sub(now)
-		return mergeTrainHeadSoaking, "soaking, " + shortDuration(left) + " left", left, true
+		return mergeTrainHeadSoaking, "soaking, " + mergeTrainShortDuration(left) + " left", left, true
 	}
 	var next time.Duration
 	if mg != nil && mg.NextSweepAt != nil && mg.NextSweepAt.After(now) {
@@ -466,8 +466,8 @@ func mergeTrainHeadState(head *StageTrackerItem, now time.Time) (state, reason s
 	return mergeTrainHeadReady, "approved and green; merges on hive's next sweep", next, true
 }
 
-// shortDuration is "12m" / "1h 05m" / "45s" for the chip's words.
-func shortDuration(d time.Duration) string {
+// mergeTrainShortDuration is "12m" / "1h 05m" / "45s" for the chip's words.
+func mergeTrainShortDuration(d time.Duration) string {
 	d = d.Round(time.Second)
 	if d < time.Minute {
 		return strconv.Itoa(int(d/time.Second)) + "s"
@@ -568,7 +568,7 @@ func (m *mergeTrainMemory) warn(repo string, mt *StageTrackerMergeTrain, now tim
 	}
 	m.last[key] = now
 	slog.Warn("merge train stalled: head has not progressed; "+strconv.Itoa(mt.Size-1)+" PR(s) wait behind it",
-		"repo", repo, "train", mt.ID, "head", mt.HeadNumber, "head_state", mt.HeadState, "head_reason", mt.HeadReason, "stalled_for", shortDuration(time.Duration(mt.StalledS)*time.Second), "size", mt.Size)
+		"repo", repo, "train", mt.ID, "head", mt.HeadNumber, "head_state", mt.HeadState, "head_reason", mt.HeadReason, "stalled_for", mergeTrainShortDuration(time.Duration(mt.StalledS)*time.Second), "size", mt.Size)
 	return true
 }
 

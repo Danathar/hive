@@ -15,20 +15,18 @@
 # merges: PR checks run against the merge ref at push time, not at merge time,
 # so syncs that land in between can push files past a baseline captured
 # earlier and turn main red (crux#22 did exactly that).
-1825 agent/manager.go
-1010 agent/manager_homes.go
-1613 agent/manager_kick.go
-1218 agent/manager_launch.go
-920 agent/manager_pane_signals.go
-1001 agent/manager_restart.go
+1653 agent/manager.go
+952 agent/manager_homes.go
+1386 agent/manager_kick.go
+1202 agent/manager_launch.go
+884 agent/manager_pane_signals.go
 975 agent/manager_tokens.go
 815 agent/permissions_watcher.go
-953 api/client/client.go
-831 api/runtime.go
-1365 config/agent_runtime.go
-1084 cruxtest/recorder.go
-997 proxy/rules.go
-911 pushbroker/pushbroker.go
-1082 serve/families.go
-833 serve/serve.go
-976 watchdog/reconciler.go
+914 api/client/client.go
+1271 config/agent_runtime.go
+1076 cruxtest/recorder.go
+990 proxy/rules.go
+889 pushbroker/pushbroker.go
+1048 serve/families.go
+810 serve/serve.go
+919 watchdog/reconciler.go

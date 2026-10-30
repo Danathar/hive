@@ -319,7 +319,7 @@ With the marker, the activity monitor's pill reads `blocked on #N`, links the PR
 
 The hard-suppress reconcile (#12002) can also lift a Hive-applied `blocked` after a referencing PR merges, but only when the newest label event was by the App bot; human-applied or re-applied labels are not lifted. It posts `<!-- hive:hard-suppress-lifted -->`.
 
-**Configuration and implementation.** Fixed label (`src/pkg/github/issue_blocked.go`, `src/pkg/github/issue_recheck_soak.go`, `src/pkg/github/issue_stage_labels.go`, `src/pkg/github/issue_claim_gate.go`); contributor/dashboard controls: `hub.contribute_skip_labels`, dashboard bands (`src/pkg/config/config.go:4585-4685`, `src/docs/dashboard.md:105-140`)
+**Configuration and implementation.** Fixed label (`src/pkg/github/issue_blocked.go`, `src/pkg/github/issue_recheck_soak.go`, `src/pkg/github/issue_stage_labels.go`, `src/pkg/github/issue_claim_gate.go`); contributor/dashboard controls: `hub.contribute_skip_labels`, dashboard bands (`src/pkg/config/hub_config.go:187-193`, `src/docs/dashboard.md:105-140`)
 
 #### `needs-human`
 
@@ -609,7 +609,7 @@ Umbrella issue is never a unit of agent work: every automated claim producer (re
 
 **Release or override.** Remove label or process plan/design
 
-**Configuration and implementation.** `planning.plan_from_label`, `planning.plan_labels`, `planning.design_labels` (`src/pkg/config/config.go:400-460`, `src/pkg/planning/issue.go:483-510`)
+**Configuration and implementation.** `planning.plan_from_label`, `planning.plan_labels`, `planning.design_labels` (`src/pkg/config/planning_config.go:34-60`, `src/pkg/planning/issue.go:483-510`)
 
 #### `hive/likely-done`
 
@@ -665,7 +665,7 @@ Contributor already-done verdict/confirmation; default contributor skip label an
 
 **Release or override.** Human removes/reopens or confirms reporter-gated bugs
 
-**Configuration and implementation.** `hub.contribute_already_done_label`, fixed label (`src/pkg/config/config.go:4701-4924`, `src/pkg/dashboard/contribute_verdict_settle.go`, `src/pkg/github/issue_close.go`)
+**Configuration and implementation.** `hub.contribute_already_done_label`, fixed label (`src/pkg/config/hub_config.go:253-259,422-430`, `src/pkg/dashboard/contribute_verdict_settle.go`, `src/pkg/github/issue_close.go`)
 
 #### `needs-triage`, `discussion`, `question`, `tracking`, `epic`
 
@@ -679,7 +679,7 @@ Default contributor skip labels/patterns.
 
 **Release or override.** Remove label or config
 
-**Configuration and implementation.** `hub.contribute_skip_labels`, `HIVE_CONTRIBUTE_SKIP_LABELS` (`src/pkg/config/config.go:4585-4685`)
+**Configuration and implementation.** `hub.contribute_skip_labels`, `HIVE_CONTRIBUTE_SKIP_LABELS` (`src/pkg/config/hub_config.go:469-490`, where `DefaultContributeSkipLabels` appears)
 
 #### Contributor allow/deny label filters
 
@@ -693,7 +693,7 @@ Hive-wide label filters can run in deny mode (skip if any label matches) or allo
 
 **Release or override.** Edit filter mode/list or per-repo filter
 
-**Configuration and implementation.** `hub.contribute_labels_mode`, `contribute_deny_labels`, `contribute_allow_labels`, `contribute_repo_filters` (`src/pkg/config/config.go:4388-4420`, `src/pkg/config/config.go:6940-6994`, `src/pkg/config/config.go:7008-7055`)
+**Configuration and implementation.** `hub.contribute_labels_mode`, `contribute_deny_labels`, `contribute_allow_labels`, `contribute_repo_filters` (`src/pkg/config/hub_config.go:167-173`, where `ContributeLabelsMode` appears; `src/pkg/config/contribute_repo_filter.go:9-17`, where `ContributeRepoFilter` appears; `src/pkg/config/contribute_repo_filter.go:74-94`, where `EvaluateContributeFilters` appears)
 
 #### `1-triage`, `2-discussing`, stage labels
 
@@ -807,7 +807,7 @@ Same exempt behavior as `do-not-merge`; wins over required-label admission. Defa
 
 **Release or override.** Remove label or config entry
 
-**Configuration and implementation.** `governor.labels.exempt` (`src/pkg/config/config.go:3388-3396`, `src/pkg/config/config.go:5800-5808`)
+**Configuration and implementation.** `governor.labels.exempt` (`src/pkg/config/governor_config.go:303-314`, where `LabelsConfig` appears; `src/pkg/config/defaults.go:365-371`)
 
 #### `hive:unauthorized`
 
@@ -869,7 +869,7 @@ Queue label for human/owner merge action; the sweep also requires its normal aut
 
 **Release or override.** Remove label; head changes can de-queue
 
-**Configuration and implementation.** `governor.labels.automerge`, default `lgtm` (`src/pkg/config/config.go:3388-3396`, `src/pkg/config/config.go:4952-4957`, `src/pkg/github/automerge/automerge_sweep.go:966-1036`)
+**Configuration and implementation.** `governor.labels.automerge`, default `lgtm` (`src/pkg/config/governor_config.go:303-314`, where `LabelsConfig` appears; `src/pkg/config/dashboard_config.go:219-224`, where `DefaultAutoMergeLabel` appears; `src/pkg/github/automerge/automerge_sweep.go:966-1036`)
 
 #### `reviewer-passed`
 
@@ -923,7 +923,7 @@ Do not confuse that broad GitHub-review override with a recorded **`/hive decisi
 
 **Release or override.** Human removes
 
-**Configuration and implementation.** `review.human_decision_label` (`src/pkg/github/human_decision_label.go:1-36`, `src/pkg/config/config.go:7186-7203`)
+**Configuration and implementation.** `review.human_decision_label` (`src/pkg/github/human_decision_label.go:1-36`, `src/pkg/config/review_config.go:320-337`)
 
 #### `needs-rebase`
 
