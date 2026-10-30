@@ -610,7 +610,7 @@ func stageTrackerSoakCaption(rec stagelabels.Record, now time.Time) string {
 		return ""
 	}
 	if left := until.Sub(now); left > 0 {
-		return admitted + "soaking — " + shortDuration(left) + " left"
+		return admitted + "soaking — " + mergeTrainShortDuration(left) + " left"
 	}
 	return admitted + "soak complete — merges on the next pass"
 }

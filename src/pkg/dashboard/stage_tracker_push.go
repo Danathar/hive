@@ -138,7 +138,7 @@ func stageTrackerPushCaption(p *StageTrackerPush, now time.Time) string {
 	if p == nil || p.State != pushStatePushed || p.Since == nil {
 		return ""
 	}
-	ago := shortDuration(now.Sub(*p.Since))
+	ago := mergeTrainShortDuration(now.Sub(*p.Since))
 	if ago == "0s" {
 		return "push seen just now → CI/re-review queued"
 	}
