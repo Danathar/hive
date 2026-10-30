@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -184,5 +185,24 @@ func TestHandlePRThroughputQualifiesWithOrg(t *testing.T) {
 	code, body = getPRThroughput(t, s, "?hours=12&repo=acme/x")
 	if code != 200 || body.Merged != 2 {
 		t.Errorf("acme/x: status %d merged %d, want 2", code, body.Merged)
+	}
+}
+
+// "Merged by repo" counts merges only, once each, not every PR action.
+func TestPRThroughputTopReposCountsMerges(t *testing.T) {
+	now := time.Date(2026, 10, 30, 10, 40, 0, 0, time.UTC)
+	entries := prThroughputBothWritersEntries(now)
+	for n := 1; n <= 5; n++ {
+		entries = append(entries, AuditEntry{Timestamp: rfc3339(now.Add(-time.Hour)), User: "system", Action: ghpkg.AuditActionAgentPRCreated, Detail: "repo=acme/z, number=" + strconv.Itoa(n), Repo: "acme/z", Target: n})
+	}
+	got := buildPRThroughputWindow(qualifyPRThroughputEntries(entries, acmeQualifier), now, 12, "", prThroughputRoleMerged)
+	want := map[string]int{"acme/x": 2, "acme/y": 2}
+	if len(got.TopRepos) != len(want) {
+		t.Fatalf("top_repos = %+v, want %v", got.TopRepos, want)
+	}
+	for _, r := range got.TopRepos {
+		if want[r.Name] != r.Count {
+			t.Errorf("top_repos %s = %d, want %d (all %+v)", r.Name, r.Count, want[r.Name], got.TopRepos)
+		}
 	}
 }

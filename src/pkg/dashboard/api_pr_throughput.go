@@ -66,8 +66,10 @@ type PRThroughput struct {
 	PreviousActor *PRThroughputActorPoint  `json:"previous_actor,omitempty"`
 	Metrics       PRThroughputMetrics      `json:"metrics"`
 	MergedByAgent []PRThroughputTop        `json:"merged_by_agent,omitempty"`
-	TopRepos      []PRThroughputTop        `json:"top_repos,omitempty"`
-	ClosedReasons []PRThroughputTop        `json:"closed_reasons,omitempty"`
+	// TopRepos is the five repos with the most merges in the window (the
+	// card's "Merged by repo"); omitted when the card is filtered to a repo.
+	TopRepos      []PRThroughputTop `json:"top_repos,omitempty"`
+	ClosedReasons []PRThroughputTop `json:"closed_reasons,omitempty"`
 }
 
 type PRThroughputBucket struct {
@@ -489,13 +491,13 @@ func summarizePRThroughput(entries []AuditEntry, since, until time.Time, repo st
 			continue
 		}
 		counts.add(e)
-		if r, ok := collect.AuditEntryRepo(e); ok {
-			topRepos[r]++
-		}
 		switch e.Action {
 		case ghpkg.AuditActionPRMerged:
 			path := prThroughputMergePath(e.Detail)
 			mergedByPath[path]++
+			if r, ok := collect.AuditEntryRepo(e); ok {
+				topRepos[r]++
+			}
 			if agent := prThroughputAgent(e); agent != "" {
 				mergedByAgent[agent]++
 			}
