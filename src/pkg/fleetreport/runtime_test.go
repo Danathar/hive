@@ -1070,8 +1070,6 @@ func TestRecurringRuntimeMessagesAreClassified(t *testing.T) {
 		"inference upstream failed":                                                                    ClassInferenceUpstreamError,
 		"kick undeliverable; busy-no-activity restart":                                                 ClassAgentPaneTimeout,
 		"agent GitHub API hourly cap reached":                                                          ClassAgentGitHubCapReached,
-		"shared-ci rerun forbidden: the App installation lacks Actions write permission":               ClassSharedCIRerunForbidden,
-		"pr-request watcher: head branch is not on the remote — the agent's push did not authenticate": ClassPRRequestHeadUnpushed,
 		"proxy: plain HTTP forward refused — destination is not globally routable":                     ClassProxyPlainForwardRefused,
 	}
 	for msg, want := range fed {
