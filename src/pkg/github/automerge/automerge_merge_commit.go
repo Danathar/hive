@@ -9,6 +9,7 @@ import (
 	gh "github.com/google/go-github/v72/github"
 	hgithub "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/stagelabels"
+	"github.com/hivecommons/hive/pkg/writeback"
 )
 
 // Merge commit for mixed authorship (follow-up to hivecommons/hive#13623 and
@@ -197,7 +198,12 @@ func (c *Engine) noteSignoffAttributionDecision(ctx context.Context, store *stag
 		return 0, nil
 	}
 	obs = c.withMergeAskFacts(ctx, key, obs)
-	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(SignoffAttributionDecisionComment(obs))}); err != nil {
+	body := SignoffAttributionDecisionComment(obs)
+	if d := c.writebackAllowed(obs.Owner+"/"+obs.Repo, writebackItemForObservation(obs), writeback.KindNeedsDecisionComment, body); !d.Allowed {
+		c.info("stage labels: sign-off attribution note withheld by write-back gate", "repo", obs.Display, "pr", obs.Number, "reason", d.Reason)
+		return 0, nil
+	}
+	if _, _, err := c.gh.Issues.CreateComment(ctx, obs.Owner, obs.Repo, obs.Number, &gh.IssueComment{Body: gh.Ptr(body)}); err != nil { // writeback:gated
 		c.warn("stage labels: sign-off attribution 085 note failed", "repo", obs.Display, "pr", obs.Number, "error", err)
 		return 0, err
 	}

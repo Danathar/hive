@@ -524,7 +524,7 @@ func (c *Client) releaseHiveNeedsHumanOnPR(ctx context.Context, owner, repo stri
 		return out, nil
 	}
 	if !labelPresent(labels, escalation.ReviewerPassedLabel) {
-		if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{escalation.ReviewerPassedLabel}); err != nil {
+		if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{escalation.ReviewerPassedLabel}); err != nil { // writeback:solicited trusted merger's /hive approve releases this PR's handoff.
 			return out, fmt.Errorf("adding %s to %s/%s#%d: %w", escalation.ReviewerPassedLabel, owner, repo, number, err)
 		}
 		c.recordWriteAudit(AuditActionHiveLabelApplied, hiveWriteMeta(),

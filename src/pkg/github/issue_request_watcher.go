@@ -22,6 +22,7 @@ import (
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/issueshape"
 	"github.com/hivecommons/hive/pkg/stagelabels"
+	"github.com/hivecommons/hive/pkg/writeback"
 )
 
 // IssueRequestDir is where agents drop issue-create and comment requests. An
@@ -1465,8 +1466,14 @@ func (c *Client) createIssue(ctx context.Context, req CreateIssueRequest) (Creat
 			if err := c.commentOnHumanFiledTwin(ctx, owner, repoName, fileSetTwin, comment); err != nil {
 				return CreateIssueResult{}, err
 			}
-		} else if err := c.CreateIssueComment(ctx, owner+"/"+repoName, fileSetTwin.GetNumber(), comment); err != nil {
-			return CreateIssueResult{}, fmt.Errorf("CreateIssue: consolidating into open issue #%d in %s/%s: %w", fileSetTwin.GetNumber(), owner, repoName, err)
+		} else {
+			item := c.WritebackItemForIssue(Issue{Number: fileSetTwin.GetNumber(), Author: safeGetLogin(fileSetTwin.GetUser()), Labels: issueLabelNames(fileSetTwin.Labels), CreatedAt: fileSetTwin.GetCreatedAt().Time})
+			if d := c.WritebackAllowed(owner+"/"+repoName, item, writeback.KindGateComment, comment); !d.Allowed {
+				return CreateIssueResult{}, fmt.Errorf("%w: %s", writeback.ErrSuppressed, d.Detail)
+			}
+			if err := c.CreateIssueComment(ctx, owner+"/"+repoName, fileSetTwin.GetNumber(), comment); err != nil { // writeback:gated
+				return CreateIssueResult{}, fmt.Errorf("CreateIssue: consolidating into open issue #%d in %s/%s: %w", fileSetTwin.GetNumber(), owner, repoName, err)
+			}
 		}
 		c.logger.Info("CreateIssue: consolidated finding into open issue over the same file set",
 			slog.String("repo", repoName), slog.Int("number", fileSetTwin.GetNumber()),
@@ -2050,7 +2057,11 @@ func (c *Client) commentOnHumanFiledTwin(ctx context.Context, owner, repo string
 			slog.String("repo", repo), slog.Int("number", twin.GetNumber()))
 		return nil
 	}
-	if err := c.CreateIssueComment(ctx, owner+"/"+repo, twin.GetNumber(), comment); err != nil {
+	item := c.WritebackItemForIssue(Issue{Number: twin.GetNumber(), Author: safeGetLogin(twin.GetUser()), Labels: issueLabelNames(twin.Labels), CreatedAt: twin.GetCreatedAt().Time})
+	if d := c.WritebackAllowed(owner+"/"+repo, item, writeback.KindGateComment, comment); !d.Allowed {
+		return fmt.Errorf("%w: %s", writeback.ErrSuppressed, d.Detail)
+	}
+	if err := c.CreateIssueComment(ctx, owner+"/"+repo, twin.GetNumber(), comment); err != nil { // writeback:gated
 		return fmt.Errorf("CreateIssue: commenting on human-filed issue #%d in %s/%s: %w", twin.GetNumber(), owner, repo, err)
 	}
 	return nil

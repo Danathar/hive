@@ -715,8 +715,9 @@ func (c *Client) postLabelApprovalReply(ctx context.Context, owner, repo string,
 
 // unparkLabelDrivenCommand answers `/hive approve` / `/hive decision` on a
 // label-driven repo with label approval configured (R5): it removes only the
-// park labels the hive itself added, adds the approval label, and says which
-// labels it left alone and who added them.
+// park labels the hive itself added, adds the approval label unless an
+// external needs-human remains, and says which labels it left alone and who
+// added them.
 func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owner, repo string, issue *gh.Issue, candidate *gh.IssueComment, command unparkCommand, result *IssueUnparkSweepResult, audit func(IssueUnparkEvent)) (bool, error) {
 	number := issue.GetNumber()
 	labels := issueLabelNames(issue.Labels)
@@ -727,6 +728,7 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	var removed []string
 	var kept []string
 	var stageLabels []string
+	acknowledge := true
 	for _, label := range labels {
 		if !c.isParkingLabel(label) {
 			continue
@@ -743,6 +745,9 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 				removed = append(removed, label)
 				continue
 			}
+			// A retained lifecycle park still needs a person. Adding an ack
+			// would contradict it and the stage engine would clear the ack.
+			acknowledge = false
 			note := fmt.Sprintf("`%s`", label)
 			if ok {
 				note = labelAttribution{Label: label, Actor: safeGetLogin(ev.Actor)}.String()
@@ -768,7 +773,7 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	// park label (a person's or a lifecycle bot's `needs-human`) re-parks the
 	// issue at the same stage (hivecommons/hive#12715).
 	stayingStage := unparkStageThatStays(displayRepo, number, labels, removed, stageLabels)
-	if !labelPresent(labels, HumanAckLabel) {
+	if acknowledge && !labelPresent(labels, HumanAckLabel) {
 		if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{HumanAckLabel}); err != nil {
 			return false, fmt.Errorf("adding %s to %s/%s#%d: %w", HumanAckLabel, owner, repo, number, err)
 		}
@@ -790,7 +795,7 @@ func (c *Client) unparkLabelDrivenCommand(ctx context.Context, displayRepo, owne
 	gone, lingering := c.unparkStageLabelsLifted(ctx, owner, repo, number, lifting)
 	removed = append(removed, gone...)
 	decision := unparkCommandDecisionText(command)
-	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept, stayingStage, lingering)
+	reply := renderUnparkLabelDrivenAcceptedReply(actor, decision, removed, kept, stayingStage, lingering, acknowledge)
 	if note := c.unparkIssueFilterNote(labels, removed); note != "" {
 		reply += "\n\n" + note
 	}
@@ -830,9 +835,14 @@ func unparkStageThatStays(displayRepo string, number int, labels, removed, stage
 	return ""
 }
 
-func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string, stayingStage string, lingering []string) string {
+func renderUnparkLabelDrivenAcceptedReply(actor, decision string, removed, kept []string, stayingStage string, lingering []string, acknowledge bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\nApproved by @%s. Decision: %s\n\n`%s` is applied", unparkAcceptedMarker, actor, decision, HumanAckLabel)
+	fmt.Fprintf(&b, "%s\nApproved by @%s. Decision: %s\n\n", unparkAcceptedMarker, actor, decision)
+	if acknowledge {
+		fmt.Fprintf(&b, "`%s` is applied", HumanAckLabel)
+	} else {
+		fmt.Fprintf(&b, "`%s` is not applied while `needs-human` remains", HumanAckLabel)
+	}
 	if len(removed) > 0 {
 		fmt.Fprintf(&b, " and Hive's own %s removed", quoteLabels(removed))
 	}
