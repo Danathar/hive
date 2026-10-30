@@ -41,8 +41,6 @@ var (
 	escalationStore     *escalation.Store
 )
 
-const escalationLedgerPath = "/data/metrics/fix-streaks.json"
-
 // getEscalationStore lazily loads the shared fix-loop ledger (staleness clock +
 // distinct-SHA attempt counts + re-engagement caps). It is the SINGLE
 // loop-safety/dedup authority shared by the re-engagement paths (#2 merge
@@ -1746,6 +1744,9 @@ func applyDuplicatePRGuard(
 	}
 	// hivecommons/hive#13093: issues parked on an unmerged PR come back once
 	// that PR settles, and never advertise `help wanted` while parked.
+	// hivecommons/hive#13311: ops-tracking soak checklists past their
+	// recheck-after deadline get evidence from the hub (or this spoke).
+	github.SetRecheckSoakProbe(github.NewHTTPSoakProbe(recheckSoakHubURL(cfg), fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port), nil))
 	blockedCtx, blockedCancel := context.WithTimeout(ctx, issueStageSyncTimeout)
 	// hivecommons/hive#13833: review-backlog items wait on the PR they were
 	// filed from in every destination; lift them when it merges, and when it
