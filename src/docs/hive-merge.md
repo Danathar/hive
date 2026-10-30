@@ -775,10 +775,27 @@ then), so the issue list and the PR list read the same
 ([#12436](https://github.com/hivecommons/hive/issues/12436)).
 
 An adoption pair is one logical PR everywhere a person might otherwise be
-asked to pick between PRs (hivecommons/hive#15495). When the write-back gate
-keeps the contributor's original open after supersession (`needs-opt-in-label`,
-a fork the hive cannot edit), it sits at 072 "superseded by #N" and the
-issue's caption, open-PR count, parked-PR check and "Let hive decide — all N
+asked to pick between PRs (hivecommons/hive#15495). A clanker- or
+hive-authored original closes in the adopting pass by policy
+(`governor.labels.stage.adoption.close_superseded: on_adopt`, the default;
+`on_merge` keeps it open until the copy merges): the write-back gate admits
+the close as `superseded-agent-pr` without the repo opt-in label the
+`contributor_adopt` kind otherwise wants, because the copy carries the same
+commits and sign-off (hivecommons/hive#15526 sat open beside hive's #15574
+as "Adopted → #15574 · superseded" with the gate saying
+`needs-opt-in-label`). A human-authored original still needs that opt-in
+label to close in the adopting pass; without it the gate keeps it open after
+supersession (`needs-opt-in-label`, or a fork the hive cannot edit) and it
+sits at 072 "superseded by #N" until the copy merges. Either way the
+superseded original draws in the Activity Monitor as one muted,
+chevron-less line under the issue (greyed title, no stage strip) whose
+trailing note reads "superseded · hive adopted → #M" — or "superseded ·
+closed · hive adopted → #M" once it is closed — on a single line (the title
+ellipsizes first); the hover carries the long form ("Hive re-authored this
+PR as #M with the same commits and sign-off. This PR closes as superseded
+when #M merges." / "…is closed as superseded."). The tracker marks it
+`superseded_by: M`; the line stays only while #M is open and listed and
+drops once #M merges or closes. The issue's caption, open-PR count, parked-PR check and "Let hive decide — all N
 PRs" fan-out all see only the hive's copy: the original's review verdict never
 gates the issue, and the copy's body carries every `Fixes #N` / `Refs #N` line
 of the original (an annotated `Refs #N — partial` travels as the bare
