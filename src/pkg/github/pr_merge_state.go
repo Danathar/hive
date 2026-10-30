@@ -26,6 +26,9 @@ type PRMergeState struct {
 	MergeableState      string
 	FromFork            bool
 	MaintainerCanModify bool
+	// WorkflowPushPaths names workflow files on either side of a fork rebase.
+	// Maintainer edits alone do not make such an App-token push deliverable.
+	WorkflowPushPaths []string
 	// CIRed is true when a check or status on HeadSHA concluded red.
 	CIRed bool
 	// RedChecks names them.
@@ -51,7 +54,7 @@ func (s PRMergeState) Conflicting() bool {
 
 // PushReachable reports whether the hive's token can push to the head.
 func (s PRMergeState) PushReachable() bool {
-	return !s.FromFork || s.MaintainerCanModify
+	return (!s.FromFork || s.MaintainerCanModify) && len(s.WorkflowPushPaths) == 0
 }
 
 // GetPRMergeState reads the PR fresh (no detail cache: the follow-through
@@ -79,6 +82,24 @@ func (c *Client) GetPRMergeState(ctx context.Context, repo string, number int) (
 	if head, base := pr.GetHead().GetRepo(), pr.GetBase().GetRepo(); head != nil && base != nil && head.GetFullName() != "" && base.GetFullName() != "" {
 		st.FromFork = !strings.EqualFold(head.GetFullName(), base.GetFullName())
 	}
+	if strings.EqualFold(st.State, "open") && st.FromFork && st.MaintainerCanModify && st.NeedsRebase() {
+		// Match the adoption lane's conservative workflow push fence: a base
+		// installation's grants do not establish workflow push access on a
+		// contributor's fork. Check both the PR and the incoming base changes.
+		for _, pair := range [][2]string{{st.BaseRef, st.HeadSHA}, {st.HeadSHA, st.BaseRef}} {
+			files, err := c.compareFiles(ctx, owner, repoName, pair[0], pair[1])
+			if err != nil {
+				return PRMergeState{}, err
+			}
+			for file := range files {
+				if strings.HasPrefix(file, ".github/workflows/") {
+					st.WorkflowPushPaths = append(st.WorkflowPushPaths, file)
+				}
+			}
+		}
+		slices.Sort(st.WorkflowPushPaths)
+		st.WorkflowPushPaths = slices.Compact(st.WorkflowPushPaths)
+	}
 	if strings.EqualFold(st.State, "open") && st.HeadSHA != "" {
 		if sum, err := SummarizeCommitChecks(ctx, c.client, owner, repoName, st.HeadSHA); err == nil && len(sum.Red) > 0 {
 			st.CIRed = true
@@ -89,11 +110,28 @@ func (c *Client) GetPRMergeState(ctx context.Context, repo string, number int) (
 }
 
 // CommitByHive reports whether the commit at sha is the hive's own work:
-// its author or committer resolves to the App bot (by login or noreply
-// address) or to an address in the pane identity domain — the fixer's
-// rebase or GitHub's update-branch under the App. A head a person pushed
-// after a rebase-then-merge approval is new content the approval never
-// covered, so the follow-through fails closed on it (hivecommons/hive#15104).
+// its committer resolves to the App bot (by login or noreply address) or to
+// an address in the pane identity domain, or its author resolves by login
+// to the App bot on a commit GitHub verified, as on GitHub's update-branch
+// under the App (web-flow commits and signs it). When GitHub
+// resolves no login for the committer, the email-only match also requires
+// the commit's signature to be verified by GitHub, which binds the signing
+// key to the committer address only (hivecommons/hive#15182); the author is
+// free text GitHub never vouches for, so no email-only author match counts.
+// GitHub resolves the author login from that same free-text email, so a
+// pusher setting the App's noreply address gets the bot login on an
+// unsigned commit; the author login therefore counts only on a verified
+// commit. A web-flow committer login is no proof either (it too resolves
+// from an email anyone can set), while update-branch commits are always
+// verified (hivecommons/hive#15421).
+// The fixer's plain-git rebase of a contributor PR is an unsigned,
+// email-only pane committer (the push broker sets commit.gpgsign=false and
+// the signed reconcile pass only walks App-authored PRs), so it does not
+// count unless the fixer host signs its pushes — the follow-through then
+// settles foreign-head rather than trusting a spoofable address. A head a
+// person pushed after a rebase-then-merge approval is new content the
+// approval never covered, so the follow-through fails closed on it
+// (hivecommons/hive#15104).
 func (c *Client) CommitByHive(ctx context.Context, repo, sha string) (bool, error) {
 	if c == nil || c.client == nil {
 		return false, ErrNoGitHubClient
@@ -107,10 +145,24 @@ func (c *Client) CommitByHive(ctx context.Context, repo, sha string) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("reading %s/%s@%s: %w", owner, repoName, shortSHA(sha), err)
 	}
-	if c.hiveCommitIdentity(safeGetLogin(rc.GetCommitter()), rc.GetCommit().GetCommitter().GetEmail()) {
-		return true, nil
+	committerLogin := safeGetLogin(rc.GetCommitter())
+	if c.hiveCommitIdentity(committerLogin, rc.GetCommit().GetCommitter().GetEmail()) {
+		// An email-only match (no login resolved) counts only on a commit
+		// GitHub verified; a login resolved to the App bot counts as is.
+		if committerLogin != "" || rc.GetCommit().GetVerification().GetVerified() {
+			return true, nil
+		}
 	}
-	return c.hiveCommitIdentity(safeGetLogin(rc.GetAuthor()), rc.GetCommit().GetAuthor().GetEmail()), nil
+	// The author counts only by a login resolved to the App bot on a commit
+	// GitHub verified: a signature never covers the author address, so a
+	// verified commit proves nothing about an email-only author match, and an
+	// unverified one proves nothing about a login GitHub derived from a
+	// spoofable noreply address.
+	if !rc.GetCommit().GetVerification().GetVerified() {
+		return false, nil
+	}
+	authorLogin := safeGetLogin(rc.GetAuthor())
+	return authorLogin != "" && c.hiveCommitIdentity(authorLogin, rc.GetCommit().GetAuthor().GetEmail()), nil
 }
 
 // PRConflictCandidates names the files a PR changed that its base also
@@ -151,8 +203,10 @@ func (c *Client) compareFiles(ctx context.Context, owner, repo, base, head strin
 			return nil, fmt.Errorf("comparing %s/%s %s...%s: %w", owner, repo, base, head, err)
 		}
 		for _, f := range cmp.Files {
-			if name := f.GetFilename(); name != "" {
-				out[name] = true
+			for _, name := range []string{f.GetFilename(), f.GetPreviousFilename()} {
+				if name != "" {
+					out[name] = true
+				}
 			}
 		}
 		if resp == nil || resp.NextPage == 0 || len(cmp.Files) == 0 {

@@ -83,13 +83,17 @@ func TestStageTrackerSoakInPayload(t *testing.T) {
 	s.deps.Config = &config.Config{}
 	s.deps.Config.AutoMerge.ContributorLane.SoakMinutes = 45
 
-	// PR 102 (095) has no NoteSoak yet: the reason fallback with the 45m window.
+	// A 095 record written before NoteSoak existed (the countdown in its
+	// reason, no clock): the reason fallback with the 45m window.
+	store.ClearSoak(stagelabels.Key("acme/console", 102))
+	store.Observe(stagelabels.Key("acme/console", 102), stagelabels.PreMergeSoak, "contributor-lane:soaking(remaining=7m0s)")
 	pr := trackerItem(t, s.buildStageTracker(s.status, store, now), "pr", 102)
 	if pr.Soak == nil || pr.Soak.WindowSeconds != 45*60 || !pr.Soak.Until.Equal(now.Add(7*time.Minute)) {
 		t.Fatalf("PR 102 soak from reason: %+v", pr.Soak)
 	}
 	// The pass records the soak: the record's clock wins.
 	started := now.Add(-20 * time.Minute)
+	store.Observe(stagelabels.Key("acme/console", 102), stagelabels.PreMergeSoak, "contributor-lane:soaking")
 	store.NoteSoak(stagelabels.Key("acme/console", 102), "abc1234def", started, 30*time.Minute)
 	resp := s.buildStageTracker(s.status, store, now)
 	pr = trackerItem(t, resp, "pr", 102)
@@ -133,12 +137,13 @@ func TestStageTrackerSoakInPayload(t *testing.T) {
 }
 
 // TestStageTrackerSoakNode: the SPA's soak clock — "Soaking · 12m left"
-// counting down in place, "ready — next sweep in Nm" past the window,
+// counting down in place, "Soaking · complete" past the window and
+// "Mergeable · merging now" once the lane's pass is on the soaked head,
 // "Soak restarted · new head" when the row's head is not the soaked one,
 // the 060 variant keeping its own word with "soak 12m left", the hover
 // sentence with the rule, the live time left and the end time, and the
 // tick swapping that sentence into the row's titles. The sweep being on
-// the PR never hides the clock, and the glyph never spins.
+// the PR never hides the clock; the glyph spins only for "Mergeable".
 func TestStageTrackerSoakNode(t *testing.T) {
 	html := indexHTML(t)
 	for _, want := range []string{
@@ -150,9 +155,13 @@ func TestStageTrackerSoakNode(t *testing.T) {
 			t.Errorf("index.html missing soak-clock wiring %q", want)
 		}
 	}
-	// No new spinner: the soak pill's cue is static.
+	// No new spinner markup: the soak words set a cue, the glyph owns the spin.
 	if strings.Contains(jsFunc(t, html, "stageTrackerSoakWords"), "cue-spin") || strings.Contains(jsFunc(t, html, "stageTrackerSoakTick"), "cue-spin") {
-		t.Error("the soak clock must not add a spinning glyph")
+		t.Error("the soak clock must not add its own spinning glyph")
+	}
+	// The owner's words (hivecommons/hive#15575): never "sweep" on a soaking row.
+	if src := jsFunc(t, html, "stageTrackerSoakWords"); strings.Contains(src, "sweep ") || strings.Contains(src, "ready —") {
+		t.Error("stageTrackerSoakWords must not say \"merge sweep\" or \"ready —\"")
 	}
 	runStageTrackerRowActionsScript(t, "function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\"/g, '&quot;'); }\n"+
 		jsConstLine(t, html, "STAGE_TRACKER_TERMINAL")+"\n"+
@@ -190,14 +199,20 @@ let html = stageTrackerMergeGateWordHtml(soaking, now);
 assert.ok(html.includes('data-ham-soak="1" data-ham-until="' + (now + 12.5 * 60000) + '" data-ham-until-kind="soaking" data-ham-soak-window="1800" data-ham-soak-head="abc1234def0" data-ham-soak-restarted="0"'), html);
 assert.ok(html.endsWith('>· 13m left</span></span>'), html);
 
-// Past the window and the sweep has not run: ready, with the next pass.
+// Past the window and the lane's pass has not come: "Soaking · complete"; the next pass is hover-only.
 const soaked = Object.assign({}, soaking, { soak: Object.assign({}, soaking.soak, { until: iso(now - 60000) }), merge_gate: { state: 'soaking', last_sweep_at: iso(now - 20000), next_sweep_at: iso(now + 3 * 60000) } });
 info = stageTrackerMergeGateInfo(soaked, now);
-assert.strictEqual(info.detail, 'ready — next sweep in 3m');
+assert.strictEqual(info.word, 'Soaking'); assert.strictEqual(info.detail, 'complete'); assert.strictEqual(info.cue, 'soaking');
 assert.strictEqual(info.until, now - 60000, 'the clock stays on the node so the tick can keep the next-sweep words fresh');
-assert.ok(info.tip.startsWith('Head abc1234 sat 30 minutes without new commits — soaked since ' + stageTrackerClockText(now - 60000) + '; hive merges it on its next sweep (next sweep in 3m).'), info.tip);
-assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, soaked, { merge_gate: { state: 'soaking', sweep_running: true } }), now).detail, 'ready — merge sweep running');
-assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, soaked, { merge_gate: { state: 'soaking' } }), now).detail, 'ready — sweep due now');
+assert.ok(info.tip.startsWith('Head abc1234 sat 30 minutes without new commits — soaked since ' + stageTrackerClockText(now - 60000) + '. Soak complete — merges on the next pass (next pass in 3m).'), info.tip);
+// The lane's pass on a soaked head: Mergeable, spinning, "merging now".
+const mergeable = stageTrackerMergeGateInfo(Object.assign({}, soaked, { merge_gate: { state: 'soaking', sweep_running: true } }), now);
+assert.strictEqual(mergeable.word, 'Mergeable'); assert.strictEqual(mergeable.detail, 'merging now'); assert.strictEqual(mergeable.cue, 'running');
+assert.ok(mergeable.tip.endsWith('. Mergeable — merging now.'), mergeable.tip);
+assert.ok(stageTrackerGateCueHtml(Object.assign({}, soaked, { merge_gate: { state: 'soaking', sweep_running: true } }), now).includes('cue-spin'));
+assert.ok(stageTrackerMergeGateWordHtml(Object.assign({}, soaked, { merge_gate: { state: 'soaking', sweep_running: true } }), now).startsWith('<span class="ham-seg-t">Mergeable <span class="ham-gate-detail"'));
+assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, soaked, { merge_gate: { state: 'soaking' } }), now).detail, 'complete');
+assert.ok(stageTrackerMergeGateInfo(Object.assign({}, soaked, { merge_gate: { state: 'soaking' } }), now).tip.includes('Soak complete — merges on the next pass.'));
 
 // A push since the soak was measured: the soak restarted on the new head.
 const pushed = Object.assign({}, soaking, { head: 'ffff0000aaaa' });
@@ -214,7 +229,7 @@ const blocked = { repo: 'hivecommons/hive', number: 15180, kind: 'pr', stage: 60
 info = stageTrackerMergeGateInfo(blocked, now);
 assert.strictEqual(info.word, 'Review passed'); assert.strictEqual(info.detail, 'soak 25m left'); assert.strictEqual(info.cue, 'soaking');
 assert.ok(info.tip.startsWith('Head 0123456 must sit 30 minutes without new commits before the hive merges it · 25m left · soak ends '), info.tip);
-assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, blocked, { soak: Object.assign({}, blocked.soak, { until: iso(now - 1000) }) }), now).detail, 'soaked — next sweep in 42s');
+assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, blocked, { soak: Object.assign({}, blocked.soak, { until: iso(now - 1000) }) }), now).detail, 'soak complete');
 // Without a soak clock a 060 row reads as before.
 assert.strictEqual(stageTrackerMergeGateInfo(Object.assign({}, blocked, { soak: undefined }), now).detail, 'contributor-lane:claim-tier-untrusted');
 
@@ -236,12 +251,87 @@ const tip5 = 'Head abc1234 must sit 30 minutes without new commits before the hi
 assert.strictEqual(li.attrs.title, 'Soaking — ' + tip5 + ' Last checked 20s ago.', 'the chevron hover carries the live time left');
 assert.strictEqual(glyph.attrs.title, tip5); assert.strictEqual(glyph.attrs['aria-label'], tip5);
 assert.strictEqual(n.attrs['data-ham-soak-tip'], tip5);
-// Past the window the pill flips to ready without a payload.
+// Past the window the pill flips to Mergeable (the pass was on it) without a payload — the word too.
+const wordNode = { nodeType: 3, textContent: 'Soaking ' };
+n.previousSibling = wordNode;
 stageTrackerGateCountdownSync({ querySelectorAll: () => [n] }, now + 13 * 60000);
-assert.strictEqual(n.textContent, '· ready — merge sweep running');
-assert.ok(li.attrs.title.startsWith('Soaking — Head abc1234 sat 30 minutes without new commits — soaked since ' + ends), li.attrs.title);
+assert.strictEqual(n.textContent, '· merging now');
+assert.strictEqual(wordNode.textContent, 'Mergeable ');
+assert.ok(li.attrs.title.startsWith('Soaking — Head abc1234 sat 30 minutes without new commits — soaked since ' + ends + '. Mergeable — merging now.'), li.attrs.title);
 // Short / long forms.
 assert.deepStrictEqual([stageTrackerSoakLeftText(45000), stageTrackerSoakLeftText(750000), stageTrackerSoakLeftText(3900000), stageTrackerSoakLeftText(0)], ['45s', '12m 30s', '1h 05m', '']);
 console.log('soak clock ok');
 `)
+}
+
+// TestStageTrackerSoakCaptionFromDeadline (hivecommons/hive#15729): the
+// 095 caption counts down from the record's soak deadline at request
+// time — a sweep that re-reads the same reason moves nothing — never says
+// "0s left", and the note's age is the stage entry while soaking and the
+// deadline once the soak is complete. A record written before the
+// deadline existed still reads its `soaking(remaining=…)` reason aged
+// from the sweep that wrote it.
+func TestStageTrackerSoakCaptionFromDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	entered := now.Add(-40 * time.Minute)
+	rec := stagelabels.Record{Stage: stagelabels.PreMergeSoak, Reason: "contributor-lane:soaking", EnteredAt: entered, ReasonChangedAt: entered, LastSeen: now.Add(-30 * time.Second),
+		SoakHead: "abc", SoakStartedAt: now.Add(-20 * time.Minute), SoakWindowSeconds: 1800}
+	if got := stageTrackerSoakCaption(rec, now); got != "Admitted by the automerge lane; soaking — 10m left" {
+		t.Fatalf("caption = %q", got)
+	}
+	if left := stageTrackerSoakRemaining(rec, now); left != 10*time.Minute {
+		t.Fatalf("remaining = %v", left)
+	}
+	if at := stageTrackerNoteChangedAt(rec, now); !at.Equal(entered) {
+		t.Fatalf("note changed at %v, want stage entry %v", at, entered)
+	}
+	// A later sweep re-reads the reason: LastSeen moves, nothing else does.
+	later := rec
+	later.LastSeen = now
+	if a, b := stageTrackerNoteChangedAt(rec, now), stageTrackerNoteChangedAt(later, now); !a.Equal(b) {
+		t.Fatalf("a re-read moved the note's age: %v → %v", a, b)
+	}
+	if got := stageTrackerSoakCaption(later, now.Add(time.Minute)); got != "Admitted by the automerge lane; soaking — 9m left" {
+		t.Fatalf("a minute later: %q", got)
+	}
+	// At and past the deadline: never "0s left"; the note changed at the deadline.
+	deadline := rec.SoakStartedAt.Add(30 * time.Minute)
+	for _, at := range []time.Time{deadline, deadline.Add(90 * time.Second)} {
+		if got := stageTrackerSoakCaption(rec, at); got != "Admitted by the automerge lane; soak complete — merges on the next pass" {
+			t.Fatalf("at %v: %q", at, got)
+		}
+		if left := stageTrackerSoakRemaining(rec, at); left != 0 {
+			t.Fatalf("at %v: remaining = %v", at, left)
+		}
+		if got := stageTrackerNoteChangedAt(rec, at); !got.Equal(deadline) {
+			t.Fatalf("at %v: note changed at %v, want the deadline %v", at, got, deadline)
+		}
+	}
+	// A new reason class at the same stage dates the note from then.
+	held := rec
+	held.Reason, held.ReasonChangedAt = "release-hold", now.Add(-time.Minute)
+	if at := stageTrackerNoteChangedAt(held, now); !at.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("note changed at %v", at)
+	}
+	// No clock yet (the pass that admitted the head has not written one):
+	// the generic caption stands.
+	bare := stagelabels.Record{Stage: stagelabels.PreMergeSoak, Reason: "contributor-lane:soaking", EnteredAt: entered}
+	if got := stageTrackerSoakCaption(bare, now); got != "" {
+		t.Fatalf("no clock: %q", got)
+	}
+	if at := stageTrackerNoteChangedAt(bare, now); !at.Equal(entered) {
+		t.Fatalf("no ReasonChangedAt falls back to EnteredAt: %v", at)
+	}
+	// Legacy record: the remaining in the reason, aged from the sweep.
+	legacy := stagelabels.Record{Stage: stagelabels.PreMergeSoak, Reason: "contributor-lane:soaking(remaining=12m0s)", EnteredAt: entered, LastSeen: now.Add(-5 * time.Minute)}
+	if got := stageTrackerSoakCaption(legacy, now); got != "Admitted by the automerge lane; soaking — 7m left" {
+		t.Fatalf("legacy caption = %q", got)
+	}
+	if got := stageTrackerSoakCaption(legacy, now.Add(8*time.Minute)); got != "Admitted by the automerge lane; soak complete — merges on the next pass" {
+		t.Fatalf("legacy past deadline = %q", got)
+	}
+	// A note never dates from the future.
+	if at := stageTrackerNoteChangedAt(stagelabels.Record{Stage: stagelabels.Reviewed, EnteredAt: now.Add(time.Hour)}, now); !at.Equal(now) {
+		t.Fatalf("future entry clamped: %v", at)
+	}
 }

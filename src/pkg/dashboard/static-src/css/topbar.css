@@ -38,7 +38,7 @@
     .oc-version-manual-pill { white-space: nowrap; padding: 1px 7px; border-radius: var(--r-pill); border: 1px solid var(--border); color: var(--muted); font-size: var(--fs-xs); }
     .oc-version-upgrade-note { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
     .oc-version-state-pill { white-space: nowrap; padding: var(--sp-1) var(--sp-3); border-radius: var(--r-pill); border: 1px solid var(--border); color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
-    .oc-version-state-pill.is-draining { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
+    .oc-version-state-pill.is-draining, .oc-version-state-pill.is-delayed { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
     .oc-version-state-pill.is-missed { color: var(--red, var(--danger)); border-color: color-mix(in srgb, var(--red, var(--danger)) 40%, transparent); }
     .oc-version-state-pill.is-done { color: var(--green, var(--success)); }
     .oc-version-history { list-style: none; margin: 0; padding: 0; font-size: var(--fs-xs); color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
@@ -128,6 +128,10 @@
     .dashboard-custom-style-note button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: var(--fs-sm); line-height: 1; padding: var(--sp-0); }
     .oc-topbar-right { position: relative; z-index: 2; justify-self: end; max-width: 100%; display: flex; align-items: center; justify-content: flex-end; gap: var(--nav-chip-gap, 8px); min-width: 0; flex-wrap: nowrap; }
     .oc-health-badge { --nav-chip-color: var(--status-ok); }
+    /* Waiting on you pill (hivecommons/hive#15638): attention colour, hidden at zero, clickable. */
+    .nav-chip--attention, .oc-waiting-on-you { --nav-chip-color: var(--status-attention); }
+    .oc-waiting-on-you { flex: 0 0 auto; cursor: pointer; font-weight: 600; }
+    .oc-waiting-on-you[hidden] { display: none; }
     #oc-settings-btn { flex: 0 0 auto; }
     .oc-topbar .git-version { color: var(--muted); }
     .oc-health-badge, #welcome-topbar-btn, #oc-gh-avatar-wrap { flex: 0 0 auto; }

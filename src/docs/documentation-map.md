@@ -97,6 +97,7 @@ Documentation for the current Hive line (branch `v5`; the code and docs live und
 ### Agent writes and network reference
 - [`hive-open-pr`](hive-open-pr.md) — how agents open pull requests as the App bot instead of via `gh pr create`: the flags, the UID-ownership anchor that makes the request forge-resistant, and the asynchronous contract (exit `0` means requested, not opened).
 - [`hive-merge`](hive-merge.md) — how agents merge pull requests as the App bot instead of the GitHub MCP `merge_pull_request` tool: the flags, the F4 target-binding (pinned head SHA + governor merge-eligible list), and the retry/re-engagement behavior when required checks are still red.
+- [Native merge queue](native-merge-queue.md) — how the auto-merge lanes enqueue eligible PRs into GitHub's native merge queue (App auth only), the `native-merge-queued`/`native-merge-queue-*` stage reasons, and how Hive withdraws only its own entries when a gate breaks.
 - [`hive-open-issue`](hive-open-issue.md) — **Agent/developer reference:** request issue creation, comments, or claims through the App bot, with deduplication and retries.
 - [Review-bot threads on hive-mediated PRs](review-bot-threads.md) — route bot feedback back to the authoring agent while protecting human review threads.
 - [Network and port requirements](network-requirements.md) — inbound ports, proxy paths, egress, and firewall guidance.
@@ -129,6 +130,7 @@ Documentation for the current Hive line (branch `v5`; the code and docs live und
 - [Backup and restore](backup-restore.md) — choose runtime-specific backups, encryption, safe restoration, and migration. Covers identity checks and rootless ownership traps.
 - [Hub disaster recovery](../../docs/HUB_DISASTER_RECOVERY.md) — the hub-level runbook that goes beyond per-hive backup: hub backup and key escrow, spoke fleet recovery, Slack blast, and the full rebuild-from-zero procedure after a catastrophic loss.
 - [Deployment helper scripts](deployment-scripts.md) — the all-in-one LXC setup, Proxmox LXC, and blue-green Compose helpers. All are Docker-only; the page states each script's runtime scope and where a Podman operator should go instead.
+- [Streaming the Activity Monitor](streaming-the-activity-monitor.md) — put the dashboard's stage tracker on an unattended 24/7 Twitch stream: Twitch-side setup, the `hive-stream` image and Kustomize overlay, verification and troubleshooting.
 - [`bin/` pipeline script index](../../bin/README.md) — map of the deterministic pipeline and operational scripts, grouped by function.
 - [Dashboard API reference](api-reference.md) — pragmatic route index for dashboard and hub endpoints; one page per area under `api-reference/` (health, auth, configuration, agents, ACMM, cost, knowledge, contribute, nous, inception, beads, misc, hub SaaS, hub server).
 - [Dashboard OpenAPI spec](../../dashboard/openapi.json) — machine-readable REST API reference for integrations.

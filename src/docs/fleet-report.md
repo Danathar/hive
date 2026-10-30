@@ -166,6 +166,7 @@ title is `[selfreport] <class>: <short message>`.
 | `tmux_session_check_failed` | the agent's tmux session `has-session` check failed (`tmux has-session failed`, `crux/agent/manager.go`) — typically the session was lost or the tmux server is unhealthy, repeated ≥5 times in 10 min. Log-fed: same repeat threshold and idle clear as `agent_pane_timeout` | medium |
 | `agent_github_api_cap_reached` | an agent exhausted its per-agent GitHub API hourly budget (`agent GitHub API hourly cap reached`, `crux/proxy/agent_github_budget.go`; fields `agent`, `count`, `cap`, `retry_after`). The proxy throttles further calls until the window resets, so this reports sustained polling by one agent rather than an unknown error. Log-fed | medium |
 | `transcript_scan_slow` | a Copilot transcript activity scan took longer than its interval (`transcript activity scan outlived its interval`, `crux/agent/busy_visibility.go`) — agent liveness reads may lag. Log-fed: same ≥5-in-10-min repeat threshold and 20-minute idle clear as `agent_pane_timeout`. Operator diagnostics: check the agent's transcript/session volume; it is bounded by concurrency, so repeated hits indicate slow disk or very large session directories | low |
+| `kick_freshness_withheld` | a kick was withheld because every issue/PR ref failed the pre-kick freshness check (`kick withheld: every ref failed the freshness check`, `cmd/hive/kick_freshness.go`). The kick is retried on the next cycle; reported only when the same withholding repeats ≥5 times in 10 min (refs persistently stale or unreadable). Deferred API-budget refusals log at INFO and never trip it. Its main job is keeping the residual WARN out of `unclassified_error_repeated`. Log-fed: same repeat threshold and idle clear as `agent_pane_timeout` | low |
 | `unclassified_error_repeated` | **generic catch-all**: the same WARN/ERROR log line (numbers, hashes, paths and quoted strings collapsed) repeated ≥5 times in 10 min. Fed by a `slog.Handler` tee (`pkg/fleetreport/slogfeed`) on the hive's root logger, so a repeating defect is noticed even with no hook site. Skips benign lines (read/keepalive i/o timeouts, WARNs whose `error` is a GitHub rate-limit refusal or a 502/503/504 gateway failure — the caller retries next tick, context cancellation, the permissions watcher's `fixed …` self-healing lines) and any message that already matches another class's keywords. Clears automatically after 20 quiet minutes (2× the window), so a "cleared" comment follows once the symptom stops | low |
 
 The generic feed also skips the exact `review pending expired` message: it
@@ -195,7 +196,7 @@ change the agents' model — not a repeated runtime defect
 
 The re-engagement sweep logs `re-engagement kick undeliverable; budget not
 charged` at INFO rather than WARN when the cause is `shared session pool is
-busy` (`deliverReEngagement`, `src/cmd/hive/main.go`): a saturated shared CLI
+busy` (`deliverReEngagement`, `src/cmd/hive/main_sweeps.go`): a saturated shared CLI
 session pool refusing another session is backpressure. The kick can be retried
 on a later sweep and consumes no repair budget, so a burst across PRs is not a
 repeated runtime defect (hivecommons/hive#15350). Other undeliverable-kick

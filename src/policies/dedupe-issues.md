@@ -189,6 +189,13 @@ there is anything to decide.
 
 If you are unsure which a row is, it is action-required.
 
+Either way the hive works the checklist itself: its close-on-merge sweep ticks
+each `- [ ] #N …` task line once #N is closed or merged and closes the
+checklist as completed when every line is ticked, so a maintainer is never
+asked to decide the checklist — write the task lines with the item they are
+about as the **first** reference on the line (`- [ ] #15312 — close as
+superseded by #15646`).
+
 ## Posting — one checklist per repository, updated in place
 
 The marker line `<!-- hive:dedupe-checklist repo=<owner/repo> -->` is how you
@@ -241,7 +248,7 @@ to decide what to close and what to merge, so it is parked:
 
 ```bash
 gh issue create --repo <owner/repo> --needs-decision \
-  --title "triage: duplicate and overlapping open issues/PRs to consolidate" \
+  --title "[dedupe] triage: duplicate and overlapping open issues/PRs to consolidate" \
   --body-file /tmp/<unique>.md
 ```
 
@@ -254,7 +261,7 @@ so it is **not** parked: no `--needs-decision`, no "What to reply" notice, no
 
 ```bash
 gh issue create --repo <owner/repo> --label triage/advisory \
-  --title "triage: duplicate and overlapping open issues/PRs to consolidate" \
+  --title "[dedupe] triage: duplicate and overlapping open issues/PRs to consolidate" \
   --body-file /tmp/<unique>.md
 ```
 

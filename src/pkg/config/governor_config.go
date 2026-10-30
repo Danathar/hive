@@ -150,6 +150,11 @@ type GovernorConfig struct {
 	HotspotMinOverlaps int   `yaml:"hotspot_min_overlaps,omitempty" json:"hotspot_min_overlaps,omitempty"`
 	HotspotMinLines    int   `yaml:"hotspot_min_lines,omitempty" json:"hotspot_min_lines,omitempty"`
 	HotspotRefileDays  int   `yaml:"hotspot_refile_days,omitempty" json:"hotspot_refile_days,omitempty"`
+	// HotspotMaxOpen caps the modularize issues open at once per repo; the
+	// advisor files the next-ranked hotspot only when one closes.
+	// HotspotMaxPerPass caps new issues per advisor pass.
+	HotspotMaxOpen    int `yaml:"hotspot_max_open,omitempty" json:"hotspot_max_open,omitempty"`
+	HotspotMaxPerPass int `yaml:"hotspot_max_per_pass,omitempty" json:"hotspot_max_per_pass,omitempty"`
 
 	// ProjectObservability configures what the telemetry and operations agents
 	// recommend for the MANAGED PROJECT. It is deliberately separate from
@@ -522,9 +527,32 @@ type StageAdoptionConfig struct {
 	// on the adopted head, reviewer verdict, DCO, diff fences, soak), without
 	// requiring the original author's trust tier. nil = true. Off, an
 	// adopted PR by an untrusted contributor waits for a human /lgtm.
-	AutoMerge        *bool                        `yaml:"auto_merge,omitempty"`
-	MaintainerPolicy string                       `yaml:"maintainer_policy,omitempty"`
-	Supersede        StageAdoptionSupersedeConfig `yaml:"supersede,omitempty"`
+	AutoMerge *bool `yaml:"auto_merge,omitempty"`
+	// MaintainerPolicy says what adoption does when the PR's author holds
+	// admin or maintain on the repository (hivecommons/hive#14524):
+	// AdoptionMaintainerPolicyAdopt (default) ignores the role — a
+	// clanker PR whose hive disconnected is adopted like any other;
+	// AdoptionMaintainerPolicyAsk never adopts on its own but parks the
+	// question with the owner (an Adopt action in the activity monitor);
+	// AdoptionMaintainerPolicyNever is the pre-#14524 rule: the hive never
+	// takes a maintainer's PR over and releases any adoption of one.
+	MaintainerPolicy string `yaml:"maintainer_policy,omitempty"`
+	// CloseSuperseded says when a supersede adoption closes a clanker- or
+	// hive-authored original once the hive's copy carries its commits
+	// (hivecommons/hive#15526 sat open as "Adopted → #15574 · superseded"
+	// because the write-back gate wanted a repo opt-in label the
+	// contributor_adopt kind requires on items the hive did not author):
+	// AdoptionCloseSupersededOnAdopt (default) closes it in the adopting
+	// pass by policy — an agent's PR the hive re-authored is one logical PR,
+	// so no opt-in label is asked for; AdoptionCloseSupersededOnMerge keeps
+	// it open until the copy merges. Human-authored originals are not
+	// governed here: they close in the adopting pass only when they carry
+	// a writeback opt-in label (writeback.kinds.contributor_adopt), else
+	// when the copy merges.
+	CloseSuperseded string `yaml:"close_superseded,omitempty"`
+	// Supersede tunes supersede-mode adoption (the hive-authored copy from
+	// hive/adopt-<n>).
+	Supersede StageAdoptionSupersedeConfig `yaml:"supersede,omitempty"`
 }
 
 // StageAdoptionSupersedeConfig tunes the hive-authored adoption copy.
@@ -980,4 +1008,26 @@ func (m ModeConfig) MarshalYAML() (interface{}, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// Values for governor.labels.stage.adoption.close_superseded.
+const (
+	AdoptionCloseSupersededOnAdopt = "on_adopt"
+	AdoptionCloseSupersededOnMerge = "on_merge"
+	DefaultAdoptionCloseSuperseded = AdoptionCloseSupersededOnAdopt
+)
+
+// AdoptionCloseSupersededValues lists the accepted close_superseded values.
+var AdoptionCloseSupersededValues = []string{AdoptionCloseSupersededOnAdopt, AdoptionCloseSupersededOnMerge}
+
+// EffectiveCloseSuperseded normalises CloseSuperseded; empty or unknown
+// reads as the default (on_adopt).
+func (c StageAdoptionConfig) EffectiveCloseSuperseded() string {
+	v := strings.ToLower(strings.TrimSpace(c.CloseSuperseded))
+	for _, p := range AdoptionCloseSupersededValues {
+		if v == p {
+			return p
+		}
+	}
+	return DefaultAdoptionCloseSuperseded
 }

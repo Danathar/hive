@@ -207,6 +207,7 @@
           "StrictAttribution": null,
           "AutoMerge": null,
           "MaintainerPolicy": "",
+          "CloseSuperseded": "",
           "Supersede": {
             "CloseFirst": null
           }
@@ -656,6 +657,7 @@
     "rfc_existing_check": {}
   },
   "fleet": {},
+  "dedupe": {},
   "contribute": {},
   "HiveID": "",
   "acmm_level": null,
@@ -705,6 +707,7 @@
       "pagerduty": {}
     }
   },
+  "security": {},
   "evidence": {
     "complexity": {}
   },
@@ -754,7 +757,8 @@
     "trusted_authors": {},
     "contributor_lane": {},
     "contributor_tier": {},
-    "merge_train": {}
+    "merge_train": {},
+    "native_merge_queue": {}
   },
   "decisions": {
     "delegate": {}

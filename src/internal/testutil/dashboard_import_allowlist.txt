@@ -70,6 +70,7 @@ github.com/hivecommons/hive/pkg/ioscan
 github.com/hivecommons/hive/pkg/knowledge
 github.com/hivecommons/hive/pkg/mention
 github.com/hivecommons/hive/pkg/mergelane
+github.com/hivecommons/hive/pkg/modelfamily
 github.com/hivecommons/hive/pkg/notify
 github.com/hivecommons/hive/pkg/nous
 github.com/hivecommons/hive/pkg/outputschema

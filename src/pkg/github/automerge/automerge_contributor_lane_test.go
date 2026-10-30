@@ -24,6 +24,8 @@ import (
 	"github.com/hivecommons/hive/pkg/intent"
 	"github.com/hivecommons/hive/pkg/review"
 	hreview "github.com/hivecommons/hive/pkg/review"
+	"github.com/hivecommons/hive/pkg/stageengine"
+	"github.com/hivecommons/hive/pkg/stageengine/prstage"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
 
@@ -47,6 +49,7 @@ func contributorClaimMarkerTier(who, kind, hive, fields string) string {
 }
 
 type contributorLaneFixture struct {
+	nodeID          string
 	author          string
 	body            string
 	labels          []string
@@ -179,6 +182,7 @@ func newContributorLaneAPI(t *testing.T, fx *contributorLaneFixture) *httptest.S
 		}
 		pull := func(sha string) map[string]any {
 			p := map[string]any{
+				"node_id":         fx.nodeID,
 				"number":          7,
 				"state":           "open",
 				"draft":           fx.draft,
@@ -1655,21 +1659,33 @@ func TestTrySweepContributorLanePRSoakTiming(t *testing.T) {
 	engine := newContributorLaneEngine(api.URL, policy, clock, Options{ContributorSoak: tracker})
 	ctx := context.Background()
 
-	// First green observation: soak starts now, nothing merges.
-	_, reason, err := engine.trySweepContributorLanePR(ctx, "widget", "acme", "widget", 7, policy)
-	if err != nil || reason != contributorLaneReasonSoaking+"(remaining=2h0m0s)" {
+	// First green observation: soak starts now, nothing merges. The reason
+	// is the bare token — the countdown is not in it (hivecommons/hive#15729:
+	// a reason that moved every pass re-stamped the stage record); the
+	// clock rides on the evaluation.
+	eval, reason, err := engine.evaluateContributorLanePR(ctx, "widget", "acme", "widget", 7, policy, false)
+	if err != nil || reason != contributorLaneReasonSoaking {
 		t.Fatalf("first pass reason=%q err=%v", reason, err)
+	}
+	if !eval.soakStartedAt.Equal(clock.at) || eval.soakRemaining != 2*time.Hour {
+		t.Fatalf("first pass soak clock = %v / %v, want %v / 2h", eval.soakStartedAt, eval.soakRemaining, clock.at)
 	}
 	firstGreen, ok := tracker.FirstGreen("acme", "widget", 7, "sha7")
 	if !ok || !firstGreen.Equal(clock.at) {
 		t.Fatalf("first green = %v ok=%v, want %v", firstGreen, ok, clock.at)
 	}
 
-	// Half-way through the soak the remaining time is reported.
+	// Half-way through the soak the reason is unchanged; the clock counts.
 	clock.advance(time.Hour)
-	_, reason, err = engine.trySweepContributorLanePR(ctx, "widget", "acme", "widget", 7, policy)
-	if err != nil || reason != contributorLaneReasonSoaking+"(remaining=1h0m0s)" {
+	eval, reason, err = engine.evaluateContributorLanePR(ctx, "widget", "acme", "widget", 7, policy, false)
+	if err != nil || reason != contributorLaneReasonSoaking {
 		t.Fatalf("mid-soak reason=%q err=%v", reason, err)
+	}
+	if !eval.soakStartedAt.Equal(firstGreen) || eval.soakRemaining != time.Hour {
+		t.Fatalf("mid-soak clock = %v / %v, want %v / 1h", eval.soakStartedAt, eval.soakRemaining, firstGreen)
+	}
+	if _, reason, err = engine.trySweepContributorLanePR(ctx, "widget", "acme", "widget", 7, policy); err != nil || reason != contributorLaneReasonSoaking {
+		t.Fatalf("mid-soak sweep reason=%q err=%v", reason, err)
 	}
 	if got, _ := tracker.FirstGreen("acme", "widget", 7, "sha7"); !got.Equal(firstGreen) {
 		t.Fatalf("first green moved to %v", got)
@@ -1700,9 +1716,9 @@ func TestTrySweepContributorLanePRSoakSurvivesRestart(t *testing.T) {
 	engine := newContributorLaneEngine(api.URL, policy, clock, Options{ContributorSoak: tracker})
 	ctx := context.Background()
 
-	_, reason, err := engine.trySweepContributorLanePR(ctx, "widget", "acme", "widget", 7, policy)
-	if err != nil || reason != contributorLaneReasonSoaking+"(remaining=30m0s)" {
-		t.Fatalf("fresh process reason=%q err=%v, want 30m remaining from the check's completed_at", reason, err)
+	eval, reason, err := engine.evaluateContributorLanePR(ctx, "widget", "acme", "widget", 7, policy, false)
+	if err != nil || reason != contributorLaneReasonSoaking || eval.soakRemaining != 30*time.Minute {
+		t.Fatalf("fresh process reason=%q remaining=%v err=%v, want 30m remaining from the check's completed_at", reason, eval.soakRemaining, err)
 	}
 	if first, ok := tracker.FirstGreen("acme", "widget", 7, "sha7"); !ok || !first.Equal(clock.at.Add(-90*time.Minute)) {
 		t.Fatalf("first green = %v ok=%v, want seeded from completed_at", first, ok)
@@ -1721,8 +1737,8 @@ func TestTrySweepContributorLanePRSoakSurvivesRestart(t *testing.T) {
 	api2 := newContributorLaneAPI(t, &fx2)
 	defer api2.Close()
 	engine2 := newContributorLaneEngine(api2.URL, policy, clock, Options{ContributorSoak: NewContributorSoakTracker()})
-	if _, reason, err := engine2.trySweepContributorLanePR(ctx, "widget", "acme", "widget", 7, policy); err != nil || reason != contributorLaneReasonSoaking+"(remaining=2h0m0s)" {
-		t.Fatalf("future completed_at reason=%q err=%v", reason, err)
+	if eval, reason, err := engine2.evaluateContributorLanePR(ctx, "widget", "acme", "widget", 7, policy, false); err != nil || reason != contributorLaneReasonSoaking || eval.soakRemaining != 2*time.Hour {
+		t.Fatalf("future completed_at reason=%q remaining=%v err=%v", reason, eval.soakRemaining, err)
 	}
 }
 
@@ -1889,9 +1905,6 @@ func TestContributorLanePolicyHelpers(t *testing.T) {
 	}
 	if got := p.excludedLabel([]string{"ok"}); got != "" {
 		t.Fatalf("excludedLabel = %q, want empty", got)
-	}
-	if got := contributorLaneSoakReason(90*time.Minute + 20*time.Second); got != "contributor-lane:soaking(remaining=1h30m0s)" {
-		t.Fatalf("soak reason = %q", got)
 	}
 	var nilEngine *Engine
 	if nilEngine.currentContributorLanePolicy().Enabled {
@@ -2212,4 +2225,32 @@ func storedChangeRequest(t *testing.T, head string) *hreview.HumanChangeRequests
 		t.Fatal(err)
 	}
 	return store
+}
+
+// Owner invariant (hivecommons/hive#15640), verbatim: "i always have the
+// last word when it comes to merge of untrusted". A green, approved,
+// soaked PR from a contributor the lane cannot vouch for (self-registered
+// newcomer, untrusted tier) is never auto-merged: the lane refuses with
+// claim-tier-untrusted and the stage engine parks it at 090
+// ready-for-human-merge — the merge gate, not an 085 decision in review.
+func TestContributorLaneUntrustedGreenApprovedParksForHumanMerge(t *testing.T) {
+	fx := validContributorFixture()
+	fx.issueComments[0]["body"] = contributorClaimMarkerTier(contributorLaneTestAuthor, "contributor", contributorLaneTestHive, " tier=newcomer verified=false")
+	api := newContributorLaneAPI(t, &fx)
+	defer api.Close()
+	policy := defaultContributorLanePolicy()
+	clock := &contributorLaneClock{at: time.Date(2026, 10, 15, 13, 0, 0, 0, time.UTC)}
+	engine := newContributorLaneEngine(api.URL, policy, clock, Options{ContributorSoak: soakedTracker(clock)})
+
+	_, reason, err := engine.trySweepContributorLanePR(context.Background(), "widget", "acme", "widget", 7, policy)
+	if err != nil || reason != contributorLaneReasonClaimTier {
+		t.Fatalf("reason = %q err = %v, want %q", reason, err, contributorLaneReasonClaimTier)
+	}
+	if fx.merges != 0 {
+		t.Fatalf("untrusted author auto-merged (%d merges)", fx.merges)
+	}
+	v := stageengine.ClassifyStage(prstage.Observation{Lane: stageLaneContributor, Reason: reason, HeadSHA: "sha7", Detail: prstage.Detail{VerdictKnown: true, Verdict: approvedVerdict("acme/widget", 7, "sha7")}})
+	if v.Stage != stagelabels.ReadyForHumanMerge || !v.Human {
+		t.Fatalf("stage = %+v, want 090 ready-for-human-merge awaiting the operator", v)
+	}
 }

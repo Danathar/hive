@@ -94,6 +94,16 @@ func TestRouteHumanFixEvidence(t *testing.T) {
 	if r := RouteHuman(e); len(r.Reasons) != 2 || r.LaneReason != LaneReasonChangesRequested {
 		t.Fatalf("multi-reason route = %+v", r)
 	}
+	// Red CI on a clanker's PR goes back to the clanker (072) even when the
+	// reviewer also said requires_human: a failing check is the author's to
+	// fix first and never alone parks the PR at 085 (hivecommons/hive#15722).
+	e = readyEvidence()
+	e.AuthorKind = authorkind.Clanker
+	e.Verdict = VerdictRequiresHuman
+	e.Checks = CheckSummary{Total: 2, Green: 1, Red: []string{"unit"}, Known: true}
+	if r := RouteHuman(e); r.Stage != ReturnedToContributor || r.LaneReason != "check-failing:unit" {
+		t.Fatalf("clanker red CI + requires_human route = %+v", r)
+	}
 }
 
 // TestRouteHumanPendingStaysAtReview: no current-head verdict, or a head
@@ -149,6 +159,11 @@ func TestRouteHumanDecision(t *testing.T) {
 			e.Verdict = VerdictRequiresHuman
 			e.DecisionQuestion = "@clubanderson should decide whether to land this now."
 		}, "reviewer question: @clubanderson should decide whether to land this now."},
+		{"requires_human finding", func(e *Evidence) {
+			e.Verdict = VerdictRequiresHuman
+			e.DecisionQuestion = "close in favour of #15309?"
+			e.DecisionFinding = "duplicate: the review found this change already landed or open elsewhere"
+		}, "the review found: duplicate: the review found this change already landed or open elsewhere"},
 		{"requires_human summary", func(e *Evidence) {
 			e.Verdict = VerdictRequiresHuman
 			e.HumanSummaries = []string{"security requires human: relay owner should confirm before merge"}
@@ -807,5 +822,57 @@ func TestRouteHumanChangeRequesterWinsOverParks(t *testing.T) {
 	e.SelfAuthored = true
 	if r := RouteHuman(e); r.Stage != Fixing {
 		t.Fatalf("self-authored route = %+v", r)
+	}
+}
+
+// hivecommons/hive#15499: the same reviewer question re-asked on a new head
+// is not a new entry comment; a different question is.
+func TestEntryCommentRepeatsDecisionAcrossHeads(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	st := NewStore(filepath.Join(t.TempDir(), "s.json"), func() time.Time { return now })
+	key := Key("o/r", 15499)
+	st.Observe(key, NeedsDecision, "verdict:decision-requested")
+	st.MarkEntryCommentedCause(key, "h1", EntryCause([]string{"reviewer question: close as a no-op?"}))
+	st.MarkEntryCommentedDecisionKey(key, "redundant-of:15427")
+	rec, _ := st.Get(key)
+	if !rec.EntryCommentRepeatsDecision("redundant-of:15427") || rec.EntryCommentRepeatsDecision("redundant-of:1") || rec.EntryCommentRepeatsDecision("") {
+		t.Fatalf("after first entry: %+v", rec)
+	}
+	// A new head (merge-from-base) resets the per-head cause list but not
+	// the decision identity.
+	st.MarkEntryCommented(key, "h2")
+	if rec, _ = st.Get(key); !rec.EntryCommentRepeatsDecision("redundant-of:15427") {
+		t.Fatalf("new head lost the decision identity: %+v", rec)
+	}
+	// The 50↔85 flap #15499 showed (re-review on each head, then the same
+	// verdict) keeps the identity: it is still the one question.
+	st.Observe(key, ReviewPending, "")
+	st.Observe(key, NeedsDecision, "verdict:decision-requested")
+	if rec, _ = st.Get(key); !rec.EntryCommentRepeatsDecision("redundant-of:15427") {
+		t.Fatalf("stage flap lost the decision identity: %+v", rec)
+	}
+}
+
+func TestAlreadyLandedReasonCaption(t *testing.T) {
+	if got := AlreadyLandedReason(15506); got != "self-authored:already-landed:#15506" {
+		t.Fatalf("reason=%q", got)
+	}
+	if c, ok := AlreadyLandedCaption(AlreadyLandedReason(15506)); !ok || c != "already landed via #15506 — closing as superseded" {
+		t.Fatalf("caption=%q ok=%v", c, ok)
+	}
+	if c, ok := AlreadyLandedCaption(AlreadyLandedReason(0)); !ok || c != "already landed on the base — closing as superseded" {
+		t.Fatalf("bare caption=%q ok=%v", c, ok)
+	}
+	if _, ok := AlreadyLandedCaption("superseded-by-merge"); ok {
+		t.Fatal("other reasons are not already-landed")
+	}
+}
+
+func TestAlreadyLandedAuthorReason(t *testing.T) {
+	if got := AlreadyLandedAuthorReason(authorkind.Human); got != "already-landed:human" {
+		t.Fatalf("human = %q", got)
+	}
+	if got := AlreadyLandedAuthorReason(authorkind.Unknown); got != "already-landed:unknown" {
+		t.Fatalf("unknown = %q", got)
 	}
 }

@@ -230,7 +230,7 @@
        state as a pill — with the drain countdown and the agents holding the
        upgrade — and lists the history so a missed window is never silent. */
     function versionStateLabels() {
-      return { scheduled: 'Scheduled', draining: 'Draining', pulling: 'Pulling', rolling: 'Rolling', verifying: 'Verifying', done: 'Upgraded', missed: 'Missed window' };
+      return { scheduled: 'Scheduled', delayed: 'Delayed', draining: 'Draining', pulling: 'Pulling', rolling: 'Rolling', verifying: 'Verifying', done: 'Upgraded', missed: 'Missed window' };
     }
 
     function versionStateLabel(state) {
@@ -263,7 +263,7 @@
         const agents = versionAgentsInTurnText(st);
         const left = typeof st.drainRemainingS === 'number' && st.drainRemainingS > 0 ? versionFormatDuration(st.drainRemainingS) + ' left' : 'deadline reached';
         text += (agents ? ' · ' + agents : '') + ' · ' + left;
-      } else if (st.state === 'missed' && st.reason) {
+      } else if ((st.state === 'missed' || st.state === 'delayed') && st.reason) {
         text += ' · ' + st.reason;
       } else if (st.state === 'scheduled' && st.nextWindowAt) {
         const at = new Date(st.nextWindowAt);
@@ -1477,4 +1477,3 @@
       }, VERSION_CHECK_INTERVAL_MS);
     }
     // startVersionCheck() — deferred to _deferredInit
-

@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +43,27 @@ func agentHiveSHA() string {
 		return sha
 	}
 	return buildCommit
+}
+
+// agentNoProxy returns the NO_PROXY value handed to agents: loopback plus the
+// host of OMP_AUTH_BROKER_URL, and only that host. An unset, unparsable or
+// host-less URL adds nothing, so every other private address stays behind the
+// proxy's destination guard. The host is appended only when it is an IP
+// literal or a plain DNS hostname: wildcards, leading or trailing dots and
+// any other odd characters fall back to loopback, since NO_PROXY would read
+// them as "bypass everything" or a domain-suffix match.
+var noProxyHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
+
+func agentNoProxy() string {
+	u, err := url.Parse(strings.TrimSpace(os.Getenv("OMP_AUTH_BROKER_URL")))
+	if err != nil {
+		return loopbackNoProxy
+	}
+	host := u.Hostname()
+	if net.ParseIP(host) == nil && !noProxyHostRe.MatchString(host) {
+		return loopbackNoProxy
+	}
+	return loopbackNoProxy + "," + host
 }
 
 func (m *Manager) buildBootstrapPrompt(agent *AgentProcess) string {
@@ -294,8 +317,12 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// polling a local dev server would otherwise get proxy-side dial errors
 	// (#14076), and a repo's own tests must see real connection errors
 	// instead of the proxy's 502.
-	vars = append(vars, agentEnvPair{"NO_PROXY", loopbackNoProxy, false})
-	vars = append(vars, agentEnvPair{"no_proxy", loopbackNoProxy, false})
+	// The credential broker (OMP_AUTH_BROKER_URL) usually sits on a private
+	// address the proxy's plain-forward guard refuses, so its host bypasses
+	// the proxy too (#15432).
+	noProxy := agentNoProxy()
+	vars = append(vars, agentEnvPair{"NO_PROXY", noProxy, false})
+	vars = append(vars, agentEnvPair{"no_proxy", noProxy, false})
 	vars = append(vars, agentEnvPair{"HIVE_PROXY_AGENT", agent.Name, false})
 	vars = append(vars, agentEnvPair{"GIT_TERMINAL_PROMPT", "0", false})
 	vars = append(vars, agentEnvPair{"NODE_EXTRA_CA_CERTS", proxyCACertPath, false})
