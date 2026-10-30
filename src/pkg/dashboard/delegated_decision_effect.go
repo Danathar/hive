@@ -192,7 +192,7 @@ func (s *Server) delegatedStuckWhy(in delegatedecision.Input, d delegatedecision
 		return delegatedecision.GlossaryHold
 	case has("behind"):
 		return delegatedecision.GlossaryBehind
-	case in.Kind == delegatedecision.KindPR && !in.CIGreen && d.Verdict != delegatedecision.VerdictCloseDuplicate && d.Verdict != delegatedecision.VerdictCloseSuperseded:
+	case in.Kind == delegatedecision.KindPR && in.CIRed() && d.Verdict != delegatedecision.VerdictCloseDuplicate && d.Verdict != delegatedecision.VerdictCloseSuperseded:
 		return delegatedecision.GlossaryCIRed
 	}
 	switch {
@@ -257,7 +257,7 @@ func delegatedStuckOptions(in delegatedecision.Input, d delegatedecision.Decisio
 			StageTrackerDecisionOption{Action: decisionActionRetry, Label: "Re-evaluate now", Enabled: true})
 	}
 	if in.Kind == delegatedecision.KindPR && d.Verdict != delegatedecision.VerdictCloseDuplicate && d.Verdict != delegatedecision.VerdictCloseSuperseded {
-		o := decisionOption(decisionActionMergeNow, "Merge as maintainer", mergerRole, decisionWhyMergerRole)
+		o := decisionOption(decisionActionMergeNow, decisionMergeNowLabel, mergerRole, decisionWhyMergerRole)
 		o.Consequence = "merges #" + strconv.Itoa(in.Number) + " now via hive's identity, attributed to you"
 		opts = append(opts, o)
 	}

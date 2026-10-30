@@ -165,6 +165,7 @@ writes no entry.
 | Review backlog issues | `review_backlog.go` | yes (`review_backlog_issue_filed`, one per GitHub issue, with `pr`, `perspective`, `reused`, `destination`) | yes / backlog issue number |
 | Review backlog summary comment | `review_backlog.go` | yes (`review_backlog_summary_posted`) | yes / PR number |
 | Review backlog routing batch | `review_backlog.go` | yes (`review_backlog_batch_routed`, one per filing pass, with `destination`, `filed`, `updated`, `capped`) | yes / PR number |
+| Review backlog self-check close | `review_backlog_selfcheck.go` | yes (`review_backlog_issue_closed`, with `pr`, `why`) | yes / backlog issue number |
 | Human-decision and review-priority labels | `human_decision_label.go` | yes (`hive_label_applied`, with `label`) | yes / PR number |
 | Recommendations issue | `recommendations.go` | yes (`recommendations_posted`, `outcome=created` or `updated`) | yes / issue number |
 | Fleet report issue | `fleet_report.go` | yes (`fleet_report_posted`, `outcome=created` or `commented`) | yes / issue number |
@@ -189,7 +190,7 @@ requires an `Origin` on its request and normalises labels through
 upstream-watch, convergence channel) add their non-lane origin label themselves.
 Provenance is never a gate: if a non-lane origin label cannot be ensured on the
 repo the issue is still filed without it (logged as a warning), whereas a
-retryable failure on a routing label keeps the request queued as before. See [labels-and-control-signals.md](labels-and-control-signals.md#origin-sources).
+retryable failure on a routing label keeps the request queued as before. See [labels-and-control-signals.md](labels-and-control-signals/reference.md#origin-sources).
 
 ## Lane allowlist
 

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func useRebaseMergeStore(t *testing.T) *rebasemerge.Store {
 	return store
 }
 
-// "Approve & merge as maintainer" on a PR GitHub reports dirty is not a
+// "Merge now as maintainer" on a PR GitHub reports dirty is not a
 // 405: the approval is recorded first (/lgtm + /approve), the
 // follow-through is armed, the rebase note is left, nothing is merged, and
 // the answer is 202 rebase-queued (hivecommons/hive#14822).
@@ -177,14 +178,15 @@ func TestRebaseMergeRowCaptionFollowedAndOptions(t *testing.T) {
 			t.Fatalf("merge-now offered at 085 without needs-rebase: %+v", plain.Options)
 		}
 	}
-	// 090 relabel.
+	// 090 relabel: merge-now is the secondary answer behind "Approve and
+	// let hive merge", renamed for the rebase.
 	hm := decisionForHumanMerge(StageTrackerItem{Repo: "o/r", Number: 7, Kind: "pr", Stage: 90, BaseRef: "v5", Labels: []string{"needs-rebase"}}, false)
-	if hm.Options[0].Action != decisionActionMergeNow || hm.Options[0].Label != rebaseMergeFollowThroughLabel || hm.Options[0].Consequence != rebaseMergeFollowThroughConsequence(7, "v5") {
-		t.Fatalf("090 option = %+v", hm.Options[0])
+	if hm.Options[0].Action != decisionActionQueueMerge || hm.Options[1].Action != decisionActionMergeNow || hm.Options[1].Label != rebaseMergeFollowThroughLabel || hm.Options[1].Consequence != rebaseMergeFollowThroughConsequence(7, "v5") {
+		t.Fatalf("090 options = %+v", hm.Options[:2])
 	}
 	hmPlain := decisionForHumanMerge(StageTrackerItem{Repo: "o/r", Number: 7, Kind: "pr", Stage: 90, BaseRef: "v5"}, false)
-	if hmPlain.Options[0].Label != "Approve & merge as maintainer" {
-		t.Fatalf("090 plain option = %+v", hmPlain.Options[0])
+	if hmPlain.Options[1].Label != "Merge now as maintainer" {
+		t.Fatalf("090 plain option = %+v", hmPlain.Options[1])
 	}
 	// Settled: the caption is the lane's again; a stale record is dropped.
 	f.Merged(now.Add(2*time.Minute), "abc")
@@ -365,5 +367,79 @@ func TestDriveRebaseMergeForeignHeadFailsClosed(t *testing.T) {
 	res := rebaseMergeFailedResult(f)
 	if res.Action != rowActionRefused || res.Why != rebasemerge.FailForeignHead || len(res.Options) != 2 || res.Options[0].Action != decisionActionMergeNow || res.Options[1].Action != decisionActionCloseSuperseded {
 		t.Fatalf("failed result = %+v", res)
+	}
+}
+
+// A maintainer-editable fork with workflow changes must not enter the fixer
+// queue, even when its author is the hive's App. Approval cannot grant push
+// permissions, and a fresh-branch adoption is fenced for these paths too.
+func TestRebaseMergeWorkflowForkRefusesBeforeArming(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprint("foreign=", foreign), func(t *testing.T) {
+			store := useRebaseMergeStore(t)
+			mock := &repoItemDecisionMock{prForeign: foreign, prFork: true, prMergeState: "dirty", workflowPath: ".github/workflows/ci.yml"}
+			srv := newRepoItemDecisionServer(t, mock)
+			w := postRepoItemDecisionAs(t, srv, 8, "writer", "merger", `{"decision":"merge-now","type":"pr"}`)
+			if w.Code != http.StatusOK {
+				t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+			}
+			var resp repoItemDecisionResponse
+			_ = json.Unmarshal(w.Body.Bytes(), &resp)
+			if resp.Result == nil || resp.Result.Why != rebasemerge.FailWorkflowPush || !strings.Contains(resp.Result.Outcome, mock.workflowPath) || len(resp.Result.Options) != 0 {
+				t.Fatalf("result = %+v", resp.Result)
+			}
+			if store.Armed("testorg/testrepo", 8) || len(mock.comments) != 0 || len(mock.merges) != 0 || mock.updates != 0 || len(mock.reviews) != 0 {
+				t.Fatalf("refused request armed or wrote to GitHub: store=%v mock=%+v", store.Live(), mock)
+			}
+		})
+	}
+}
+
+// A fork head without maintainer edits is only unreachable for a
+// contributor's PR: the hive pushes its own heads with its own credentials,
+// so a hive-authored fork PR still arms as it did before the workflow fence.
+func TestRebaseMergeForkWithoutMaintainerEditsKeepsHiveAuthoredBypass(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprint("foreign=", foreign), func(t *testing.T) {
+			store := useRebaseMergeStore(t)
+			mock := &repoItemDecisionMock{prForeign: foreign, prFork: true, prNoMaintainerEdits: true, prMergeState: "dirty"}
+			srv := newRepoItemDecisionServer(t, mock)
+			w := postRepoItemDecisionAs(t, srv, 8, "writer", "merger", `{"decision":"merge-now","type":"pr"}`)
+			var resp repoItemDecisionResponse
+			_ = json.Unmarshal(w.Body.Bytes(), &resp)
+			if !foreign {
+				f, ok := store.Get("testorg/testrepo", 8)
+				if w.Code != http.StatusAccepted || resp.Status != repoItemStatusRebaseQd || !ok || !f.HiveAuthored || f.State != rebasemerge.StateRebasing {
+					t.Fatalf("hive-authored fork must still arm: code=%d body=%s follow-through=%+v ok=%v", w.Code, w.Body.String(), f, ok)
+				}
+				return
+			}
+			if w.Code != http.StatusOK || resp.Result == nil || resp.Result.Why != rebasemerge.FailNotReachable {
+				t.Fatalf("contributor fork must be refused as unreachable: code=%d result=%+v", w.Code, resp.Result)
+			}
+			if store.Armed("testorg/testrepo", 8) || len(mock.comments) != 0 || len(mock.merges) != 0 {
+				t.Fatalf("refused request armed or wrote to GitHub: store=%v mock=%+v", store.Live(), mock)
+			}
+		})
+	}
+}
+
+func TestRebaseMergeWorkflowDriftStopsExistingFollowThrough(t *testing.T) {
+	store := useRebaseMergeStore(t)
+	mock := &repoItemDecisionMock{}
+	srv := newRepoItemDecisionServer(t, mock)
+	now := time.Now()
+	f := rebasemerge.Arm("testorg/testrepo", 8, "writer", "main", "feedface", false, now)
+	f.Kicked(now, "fixer")
+	_ = store.Put(f)
+	_ = srv.operatorActions().Record(f.Repo, f.Number, OperatorAction{Action: operatorActionMergeNow, Actor: "writer", At: now, Outcome: operatorActionOutcomePending, Stage: 85})
+	srv.driveRebaseMerge(context.Background(), store, f, ghpkg.PRMergeState{State: "open", HeadSHA: f.ApprovedHead, BaseRef: "main", MergeableState: "dirty", FromFork: true, MaintainerCanModify: true, WorkflowPushPaths: []string{".github/workflows/new.yml"}})
+	got, _ := store.Get(f.Repo, f.Number)
+	if got.Live() || got.FailReason != rebasemerge.FailWorkflowPush || store.Armed(f.Repo, f.Number) {
+		t.Fatalf("follow-through = %+v", got)
+	}
+	acts := srv.operatorActions().List(f.Repo, f.Number)
+	if len(acts) != 1 || acts[0].Outcome != operatorActionOutcomeFailed || len(mock.comments) != 1 || len(mock.merges) != 0 || strings.Contains(mock.comments[0], rebasemerge.OptionAdoptFreshLabel) {
+		t.Fatalf("ledger=%+v comments=%v merges=%v", acts, mock.comments, mock.merges)
 	}
 }

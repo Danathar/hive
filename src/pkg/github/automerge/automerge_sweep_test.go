@@ -21,6 +21,7 @@ import (
 const testHiveAppBotLogin = "kubestellar-hive[bot]"
 
 type sweepPR struct {
+	nodeID          string
 	number          int
 	author          string
 	queuedBy        string
@@ -313,7 +314,7 @@ func TestPrefilterTrustedAuthorPR(t *testing.T) {
 		{name: "ok", pr: pr(), want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := engine.prefilterTrustedAuthorPR(tc.pr, policy); got != tc.want {
+			if got := engine.prefilterTrustedAuthorPR("acme", "widget", tc.pr, policy); got != tc.want {
 				t.Fatalf("prefilterTrustedAuthorPR = %q, want %q", got, tc.want)
 			}
 		})
@@ -426,7 +427,7 @@ func TestExecuteMergeEffectReconcilesUnknownOpenPRBeforeRetry(t *testing.T) {
 		Actor:  "automerge",
 		Inputs: map[string]string{"method": "squash", "expect_sha": "head", "lane": "self-authored"},
 	}
-	out, err := engine.executeMergeEffect(context.Background(), claim, "acme", "widget", 7, func(context.Context) (effects.Result, error) {
+	out, err := engine.executeMergeEffect(context.Background(), claim, "acme", "widget", 7, "", func(context.Context) (effects.Result, error) {
 		return effects.Result{Provenance: "merge-sha"}, nil
 	})
 	if err != nil {
@@ -2978,10 +2979,11 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 					headRepo = "acme/widget"
 				}
 				pulls = append(pulls, map[string]any{
-					"number": pr.number,
-					"state":  "open",
-					"draft":  pr.draft,
-					"user":   map[string]string{"login": pr.author},
+					"node_id": pr.nodeID,
+					"number":  pr.number,
+					"state":   "open",
+					"draft":   pr.draft,
+					"user":    map[string]string{"login": pr.author},
 					"head": map[string]any{
 						"sha":  headSHA,
 						"repo": map[string]string{"full_name": headRepo},
@@ -3042,6 +3044,7 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				base["ref"] = pr.baseRef
 			}
 			json.NewEncoder(w).Encode(map[string]any{
+				"node_id":         pr.nodeID,
 				"number":          pr.number,
 				"state":           "open",
 				"draft":           pr.draft,

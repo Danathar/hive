@@ -103,6 +103,46 @@ func TestGroupMergeTrains(t *testing.T) {
 				blocked(mtMember(2, "clean", t0.Add(time.Minute), "x.go")),
 			},
 		},
+		{
+			// hivecommons/hive#15741 at CI / Review led #15748 and #15755,
+			// both green at 080, and nothing merged.
+			name: "ready members lead an older one still at CI / Review",
+			members: []mergeTrainMember{
+				readiness(mtMember(15741, "clean", t0, "x.go"), mergeTrainReadinessUnready),
+				readiness(mtMember(15748, "clean", t0.Add(time.Minute), "x.go"), mergeTrainReadinessReady),
+				readiness(mtMember(15755, "clean", t0.Add(2*time.Minute), "x.go"), mergeTrainReadinessReady),
+			},
+			want:    [][]int{{15748, 15755, 15741}},
+			overlap: []string{"x.go"},
+		},
+		{
+			name: "an unevaluated head leads an unready one, ready beats both; readiness outranks mergeable state",
+			members: []mergeTrainMember{
+				readiness(mtMember(1, "clean", t0, "x.go"), mergeTrainReadinessUnready),
+				readiness(mtMember(2, "behind", t0.Add(time.Minute), "x.go"), mergeTrainReadinessReady),
+				mtMember(3, "clean", t0.Add(2*time.Minute), "x.go"),
+			},
+			want:    [][]int{{2, 3, 1}},
+			overlap: []string{"x.go"},
+		},
+		{
+			name: "all unready keeps the age tiebreak (a provisional front)",
+			members: []mergeTrainMember{
+				readiness(mtMember(2, "clean", t0.Add(time.Minute), "x.go"), mergeTrainReadinessUnready),
+				readiness(mtMember(1, "clean", t0, "x.go"), mergeTrainReadinessUnready),
+			},
+			want:    [][]int{{1, 2}},
+			overlap: []string{"x.go"},
+		},
+		{
+			name: "a blocked head trails even a ready-tier sort",
+			members: []mergeTrainMember{
+				blocked(readiness(mtMember(1, "clean", t0, "x.go"), mergeTrainReadinessReady)),
+				readiness(mtMember(2, "clean", t0.Add(time.Minute), "x.go"), mergeTrainReadinessUnready),
+			},
+			want:    [][]int{{2, 1}},
+			overlap: []string{"x.go"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -530,6 +570,78 @@ func blocked(m mergeTrainMember) mergeTrainMember {
 	return m
 }
 
+func readiness(m mergeTrainMember, tier int) mergeTrainMember {
+	m.Readiness = tier
+	return m
+}
+
+// TestMergeTrainReadinessMemory: the lane's verdict on a head sets its
+// readiness tier for the next plan — a soak or merge-queue wait is ready,
+// CI pending or a review wait is unready, a new head forgets — and a PR
+// the lane never evaluated on its normal path reads its tier from the
+// stage store's resolved stage (parked-behind records say nothing).
+func TestMergeTrainReadinessMemory(t *testing.T) {
+	for reason, want := range map[string]int{
+		"":                                     mergeTrainReadinessReady,
+		prstage.ContributorLaneReasonSoaking:   mergeTrainReadinessReady,
+		"behind":                               mergeTrainReadinessReady,
+		"release-hold:v5":                      mergeTrainReadinessReady,
+		"check-pending":                        mergeTrainReadinessUnready,
+		"required-check-pending:build":         mergeTrainReadinessUnready,
+		prstage.ContributorLaneReasonNoVerdict: mergeTrainReadinessUnready,
+		prstage.AutoMergeReasonReviewGatePrefix + prstage.ReviewGateOutcomeAwaiting: mergeTrainReadinessUnready,
+		"not-mergeable":         mergeTrainReadinessUnknown,
+		"untrusted-author-role": mergeTrainReadinessUnknown,
+	} {
+		if got := mergeTrainReadinessOf(reason); got != want {
+			t.Fatalf("mergeTrainReadinessOf(%q) = %d, want %d", reason, got, want)
+		}
+	}
+	t0 := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	c := &Engine{}
+	c.stageStore = stagelabels.NewStore("", func() time.Time { return t0 })
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 7, "sha1"); got != mergeTrainReadinessUnknown {
+		t.Fatalf("never seen = %d, want unknown", got)
+	}
+	c.noteMergeTrainOutcome("self", "acme", "widget", 7, "sha1", "check-pending")
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 7, "sha1"); got != mergeTrainReadinessUnready {
+		t.Fatalf("CI pending = %d, want unready", got)
+	}
+	if c.mergeTrainHeadBlocked("self", "acme", "widget", 7, "sha1") {
+		t.Fatal("CI pending is unready, not blocked")
+	}
+	// The member turns ready: it moves to the front of the next plan.
+	c.noteMergeTrainOutcome("self", "acme", "widget", 7, "sha1", prstage.ContributorLaneReasonSoaking)
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 7, "sha1"); got != mergeTrainReadinessReady {
+		t.Fatalf("soaking = %d, want ready", got)
+	}
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 7, "sha2"); got != mergeTrainReadinessUnknown {
+		t.Fatalf("new head = %d, want unknown", got)
+	}
+	if got := c.mergeTrainHeadReadiness("trusted", "acme", "widget", 7, "sha1"); got != mergeTrainReadinessUnknown {
+		t.Fatalf("another lane = %d, want unknown", got)
+	}
+	// It goes red: blocked, and no longer a ready front.
+	c.noteMergeTrainOutcome("self", "acme", "widget", 7, "sha1", "required-check-failing:build")
+	if !c.mergeTrainHeadBlocked("self", "acme", "widget", 7, "sha1") {
+		t.Fatal("red check blocks the head")
+	}
+	// No verdict at this head: the stage store's resolved stage decides.
+	c.stageStore.Observe(stagelabels.Key("acme/widget", 8), stagelabels.ReviewPending, "check-pending")
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 8, "sha8"); got != mergeTrainReadinessUnready {
+		t.Fatalf("050 in the store = %d, want unready", got)
+	}
+	c.stageStore.Observe(stagelabels.Key("acme/widget", 8), stagelabels.AwaitingMergeAdmission, "")
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 8, "sha8"); got != mergeTrainReadinessReady {
+		t.Fatalf("080 in the store = %d, want ready", got)
+	}
+	parked := prstage.MergeTrain{State: prstage.MergeTrainStateQueuedBehind, Front: 7, Position: 2, Size: 2}.Reason()
+	c.stageStore.Observe(stagelabels.Key("acme/widget", 8), stagelabels.AwaitingMergeAdmission, parked)
+	if got := c.mergeTrainHeadReadiness("self", "acme", "widget", 8, "sha8"); got != mergeTrainReadinessUnknown {
+		t.Fatalf("parked behind a front = %d, want unknown", got)
+	}
+}
+
 // TestMergeTrainBlockedHeadMemory: the lane's verdict per head decides
 // whether it may front; a red/terminal verdict marks the exact head, any
 // other verdict clears it, and a new head starts clean. A conflict is not
@@ -621,5 +733,50 @@ func TestMergeTrainHumanMergeNeverMember(t *testing.T) {
 	c.noteMergeTrainOutcome("self", "acme", "widget", 60, "sha60", "")
 	if plan := plan0(c, prs); !plan.isFront(60) {
 		t.Fatal("a clean verdict re-admits the PR")
+	}
+}
+
+// TestPlanMergeTrainsExcludesUnderRepair: hive's own #15405 led a train's
+// header as "1st: #15405" while a maintainer's changes-requested had it at
+// 070 fixing. A PR at 070 / 071 / 085 — by label or by the stage store —
+// is somebody's to repair and takes no slot; the survivors form the train
+// among themselves.
+func TestPlanMergeTrainsExcludesUnderRepair(t *testing.T) {
+	t0 := time.Date(2026, 10, 30, 20, 0, 0, 0, time.UTC)
+	api := &mergeTrainAPI{
+		files: map[int][]string{15405: {"operator-reference.md"}, 15406: {"operator-reference.md"}, 15407: {"operator-reference.md"}, 15408: {"operator-reference.md"}},
+		state: map[int]string{15405: "clean", 15406: "clean", 15407: "clean", 15408: "clean"},
+	}
+	srv := newMergeTrainServer(t, api)
+	defer srv.Close()
+	c, logs := newMergeTrainEngine(t, srv.URL, DefaultMergeTrainPolicy, RebaseResolverFunc(func(context.Context, RebaseRequest) error { return nil }))
+	c.stageStore = stagelabels.NewStore("", func() time.Time { return t0 })
+	c.stageStore.Observe(stagelabels.Key("acme/widget", 15407), stagelabels.NeedsDecision, "rebase-failed-twice")
+	fixing := mtPR(15405, t0, "")
+	fixing.Labels = []*gh.Label{{Name: gh.Ptr(stagelabels.Fixing.Label())}}
+	needsAuthor := mtPR(15408, t0.Add(3*time.Minute), "")
+	needsAuthor.Labels = []*gh.Label{{Name: gh.Ptr(stagelabels.NeedsAuthor.Label())}}
+	prs := []*gh.PullRequest{fixing, mtPR(15406, t0.Add(time.Minute), ""), mtPR(15407, t0.Add(2*time.Minute), ""), needsAuthor}
+	plan := plan0(c, prs)
+	for _, n := range []int{15405, 15407, 15408} {
+		if plan.isSibling(n) || plan.isFront(n) {
+			t.Errorf("#%d is under repair and must be out of every train: %+v", n, plan.groups)
+		}
+	}
+	if len(plan.groups) != 0 {
+		t.Fatalf("only #15406 is left, and one PR is no train: %+v", plan.groups)
+	}
+	for _, want := range []string{"why=fixing", "why=needs-decision", "why=needs-author"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("missing skip log %q\n%s", want, logs.String())
+		}
+	}
+	// Once the fixer is done (label gone) the two clean PRs form the train
+	// and #15405 leads it by age.
+	fixing.Labels = nil
+	plan = plan0(c, prs)
+	g, ok := plan.group(15405)
+	if !ok || !reflect.DeepEqual(g.Order, []int{15405, 15406}) {
+		t.Fatalf("train = %+v", plan.groups)
 	}
 }

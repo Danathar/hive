@@ -115,7 +115,7 @@ func TestStageTrackerMergeTrainPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{`"merge_gate":{"state":"queued-behind","reason":"behind #15074 in merge train (2nd of 4, overlapping files: stage_tracker.go, index.html)"`,
-		`"merge_train":{"id":"v5#15074","state":"queued-behind","front":15074,"position":2,"size":4,"overlap_files":["stage_tracker.go","index.html"],"ahead":[15074],"members":[15074,15085,15087,15097],"length":4,"head_number":15074,"head_state":"ready","head_reason":"approved and green; merges on hive's next sweep","head_since":"2026-10-27T14:00:00Z","eta_s":300,"eta_at":"2026-10-27T14:05:00Z","eta_basis":"1 ahead"}`} {
+		`"merge_train":{"id":"v5#15074","state":"queued-behind","front":15074,"position":2,"size":4,"overlap_files":["stage_tracker.go","index.html"],"ahead":[15074],"members":[15074,15085,15087,15097],"length":4,"head_number":15074,"head_state":"ready","head_reason":"approved and green; merges on hive's next pass","head_since":"2026-10-27T14:00:00Z","eta_s":300,"eta_at":"2026-10-27T14:05:00Z","eta_basis":"1 ahead"}`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("payload lacks %s:\n%s", want, raw)
 		}
@@ -244,6 +244,7 @@ func TestStageTrackerMergeTrainSPA(t *testing.T) {
 		jsFunc(t, html, "stageTrackerOrdinal"),
 		jsFunc(t, html, "stageTrackerShortLeft"),
 		jsFunc(t, html, "stageTrackerTrainPlace"),
+		stageTrackerTrainProvisionalJS(t, html),
 		jsConstLine(t, html, "STAGE_TRACKER_TRAIN_STALLED_LEAD"),
 		jsConstLine(t, html, "STAGE_TRACKER_TRAIN_HEAD_STALL_WORD"),
 		jsFunc(t, html, "stageTrackerTrainStallWhy"),
@@ -253,12 +254,16 @@ func TestStageTrackerMergeTrainSPA(t *testing.T) {
 		jsFunc(t, html, "stageTrackerTrainEtaWords"),
 		jsFunc(t, html, "stageTrackerTrainEtaDetail"),
 		jsFunc(t, html, "stageTrackerTrainQueueTip"),
+		jsConstLine(t, html, "STAGE_TRACKER_LEFT_TRAIN_NOTE"),
+		jsFunc(t, html, "stageTrackerLeftTrainNote"),
 		jsFunc(t, html, "stageTrackerTrainLines"),
 		jsFunc(t, html, "stageTrackerRowTrain"),
 		jsFunc(t, html, "stageTrackerTrainKey"),
 		jsFunc(t, html, "stageTrackerTrainOrder"),
 		jsFunc(t, html, "stageTrackerTrainContiguous"),
 		jsFunc(t, html, "stageTrackerTrainMissing"),
+		jsConstLine(t, html, "STAGE_TRACKER_TRAIN_MECHANICS"),
+		jsFunc(t, html, "stageTrackerTrainWhere"),
 		jsFunc(t, html, "stageTrackerTrainHeaderText"),
 		jsFunc(t, html, "stageTrackerTrainHeaderHtml"),
 		jsFunc(t, html, "stageTrackerTrainRowClass"),
@@ -279,24 +284,26 @@ const other = { repo: 'hivecommons/hive', number: 15100, kind: 'pr', title: 'Doc
 
 // Pill wording per state: the place in the owner's words (#15395 —
 // "'front' should be 'merge queued - 1st' and so on").
-assert.strictEqual(stageTrackerTrainWord(front), 'Merge queued · 1st');
-assert.strictEqual(stageTrackerTrainWord(second), 'Merge queued · 2nd');
+assert.strictEqual(stageTrackerTrainWord(front), 'Merge queued · 1st of 4');
+assert.strictEqual(stageTrackerTrainWord(second), 'Merge queued · 2nd of 4');
 assert.strictEqual(stageTrackerTrainWord(third), 'Rebasing · attempt 1/2');
 assert.strictEqual(stageTrackerTrainWord(fourth), 'Needs human decision · rebase failed twice');
 assert.strictEqual(stageTrackerTrainWord(other), '');
 for (const [n, w] of [[1, '1st'], [2, '2nd'], [3, '3rd'], [4, '4th'], [11, '11th'], [12, '12th'], [13, '13th'], [21, '21st'], [22, '22nd'], [111, '111th']]) assert.strictEqual(stageTrackerOrdinal(n), w, 'ordinal ' + n);
 // The lit chevron carries the word: 080 for the members, the 085 detour for the exhausted one.
 const lit = it => stageTrackerSegments(it, stages, now).find(s => s.state === 'active');
-assert.strictEqual(lit(front).short, 'Merge queued · 1st');
-assert.strictEqual(lit(second).short, 'Merge queued · 2nd');
+assert.strictEqual(lit(front).short, 'Merge queued · 1st of 4');
+assert.strictEqual(lit(second).short, 'Merge queued · 2nd of 4');
 assert.strictEqual(lit(third).short, 'Rebasing · attempt 1/2');
 assert.strictEqual(lit(fourth).detour.text, 'Needs human decision · rebase failed twice');
 assert.strictEqual(lit(other).short, 'Ready for auto merge');
 
 // Tooltip: the queue ahead and the overlapping files.
 const tip = stageTrackerTooltip(third, now);
-assert.ok(tip.includes('Merge train: 4 PRs to v5 touch the same files; they merge one at a time, in order (1st: #15074)'), tip);
-assert.ok(tip.includes('Position: 3rd of 4 · ahead: #15074, #15085'), tip);
+assert.ok(tip.includes('Merge train: 4 PRs in the merge queue to v5 touch the same files, so they merge one at a time, in order (1st: #15074)'), tip);
+assert.ok(tip.includes('rebased onto the base only after the PR ahead of it merges'), tip);
+assert.ok(tip.includes('Position: 3rd of 4 · after #15085 merges · ahead: #15074, #15085'), tip);
+assert.ok(stageTrackerTooltip(second, now).includes('Position: 2nd of 4 · after #15074 merges'), 'second tip');
 assert.ok(tip.includes('The PR ahead merged; rebase attempt 1 of 2 in progress'), tip);
 assert.ok(tip.includes('Overlapping files: stage_tracker.go, index.html'), tip);
 assert.ok(stageTrackerTooltip(front, now).includes('Position: 1st — merges next'), 'front tip');
@@ -309,12 +316,12 @@ const sorted = [fourth, other, third, { repo: 'x/y', number: 1, kind: 'issue', s
 // Queue facts (#15395): the chip is the position, never the slug; the
 // hover sentence names the head, what it waits on and the estimate.
 const queued = mk(15319, 80, { state: 'queued-behind', position: 2, ahead: [15315], length: 3, head_number: 15315, head_state: 'soaking', head_reason: 'soaking, 12m left', eta_s: 1500 });
-assert.strictEqual(stageTrackerTrainWord(queued), 'Merge queued · 2nd');
+assert.strictEqual(stageTrackerTrainWord(queued), 'Merge queued · 2nd of 3');
 assert.strictEqual(stageTrackerTrainQueueTip(queued.merge_train), '2nd of 3 in the merge queue · behind #15315 (soaking, 12m left) · ETA ~25m. Hive merges one at a time, in order.');
 const firstQ = mk(15315, 80, { state: 'front', position: 1, length: 3, head_number: 15315, head_state: 'soaking', head_reason: 'soaking, 12m left', eta_s: 780 });
 assert.strictEqual(stageTrackerTrainQueueTip(firstQ.merge_train), '1st of 3 in the merge queue · merges next (soaking, 12m left) · ETA ~13m. Hive merges one at a time, in order.');
 const thirdQ = mk(15374, 80, { state: 'queued-behind', position: 3, ahead: [15315, 15319], length: 3, head_number: 15315, head_state: 'needs-human', head_reason: 'waiting for a maintainer (untrusted author)', eta_s: 0 });
-assert.strictEqual(stageTrackerTrainWord(thirdQ), 'Merge queued · 3rd');
+assert.strictEqual(stageTrackerTrainWord(thirdQ), 'Merge queued · 3rd of 3');
 assert.strictEqual(stageTrackerTrainQueueTip(thirdQ.merge_train), '3rd of 3 in the merge queue · behind #15315 (waiting for a maintainer (untrusted author)) · no estimate until #15315 moves. Hive merges one at a time, in order.');
 const stalledQ = mk(15374, 80, { state: 'queued-behind', position: 3, ahead: [15315, 15319], length: 3, head_number: 15315, head_state: 'ci', head_reason: 'waiting for CI', stalled: true, stalled_s: 3 * 3600 });
 assert.strictEqual(stageTrackerTrainWord(stalledQ), 'Merge queue · stalled — waiting on #15315 (waiting for CI) · 3h');
@@ -327,15 +334,18 @@ for (const it of [queued, firstQ, thirdQ, stalledQ, front, second, third, fourth
   assert.ok(!/front|queued-behind|rebase-exhausted/i.test(seen), 'no slug or "front" for #' + it.number + ': ' + seen);
 }
 // Ordinal places beyond the first few.
-for (const [pos, w] of [[11, '11th'], [12, '12th'], [13, '13th'], [21, '21st'], [22, '22nd'], [23, '23rd']]) assert.strictEqual(stageTrackerTrainWord(mk(1, 80, { state: 'queued-behind', position: pos, length: 30 })), 'Merge queued · ' + w);
+for (const [pos, w] of [[11, '11th'], [12, '12th'], [13, '13th'], [21, '21st'], [22, '22nd'], [23, '23rd']]) assert.strictEqual(stageTrackerTrainWord(mk(1, 80, { state: 'queued-behind', position: pos, length: 30 })), 'Merge queued · ' + w + ' of 30');
 // Every train state — the 1st included — lights the Merge queue column,
 // whatever stage the lane holds the head at (hive #15400 at 050 lit CI / Review).
 for (const st of ['front', 'queued-behind', 'rebasing', 'rebase-exhausted']) for (const stage of [50, 60, 70, 74, 80, 95]) assert.strictEqual(stageTrackerAnchor(stage, stages, 'pr', mk(2, stage, { state: st, position: 1 })), 80, st + ' at ' + stage);
 assert.strictEqual(stageTrackerAnchor(50, stages, 'pr', other), 50, 'no train: stage rules as before');
-// The 1st-in-train head at 050 lights its word in the Merge queue column.
+// The 1st-in-train head at 050 lights the Merge queue column, but its
+// word leads with the stage's blocker — the slot is provisional until
+// CI and the verdict are in (hive #15577 read "Merge queued · 1st" over
+// a caption saying build-and-test was still running).
 const headAt50 = mk(15400, 50, { state: 'front', position: 1 });
 assert.strictEqual(lit(headAt50).number, 80);
-assert.strictEqual(lit(headAt50).short, 'Merge queued · 1st');
+assert.strictEqual(lit(headAt50).short, 'CI / Review · queued 1st of 4 once ready');
 const grouped = stageTrackerTrainContiguous(sorted).map(it => it.number);
 assert.deepStrictEqual(grouped, [15074, 15085, 15087, 15097, 15100, 1]);
 // Header line before the run, once; rail classes on members, last closes it.
@@ -383,15 +393,31 @@ assert.deepStrictEqual(fullRows.map(r => r.key), ['train:hivecommons/hive|v5#154
 assert.ok(fullRows[0].html.includes('</svg> merge train · 3 PRs · 1st: #15425'), fullRows[0].html);
 assert.strictEqual(stageTrackerTrainRowClass(issue2, t1, issue3), ' ham-train');
 assert.strictEqual(stageTrackerTrainRowClass(issue3, issue2, plainIssue), ' ham-train ham-train-last');
-// A view that carries only the head (a filter hid the other two) says so
-// and names them — never "3 PRs" over one row.
-const partRows = stageTrackerTrainRows([t1, plainIssue], (it) => ({ key: String(it.number), html: '' }));
+// A page that carries only the head says where the rest are — on another
+// page, hidden by the filter — and names them; never "3 PRs" over one row,
+// and never a bare "not in this view" (owner: "what does 'not in this
+// view' mean?").
+const where = stageTrackerTrainWhere([t1, issue2, plainIssue], [t1, issue2, issue3, plainIssue]);
+assert.deepStrictEqual(Object.keys(where.listed).sort(), ['15425', '15529']);
+assert.deepStrictEqual(Object.keys(where.known).sort(), ['15425', '15529', '15530']);
+const partRows = stageTrackerTrainRows([t1, plainIssue], (it) => ({ key: String(it.number), html: '' }), where);
 assert.deepStrictEqual(partRows.map(r => r.key), ['train:hivecommons/hive|v5#15425', '15425', '15499']);
-assert.ok(partRows[0].html.includes('</svg> merge train · 1 of 3 PRs here · 1st: #15425 · not in this view: #15529, #15530'), partRows[0].html);
+assert.ok(partRows[0].html.includes('</svg> merge train · 1 of 3 PRs here · 1st: #15425 · on another page: #15529 · hidden by the filter: #15530'), partRows[0].html);
 assert.ok(!partRows[0].html.includes('3 PRs ·'), partRows[0].html);
-assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425, 15530]), 'merge train · 2 of 3 PRs here · 1st: #15425 · not in this view: #15529');
-// Without a member list the header still counts honestly.
-assert.strictEqual(stageTrackerTrainHeaderText({ id: 'v5#1', front: 1, size: 3 }, [1]), 'merge train · 1 of 3 PRs here · 1st: #1 · not in this view: 2 more');
+assert.ok(!partRows[0].html.includes('not in this view'), partRows[0].html);
+assert.ok(partRows[0].html.includes('rebased onto the base only after the PR ahead of it merges'), 'header hover explains the order: ' + partRows[0].html);
+assert.ok(!partRows[0].html.includes('Position:'), 'the header speaks for the train, not one slot: ' + partRows[0].html);
+// All on the page: a plain count.
+assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425, 15529, 15530], where), 'merge train · 3 PRs · 1st: #15425');
+// Some on another page only.
+assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425], stageTrackerTrainWhere([t1, issue2, issue3], [t1, issue2, issue3])), 'merge train · 1 of 3 PRs here · 1st: #15425 · on another page: #15529, #15530');
+// Some filtered out only.
+assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425], stageTrackerTrainWhere([t1], [t1, issue2, issue3])), 'merge train · 1 of 3 PRs here · 1st: #15425 · hidden by the filter: #15529, #15530');
+// A member the payload does not carry at all is said so, not guessed.
+assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425, 15530], stageTrackerTrainWhere([t1, issue3], [t1, issue3])), 'merge train · 2 of 3 PRs here · 1st: #15425 · not in this payload: #15529');
+// Without the where context the header still says only what it knows.
+assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425, 15530]), 'merge train · 2 of 3 PRs here · 1st: #15425 · not on this page: #15529');
+assert.strictEqual(stageTrackerTrainHeaderText({ id: 'v5#1', front: 1, size: 3 }, [1]), 'merge train · 1 of 3 PRs here · 1st: #1 · not on this page: 2 more');
 assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train, [15425, 15529, 15530]), 'merge train · 3 PRs · 1st: #15425');
 assert.strictEqual(stageTrackerTrainHeaderText(t1.merge_train), 'merge train · 3 PRs · 1st: #15425');
 // No members on the page, no header.

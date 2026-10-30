@@ -18,6 +18,8 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/delegatedecision"
 	ghpkg "github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/review"
+	"github.com/hivecommons/hive/pkg/stageengine"
 	stageengineprstage "github.com/hivecommons/hive/pkg/stageengine/prstage"
 	"github.com/hivecommons/hive/pkg/stagelabels"
 )
@@ -640,13 +642,15 @@ func (s *Server) gatherDelegatedInput(ctx context.Context, repoFull string, numb
 		if err := s.gatherDelegatedLadderInput(ctx, repoFull, pr, &in); err != nil {
 			return in, err
 		}
+		in.DiffEmpty = ghpkg.PRChangedFilesClaimsEmpty(pr)
 		state := strings.ToLower(pr.GetMergeableState())
 		in.Conflicting = state == "dirty" || (pr.Mergeable != nil && !pr.GetMergeable())
-		green, err := delegatedHeadCIGreen(ctx, api, owner, repoName, pr, in.Conflicting, state)
+		ci, err := delegatedHeadCI(ctx, api, owner, repoName, pr, state)
 		if err != nil {
 			return in, fmt.Errorf("reading checks for %s#%d: %w", repoFull, number, err)
 		}
-		in.CIGreen = green
+		in.CIGreen, in.CIPending = ci.green, ci.pending
+		s.gatherDelegatedRecordedPark(repoFull, number, pr.GetHead().GetSHA(), &in)
 		if files, _, err := api.PullRequests.ListFiles(ctx, owner, repoName, number, &gh.ListOptions{PerPage: delegatedDecisionGatherLimit}); err == nil && len(files) > 0 {
 			in.LowRiskPaths = true
 			for _, f := range files {
@@ -684,7 +688,22 @@ func (s *Server) gatherDelegatedInput(ctx context.Context, repoFull string, numb
 	}
 	in.ReporterTrustHold = strings.Contains(lowerReason, "reporter-trust") || strings.Contains(lowerReason, "reporter trust")
 	in.DCOMissing = strings.Contains(lowerReason, "dco")
+	if in.Kind == delegatedecision.KindIssue {
+		in.Advisory = delegatedAdvisoryChecklist(in.Labels, in.Body)
+	}
 	return in, nil
+}
+
+// delegatedAdvisoryChecklist is the advisory block of a hive advisory issue
+// (hivecommons/hive#15754): the same classification the tracker draws
+// (stageTrackerAdvisoryFor), with the checklist's progress. nil for an
+// ordinary issue.
+func delegatedAdvisoryChecklist(labels []string, body string) *delegatedecision.AdvisoryChecklist {
+	adv := stageTrackerAdvisoryFor(labels, body, nil)
+	if adv == nil {
+		return nil
+	}
+	return &delegatedecision.AdvisoryChecklist{Resolved: adv.Resolved, Total: adv.Total}
 }
 
 // delegatedAdoptionGraceElapsed reads the stage store: adoption at the PR's
@@ -697,31 +716,107 @@ func (s *Server) delegatedAdoptionGraceElapsed(repoFull string, number int) bool
 	return rec.AdoptionBlocked(rec.NudgeHead) != ""
 }
 
-// delegatedHeadCIGreen decides Input.CIGreen for the PR under decision.
-// mergeable_state alone cannot carry it: GitHub reports "blocked" both for a
-// missing required review and for red required checks, and "unknown" /
-// "behind" / "" say nothing about the head at all. Only "clean" and
-// "has_hooks" assert a green head; "unstable" and a conflict deny it; every
-// other state is settled from the head's combined status and check runs the
-// way gatherDelegatedPRContext settles a competing PR — no red, nothing
-// pending, and at least one green result, so a head whose checks never ran
-// is not read as green either.
-func delegatedHeadCIGreen(ctx context.Context, api *gh.Client, owner, repoName string, pr *gh.PullRequest, conflicting bool, state string) (bool, error) {
-	switch {
-	case conflicting, state == "unstable":
-		return false, nil
-	case state == "clean", state == "has_hooks":
-		return true, nil
+// delegatedHeadCIState is what the head's checks say: green (every
+// gating check passed), pending (some still running, none failed), or
+// neither (a check failed, or none ever reported).
+type delegatedHeadCIState struct {
+	green, pending bool
+}
+
+// delegatedHeadCI decides Input.CIGreen / CIPending for the PR under
+// decision. mergeable_state alone cannot carry it: GitHub reports "blocked"
+// both for a missing required review and for red required checks,
+// "unstable" whenever ANY context is pending or failing — a non-required
+// merge-metadata context like tide included — and "unknown" / "behind" /
+// "" say nothing about the head at all. Only "clean" and "has_hooks"
+// assert a green head; every other state is settled from the head's
+// combined status and check runs (meta contexts excluded, the way
+// gatherDelegatedPRContext settles a competing PR): green is no red,
+// nothing pending and at least one green result; pending is no red with
+// a check still running. hivecommons/hive#15722 read "unstable" as red
+// while every check on the head was green and only tide was pending, and
+// the preview told the operator "CI is red".
+func delegatedHeadCI(ctx context.Context, api *gh.Client, owner, repoName string, pr *gh.PullRequest, state string) (delegatedHeadCIState, error) {
+	if state == "clean" || state == "has_hooks" {
+		return delegatedHeadCIState{green: true}, nil
 	}
 	sha := strings.TrimSpace(pr.GetHead().GetSHA())
 	if sha == "" {
-		return false, nil
+		return delegatedHeadCIState{}, nil
 	}
 	summary, err := ghpkg.SummarizeCommitChecks(ctx, api, owner, repoName, sha)
 	if err != nil {
-		return false, err
+		return delegatedHeadCIState{}, err
 	}
-	return len(summary.Red) == 0 && summary.Pending == 0 && summary.Green > 0, nil
+	if len(summary.Red) > 0 {
+		return delegatedHeadCIState{}, nil
+	}
+	return delegatedHeadCIState{green: summary.Pending == 0 && summary.Green > 0, pending: summary.Pending > 0}, nil
+}
+
+// gatherDelegatedRecordedPark reads what the stage engine recorded about
+// the PR — the reason it parked it, whether the hive adopted it in place,
+// and the reviewer verdict on its head — so the delegate decides on the
+// same facts the 085 entry comment named, not only on the words the
+// tracker row sent along (hivecommons/hive#15722: the row said reviewer
+// requires_human / high-risk, the plan said "CI is red").
+func (s *Server) gatherDelegatedRecordedPark(repoFull string, number int, head string, in *delegatedecision.Input) {
+	head = strings.TrimSpace(head)
+	recorded := ""
+	if rec, ok := s.stageStoreOrShared().Get(stagelabels.Key(repoFull, number)); ok {
+		recorded = strings.TrimSpace(rec.Reason)
+		if recorded != "" && !slices.Contains(in.Reasons, recorded) {
+			in.Reasons = append(in.Reasons, recorded)
+		}
+		in.AdoptedByHive = rec.AdoptionLive(head)
+	}
+	for _, r := range in.Reasons {
+		lower := strings.ToLower(r)
+		if strings.Contains(lower, stageengineprstage.ContributorLaneReasonAdoptedByHive) {
+			in.AdoptedByHive = true
+		}
+		if stagelabels.ReasonClass(lower) == stageengine.StageReasonVerdictRequiresHuman || strings.Contains(lower, "requires_human") {
+			in.ReviewerRequiresHuman = true
+		}
+	}
+	art, err := review.LoadArtifact("")
+	if err != nil {
+		return
+	}
+	lookup := stageTrackerDecisionVerdictLookup(&art)
+	agg, ok := lookup(repoFull, number, head, in.ReviewerRequiresHuman)
+	if !ok {
+		_, short, _ := strings.Cut(repoFull, "/")
+		agg, ok = lookup(short, number, head, in.ReviewerRequiresHuman)
+	}
+	if !ok {
+		return
+	}
+	if agg.RequiresHuman || agg.DecisionRequested {
+		in.ReviewerRequiresHuman = true
+	}
+	if in.Question == "" {
+		in.Question = strings.TrimSpace(agg.DecisionQuestion)
+	}
+	in.ReviewerFinding = strings.TrimSpace(agg.DecisionFinding)
+	in.SecurityFinding = delegatedSecurityFinding(agg)
+}
+
+// delegatedSecurityFinding: the reviewer's finding is the security
+// review's own — that perspective withheld approval, or the finding names
+// a security / credentials question. The reviewer's generic high-risk
+// marker alone is not one: it is a risk-class flag the fixer addresses.
+func delegatedSecurityFinding(agg review.Aggregate) bool {
+	if agg.Perspectives[review.PerspectiveSecurity] == review.VerdictRequiresHuman {
+		return true
+	}
+	lower := strings.ToLower(agg.DecisionFinding)
+	for _, term := range []string{"security", "credential", "secret", "permission", "privilege", "vulnerab", "insecure", "malicious", "supply chain", "supply-chain"} {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // delegatedWorkflowPath reports a file under .github/workflows: the adoption
@@ -775,7 +870,7 @@ func (s *Server) executeDelegatedDecision(ctx context.Context, in delegatedecisi
 					notes = append(notes, "parking labels lifted, `"+ghpkg.HumanAckLabel+"` applied")
 					s.noteDelegatedUnpark(repoFull, number)
 				}
-			} else if d.Verdict == delegatedecision.VerdictDirection && in.HiveAuthored {
+			} else if d.Verdict == delegatedecision.VerdictDirection && (in.HiveAuthored || in.AdoptedByHive) {
 				if _, err := client.RecordOperatorPullRequestDecision(ctx, repoFull, number, user, d.Text, repoItemDecisionChangeRequests()); err != nil && !errors.Is(err, ghpkg.ErrPullRequestNotHiveAuthored) {
 					return notes, fmt.Errorf("recording PR direction: %w", err)
 				} else if err == nil {
@@ -791,10 +886,25 @@ func (s *Server) executeDelegatedDecision(ctx context.Context, in delegatedecisi
 				continue
 			}
 			if mergerRole {
-				if err := client.QueuePRAutoMergeWithNote(ctx, repoFull, number, user, marker); err != nil {
+				queued, err := client.QueuePRAutoMergeWithNoteResult(ctx, repoFull, number, user, marker)
+				if err != nil {
 					return notes, fmt.Errorf("approving PR head: %w", err)
 				}
-				notes = append(notes, "Approve review submitted on the head and queued for auto-merge (the engine merges per repo settings)")
+				if queued.ReviewSubmitted {
+					notes = append(notes, "Approve review submitted on the head and queued for auto-merge (the engine merges per repo settings)")
+				} else {
+					// The hive's own PR: no review is possible, so the
+					// operator's approval goes on record the way Approve
+					// records it and the self-authored lane merges on it.
+					if _, err := client.RecordOperatorPullRequestApprovalWith(ctx, repoFull, number, user, ghpkg.PullRequestApprovalOptions{
+						HumanChangeRequests: repoItemDecisionChangeRequests(),
+						LiftNeedsHuman:      true,
+						SentinelLabel:       s.sentinelLabel(),
+					}); err != nil {
+						return notes, fmt.Errorf("approving PR: %w", err)
+					}
+					notes = append(notes, "approval recorded on the hive's own head and queued for auto-merge (the App cannot review its own pull request; the self-authored lane merges once CI is green)")
+				}
 			} else {
 				if _, err := client.RecordOperatorPullRequestApproval(ctx, repoFull, number, user); err != nil {
 					return notes, fmt.Errorf("approving PR: %w", err)
@@ -819,20 +929,25 @@ func (s *Server) executeDelegatedDecision(ctx context.Context, in delegatedecisi
 				}
 			}
 			notes = append(notes, "labels removed: "+strings.Join(a.Labels, ", "))
-		case delegatedecision.ActionCloseDuplicate, delegatedecision.ActionCloseNotNow:
-			// Both share one comment-then-close path so the writeback
+		case delegatedecision.ActionCloseDuplicate, delegatedecision.ActionCloseNotNow, delegatedecision.ActionCloseCompleted:
+			// All share one comment-then-close path so the writeback
 			// ratchet (pkg/writeback/testdata) sees no new write sites.
 			notNow := a.Kind == delegatedecision.ActionCloseNotNow
+			completed := a.Kind == delegatedecision.ActionCloseCompleted
 			body := fmt.Sprintf("%s\n\nRationale: %s.\n\n_Closed by the hive as the owner's delegate (rule `%s`)._\n%s", a.Text, d.Rationale, d.Rule, marker)
 			reason := "closed as duplicate of #" + strconv.Itoa(a.Target) + " by the hive delegate"
 			what := "duplicate"
-			if notNow {
+			stateReason := issueStateReasonNotPlanned
+			if notNow || completed {
 				if in.Kind != delegatedecision.KindIssue {
-					return notes, fmt.Errorf("not-now closes issues only")
+					return notes, fmt.Errorf("%s closes issues only", a.Kind)
 				}
 				body = comment
 				reason = "declined for now by the hive delegate: no incident or recurrence justifies the cost yet"
 				what = "not-now"
+			}
+			if completed {
+				reason, what, stateReason = "advisory closed as completed by the hive delegate: its items are resolved", "advisory", issueStateReasonCompleted
 			}
 			if err := client.CreateIssueComment(ctx, repoFull, number, body); err != nil {
 				return notes, fmt.Errorf("posting %s note: %w", what, err)
@@ -844,11 +959,13 @@ func (s *Server) executeDelegatedDecision(ctx context.Context, in delegatedecisi
 			} else if err := client.CloseIssue(ctx, repoFull, number, ghpkg.IssueCloseOptions{
 				OverrideReason:          reason,
 				SuppressOverrideComment: true,
-				StateReason:             issueStateReasonNotPlanned,
+				StateReason:             stateReason,
 			}); err != nil {
 				return notes, fmt.Errorf("closing %s: %w", what, err)
 			}
-			if notNow {
+			if completed {
+				notes = append(notes, "closed as completed (advisory resolved)")
+			} else if notNow {
 				notes = append(notes, "closed as not planned (declined for now)")
 			} else {
 				notes = append(notes, fmt.Sprintf("closed in favour of #%d", a.Target))
@@ -931,7 +1048,7 @@ func delegatedDecisionResolves(v delegatedecision.Verdict) bool {
 	case delegatedecision.VerdictApprove, delegatedecision.VerdictDirection, delegatedecision.VerdictAdoptSupersede,
 		delegatedecision.VerdictCloseDuplicate, delegatedecision.VerdictCloseSuperseded,
 		delegatedecision.VerdictQuarantineFlaky, delegatedecision.VerdictAcceptRatchet, delegatedecision.VerdictAcceptProposal,
-		delegatedecision.VerdictNotNow:
+		delegatedecision.VerdictNotNow, delegatedecision.VerdictClose:
 		return true
 	}
 	return false
