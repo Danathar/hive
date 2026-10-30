@@ -206,3 +206,21 @@ func TestPRThroughputTopReposCountsMerges(t *testing.T) {
 		}
 	}
 }
+
+// The widget's 7-day throughput is the same de-duplicated count.
+func TestHandleWidgetThroughputCountsHiveMergeOnce(t *testing.T) {
+	s, deps := apiServer(t)
+	deps.Config.Project.Org = "acme"
+	now := time.Now().UTC()
+	auditPath := writeAuditFixture(t, t.TempDir(), prThroughputBothWritersEntries(now))
+	prev := prThroughputAuditPath
+	prThroughputAuditPath = auditPath
+	t.Cleanup(func() { prThroughputAuditPath = prev })
+	s.audit = &AuditLog{}
+
+	result := decodeJSON(t, doGet(s, "/api/widget"))
+	tp, _ := result["prThroughput7d"].(map[string]any)
+	if merged, _ := tp["merged"].(float64); merged != 4 {
+		t.Fatalf("widget prThroughput7d = %v, want merged 4", tp)
+	}
+}
