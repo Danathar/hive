@@ -266,6 +266,18 @@ func issueDoneLabel(labels map[string]bool, doneLabels []string) bool {
 	if !labels[github.VerifiedOpenLabel] {
 		return hasAnyLabel(labels, doneLabels)
 	}
+	return hasOtherDoneLabel(labels, doneLabels)
+}
+
+// onlyLikelyDone reports whether hive/likely-done is the only configured
+// done label the issue wears.
+func onlyLikelyDone(labels map[string]bool, doneLabels []string) bool {
+	return labels[github.LikelyDoneLabel] && !hasOtherDoneLabel(labels, doneLabels)
+}
+
+// hasOtherDoneLabel reports whether the issue wears a configured done label
+// other than hive/likely-done.
+func hasOtherDoneLabel(labels map[string]bool, doneLabels []string) bool {
 	for _, label := range doneLabels {
 		lower := strings.ToLower(label)
 		if lower != github.LikelyDoneLabel && labels[lower] {
@@ -273,21 +285,6 @@ func issueDoneLabel(labels map[string]bool, doneLabels []string) bool {
 		}
 	}
 	return false
-}
-
-// onlyLikelyDone reports whether hive/likely-done is the only configured
-// done label the issue wears.
-func onlyLikelyDone(labels map[string]bool, doneLabels []string) bool {
-	if !labels[github.LikelyDoneLabel] {
-		return false
-	}
-	for _, label := range doneLabels {
-		lower := strings.ToLower(label)
-		if lower != github.LikelyDoneLabel && labels[lower] {
-			return false
-		}
-	}
-	return true
 }
 
 func issueLinkedPRState(github.Issue) linkedPRState { return linkedPRState{} }
