@@ -66,15 +66,53 @@ func TestNeedsDecisionParkComment(t *testing.T) {
 }
 
 func TestParkCommentExplains(t *testing.T) {
-	for body, want := range map[string]bool{
-		"The remaining step needs the owner to pick the queue owner; options below.": true,
-		"<!-- hive:gfi superseded=true --> ~~Good first issue~~ — withdrawn":         false,
-		"thanks!": false,
-		needsDecisionParkMarker("old") + "\n**Parked for a maintainer decision.**": true,
+	prose := "The remaining step needs the owner to pick the queue owner; options below."
+	for _, tc := range []struct {
+		name, body, author string
+		want               bool
+	}{
+		{name: "the reporter explained it", body: prose, author: "j1mc", want: true},
+		{name: "the reporter, other case", body: prose, author: "J1MC", want: true},
+		{name: "a maintainer's remark is not the agent's explanation", body: prose, author: "castrojo", want: false},
+		{name: "a bystander's remark", body: prose, author: "someone", want: false},
+		{name: "the reporter's hive-marked notice", body: "<!-- hive:gfi superseded=true --> ~~Good first issue~~ — withdrawn", author: "j1mc", want: false},
+		{name: "the reporter's footer only", body: "thanks!", author: "j1mc", want: false},
+		{name: "the hub's own park comment, any author", body: needsDecisionParkMarker("old") + "\n**Parked for a maintainer decision.**", author: "hive[bot]", want: true},
 	} {
-		if got := parkCommentExplains(body); got != want {
-			t.Errorf("parkCommentExplains(%q) = %v, want %v", body, got, want)
+		if got := parkCommentExplains(tc.body, tc.author, "j1mc"); got != tc.want {
+			t.Errorf("%s: parkCommentExplains = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	if parkCommentExplains(prose, "", "") {
+		t.Error("no reporter known: only the hub's marker counts")
+	}
+}
+
+// A wrong-base verdict that fell back to needs-decision already got its own
+// park note (parkWrongBaseIssue); a gate park was demoted to idle and
+// released. Only a standing needs-decision verdict gets the question.
+func TestNeedsDecisionParkDue(t *testing.T) {
+	for _, tc := range []struct {
+		verdict  string
+		wrongBas bool
+		want     bool
+	}{
+		{verdict: completionVerdictNeedsDecision, want: true},
+		{verdict: completionVerdictNeedsDecision, wrongBas: true, want: false},
+		{verdict: completionVerdictIdle, want: false},
+		{verdict: completionVerdictBlocked, want: false},
+		{verdict: completionVerdictNoWorkNeeded, want: false},
+	} {
+		if got := needsDecisionParkDue(tc.verdict, tc.wrongBas); got != tc.want {
+			t.Errorf("needsDecisionParkDue(%q, %v) = %v, want %v", tc.verdict, tc.wrongBas, got, tc.want)
+		}
+	}
+	// A gate-park reason demotes the verdict before the check, so it is
+	// never due.
+	hub, _ := covK2Hub(t)
+	v, _ := hub.reclassifyGateParkVerdict("fresh-key", completionVerdictNeedsDecision, gateParkReason)
+	if needsDecisionParkDue(v, false) {
+		t.Fatalf("a released gate park must not get the question (verdict %q)", v)
 	}
 }
 
@@ -123,13 +161,17 @@ func TestNeedsDecisionParkPost(t *testing.T) {
 	}{
 		{name: "no comments: post the question", comments: nil, want: true},
 		{name: "only the hive's own good-first-issue notice (utah#1036)", comments: []map[string]any{
-			{"id": 1, "body": "<!-- hive:gfi superseded=true --> ~~Good first issue~~ — withdrawn by the hive", "created_at": after}}, want: true},
+			{"id": 1, "body": "<!-- hive:gfi superseded=true --> ~~Good first issue~~ — withdrawn by the hive", "created_at": after, "user": map[string]any{"login": "hivecommons-hive[bot]"}}}, want: true},
 		{name: "a comment from before the task does not explain this park", comments: []map[string]any{
-			{"id": 2, "body": "This looks insane, I love it! The way I have been doing this is by automating bumps.", "created_at": before}}, want: true},
+			{"id": 2, "body": "This looks insane, I love it! The way I have been doing this is by automating bumps.", "created_at": before, "user": map[string]any{"login": "j1mc"}}}, want: true},
 		{name: "the agent explained the park itself", comments: []map[string]any{
-			{"id": 3, "body": "Parking: the owner must choose who admits PRs to the merge queue. Recommended: A.", "created_at": after}}, want: false},
+			{"id": 3, "body": "Parking: the owner must choose who admits PRs to the merge queue. Recommended: A.", "created_at": after, "user": map[string]any{"login": "j1mc"}}}, want: false},
+		{name: "a maintainer commented during the task: still post", comments: []map[string]any{
+			{"id": 5, "body": "The way I have been doing this is by setting renovate bumps to automerge.", "created_at": after, "user": map[string]any{"login": "castrojo"}}}, want: true},
+		{name: "the reporter commented within the clock-skew minute", comments: []map[string]any{
+			{"id": 6, "body": "Parking: the owner must choose who admits PRs to the merge queue.", "created_at": assigned.Add(-30 * time.Second).Format(time.RFC3339), "user": map[string]any{"login": "j1mc"}}}, want: false},
 		{name: "already posted for this task", comments: []map[string]any{
-			{"id": 4, "body": needsDecisionParkMarker("t") + "\n**Parked for a maintainer decision.**", "created_at": after}}, want: false},
+			{"id": 4, "body": needsDecisionParkMarker("t") + "\n**Parked for a maintainer decision.**", "created_at": after, "user": map[string]any{"login": "hivecommons-hive[bot]"}}}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub, _ := covK2Hub(t)
@@ -152,7 +194,7 @@ func TestNeedsDecisionParkPost(t *testing.T) {
 func TestNeedsDecisionParkSkipsNonIssueTasks(t *testing.T) {
 	hub, _ := covK2Hub(t)
 	var calls int
-	hub.needsDecisionParkPoster = func(context.Context, string, int, time.Time, string) error {
+	hub.needsDecisionParkPoster = func(context.Context, string, int, time.Time, string, string) error {
 		calls++
 		return nil
 	}
@@ -210,7 +252,7 @@ func TestNeedsDecisionParkWireShape(t *testing.T) {
 		body   string
 	}
 	got := make(chan call, 2)
-	hub.needsDecisionParkPoster = func(_ context.Context, repo string, number int, since time.Time, body string) error {
+	hub.needsDecisionParkPoster = func(_ context.Context, repo string, number int, since time.Time, _ string, body string) error {
 		got <- call{repo, number, since, body}
 		return nil
 	}
@@ -245,7 +287,7 @@ func TestNeedsDecisionParkWireShape(t *testing.T) {
 	conn.WriteJSON(WSMessage{Type: "ready", Seq: 3})
 	again := readMsg(t, conn)
 	if again.Type != "task_assign" || again.Number != 77 {
-		t.Skipf("issue not re-offered in this harness (%+v); the first half is the regression", again)
+		t.Fatalf("issue must be re-offered after the cooldown, got %+v", again)
 	}
 	conn.WriteJSON(WSMessage{
 		Type: "task_complete", TaskID: again.TaskID, Result: "completed",
@@ -256,6 +298,71 @@ func TestNeedsDecisionParkWireShape(t *testing.T) {
 	select {
 	case c := <-got:
 		t.Fatalf("a released gate park must not get a park comment: %+v", c)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A wrong_base verdict with no valid target falls back to needs-decision and
+// parkWrongBaseIssue posts its own note; the hub's park question must not be
+// posted next to it (adjudicator-3 on #16837).
+func TestNeedsDecisionParkNotForWrongBaseFallback(t *testing.T) {
+	s, ts := setupWSTest(t)
+	defer ts.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/contribute/register", strings.NewReader(`{"github_username":"dev"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+	var reg map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &reg); err != nil {
+		t.Fatalf("register response: %v", err)
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(ts), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	readMsg(t, conn)
+	conn.WriteJSON(WSMessage{Type: "auth_response", RegistrationToken: reg["registration_token"], CLIBackend: "pi"})
+	readMsg(t, conn)
+
+	s.statusMu.Lock()
+	s.status = &StatusPayload{Repos: []FrontendRepo{{
+		Name: "widgets", Full: "acme/widgets",
+		ActionableIssues: []any{noWorkIssue(77, "Backport the fix to the release branch", time.Now().Add(-24*time.Hour))},
+	}}}
+	s.statusMu.Unlock()
+
+	hub := s.contributeHub
+	parked := make(chan struct{}, 1)
+	hub.wrongBaseParker = func(context.Context, string, int, string, string, string) error {
+		parked <- struct{}{}
+		return nil
+	}
+	posted := make(chan string, 1)
+	hub.needsDecisionParkPoster = func(_ context.Context, _ string, _ int, _ time.Time, _ string, body string) error {
+		posted <- body
+		return nil
+	}
+
+	conn.WriteJSON(WSMessage{Type: "ready", Seq: 2})
+	assign := readMsg(t, conn)
+	if assign.Type != "task_assign" || assign.Number != 77 {
+		t.Fatalf("expected task_assign for #77, got %+v", assign)
+	}
+	conn.WriteJSON(WSMessage{
+		Type: "task_complete", TaskID: assign.TaskID, Result: "completed",
+		CompletionSignal: completionSignalVerdict,
+		Verdict:          completionVerdictWrongBase, VerdictTargetBranch: "",
+		VerdictReason: "the fix belongs on a release branch",
+	})
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wrong-base fallback must park through its own path")
+	}
+	select {
+	case body := <-posted:
+		t.Fatalf("a wrong-base fallback park must not also get the hub's question:\n%s", body)
 	case <-time.After(300 * time.Millisecond):
 	}
 }

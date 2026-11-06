@@ -46,17 +46,30 @@ func sanitizeParkTaskID(id string) string {
 const parkExplanationMinLen = 40
 
 // parkCommentExplains reports whether a comment posted after the task was
-// assigned already says why the issue is parked: any non-trivial comment
-// that is not one of the hive's own marked notices (a good-first-issue
-// withdrawal, a claim, an un-park notice), and the hub's own park comment.
-func parkCommentExplains(body string) bool {
+// assigned already says why the issue is parked: the hub's own park comment,
+// or a non-trivial comment by the reporting contributor that is not one of
+// the hive's marked notices. A maintainer's or a bystander's remark in the
+// task window does not explain the agent's park, so it never suppresses the
+// question.
+func parkCommentExplains(body, author, reporter string) bool {
 	if strings.Contains(body, needsDecisionParkMarkerPrefix) {
 		return true
+	}
+	reporter = strings.TrimPrefix(strings.TrimSpace(reporter), "@")
+	if reporter == "" || !strings.EqualFold(strings.TrimSpace(author), reporter) {
+		return false
 	}
 	if strings.Contains(body, "<!-- hive:") {
 		return false
 	}
 	return len(strings.TrimSpace(body)) >= parkExplanationMinLen
+}
+
+// needsDecisionParkDue reports whether a completion's final verdict gets the
+// hub's park question: a needs-decision verdict that stands, except one that
+// fell back from wrong_base, whose park parkWrongBaseIssue already explains.
+func needsDecisionParkDue(verdict string, wrongBaseParked bool) bool {
+	return verdict == completionVerdictNeedsDecision && !wrongBaseParked
 }
 
 // recommendationLabelRE is a leading "Recommended:" / "Recommendation —" label.
@@ -114,15 +127,15 @@ func (h *ContributeWSHub) postNeedsDecisionPark(task *WSTaskAssign, taskID, repo
 	ctx, cancel := context.WithTimeout(context.Background(), needsDecisionParkTimeout)
 	defer cancel()
 	body := needsDecisionParkComment(taskID, reporter, reason, h.configuredNeedsDecisionLabel())
-	if err := h.needsDecisionParkPost(ctx, task.Repo, task.Number, assignedAt, body); err != nil {
+	if err := h.needsDecisionParkPost(ctx, task.Repo, task.Number, assignedAt, reporter, body); err != nil {
 		h.logger.Warn("[contribute-ws] needs-decision park: could not post the question",
 			"repo", task.Repo, "number", task.Number, "reporter", reporter, "error", err)
 	}
 }
 
-func (h *ContributeWSHub) needsDecisionParkPost(ctx context.Context, repo string, number int, since time.Time, body string) error {
+func (h *ContributeWSHub) needsDecisionParkPost(ctx context.Context, repo string, number int, since time.Time, reporter, body string) error {
 	if h.needsDecisionParkPoster != nil {
-		return h.needsDecisionParkPoster(ctx, repo, number, since, body)
+		return h.needsDecisionParkPoster(ctx, repo, number, since, reporter, body)
 	}
 	if h.server == nil || h.server.deps == nil || h.server.deps.GHClient == nil {
 		return ghpkg.ErrNoGitHubClient
@@ -132,18 +145,23 @@ func (h *ContributeWSHub) needsDecisionParkPost(ctx context.Context, repo string
 	if !ok {
 		return fmt.Errorf("repo %q is not owner/name", repo)
 	}
-	opts := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	// A minute of slack for clock skew between the hub and GitHub, applied
+	// to the listing and the filter alike.
+	from := time.Time{}
 	if !since.IsZero() {
-		at := since.Add(-time.Minute)
-		opts.Since = &at
+		from = since.Add(-time.Minute)
+	}
+	opts := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	if !from.IsZero() {
+		opts.Since = &from
 	}
 	comments, _, err := client.GoGitHub().Issues.ListComments(ctx, owner, name, number, opts)
 	if err != nil {
 		return err
 	}
 	for _, c := range comments {
-		if since.IsZero() || !c.GetCreatedAt().Time.Before(since) {
-			if parkCommentExplains(c.GetBody()) {
+		if from.IsZero() || !c.GetCreatedAt().Time.Before(from) {
+			if parkCommentExplains(c.GetBody(), c.GetUser().GetLogin(), reporter) {
 				return nil
 			}
 		}

@@ -1216,7 +1216,7 @@ type ContributeWSHub struct {
 	// needsDecisionParkPoster is the seam for posting the question a
 	// needs-decision park was left without (contribute_needs_decision_park.go);
 	// nil means use GHClient.
-	needsDecisionParkPoster func(ctx context.Context, repo string, number int, since time.Time, body string) error
+	needsDecisionParkPoster func(ctx context.Context, repo string, number int, since time.Time, reporter, body string) error
 	// verdictBlockerRecorder is the seam for recording the blocker a blocked
 	// verdict names (contribute_verdict_blocker.go); nil means use GHClient.
 	// verdictBlockersRecorded dedupes re-delivered verdicts per task.
@@ -4485,10 +4485,12 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			verdict := normalizeCompletionVerdict(msg.Verdict, msg.VerdictBlocked, msg.VerdictNeedsDecision, verifiedPR)
 			verdictReason := strings.TrimSpace(msg.VerdictReason)
 			wrongBaseTarget := ""
+			wrongBaseParked := false
 			if verdict == completionVerdictWrongBase {
 				resolved, target, reason, park := h.resolveWrongBaseVerdict(
 					completedTask, verdict, msg.VerdictTargetBranch)
 				verdict, wrongBaseTarget, verdictReason = resolved, target, reason
+				wrongBaseParked = park
 				if park && completedTask != nil {
 					taskCopy := *completedTask
 					go h.parkWrongBaseIssue(&taskCopy, s.contributor.profile.GitHubUsername,
@@ -4538,8 +4540,9 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			}
 			// A needs-decision verdict that stands parks the issue at 045 with
 			// the relay's label alone; the hub posts the question when the
-			// agent left none (contribute_needs_decision_park.go).
-			if verdict == completionVerdictNeedsDecision && completedTask != nil {
+			// agent left none (contribute_needs_decision_park.go). A wrong-base
+			// park already got its own note from parkWrongBaseIssue.
+			if needsDecisionParkDue(verdict, wrongBaseParked) && completedTask != nil {
 				taskCopy := *completedTask
 				go h.postNeedsDecisionPark(&taskCopy, msg.TaskID, s.contributor.profile.GitHubUsername, verdictReason, taskAssignedAt)
 			}
