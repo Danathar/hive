@@ -770,7 +770,8 @@ other role.
   `needs_decision`, `needs_spec`), and `reporter_trust` (`enabled`,
   `trusted_associations`, `trusted_logins`, `untrusted_require_labels`).
 - `sentinel.settings` changes Sentinel's `sensitive_paths`,
-  `disabled_behaviors`, `exempt_logins` and `trusted_authors_block`. A
+  `disabled_behaviors`, `exempt_logins`, `trusted_authors_block` and
+  `clear_counts_as_approval`. A
   repository with its own list
   (`project.repo_policies[].sentinel_sensitive_paths`) keeps it when
   `sensitive_paths` changes: the preview names those repositories and the
@@ -811,6 +812,15 @@ The preview says plainly when a change lets more through:
   off. The preview names the pull requests that would no longer be held. For
   a repository's own list it names the globs per repository, for example
   `Sentinel stops flagging Justfile, **/requirements*.txt in org/a`.
+- **Fewer human steps before a merge:** `clear_counts_as_approval` turned on.
+  A trusted merger who removes the Sentinel label is then also recorded as
+  approving that head, which answers every `requires_human` question the
+  reviewer raised on it and, like any approval, admits an outside
+  contributor's head for the hive to merge. The preview says so, and says who
+  still cannot approve this way (anyone below merger, a bot, the pull
+  request's own author). Turning it off is not widening. A hive whose build
+  does not report the setting refuses the change. See
+  [Removing the label can also approve the head](operator-reference/sweeps-and-operations.md#removing-the-label-can-also-approve-the-head).
 
 On a hive managed by a hub, the issue filter preview also says the change may
 be overwritten. If the hub's record for the hive carries an issue filter, the

@@ -78,6 +78,7 @@ The complete built-in scheduler set in v4 is:
 | `${SLA_VIOLATIONS}` | Count of actionable issues past the configured SLA. | From `ActionableResult.Issues.SLAViolations`. |
 | `${ISSUE_LIST}` | Formatted issue list for the agent's lane. | `scanner` sees all passed issues; other agents get lane-filtered issues. |
 | `${PR_LIST}` | Formatted pull-request list. | Empty/none formatting comes from the scheduler formatter. |
+| `${SENTINEL_CLEARED}` | The queue reviewer's rule for a pull request whose `${PR_LIST}` row carries `[sentinel-cleared: @login@sha]`: a trusted merger removed the sentinel alert label on that head, so the reviewer judges it normally instead of routing it for the same trust review. | Empty unless `sentinel.clear_counts_as_approval` is on; `reviewer-queue.md` places it at the end of its "always route" rule. |
 | `${AUTHORIZED_REPOS}` | Repository authorization section for the configured project repos and GitHub host. | Built by the scheduler. |
 | `${GH_AUTH}` | GitHub App/CLI authentication instructions for the agent. | Templates/policies decide whether using GitHub writes is allowed; supervisor no-GitHub policies should not rely on this fragment. |
 | `${IN_FLIGHT}` | Note listing work items withheld from `${ISSUE_LIST}` because an active session (Linear agent session) is already working them. | Empty when nothing is held. Appended after resolution when a template omits it. |

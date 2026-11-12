@@ -52,9 +52,9 @@ func (c *Engine) latestTrustedHumanReview(ctx context.Context, owner, repo strin
 // standingTrustedHumanReviews returns each trusted human's standing review:
 // the login's latest opinionated review (APPROVED / CHANGES_REQUESTED /
 // DISMISSED), kept only when the login is a person (not the App, not a bot)
-// isTrustedMerger says is configured and trusted. It reads all pages before
-// selecting, so an older approval never shadows a later change request or
-// dismissal. A read failure returns nothing.
+// the merger authorizer is configured for and trusts (trustedHumanLogin).
+// It reads all pages before selecting, so an older approval never shadows a
+// later change request or dismissal. A read failure returns nothing.
 func (c *Engine) standingTrustedHumanReviews(ctx context.Context, owner, repo string, number int) []*gh.PullRequestReview {
 	if c == nil || c.gh == nil {
 		return nil
@@ -89,12 +89,12 @@ func (c *Engine) standingTrustedHumanReviews(ctx context.Context, owner, repo st
 	}
 	c.noteStageReviews(owner, repo, number, seen)
 	var out []*gh.PullRequestReview
+	authz, app := c.mergerAuthorizer(), ""
+	if c.transport != nil {
+		app = c.transport.AppBotLogin()
+	}
 	for login, rv := range latest {
-		if c.isHiveAppReviewAuthor(rv) || strings.HasSuffix(login, "[bot]") {
-			continue
-		}
-		trusted, configured := c.isTrustedMerger(login)
-		if !configured || !trusted {
+		if !trustedHumanLogin(authz, app, login) {
 			continue
 		}
 		out = append(out, rv)

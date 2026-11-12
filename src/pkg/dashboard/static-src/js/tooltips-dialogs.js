@@ -268,6 +268,7 @@
         case 'toggleSentinelEnabled': toggleSentinelEnabled(el); break;
         case 'toggleSentinelBehavior': toggleSentinelBehavior(el); break;
         case 'toggleSentinelTrustedAuthorsBlock': toggleSentinelTrustedAuthorsBlock(el); break;
+        case 'toggleSentinelClearCountsAsApproval': toggleSentinelClearCountsAsApproval(el); break;
         case 'resetSentinelPaths': resetSentinelPaths(); break;
         case 'wsWavefrontSetEnabled': wsWavefrontSetEnabled(el); break;
         case 'toggleAgentEnabled': setAgentEnabled(el.dataset.agent, el.dataset.enabled !== 'true'); break;

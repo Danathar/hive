@@ -85,6 +85,12 @@ type SentinelSweepOptions struct {
 	// strict no-op. PRs the sentinel skips (unchanged heads, exempt authors)
 	// are not observed.
 	PatchObserver func(SentinelPatchObservation)
+	// ClearApproval, when non-nil, is sentinel.clear_counts_as_approval: the
+	// sweep hands it each removal of the alert label that a person made on
+	// the head the label was seen on, and it answers whether that removal is
+	// also the person's approval of the head (sentinel_clear_approval.go).
+	// nil, the default, leaves a removal as a Sentinel clearance only.
+	ClearApproval func(SentinelClearance) SentinelClearApproval
 }
 
 // sentinelEvaluatorForRepo is the evaluator config for one "owner/repo":
@@ -409,6 +415,7 @@ func (c *Client) SetSentinelHeadsPath(path string) {
 		return
 	}
 	c.sentinelHeads.setPath(path, c.logger)
+	c.sentinelAwaitingClear.setPath(sentinelAwaitingClearPath(path), c.logger)
 }
 
 func sentinelKey(owner, repo string, number int) string {
@@ -429,6 +436,7 @@ func (c *Client) sentinelSweepPrepared(opts SentinelSweepOptions) (string, int, 
 	if maxActions <= 0 {
 		maxActions = 20
 	}
+	c.sentinelClearApprovalPrepare(opts)
 	return label, maxActions, &SentinelSweepResult{ReposHit: map[string]int{}}, nil
 }
 
@@ -457,6 +465,7 @@ func (c *Client) SweepSentinel(ctx context.Context, opts SentinelSweepOptions) (
 				result.CachedRepos++
 				c.sweepSentinelCached(ctx, result, repo, owner, repoName, snap, label, maxActions, opts)
 				c.sentinelHeads.retain(owner, repoName, snap.PRs)
+				c.sentinelAwaitingClear.retain(owner, repoName, snap.PRs)
 				c.writebackSweepSummary(repo)
 				continue
 			}
@@ -500,7 +509,7 @@ func (c *Client) sweepSentinelCached(ctx context.Context, result *SentinelSweepR
 		}
 		item := snap.PRs[n]
 		result.Seen++
-		if !item.HasLabel(label) && c.sentinelHeads.isSeen(sentinelKey(owner, repoName, n), item.HeadSHA) {
+		if !item.HasLabel(label) && c.sentinelHeads.isSeen(sentinelKey(owner, repoName, n), item.HeadSHA) && !c.sentinelClearApprovalDue(opts, sentinelKey(owner, repoName, n), item.HeadSHA) {
 			result.Skipped++
 			continue
 		}
@@ -674,6 +683,16 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	decision := DecideSentinelAction(label, trust, opts.TrustedAuthorsBlock)
 	hasAlertLabel := prHasLabel(pr, label)
 	key := sentinelKey(owner, repo, number)
+	// With sentinel.clear_counts_as_approval on, a trusted merger's removal
+	// of the label on the head it was seen on is also their approval of it.
+	approvalNote := ""
+	if !hasAlertLabel && opts.ClearApproval != nil {
+		note, err := c.sentinelClearApproval(ctx, opts, displayRepo, owner, repo, pr, label)
+		if err != nil {
+			return SentinelSweepEvent{}, false, err
+		}
+		approvalNote = note
+	}
 	if !hasAlertLabel && c.sentinelHeads.unchanged(key, head) {
 		return SentinelSweepEvent{}, false, nil
 	}
@@ -682,6 +701,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	}
 	if hasAlertLabel && decision.Block {
 		// Already alerted on; a maintainer has not cleared it yet.
+		c.sentinelAwaitClear(opts, key, head)
 		return SentinelSweepEvent{}, false, nil
 	}
 	files, err := listPRFilesWithPatch(ctx, c.client, owner, repo, pr)
@@ -801,7 +821,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 			cleared, note = releasedBy != "", fmt.Sprintf(sentinelReleasedNote, releasedBy, label)
 		}
 		if cleared {
-			if err := c.recordSentinelClearance(ctx, owner, repo, number, note, markerBody); err != nil {
+			if err := c.recordSentinelClearance(ctx, owner, repo, number, sentinelNoteWithApproval(note, approvalNote), markerBody); err != nil {
 				return SentinelSweepEvent{}, false, err
 			}
 			return SentinelSweepEvent{}, false, nil
@@ -841,6 +861,7 @@ func (c *Client) trySentinelPR(ctx context.Context, displayRepo, owner, repo str
 	if err := writeSentinelComment(markerBody, "alert"); err != nil {
 		return SentinelSweepEvent{}, false, err
 	}
+	c.sentinelAwaitClear(opts, key, head)
 	return event, true, nil
 }
 

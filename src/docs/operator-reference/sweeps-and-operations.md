@@ -834,6 +834,7 @@ push re-arms it.
 | `sentinel.enabled` | **on** when unset | `false` disables the sweep entirely. |
 | `sentinel.label` | `sentinel-alert` | Label added to untrusted flagged PRs (created red if missing). Neutral on purpose: it means "look closely", not "malicious". This configured label is also added to Hive's hold/exclude set and blocks Hive approval plus every auto-merge lane until a human removes it. |
 | `sentinel.trusted_authors_block` | `false` | When `false`, trusted author findings are notice-only: comment, audit/dashboard record, no label, no approval/merge block. Set `true` to add the blocking label for trusted authors too. A PR the hive opens to supersede an adopted contributor PR (body line `Supersedes #N (…; original commits by @login preserved).`) is judged by the adopted PR's author, not by the App: its code is that author's, so an untrusted author's flagged head gets the label on the App's PR too. A maintainer who removed the label from the adopted PR at the same head is not asked again; any later head is judged afresh. |
+| `sentinel.clear_counts_as_approval` | `false` | When `true`, a trusted merger who removes the alert label on the head it was seen on is also recorded as approving that head. See [Removing the label can also approve the head](#removing-the-label-can-also-approve-the-head) below. |
 | `sentinel.sensitive_paths` | shipped defaults (`sentinel.DefaultSensitivePaths`) | Glob list (same syntax as `intent.guardrail_path_patterns`; `**` crosses directories) that **replaces** the defaults when set. Defaults cover OWNERS/CODEOWNERS/MAINTAINERS, SECURITY.md, GOVERNANCE.md, `.github/workflows/**`, actions, dependabot, codeql, rulesets, CI config, Makefile/Justfile, pre-commit hooks, `policies/**`, `hive.yaml*`, `gh-wrapper*`, proxy rules, Dockerfiles, `install.sh`, dependency manifests and lockfiles, release workflows, `.env*`/key material, `deploy/**`, Terraform, Helm/k8s manifests. |
 | `project.repo_policies[].sentinel_sensitive_paths` | unset = `sentinel.sensitive_paths` | One repository's own sensitive-path list. It replaces the hive-wide list for that repository's pull requests only, stricter or looser, and a change to `sentinel.sensitive_paths` does not reach it. `[]` matches nothing. Set in hive.yaml, in Settings → Security (**Sensitive files per repository**) or with the admin MCP `sentinel.settings` `repo_sensitive_paths`; clearing it returns the repository to the hive-wide list. Like any Sentinel setting, it applies to heads Sentinel evaluates after the change. |
 | `sentinel.disabled_behaviors` | empty | Rule names from the table above to switch off. Unknown names are rejected. |
@@ -846,6 +847,63 @@ the dashboard writes the owner-only `/api/config/governor/security` overlay.
 Every alert is also written to the dashboard audit log as `sentinel-alert`,
 and, when `evidence.enabled` is on, recorded under `sentinel` in the flagged
 head's [review evidence bundle](../review-evidence.md).
+
+### Removing the label can also approve the head
+
+A maintainer who reads a flagged diff and removes the alert label has made the
+trust decision. By default that only clears Sentinel: if the reviewer returned
+`requires_human` on the same head (often asking for the very trust review the
+maintainer just did), the PR still waits at `stage/085-needs-decision` for a
+separate approval.
+
+`sentinel.clear_counts_as_approval: true` (default `false`) makes the removal
+count as that person's approval of the head, when the right person makes it:
+
+- **Who.** The person who removed the label must pass the test a GitHub
+  **Approve** review must pass to answer `requires_human`: a merger or owner in
+  `dashboard.authorized_users`, not the hive App and not a bot. The PR's own
+  author never counts, nor does the author of the code on a PR the hive
+  adopted. Hive reads who removed the label from GitHub's own label event,
+  never from a comment.
+- **Which head.** The head the sweep saw the label on, and only when the label
+  came off after that head reached the repository. Hive takes that arrival
+  time from GitHub (a force-push event, or the first check suite or commit
+  status on the head); when it cannot tell, it records nothing. New commits
+  need a new decision. An approval follows the PR to a later head only where any recorded
+  approval does: over the hive's own merge of the base branch that leaves the
+  PR's diff unchanged. A Sentinel clearance that Hive merely carries to a later
+  head (flagged changes unchanged) records no approval.
+- **What is recorded.** The same approval a dashboard **Approve** or a
+  `/hive decision approve` reply records, in `review-human-change-requests.json`,
+  keyed by the label event so a second sweep or a restart never records it
+  twice. Hive adds a line to its own Sentinel comment naming who removed the
+  label, and writes a `sentinel-clear-approval` entry to the audit log.
+- **What it answers.** Everything a recorded approval of that head answers:
+  the reviewer's `requires_human` on it (whether the verdict came before or
+  after the removal), so the PR leaves 085 for that reason; and, as with any
+  approval by a trusted merger, an outside contributor's head is admitted for
+  the hive to merge once the other gates pass.
+- **What it does not change.** Anyone else's removal clears Sentinel as before
+  and approves nothing (one `INFO` log line says so). `hold` labels,
+  human-merge paths, the CI workflow-file fence (which reads Approve reviews
+  and `/hive decision approve`, not this record), required checks, and the
+  self-merge sweep's own review-verdict hold on hive-authored PRs are all
+  untouched.
+
+The trade-off is that removing the label approves the head for every question
+the reviewer raised, not only Sentinel's. Leave it off if your maintainers
+remove the label to mean "the flagged files are fine" and nothing more.
+
+Hive notices a removal on its next Sentinel sweep (within 15 minutes). The
+setting must be on while the label is on the PR: a label removed while it was
+off is not turned into an approval later. With it on, the queue reviewer's PR
+list marks such a head `[sentinel-cleared: @login@sha]` and its policy tells it
+to review that head normally instead of routing it for the same trust review
+(`${SENTINEL_CLEARED}` in `reviewer-queue.md`), and the 085 comment says that
+removing the label also approves the head. Set it in hive.yaml, in
+**Settings → Security → Suspicious Activity**, or with the admin MCP
+`sentinel.settings` operation, whose preview discloses turning it on as a
+widening.
 
 On the dashboard's Projects cards, every open PR that carries the configured
 sentinel label is drawn as a red pill (status chip and main pill), taking

@@ -33,6 +33,11 @@ const (
 	// stage/072-returned-to-contributor — while the hive had it parked for
 	// a person (hivecommons/hive#15159). SourceID is the label event.
 	HumanChangeRequestSourceStageLabel = "stage-label"
+	// HumanChangeRequestSourceSentinelClear is a trusted merger removing the
+	// sentinel alert label from the head the hive alerted on, on a hive with
+	// sentinel.clear_counts_as_approval on. It is always an approval
+	// (HumanChangeRequestKindApprove); SourceID is the label event.
+	HumanChangeRequestSourceSentinelClear = "sentinel-clear"
 )
 
 // Kinds of a HumanChangeRequest.
@@ -60,7 +65,8 @@ type HumanChangeRequest struct {
 	HeadSHA string `json:"head_sha"`
 	// BodyDigest binds dashboard approval replay to the validated title/body.
 	BodyDigest string `json:"body_digest,omitempty"`
-	// Source is HumanChangeRequestSourceReview, ...Decision or ...StageLabel.
+	// Source is HumanChangeRequestSourceReview, ...Decision, ...StageLabel
+	// or ...SentinelClear.
 	Source string `json:"source"`
 	// SourceID is the review ID or comment ID: with HeadSHA it is the
 	// dedupe key, so the same review is never recorded (or kicked) twice.

@@ -113,6 +113,11 @@ type Evidence struct {
 	DCO       DCOState
 	// Sentinel is true when the sentinel alert label is on the PR.
 	Sentinel bool
+	// SentinelClearApproves is true when the hive counts a trusted merger's
+	// removal of that label as their approval of the head
+	// (sentinel.clear_counts_as_approval). The caller sets it; nothing here
+	// reads config.
+	SentinelClearApproves bool
 	// Conflict is true when the head does not merge cleanly (lane reason,
 	// needs-rebase label).
 	Conflict bool
@@ -336,6 +341,9 @@ type Route struct {
 	Verdict      VerdictState
 	Holds        []string
 	Sentinel     bool
+	// SentinelClearApproves is Evidence.SentinelClearApproves while the
+	// sentinel alert is open.
+	SentinelClearApproves bool
 	// ApprovalReleasesFence is Evidence.ApprovalReleasesFence: the
 	// manual-merge reason is a workflow-path fence an approval releases.
 	ApprovalReleasesFence bool
@@ -674,7 +682,7 @@ func routeProgress(e Evidence) Route {
 	}
 	if len(decide) > 0 {
 		return Route{Stage: NeedsDecision, Reasons: decide, Summary: summary, Head: e.Head, SelfAuthored: e.SelfAuthored, Verdict: e.Verdict,
-			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, ManualMerge: e.ManualMerge, ApprovalReleasesFence: e.ManualMerge && e.ApprovalReleasesFence, HumanApprover: approver, Hold: e.Hold}
+			Holds: append([]string(nil), e.Holds...), Sentinel: e.Sentinel, SentinelClearApproves: e.Sentinel && e.SentinelClearApproves, ManualMerge: e.ManualMerge, ApprovalReleasesFence: e.ManualMerge && e.ApprovalReleasesFence, HumanApprover: approver, Hold: e.Hold}
 	}
 	if e.HeadDirty {
 		// GitHub reports this very head `dirty`: it cannot merge, by the
@@ -1098,6 +1106,9 @@ func DecisionActions(r Route) string {
 	if r.Sentinel {
 		steps = append(steps, "resolve the sentinel alert and have a maintainer clear its label")
 	}
+	if r.Sentinel && r.SentinelClearApproves {
+		steps = append(steps, sentinelClearApprovesStep(head))
+	}
 	for _, h := range r.Holds {
 		if h == "hold" && r.Hold.SelfImposed() {
 			steps = append(steps, selfImposedHoldStep(r.Hold))
@@ -1117,6 +1128,13 @@ func DecisionActions(r Route) string {
 		b.WriteString("\n- " + s + ".")
 	}
 	return b.String()
+}
+
+// sentinelClearApprovesStep is the sentence the 085 comment adds under the
+// sentinel step on a hive with sentinel.clear_counts_as_approval on; head is
+// the short head SHA, already in backticks.
+func sentinelClearApprovesStep(head string) string {
+	return "on this hive a trusted merger who removes the sentinel label also approves this head (" + head + "): the removal answers the reviewer's `requires_human` on it, so no separate approval is needed"
 }
 
 // selfImposedHoldStep is the release step for a `hold` the hive set itself,

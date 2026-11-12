@@ -487,6 +487,7 @@ func TestPlatformSettingsRenderEveryKey(t *testing.T) {
 		{"renderGovSecurity", "intent.alignment_model", `securityModelInput('intentAlignmentModel'`},
 		{"renderGovSecurity", "sentinel.max_actions", `data-change-action="gh82"`},
 		{"renderGovSecurity", "sentinel.trusted_authors_block", `data-action="toggleSentinelTrustedAuthorsBlock"`},
+		{"renderGovSecurity", "sentinel.clear_counts_as_approval", `data-action="toggleSentinelClearCountsAsApproval"`},
 	} {
 		body := extractJSFunction(t, html, c.fn)
 		if !strings.Contains(body, "yamlHint('"+c.yaml+"')") {

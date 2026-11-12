@@ -151,6 +151,11 @@
       const isOn = el.classList.toggle('on');
       markSentinelDirty('trustedAuthorsBlock', isOn);
     }
+    function toggleSentinelClearCountsAsApproval(el) {
+      if (!el || el.classList.contains('disabled')) return;
+      const isOn = el.classList.toggle('on');
+      markSentinelDirty('clearCountsAsApproval', isOn);
+    }
     function resetSentinelPaths() {
       const sn = sentinelState();
       sn.sensitivePaths = (sn.defaultSensitivePaths || []).slice();

@@ -1278,7 +1278,15 @@ A PR merges through this tier only when all of the following hold:
   sweep, which reads only stage-labelled PRs (hivecommons/hive#16121).
 - Sentinel has no blocking finding (`contributor-lane:sentinel-blocked`), the
   reporter-trust gate has not held the PR (`contributor-lane:reporter-trust-hold`),
-  and no reviewer has an outstanding `CHANGES_REQUESTED`.
+  and no reviewer has an outstanding `CHANGES_REQUESTED`. On a hive with
+  `sentinel.clear_counts_as_approval` on (default off), a trusted merger who
+  removes the Sentinel label on the head it was raised on is also recorded as
+  approving that head, so the removal answers a `requires_human` verdict on
+  it in the gate above and no second approval is asked for. The label event
+  must be that person's own (not a bot's, not the PR author's), and the
+  approval is for that head only. It does not release the workflow-path
+  fence or any hold. See
+  [Removing the label can also approve the head](operator-reference/sweeps-and-operations.md#removing-the-label-can-also-approve-the-head).
 - No excluded label (`hold`, `do-not-merge*`, `needs-human`, `blocked`,
   `needs-rebase` by default), not draft, mergeable, no human-merge path.
 - The head SHA has stayed green for `soak_minutes` (`0`/unset = default 30;

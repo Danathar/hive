@@ -98,6 +98,7 @@ type sentinelLabelHistory struct {
 	lastKind      string
 	lastActor     *gh.User
 	lastAt        time.Time
+	lastID        int64
 	forcePushedAt time.Time
 }
 
@@ -125,6 +126,7 @@ func (c *Client) sentinelLabelHistory(ctx context.Context, owner, repo string, n
 				h.lastKind = strings.ToLower(ev.GetEvent())
 				h.lastActor = ev.GetActor()
 				h.lastAt = at
+				h.lastID = ev.GetID()
 			case "head_ref_force_pushed":
 				if !strings.EqualFold(strings.TrimSpace(ev.GetCommitID()), head) {
 					continue
@@ -176,26 +178,34 @@ const sentinelReleasedNote = "_@%s approved this head from the Hive dashboard, s
 // head. Without any of those nothing is cleared: not knowing is never a
 // clearance.
 func (c *Client) sentinelClearedAfterLatestPush(ctx context.Context, owner, repo string, number int, head, label string) (bool, string, error) {
+	_, actor, cleared, err := c.sentinelRemovalAfterLatestPush(ctx, owner, repo, number, head, label)
+	return cleared, actor, err
+}
+
+// sentinelRemovalAfterLatestPush is sentinelClearedAfterLatestPush plus the
+// label event it accepted, for the caller that records who made it
+// (sentinel_clear_approval.go).
+func (c *Client) sentinelRemovalAfterLatestPush(ctx context.Context, owner, repo string, number int, head, label string) (sentinelLabelHistory, string, bool, error) {
 	h, err := c.sentinelLabelHistory(ctx, owner, repo, number, head, label)
 	if err != nil {
-		return false, "", err
+		return sentinelLabelHistory{}, "", false, err
 	}
 	actor, ok := c.humanRemoval(h)
 	if !ok {
-		return false, "", nil
+		return h, "", false, nil
 	}
 	pushedAt := h.forcePushedAt
 	if pushedAt.IsZero() {
 		arrived, err := c.sentinelHeadArrivedAt(ctx, owner, repo, head)
 		if err != nil {
-			return false, "", err
+			return sentinelLabelHistory{}, "", false, err
 		}
 		pushedAt = arrived
 	}
 	if pushedAt.IsZero() || !h.lastAt.After(pushedAt) {
-		return false, "", nil
+		return h, "", false, nil
 	}
-	return true, actor, nil
+	return h, actor, true, nil
 }
 
 // sentinelClearanceCarriesOver reports whether a maintainer's clearance of an

@@ -843,6 +843,11 @@ type sentinelState struct {
 	DisabledBehaviors     []string `json:"disabled_behaviors"`
 	ExemptLogins          []string `json:"exempt_logins"`
 	TrustedAuthorsBlock   bool     `json:"trusted_authors_block"`
+	// ClearCountsAsApproval is sentinel.clear_counts_as_approval;
+	// clearApprovalKnown is whether the hive reports the setting at all (a
+	// build without it cannot be asked to change it).
+	ClearCountsAsApproval bool `json:"clear_counts_as_approval"`
+	clearApprovalKnown    bool
 	// RepoOverrides are the repositories whose own list
 	// (repo_policies[].sentinel_sensitive_paths) replaces sensitive_paths. A
 	// change to sensitive_paths does not reach them, and an override added,
@@ -918,6 +923,7 @@ func readSentinelState(ctx context.Context, provider Provider) (sentinelState, e
 	if st.TrustedAuthorsBlock, ok = boolField(sc, "trustedAuthorsBlock"); !ok {
 		return st, missingSetting(what, "security.sentinel.trustedAuthorsBlock")
 	}
+	st.ClearCountsAsApproval, st.clearApprovalKnown = boolField(sc, "clearCountsAsApproval")
 	behaviors, ok := sc["behaviors"].([]any)
 	if !ok {
 		return st, missingSetting(what, "security.sentinel.behaviors")
@@ -958,16 +964,17 @@ func sentinelBehaviorDescriptions() (map[string]string, []string) {
 
 func (sentinelSettingsOp) Name() string { return WriteOpSentinelSettings }
 func (sentinelSettingsOp) Description() string {
-	return "Change Sentinel's sensitive_paths, disabled_behaviors, exempt_logins and trusted_authors_block through PUT /api/config/governor/security, the endpoint Settings → Security saves through. Each list takes {add, remove, clear}: the preview reads the current lists, shows each before → after and sends the merged list, and write_confirm is refused if the settings changed since the preview. A change that flags fewer pull requests is disclosed as widening and names which pull requests would no longer be held. A repository with its own list (project.repo_policies[].sentinel_sensitive_paths) keeps it when sensitive_paths changes: the preview names those repositories and what their lists leave out. repo_sensitive_paths sets or clears one repository's own list: {\"owner/repo\": [every glob for it]}, [] to flag nothing by path there, or null to use the hive-wide list again; only the named repositories change, and a list that flags fewer paths in a repository is disclosed as widening. Owner only: the endpoint refuses any other role. It removes no label from any pull request."
+	return "Change Sentinel's sensitive_paths, disabled_behaviors, exempt_logins, trusted_authors_block and clear_counts_as_approval through PUT /api/config/governor/security, the endpoint Settings → Security saves through. Each list takes {add, remove, clear}: the preview reads the current lists, shows each before → after and sends the merged list, and write_confirm is refused if the settings changed since the preview. A change that flags fewer pull requests is disclosed as widening and names which pull requests would no longer be held. A repository with its own list (project.repo_policies[].sentinel_sensitive_paths) keeps it when sensitive_paths changes: the preview names those repositories and what their lists leave out. repo_sensitive_paths sets or clears one repository's own list: {\"owner/repo\": [every glob for it]}, [] to flag nothing by path there, or null to use the hive-wide list again; only the named repositories change, and a list that flags fewer paths in a repository is disclosed as widening. clear_counts_as_approval (default off) makes a trusted merger's removal of the alert label also their approval of that head; turning it on is disclosed as widening, because one human step replaces two. Owner only: the endpoint refuses any other role. It removes no label from any pull request."
 }
 func (sentinelSettingsOp) InputSchema() map[string]any {
 	_, names := sentinelBehaviorDescriptions()
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"sensitive_paths":       listChangeSchema("Glob patterns whose change always raises the sensitive_path finding. An emptied list goes back to the shipped defaults; to stop path checks, disable the sensitive_path behavior instead."),
-		"disabled_behaviors":    listChangeSchema("Sentinel rules switched off (add disables a rule, remove turns it back on). Known rules: " + strings.Join(names, ", ") + "."),
-		"exempt_logins":         listChangeSchema("Pull request authors Sentinel never flags (exact login, case-insensitive)."),
-		"trusted_authors_block": map[string]any{"type": "boolean", "description": "Whether a finding on a trusted author's pull request (the Hive App, configured trusted bots, authorized owners) gets the blocking label; off posts an informational notice only."},
-		"repo_sensitive_paths":  sentinelRepoPathsSchema(),
+		"sensitive_paths":          listChangeSchema("Glob patterns whose change always raises the sensitive_path finding. An emptied list goes back to the shipped defaults; to stop path checks, disable the sensitive_path behavior instead."),
+		"disabled_behaviors":       listChangeSchema("Sentinel rules switched off (add disables a rule, remove turns it back on). Known rules: " + strings.Join(names, ", ") + "."),
+		"exempt_logins":            listChangeSchema("Pull request authors Sentinel never flags (exact login, case-insensitive)."),
+		"trusted_authors_block":    map[string]any{"type": "boolean", "description": "Whether a finding on a trusted author's pull request (the Hive App, configured trusted bots, authorized owners) gets the blocking label; off posts an informational notice only."},
+		"clear_counts_as_approval": map[string]any{"type": "boolean", "description": "Whether a trusted merger who removes the alert label on the head it was raised on is also recorded as approving that head (default off). On is a widening: one human step where there were two, and the approval covers every question the reviewer raised, not only Sentinel's."},
+		"repo_sensitive_paths":     sentinelRepoPathsSchema(),
 	}, "additionalProperties": false}
 }
 
@@ -991,6 +998,8 @@ type sentinelRequest struct {
 	paths, behaviors, exempt          listChange
 	hasPaths, hasBehaviors, hasExempt bool
 	block                             *bool
+	// clearApproval is clear_counts_as_approval when given.
+	clearApproval *bool
 	// repoPaths are the per-repository lists to set (nil value: clear).
 	repoPaths map[string]*[]string
 }
@@ -998,7 +1007,7 @@ type sentinelRequest struct {
 func parseSentinelArgs(args map[string]any) (sentinelRequest, error) {
 	const where = "sentinel.settings"
 	var req sentinelRequest
-	if err := rejectUnknownKeys(args, where, "sensitive_paths", "disabled_behaviors", "exempt_logins", "trusted_authors_block", "repo_sensitive_paths"); err != nil {
+	if err := rejectUnknownKeys(args, where, "sensitive_paths", "disabled_behaviors", "exempt_logins", "trusted_authors_block", "clear_counts_as_approval", "repo_sensitive_paths"); err != nil {
 		return req, err
 	}
 	var err error
@@ -1018,11 +1027,18 @@ func parseSentinelArgs(args map[string]any) (sentinelRequest, error) {
 		}
 		req.block = &b
 	}
+	if raw, present := args["clear_counts_as_approval"]; present && raw != nil {
+		b, ok := raw.(bool)
+		if !ok {
+			return req, fmt.Errorf("%s.clear_counts_as_approval must be true or false", where)
+		}
+		req.clearApproval = &b
+	}
 	if req.repoPaths, err = parseSentinelRepoPathsArg(args, where); err != nil {
 		return req, err
 	}
-	if !req.hasPaths && !req.hasBehaviors && !req.hasExempt && req.block == nil && req.repoPaths == nil {
-		return req, fmt.Errorf("give at least one of sensitive_paths, disabled_behaviors, exempt_logins, trusted_authors_block or repo_sensitive_paths")
+	if !req.hasPaths && !req.hasBehaviors && !req.hasExempt && req.block == nil && req.clearApproval == nil && req.repoPaths == nil {
+		return req, fmt.Errorf("give at least one of sensitive_paths, disabled_behaviors, exempt_logins, trusted_authors_block, clear_counts_as_approval or repo_sensitive_paths")
 	}
 	if req.hasBehaviors {
 		descriptions, names := sentinelBehaviorDescriptions()
@@ -1124,6 +1140,16 @@ func (sentinelSettingsOp) PreviewWithProvider(ctx context.Context, args map[stri
 			changes = append(changes, settingChange{Field: "sentinel.trusted_authors_block", Before: before.TrustedAuthorsBlock, After: *block})
 		}
 	}
+	if req.clearApproval != nil {
+		if !before.clearApprovalKnown {
+			return WritePreview{}, fmt.Errorf("sentinel.settings: this hive's build does not report sentinel.clear_counts_as_approval, so it cannot be changed here; upgrade the hive first")
+		}
+		sentinelBody["clearCountsAsApproval"] = *req.clearApproval
+		after.ClearCountsAsApproval = *req.clearApproval
+		if before.ClearCountsAsApproval != *req.clearApproval {
+			changes = append(changes, settingChange{Field: "sentinel.clear_counts_as_approval", Before: before.ClearCountsAsApproval, After: *req.clearApproval})
+		}
+	}
 	if len(changes) == 0 {
 		return WritePreview{}, fmt.Errorf("sentinel.settings changes nothing: Sentinel already reads that way")
 	}
@@ -1148,7 +1174,7 @@ func (sentinelSettingsOp) PreviewWithProvider(ctx context.Context, args map[stri
 		Target:              "sentinel",
 		Request:             WriteRequest{Method: http.MethodPut, Path: "/api/config/governor/security", Body: map[string]any{"sentinel": sentinelBody}},
 		Effects:             effects,
-		WideningDisclosure:  sentinelDisclosure(before, after, descriptions),
+		WideningDisclosure:  sentinelClearApprovalDisclosure(sentinelDisclosure(before, after, descriptions), before, after),
 		ConfirmationMessage: "Confirm changing Sentinel settings: " + strings.Join(fields, ", ") + ".",
 		Details:             map[string]any{"changes": changeDetails(changes)},
 		StateFingerprint:    fingerprint,
@@ -1202,6 +1228,22 @@ func sentinelDisclosure(before, after sentinelState, descriptions map[string]str
 		return "Widening: fewer pull requests flagged by Sentinel, which narrows its protection. " + capitalize(strings.Join(fewer, "; ")) + ". The " + before.label + " label holds a pull request from Hive approval and every auto-merge lane until a maintainer removes it, so these pull requests would no longer be held for a maintainer." + moreNote
 	}
 	return "No widening: Sentinel flags every pull request it flags today." + moreNote
+}
+
+// sentinelClearApprovalDisclosure adds, to the flagged-pull-request
+// disclosure, what a flip of sentinel.clear_counts_as_approval changes.
+// Turning it on widens what a label removal does, which the disclosure above
+// does not cover, so it leads the text and makes the whole preview a
+// widening; turning it off is noted after it. Unchanged returns disclosure
+// as it was.
+func sentinelClearApprovalDisclosure(disclosure string, before, after sentinelState) string {
+	switch {
+	case !before.ClearCountsAsApproval && after.ClearCountsAsApproval:
+		return "Widening: fewer human steps before a merge. With sentinel.clear_counts_as_approval on, a trusted merger (a merger or owner in dashboard.authorized_users) who removes the " + before.label + " label on the head it was raised on is also recorded as approving that head, the same record a dashboard Approve writes. That approval answers every question the reviewer raised on the head (any requires_human verdict, not only one about Sentinel's finding) and, like any approval, admits an outside contributor's head for the hive to merge once the other gates pass. A removal by anyone else, by a bot or by the pull request's own author still approves nothing, and new commits need a new decision. What Sentinel flags: " + disclosure
+	case before.ClearCountsAsApproval && !after.ClearCountsAsApproval:
+		return disclosure + " Also: with sentinel.clear_counts_as_approval off, removing the " + before.label + " label only clears Sentinel again, and a requires_human verdict on that head waits for a separate approval. Approvals already recorded from earlier removals stand."
+	}
+	return disclosure
 }
 
 // sentinelRepoOverrideStanding names, for each repository with its own

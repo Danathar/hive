@@ -576,6 +576,7 @@ func (c *Engine) humanEvidence(ctx context.Context, tracker *StageTracker, key s
 		sentinel = defaultSentinelLabel
 	}
 	e.Sentinel = hasLabelFold(obs.Labels, sentinel)
+	e.SentinelClearApproves = e.Sentinel && c.sentinelClearCountsAsApproval()
 	summary, known := c.headChecks(ctx, tracker, key, obs, now)
 	e.Checks = stagelabels.CheckSummary{Total: summary.Total, Green: summary.Green, Pending: summary.Pending, Red: summary.Red, Missing: summary.MissingRequired, Known: known}
 	if c.hiveSupersedingPR(obs) {

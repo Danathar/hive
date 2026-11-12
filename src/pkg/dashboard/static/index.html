@@ -53182,6 +53182,7 @@ function burnAreaChart() {
         case 'toggleSentinelEnabled': toggleSentinelEnabled(el); break;
         case 'toggleSentinelBehavior': toggleSentinelBehavior(el); break;
         case 'toggleSentinelTrustedAuthorsBlock': toggleSentinelTrustedAuthorsBlock(el); break;
+        case 'toggleSentinelClearCountsAsApproval': toggleSentinelClearCountsAsApproval(el); break;
         case 'resetSentinelPaths': resetSentinelPaths(); break;
         case 'wsWavefrontSetEnabled': wsWavefrontSetEnabled(el); break;
         case 'toggleAgentEnabled': setAgentEnabled(el.dataset.agent, el.dataset.enabled !== 'true'); break;
@@ -70861,6 +70862,10 @@ function burnAreaChart() {
           <div class="config-toggle-switch ${sn.trustedAuthorsBlock ? 'on' : ''} ${sn.enabled ? '' : 'disabled'}" data-action="toggleSentinelTrustedAuthorsBlock"></div>
           <span class="config-toggle-label">Block trusted authors ${yamlHint('sentinel.trusted_authors_block')} ${settingHelpMark('operator-reference/sweeps-and-operations', 'suspicious-activity-alerts-sentinel', 'Block trusted authors', `Default off: Hive App PRs, owner-authored PRs and allow-listed bot PRs still get a Sentinel notice and audit record, but Hive does not add the alert label or block merge. Turn on to add the label for trusted authors too.`)}</span>
         </div>
+        <div class="config-toggle">
+          <div class="config-toggle-switch ${sn.clearCountsAsApproval ? 'on' : ''} ${sn.enabled ? '' : 'disabled'}" data-action="toggleSentinelClearCountsAsApproval"></div>
+          <span class="config-toggle-label">Removing the alert label approves the head ${yamlHint('sentinel.clear_counts_as_approval')} ${settingHelpMark('operator-reference/sweeps-and-operations', 'suspicious-activity-alerts-sentinel', 'Removing the alert label approves the head', `Default off: removing the alert label only clears Sentinel, and a reviewer verdict of requires_human on that head still waits for a separate approval. Turn on and a trusted merger (a merger or owner in Manage Access) who removes the label on the head it was raised on is also recorded as approving that head, as if they had pressed Approve here. The trade-off: removing the label approves the head for every question the reviewer raised, not only Sentinel's, and like any approval it admits an outside contributor's head for the hive to merge once the other gates pass. A removal by anyone else, by a bot or by the PR's own author approves nothing. The approval is for that head only; new commits need a new decision. Hive names who removed the label on its Sentinel comment and in the audit log.`)}</span>
+        </div>
         <div class="config-field-row">
           <div class="config-field"><label>Alert label</label><input type="text" value="${esc(sn.label || 'sentinel-alert')}" placeholder="sentinel-alert" data-change-action="gh81" ${sn.enabled ? '' : 'disabled'}></div>
           <div class="config-field"><label>Max alerts per sweep ${yamlHint('sentinel.max_actions')} ${settingHelpMark('operator-reference/sweeps-and-operations', 'suspicious-activity-alerts-sentinel', 'Max alerts per sweep', `Caps label+comment actions per pass so a flood of PRs cannot spam a repo.`)}</label><input type="number" min="1" max="500" value="${Number(sn.maxActions) || 20}" data-change-action="gh82" ${sn.enabled ? '' : 'disabled'}></div>
@@ -74883,6 +74888,11 @@ function burnAreaChart() {
       if (!el || el.classList.contains('disabled')) return;
       const isOn = el.classList.toggle('on');
       markSentinelDirty('trustedAuthorsBlock', isOn);
+    }
+    function toggleSentinelClearCountsAsApproval(el) {
+      if (!el || el.classList.contains('disabled')) return;
+      const isOn = el.classList.toggle('on');
+      markSentinelDirty('clearCountsAsApproval', isOn);
     }
     function resetSentinelPaths() {
       const sn = sentinelState();

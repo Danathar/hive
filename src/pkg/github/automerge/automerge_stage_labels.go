@@ -123,6 +123,11 @@ type StageLabelPolicy struct {
 	// on_merge leaves it open until the copy merges. Human-authored
 	// originals always take the gated path.
 	AdoptCloseSuperseded string
+	// SentinelClearApproves is the live sentinel.clear_counts_as_approval
+	// switch. Here it only words the 085 comment's sentinel step; the
+	// approval itself is recorded by the sentinel sweep
+	// (RecordSentinelClearApproval).
+	SentinelClearApproves bool
 	// DCORequired resolves the per-repo `governor.labels.stage.dco.required`
 	// override for "owner/repo" (stageRepoFullName, never the display name);
 	// ok false means "detect" (a DCO context in the branch's required checks

@@ -454,6 +454,7 @@ func (s *Scheduler) substituteTemplate(template string, actionable *github.Actio
 		"ISSUE_LIST":            lit(issueList),
 		"PR_LIST":               lit(prList),
 		"REVIEW_PERSPECTIVES":   lit(s.reviewPerspectivesSection()),
+		"SENTINEL_CLEARED":      lit(s.sentinelClearedPolicyText()),
 		"AUTHORIZED_REPOS":      lit(s.buildReposSectionFor(agentName)),
 		"GH_AUTH":               lit(s.ghAuthInstructions()),
 		"WORK_TRACKER":          lit(s.workTrackerSection()),

@@ -73,6 +73,8 @@ func (s *Server) handleGovernorSecurity(w http.ResponseWriter, r *http.Request) 
 			TrustedAuthorsBlock *bool     `json:"trustedAuthorsBlock"`
 			Repos               *[]string `json:"repos"`
 			MaxActions          *int      `json:"maxActions"`
+			// ClearCountsAsApproval is sentinel.clear_counts_as_approval.
+			ClearCountsAsApproval *bool `json:"clearCountsAsApproval"`
 			// RepoSensitivePaths sets or clears single repositories'
 			// project.repo_policies[].sentinel_sensitive_paths: a list
 			// replaces that repository's own list ([] flags nothing by
@@ -118,6 +120,9 @@ func (s *Server) handleGovernorSecurity(w http.ResponseWriter, r *http.Request) 
 		}
 		if body.Sentinel.TrustedAuthorsBlock != nil {
 			sc.TrustedAuthorsBlock = *body.Sentinel.TrustedAuthorsBlock
+		}
+		if body.Sentinel.ClearCountsAsApproval != nil {
+			sc.ClearCountsAsApproval = *body.Sentinel.ClearCountsAsApproval
 		}
 		if body.Sentinel.Repos != nil {
 			sc.Repos = trimNonEmpty(*body.Sentinel.Repos)
@@ -325,7 +330,14 @@ func (s *Server) handleGovernorSecurity(w http.ResponseWriter, r *http.Request) 
 			job.TTLSeconds = *body.SandboxJobTTLSeconds
 		}
 	}
+	clearApprovalChange := ""
 	if nextSentinel != nil {
+		// Turning sentinel.clear_counts_as_approval on lets a label removal
+		// stand in for an approval, so the audit entry names the flip.
+		if before, after := cfg.Sentinel.ClearCountsAsApproval, nextSentinel.ClearCountsAsApproval; before != after {
+			onOff := map[bool]string{false: "off", true: "on"}
+			clearApprovalChange = onOff[before] + " → " + onOff[after]
+		}
 		cfg.Sentinel = *nextSentinel
 	}
 
@@ -338,6 +350,9 @@ func (s *Server) handleGovernorSecurity(w http.ResponseWriter, r *http.Request) 
 		s.deps.IoscanConfigApplied()
 	}
 	auditKV := []string{"section", "security"}
+	if clearApprovalChange != "" {
+		auditKV = append(auditKV, "sentinel_clear_counts_as_approval", clearApprovalChange)
+	}
 	if len(repoSensitivePathChanges) > 0 {
 		auditKV = append(auditKV, "sentinel_repo_sensitive_paths", strings.Join(repoSensitivePathChanges, "; "))
 	}
@@ -529,6 +544,7 @@ func sentinelSectionResponse(sc config.SentinelConfig, overrides []config.RepoSe
 		"behaviors":             behaviors,
 		"exemptLogins":          nonNilStrings(sc.ExemptLogins),
 		"trustedAuthorsBlock":   sc.TrustedAuthorsBlock,
+		"clearCountsAsApproval": sc.ClearCountsAsApproval,
 		"repos":                 nonNilStrings(sc.Repos),
 		"maxActions":            sc.MaxActionsOrDefault(),
 

@@ -172,6 +172,7 @@ type Client struct {
 	humanMergePaths           map[string][]string    // auto_merge.human_merge_paths; see SetHumanMergePaths
 	humanMergePinOnly         map[string]PinOnlySpec // guarded by mergePolicyMu
 	sentinelHeads             sentinelHeadsSeen      // head SHAs the sentinel sweep already evaluated
+	sentinelAwaitingClear     sentinelHeadsSeen      // heads last seen wearing the sentinel label (sentinel_clear_approval.go)
 	autoMergeMinHeadAge       time.Duration
 	mergeAlertMu              sync.Mutex
 	mergeAlertSink            MergeFailureAlertSink

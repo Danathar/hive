@@ -82,6 +82,14 @@ project:
 # authorized users, allow-listed bots) receive informational notices only.
 # sentinel:
 #   trusted_authors_block: false  # set true to block trusted authors too
+#   # Off by default. On: a trusted merger (merger/owner in
+#   # dashboard.authorized_users) who removes the alert label on the head it
+#   # was raised on is also recorded as approving that head, which answers a
+#   # reviewer's requires_human on it. It approves the head for every question
+#   # the reviewer raised, not only Sentinel's. Anyone else's removal, a bot's,
+#   # or the PR author's own approves nothing. See
+#   # docs/operator-reference/sweeps-and-operations.md.
+#   clear_counts_as_approval: false
 
 # Hive-curated `good first issue` advertising (default ON; `enabled: false`
 # opts out). A periodic sweep scores open, unclaimed issues; the few that qualify get

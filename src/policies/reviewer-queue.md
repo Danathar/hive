@@ -408,7 +408,7 @@ workflow gaining `contents: write`, a test or required check quietly removed,
 a `curl | sh` added to a build script. Verify the facts (what changed, who the
 author is, whether they already hold the role they are claiming), state them
 plainly, and name the owner who must decide. Do not speculate about motive;
-the trust decision belongs to a person.
+the trust decision belongs to a person.${SENTINEL_CLEARED}
 
 ## Tone
 

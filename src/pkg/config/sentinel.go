@@ -51,6 +51,13 @@ type SentinelConfig struct {
 	// bots and authorized owners) into the blocking label. The default false
 	// still evaluates and comments, but only as an informational notice.
 	TrustedAuthorsBlock bool `yaml:"trusted_authors_block,omitempty" json:"trusted_authors_block,omitempty"`
+	// ClearCountsAsApproval makes a trusted merger's removal of the alert
+	// label also that person's approval of the head they cleared: the sweep
+	// records it in the decision ledger a dashboard Approve writes to, which
+	// answers a reviewer's requires_human on that head. The default false
+	// leaves a removal as a Sentinel clearance only. Removals by anyone else
+	// (a bot, the PR's author, a login below merger) never record one.
+	ClearCountsAsApproval bool `yaml:"clear_counts_as_approval,omitempty" json:"clear_counts_as_approval,omitempty"`
 	// Repos optionally restricts the sweep to these owner/repo slugs. Empty
 	// means every watched repo.
 	Repos []string `yaml:"repos,omitempty" json:"repos,omitempty"`

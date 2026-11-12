@@ -1416,6 +1416,9 @@ func sentinelSweepOptions(cfg *config.Config, ghClient *github.Client, dashSrv *
 		},
 		// Per-repo sensitive paths (project.repo_policies[].sentinel_sensitive_paths).
 		SensitivePathsForRepo: sentinelRepoSensitivePathsFunc(cfg),
+		// sentinel.clear_counts_as_approval: nil (off) unless the operator
+		// turned it on.
+		ClearApproval: sentinelClearApprovalFunc(cfg, ghClient, dashSrv),
 	}
 }
 
