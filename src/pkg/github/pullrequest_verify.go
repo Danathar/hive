@@ -185,6 +185,12 @@ func prVerifyAssignedAndAuthor(v PRVerification, expectedRepo, expectedAuthor st
 // empty budget arrives as *RateLimitError too. The two markers the pacer uses
 // to tell them apart (slowstart.go: a Retry-After header, or the "secondary
 // rate limit" phrase) are therefore checked here as well.
+//
+// One case stays indistinguishable. go-github stores the rate a response
+// reports before it types the error, so after a secondary refusal that
+// reported an empty budget it refuses later REST reads locally, with no
+// headers and the plain primary-limit message. A lookup in that window is
+// answered here as a primary limit and does make the one GraphQL read.
 func prVerifyPrimaryRateLimited(err error) bool {
 	var abuse *gh.AbuseRateLimitError
 	if errors.As(err, &abuse) {
