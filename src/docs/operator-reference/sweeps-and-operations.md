@@ -894,6 +894,12 @@ The trade-off is that removing the label approves the head for every question
 the reviewer raised, not only Sentinel's. Leave it off if your maintainers
 remove the label to mean "the flagged files are fine" and nothing more.
 
+One more difference from an Approve review: GitHub ties a review to the commit
+the reviewer was shown, but a label event names no commit. The approval is for
+the head that was current when the label came off, so a push that landed
+moments before the removal is covered by it. Sentinel's own clearance has
+always worked this way; with this setting on, the approval does too.
+
 Hive notices a removal on its next Sentinel sweep (within 15 minutes). The
 setting must be on while the label is on the PR: a label removed while it was
 off is not turned into an approval later. With it on, the queue reviewer's PR
