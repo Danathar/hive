@@ -64,6 +64,34 @@ func (f *fakeCustomersService) Accept(v CustomersViewer, sid string) (CustomerRe
 	return f.result("p_accepted", v)
 }
 
+func (f *fakeCustomersService) AnswerHint(v CustomersViewer, hid string, same bool) (CustomerResult, error) {
+	f.note("AnswerHint", v, fmt.Sprintf("%s:%v", hid, same))
+	return f.result("p_hinted", v)
+}
+
+func (f *fakeCustomersService) Merge(v CustomersViewer, id, from string) (CustomerResult, error) {
+	f.note("Merge", v, id+"<-"+from)
+	return f.result(id, v)
+}
+
+func (f *fakeCustomersService) Unmerge(v CustomersViewer, id, from string) (CustomerResult, error) {
+	f.note("Unmerge", v, id+"<-"+from)
+	return f.result(id, v)
+}
+
+func (f *fakeCustomersService) Split(v CustomersViewer, id string, keys []string, name string) (CustomerResult, error) {
+	f.note("Split", v, id+":"+strings.Join(keys, ",")+":"+name)
+	return f.result("p_split", v)
+}
+
+func (f *fakeCustomersService) Export(v CustomersViewer, id string) (any, error) {
+	f.note("Export", v, id)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return map[string]any{"person": map[string]any{"id": id}, "edges": []any{}}, nil
+}
+
 func (f *fakeCustomersService) Dismiss(v CustomersViewer, sid string) error {
 	f.note("Dismiss", v, sid)
 	return f.err
@@ -121,6 +149,11 @@ var (
 	custForget    = customersRoute{http.MethodDelete, "/api/customers/p_other", ""}
 	custAccept    = customersRoute{http.MethodPost, "/api/customers/suggestions/s_1/accept", ""}
 	custDismiss   = customersRoute{http.MethodPost, "/api/customers/suggestions/s_1/dismiss", ""}
+	custMerge     = customersRoute{http.MethodPost, "/api/customers/p_other/merge", `{"from":"p_src"}`}
+	custUnmerge   = customersRoute{http.MethodPost, "/api/customers/p_other/unmerge", `{"from":"p_src"}`}
+	custSplit     = customersRoute{http.MethodPost, "/api/customers/p_other/split", `{"identities":["email:a@b.c"],"name":"Split"}`}
+	custExport    = customersRoute{http.MethodGet, "/api/customers/p_other/export", ""}
+	custHint      = customersRoute{http.MethodPost, "/api/customers/hints/h_1/answer", `{"same":true}`}
 )
 
 // TestCustomersRoleMatrix walks every route as every kind of caller. The
@@ -143,6 +176,11 @@ func TestCustomersRoleMatrix(t *testing.T) {
 		{custAdd, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
 		{custAccept, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
 		{custDismiss, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
+		{custHint, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
+		{custMerge, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
+		{custUnmerge, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
+		{custSplit, map[string]int{"owner": ok, "read-write": ok, "merger": ok, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
+		{custExport, map[string]int{"owner": ok, "read-write": forbidden, "merger": forbidden, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
 		{custForget, map[string]int{"owner": ok, "read-write": forbidden, "merger": forbidden, "read": forbidden, "unverified owner": forbidden, "read with no name": forbidden}},
 	}
 	s, _ := apiServer(t)
@@ -230,7 +268,7 @@ func TestCustomersOffAndErrors(t *testing.T) {
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &off) != nil || off["enabled"] != false {
 		t.Fatalf("list while off = %d %s", rec.Code, rec.Body.String())
 	}
-	for _, r := range []customersRoute{custGetMe, custEditMe, custAdd, custForget, custAccept, custDismiss} {
+	for _, r := range []customersRoute{custGetMe, custEditMe, custAdd, custForget, custAccept, custDismiss, custHint, custMerge, custUnmerge, custSplit, custExport} {
 		if rec := customersDo(s, custOwner, r.method, r.path, r.body); rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s while off = %d, want 503", r.method, r.path, rec.Code)
 		}
@@ -287,6 +325,11 @@ func TestCustomersAudit(t *testing.T) {
 		{custReadWrite, custEditOther},
 		{custReadWrite, custAccept},
 		{custReadWrite, custDismiss},
+		{custReadWrite, custHint},
+		{custReadWrite, custMerge},
+		{custReadWrite, custUnmerge},
+		{custReadWrite, custSplit},
+		{custOwner, custExport},
 		{custOwner, custForget},
 	}
 	for _, st := range steps {
@@ -302,8 +345,8 @@ func TestCustomersAudit(t *testing.T) {
 			count++
 		}
 	}
-	if count != 7 {
-		t.Fatalf("audited %d customer actions, want 7: %v", count, got)
+	if count != 12 {
+		t.Fatalf("audited %d customer actions, want 12: %v", count, got)
 	}
 	want := map[string]string{
 		"customer_profile_open": "olivia|person=p_other;",
@@ -311,6 +354,11 @@ func TestCustomersAudit(t *testing.T) {
 		"customer_forget":       "olivia|person=p_other, edges=3;",
 		"customer_accept":       "rita|person=p_accepted;",
 		"customer_dismiss":      "rita|suggestion=s_1;",
+		"customer_hint_answer":  "rita|person=p_hinted, same=true;",
+		"customer_merge":        "rita|person=p_other, from=p_src;",
+		"customer_unmerge":      "rita|person=p_other, from=p_src;",
+		"customer_split":        "rita|from=p_other, person=p_split, identities=1;",
+		"customer_export":       "olivia|person=p_other;",
 	}
 	for action, detail := range want {
 		if got[action] != detail {
@@ -325,5 +373,43 @@ func TestCustomersAudit(t *testing.T) {
 	// value that was written.
 	if strings.Contains(edits, "N;") || strings.Contains(got["customer_add"], "Ada") {
 		t.Errorf("audit carries a written value: %v", got)
+	}
+}
+
+func TestCustomersMergeSplitExportBodiesAndAudit(t *testing.T) {
+	s, _ := apiServer(t)
+	fake := &fakeCustomersService{}
+	s.SetCustomersService(fake)
+	for _, r := range []customersRoute{
+		{http.MethodPost, "/api/customers/p_a/merge", `{}`},
+		{http.MethodPost, "/api/customers/p_a/merge", `{not json`},
+		{http.MethodPost, "/api/customers/p_a/unmerge", `{"from":"  "}`},
+		{http.MethodPost, "/api/customers/p_a/split", `{"identities":[]}`},
+		{http.MethodPost, "/api/customers/p_a/split", `{}`},
+	} {
+		if rec := customersDo(s, custOwner, r.method, r.path, r.body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s %s %s = %d, want 400", r.method, r.path, r.body, rec.Code)
+		}
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("a malformed request reached the service: %v", fake.calls)
+	}
+	// An id copied into the audit line is cleaned and bounded.
+	rec := customersDo(s, custOwner, http.MethodPost, "/api/customers/p_a/merge", `{"from":"p_x\n<script> `+strings.Repeat("a", 100)+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, e := range s.audit.Recent(10) {
+		if e.Action == "customer_merge" && (strings.ContainsAny(e.Detail, "<>\n") || len(e.Detail) > 120) {
+			t.Fatalf("audit detail not cleaned: %q", e.Detail)
+		}
+	}
+	rec = customersDo(s, custOwner, http.MethodGet, "/api/customers/p_other/export", "")
+	if rec.Header().Get("Content-Disposition") == "" || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("export headers = %v", rec.Header())
+	}
+	fake.err = ErrCustomerConflict
+	if rec := customersDo(s, custOwner, http.MethodPost, "/api/customers/p_a/merge", `{"from":"p_b"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("a conflicting merge = %d", rec.Code)
 	}
 }
