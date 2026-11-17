@@ -71,6 +71,8 @@ During the Kubernetes **seed-plus-overlay fallback** only:
 | `acmm_level` | Overlay when present; seed is a fallback, not an unconditional platform override |
 | `hub.is_public` | Seed when set; the hosting hub can also reassert publication policy by heartbeat |
 | GitHub App credentials | Overlay, except a real installed App in the seed is protected against a placeholder overlay wiping it |
+| `review` and `agent_sandbox` blocks | Overlay when it carries the block (adopted whole, on boot and on every reload that starts from the seed); the seed is the fallback only when the overlay has none |
+| `variables.security` | Seed only. The overlay's `variables` block is never adopted |
 
 For example, changing `acmm_level` in the ConfigMap of a hive with a runtime file will not apply a new pack on restart. Use the dashboard's pack controls or the hosting hub's supported controls instead. Public-hosting policy remains the hosting administrator's responsibility, not an arbitrary agent setting.
 
@@ -219,7 +221,8 @@ agents:
 
 `exclude_author_model` defaults to true. `exclude_author_family` compares the
 normalized vendor prefix before the first dash (`claude`, `gpt`, `gemini`,
-`grok`, ...). If no pool entry is eligible, `fallback` is `pinned` (use the
+`grok`, ...), after dropping a provider path and `:variant` suffix, so
+`anthropic/claude-opus-5-5` and `claude-sonnet-5` are the same family. If no pool entry is eligible, `fallback` is `pinned` (use the
 agent's configured `model`), `skip` (omit the PR from that kick), or
 `requires_human` (keep the PR visible with a human-review marker). Reviewers
 record the delegated sub-agent's model as `review_model` in the verdict artifact,
@@ -407,6 +410,10 @@ is refused at the tier the non-conversational half requires.
 
 For prompt file resolution and the complete built-in `${VAR}` reference, see
 [Policy and prompt templates](../policies/README.md).
+
+### Sandbox settings (`agents.<name>.sandbox`)
+
+An agent's `sandbox` block (image, runtime, Job fields) is editable from its General tab under "Sandbox settings: image, runtime and Job", and through `PUT /api/config/agent/<name>/general` with `sandboxImage`, `sandboxRuntime`, `sandboxJob` and `sandboxCopyFrom` (hivecommons/hive#18797). A blank value inherits the hive-wide `agent_sandbox` default, which is set under Settings, Security. "Copy sandbox settings from..." copies another agent's complete block, Secret names included and never values. Enabling a sandbox that resolves no image is refused with the field named. The full set of controls and keys is in [sandbox-isolation.md](sandbox-isolation.md#setting-up-a-sandbox-from-the-dashboard). `sandbox.job.image_pull_secrets` (Secret names only, at most 32; a per-agent block that sets none inherits `agent_sandbox.job`) adds registry pull secrets to the Job pod beside hive's own and the Job service account's; the API field is `sandboxJob.imagePullSecrets` ([#18819](https://github.com/hivecommons/hive/issues/18819), see [Private-registry images](sandbox-isolation.md#running-sandboxed-kicks-as-kubernetes-jobs)).
 
 ### Declarative extensions
 
