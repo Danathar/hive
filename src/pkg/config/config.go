@@ -1648,6 +1648,7 @@ func AgentSandboxGateReport(cfg *Config) SandboxGateReport {
 		return SandboxGateReport{}
 	}
 
+	var noPullSecrets, badPullSecrets []string
 	var optedIn, noImage, noClaim, noGateway, noDigest, badRuntime []string
 	var openshellBlocks []SandboxOpenShellConfig
 	var substrateBlocks []SandboxSubstrateConfig
@@ -1658,6 +1659,14 @@ func AgentSandboxGateReport(cfg *Config) SandboxGateReport {
 		optedIn = append(optedIn, name)
 		if strings.TrimSpace(a.SandboxImage(cfg.AgentSandbox)) == "" {
 			noImage = append(noImage, name)
+		}
+		if a.SandboxRuntime(cfg.AgentSandbox) == SandboxRuntimeJob {
+			job := a.SandboxJob(cfg.AgentSandbox)
+			if err := ValidateImagePullSecrets(job.ImagePullSecrets); err != nil {
+				badPullSecrets = append(badPullSecrets, name)
+			} else if strings.TrimSpace(job.ServiceAccount) != "" && len(job.ImagePullSecrets) == 0 {
+				noPullSecrets = append(noPullSecrets, name)
+			}
 		}
 		switch rt := a.SandboxRuntime(cfg.AgentSandbox); {
 		case !ValidSandboxRuntimes[rt]:
@@ -1691,6 +1700,8 @@ func AgentSandboxGateReport(cfg *Config) SandboxGateReport {
 	sort.Strings(noGateway)
 	sort.Strings(noDigest)
 	sort.Strings(badRuntime)
+	sort.Strings(noPullSecrets)
+	sort.Strings(badPullSecrets)
 
 	var out []string
 	if len(optedIn) == 0 {
@@ -1717,6 +1728,16 @@ func AgentSandboxGateReport(cfg *Config) SandboxGateReport {
 			"agent(s) %s use the job or openshell sandbox runtime but resolve no workspace_claim; the sandbox has no way to see the workspace and every kick will fail — "+
 				"set agent_sandbox.job.workspace_claim / agent_sandbox.openshell.workspace_claim (or the per-agent one) to the PVC hive's data lives on (#6311)",
 			strings.Join(noClaim, ", ")))
+	}
+	if len(badPullSecrets) > 0 {
+		out = append(out, fmt.Sprintf(
+			"agent(s) %s have an invalid sandbox.job.image_pull_secrets (names only, at most %d); sandboxed kicks will be refused (#18819)",
+			strings.Join(badPullSecrets, ", "), MaxJobImagePullSecrets))
+	}
+	if len(noPullSecrets) > 0 {
+		out = append(out, fmt.Sprintf(
+			"agent(s) %s run Jobs under sandbox.job.service_account with no sandbox.job.image_pull_secrets; hive reads that service account's imagePullSecrets only when its Role grants `get serviceaccounts`, and without it a private-registry sandbox image fails ImagePullBackOff (see the launcher warning) — set sandbox.job.image_pull_secrets to the registry Secret names (#18819)",
+			strings.Join(noPullSecrets, ", ")))
 	}
 	if len(noGateway) > 0 {
 		out = append(out, fmt.Sprintf(
@@ -6249,6 +6270,24 @@ func loadWithDashboardOverlay(path string, validateOpts ValidateOptions) (*Confi
 	// pack apply saw nothing to respect. Adopt them BEFORE the fullness guard,
 	// like WorkSource, so a short overlay still carries them.
 	adoptOperatorCadenceOverrides(cfg, &overlay)
+	// Review gate and agent sandbox (#18804): the dashboard saves both into
+	// the overlay (the Config marshals whole), but this reload used to rebuild
+	// them from the seed alone, so a reload that starts from the seed (the
+	// read-only ConfigMap mount on a first boot or reprovision, config-check,
+	// a watcher reload of the seed path) silently dropped
+	// review.combined_perspectives, review.require_labels,
+	// review.perspectives_source and agent_sandbox.image/job.*, the same shape
+	// as #5632 and the work source. Adopt each block whole when the overlay
+	// carries it, BEFORE the fullness guard so a short overlay still wins; an
+	// overlay that says nothing leaves the seed's block untouched. This is the
+	// same overlay-wins rule the entrypoint's boot merge applies to every
+	// block. Variables stays seed-only (see the invariant below).
+	if !reflect.DeepEqual(overlay.Review, ReviewConfig{}) {
+		cfg.Review = overlay.Review
+	}
+	if !reflect.DeepEqual(overlay.AgentSandbox, cruxconfig.AgentSandboxConfig{}) {
+		cfg.AgentSandbox = overlay.AgentSandbox
+	}
 	if len(overlay.RemovedAgents) > 0 {
 		cfg.RemovedAgents = overlay.RemovedAgents
 		cfg.PruneRemovedAgents()
@@ -6293,6 +6332,34 @@ func loadWithDashboardOverlay(path string, validateOpts ValidateOptions) (*Confi
 	cfg.MergeAgentOverrides(agents)
 	for name := range agents {
 		cfg.ApplyAgentDefaults(name)
+	}
+	// Per-agent files (/data/agent-configs/<name>.yaml) are the higher layer
+	// (config-layering.md), but the whole-entry replacement above buried them
+	// under the overlay's older copy of the same agent, so an operator's
+	// `paused: true` or `sandbox:` block in the agent file never took effect
+	// while the overlay and runtime config still said otherwise (#18804). Carry
+	// those two operator-owned fields forward from the file. Not the whole
+	// entry: an explicit overlay `converse: false` deliberately beats the file
+	// (#7503), and pack-reconciled fields live in the overlay. `paused: false`
+	// in a file is indistinguishable from unset, so only a pause is carried;
+	// unpause through the dashboard, which writes both layers.
+	if cfg.Data.AgentsDir != "" {
+		if files, ferr := LoadAgentOverrides(cfg.Data.AgentsDir); ferr == nil {
+			for name, fa := range files {
+				a, ok := cfg.Agents[name]
+				if !ok || cfg.IsAgentRemoved(name) {
+					continue
+				}
+				if fa.Paused {
+					a.Paused = true
+					a.PauseOwner = fa.PauseOwner
+				}
+				if fa.Sandbox != nil {
+					a.Sandbox = fa.Sandbox
+				}
+				cfg.Agents[name] = a
+			}
+		}
 	}
 	if err := cfg.ApplyAgentSpecRepoScopes(); err != nil {
 		return cfg, err

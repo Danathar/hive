@@ -173,7 +173,18 @@ The dashboard **Governor** card summarizes queue depth, operating mode, budget
 posture, and cadence controls for the hive. Its collapsible **PRs by model** nested
 sub-section reads `GET /api/governor/pr-models` with the selected `7d`, `30d`,
 or `all` window. The nested header keeps the window/sort toggles visible and its
-collapsed summary shows the current top-ranked model plus model count.
+collapsed summary shows the current top-ranked model plus model count. Each
+model row has a **▸ PRs** button that opens that model's pull requests in the
+selected window (outcome, review rounds, fix attempts, first pass, author agent
+and backend, each linked to GitHub). The list is fetched on demand with
+`GET /api/governor/pr-models?window=…&model=<model>` and cached per window and
+model.
+Each model row's tooltip also shows **Hive review cost**: what the hive's own
+agents (reviewers, adjudicator, fixers) are estimated to have spent on that
+model's PRs, joined from the cached launch-cost snapshot (see
+[Launch attribution](token-tracking.md#launch-attribution)). A note under the
+header names the launch-cost window and the spend that could not be tied to any
+PR. "—" means no attributed usage, not $0.
 
 The Governor **actionable issues** and **actionable PRs** tiles use the shared
 server-side actionable partition described in [Repository card legend, issue
